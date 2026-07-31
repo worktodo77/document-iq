@@ -566,9 +566,26 @@ landed on the same document, on the same pair of runs.
 
 #### Honest residue
 
-* The `.pptx` mechanism is **still not identified**. It has now been observed
-  once in three OCR-enabled full runs and never in a targeted probe. No
-  speculative fix has been applied, and none should be: a lock or a parser
+* The `.pptx` mechanism is **still not identified**, and a third attempt to
+  reproduce it failed. This one went through the **shipped pipeline** rather
+  than calling `python-pptx` directly — the earlier probe only ever ruled out
+  the naive shared-parser theory — over an 18-file subset chosen to recreate
+  the conditions the fault was seen under: the failing deck's own folder plus
+  the corpus's OCR-heaviest scans, with rapidocr and onnxruntime resident and
+  rasterized pages in flight. **5 rounds, 1 distinct corpus hash, 0 documents
+  degraded inside the pool, 0 failures.** (The 222-page scan was excluded from
+  the probe corpus and it is said here rather than left to be noticed: it alone
+  exceeds the 3600 s watchdog on this machine and would have made repetition
+  unaffordable. The OCR pressure came from the other five scans.)
+
+  The instrument is worth keeping: the retry disclosure fires whenever a
+  document did not read cleanly *inside the pool*, whether or not the serial
+  re-read then repaired it, so a future recurrence is now visible in the log
+  even though it no longer reaches the deliverables. Standing count: observed
+  once in three full OCR-enabled runs, never in 5 pipeline rounds or 72
+  targeted concurrent attempts.
+
+  No speculative fix has been applied, and none should be: a lock or a parser
   change added on the strength of an unreproduced fault is a change nobody can
   justify keeping, or later justify removing.
 * The retry makes a *load-dependent* failure survivable. It does not make a
