@@ -34,6 +34,36 @@ Consequence for the product's positioning, flagged: §7 and D-03 make the token 
 
 **RULED 2026-07-30 (D-17): keep the GUI as previously decided.** Three summary-screen treatments were drawn and compared — evidentiary lead with tokens demoted, a split headline, and the ruled token lead with an audit panel below. Alex ruled to **stick with the previous decisions**: §7 and D-03 are **not** amended, the token before/after remains the summary headline, and the evidentiary claims (page accounting, omission attribution, run fingerprint, index reconciliation, review flags) stay as a supporting panel. The evidentiary-lead proposal is **declined, not deferred** — do not re-open it in Sprint 2 without a new instruction. D-07, D-14, D-15 and D-16 all stand unchanged; Track C's brief already reflects them and required no correction.
 
+| D-18 | §7 page-marker format — keep or compact | **KEEP §7's format unchanged.** Alex ruled "measure it properly first"; the measurement settles it against changing. Full-corpus measurement (all 298 PDFs / 17,732 pages, via Track B's pre-token proxy): markers are **0.5% of the corpus without Bates, 1.2% with**. Compaction buys almost nothing — `[p1234]` and `===== PAGE 1234 =====` both yield **5 pre-tokens**, because pre-token count tracks the number of symbol runs, not string length; only the Bates variant compacts at all (13 → 10). A two-repo change against DocIQ *and* Expert Assist's parser to recover ~0.5% is not worth it. **Correction on the record:** the initial estimate that framed markers as the single largest economization lever used a chars÷3.5 approximation and was wrong in framing — the absolute figure (~230K pre-tokens for the Bates form) held, but the share did not. Character compaction does not imply token savings. | 2026-07-30 |
+
+## Measured corpus token load (full corpus, 2026-07-30)
+
+Measured over **all 298 PDFs / 17,732 pages** of the real MODEC/Petrobras MPR
+corpus using Track B's pre-token proxy (`verify/tokens.measure`), which yields a
+*hard lower bound* on token count for any byte-level BPE tokenizer:
+
+| quantity | measured |
+|---|---|
+| characters | 49,031,833 |
+| **pre-tokens (token floor)** | **19,388,495** |
+| density | 2.53 chars/pre-token |
+| per page | 2,765 chars / 1,093 pre-tokens |
+
+**This is ~6× the requirements' 3.4M assumption (§1) and ~97× the 200K
+direct-context working figure.** The consequence is strategic and should not be
+softened: **no combination of reductions brings this record into direct
+context.** A 90% reduction still leaves ~2M tokens, 10× over. Path B (Claude
+reading the matter folder from disk) is therefore not merely the *recommended*
+route for forensic matters — at this scale it is the only viable one, and the
+UI must treat direct-context capacity as an aspiration that this class of matter
+will not meet. This strengthens D-15 rather than contradicting it.
+
+Two knock-on notes: the density figure independently corroborates Track B's
+refutation of D-03's 3.30–3.60 chars/token band (measured 2.53 here, 3.03 on
+Track B's 40-PDF sample — both below the ruled floor), and every token figure in
+the Sprint-1 UI mockups (3.4M → 850K) is now known to be far too small and must
+not be carried into the build as if measured.
+
 ## Corpus reality vs. the spec's assumption (recorded 2026-07-30)
 
 The requirements' motivating figures (§1: "38 MODEC MPRs at ~20 MB / ~150 pages
