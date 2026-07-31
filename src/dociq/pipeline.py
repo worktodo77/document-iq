@@ -26,15 +26,19 @@ and Stage 4 runs after 3b because a drop-log entry is written against a Doc ID.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Sequence
 
 from dociq.contracts import (
+    ContractViolation,
     Disposition,
     DocumentRecord,
+    IdRegime,
     PageKind,
+    ProcessingStatus,
     ReconciliationRow,
     RunConfig,
     RunResult,
@@ -74,6 +78,12 @@ from dociq.identify.bates import (
 from dociq.ingest import walker
 from dociq.profiles.apply import apply_profiles
 from dociq.profiles.model import FormatProfile, OperatorStamp, operator_stamp, write_matter_copy
+from dociq.runstate import (
+    COMPLETED,
+    INCOMPLETE_DIR,
+    STATUS_FILENAME,
+    RunTermination,
+)
 from dociq.verify import accounting, manifest as mf
 from dociq.verify.tokens import TokenEstimate as MeasuredEstimate
 from dociq.verify.tokens import estimate_for_texts
@@ -153,9 +163,36 @@ class PipelineOutcome:
     """Per-stage wall clock, in stage order. Reporting only — it never reaches
     a hashed artifact, because a run that took longer is not a different run."""
 
+    termination: RunTermination = COMPLETED
+    """How the run ENDED (Codex B-1). ``COMPLETED`` is the only value under
+    which anything was written."""
+
+    published: bool = True
+    """Whether this run wrote the §7 deliverables.
+
+    False for every non-complete termination, and the reason
+    :attr:`incomplete_dir` exists. Recorded rather than re-derived so a
+    consumer never has to know the publication rule."""
+
+    incomplete_dir: Path | None = None
+    """Where an aborted run recorded itself — ``<output>/incomplete_run/``.
+    ``None`` for a completed run."""
+
     @property
     def ok(self) -> bool:
-        return self.accounting.ok and not self.manifest.unclassified
+        """The run produced a complete, self-consistent, published output set.
+
+        ``termination.complete`` is FIRST and is not redundant with the two
+        gates after it (Codex B-1). Accounting is an identity over whatever set
+        it is handed, and zero equals zero: an empty blocked run and a partial
+        cancelled run both satisfy it. So does an empty manifest's
+        ``unclassified``. Without this term, an aborted run reported ``ok``.
+        """
+        return (
+            self.termination.complete
+            and self.accounting.ok
+            and not self.manifest.unclassified
+        )
 
     def timing(self, stage: str) -> float:
         return dict(self.timings_s).get(stage, 0.0)
@@ -325,15 +362,22 @@ _STALE_PATTERNS = (
     "run_summary.pdf",
     mf.MANIFEST_NAME,
     "profile/*.yaml",
+    f"{INCOMPLETE_DIR}/*",
 )
 """Deliverables a re-run replaces. ``upload_package/`` is absent because
 :func:`~dociq.emit.handoff.build_upload_package` already rebuilds it from
 scratch, and ``doc_ids_issued.json`` is absent because it is this run's *input*
 to the D-04 renumbering check — deleting it would silence the one warning the
-re-run case exists to produce."""
+re-run case exists to produce.
+
+``incomplete_run/*`` IS purged: once a complete run has written this folder, the
+record of an earlier aborted attempt describes a state the folder is no longer
+in, and leaving it would put a "RUN BLOCKED" artifact beside a good output set."""
 
 
-def _purge_stale_deliverables(layout: OutputLayout) -> tuple[str, ...]:
+def _purge_stale_deliverables(
+    layout: OutputLayout, termination: RunTermination
+) -> tuple[str, ...]:
     """Remove the previous run's deliverables from the destination.
 
     Re-running a matter means replacing its outputs, and a leftover
@@ -341,10 +385,25 @@ def _purge_stale_deliverables(layout: OutputLayout) -> tuple[str, ...]:
     worse than a missing one: it sits in the folder Expert Assist reads, under
     an identifier this run gave to a different document.
 
+    ``termination`` is a REQUIRED argument, and it is checked here rather than
+    only at the call site (Codex B-1). Destroying a complete prior corpus
+    because a preflight check failed is the worst outcome this pipeline can
+    produce, so the guard is a property of the function that does the deleting:
+    the only way to call it is to hand it a proof that the run completed, and
+    the proof is validated. :func:`run` also returns before Stage 5 on any
+    non-complete termination, so the ordering and the argument are two
+    independent defences and the raise below is unreachable from the shipped
+    path.
+
     Nothing is deleted silently — the list goes into the log's ``run`` section,
     which is outside the hashed content precisely because a first run and a
     re-run must not differ inside it.
     """
+    if not termination.publishable:
+        raise ContractViolation(
+            "refusing to remove a previous run's deliverables for a run that "
+            f"ended {termination.status.value}: {termination.reason}"
+        )
     removed: list[str] = []
     for pattern in _STALE_PATTERNS:
         for path in sorted(layout.root.glob(pattern)):
@@ -352,6 +411,173 @@ def _purge_stale_deliverables(layout: OutputLayout) -> tuple[str, ...]:
                 removed.append(path.relative_to(layout.root).as_posix())
                 path.unlink()
     return tuple(removed)
+
+
+def _abort(
+    *,
+    config: RunConfig,
+    walked: RunResult,
+    walk_notes: walker.RunNotes,
+    layout: OutputLayout,
+    stamp: OperatorStamp,
+    opts: PipelineOptions,
+    timings: list[tuple[str, float]],
+) -> PipelineOutcome:
+    """End a run that did not complete, WITHOUT publishing anything.
+
+    Codex review #1, finding B-1. Everything Stage 5 would do is skipped: no
+    purge, no ``clean_text/``, no index, no ``sources.json``, no
+    ``processing_log.json``, no ``run_summary.pdf``, no ``output_manifest.json``
+    and no issued-ID ledger. Whatever the last COMPLETE run left in this folder
+    is exactly as it was, which is the point of the finding.
+
+    The run is not silent, though — an aborted run that leaves no trace is its
+    own audit failure. It records itself under ``incomplete_run/``:
+
+    * ``run_status.json`` — the typed terminal status, machine-readable;
+    * ``processing_log.json`` — the ordinary log structure over whatever was
+      read, so the diagnostic tooling that reads a log can read this one;
+    * ``run_summary.pdf`` — the same one-page summary an operator is used to,
+      carrying the status banner.
+
+    They live in a sub-directory rather than beside the deliverables so that no
+    name an incomplete run writes can collide with a name a complete run wrote.
+    A subsequent complete run purges the directory (``_STALE_PATTERNS``), and
+    the manifest classifies it as excluded so it can never make a later, good
+    run report an unclassified output.
+    """
+    termination = walk_notes.termination
+    documents = walked.documents
+    warnings = list(walk_notes.messages()) + list(walked.warnings)
+
+    result = RunResult(
+        config=config,
+        documents=documents,
+        unsupported=walked.unsupported,
+        warnings=tuple(warnings),
+    )
+
+    # The correctness gate fails as well as publication being withheld. Codex
+    # offered these as alternatives; doing both means a consumer that only reads
+    # `accounting.ok` — the property `PipelineOutcome.ok` used to be derived
+    # from on its own — still cannot mistake this for a good run.
+    report_acc = accounting.check(result)
+    report_acc.discrepancies.insert(
+        0,
+        accounting.Discrepancy(
+            "<run>",
+            f"run-{termination.status.value}",
+            termination.reason
+            or f"the run ended {termination.status.value} and published nothing",
+        ),
+    )
+
+    quarantine = OutputLayout(layout.root / INCOMPLETE_DIR)
+    quarantine.root.mkdir(parents=True, exist_ok=True)
+
+    before = estimate_for_texts(p.text for d in documents for p in d.pages)
+    after = estimate_for_texts(
+        p.text
+        for d in documents
+        for p in d.pages
+        if p.disposition is Disposition.KEEP
+    )
+
+    bundle = build_log(
+        config,
+        documents,
+        unsupported=walked.unsupported,
+        token_estimate=after,
+        warnings=list(walked.warnings),
+        stamp=stamp,
+        run_notes={
+            **termination.as_jsonable(),
+            "published": False,
+            "deliverables_note": (
+                "This run wrote NO deliverables. The files in the parent folder, "
+                "if any, belong to the last run that completed."
+            ),
+            "load_dependent_extraction": list(walk_notes.load_dependent),
+            "invocation_notes": list(walk_notes.invocation),
+        },
+    )
+    write_processing_log(bundle, quarantine)
+
+    (quarantine.root / STATUS_FILENAME).write_text(
+        json.dumps(
+            {
+                **termination.as_jsonable(),
+                "headline": termination.headline(),
+                "generated_at": stamp.saved_at,
+                "operator": stamp.username,
+                "source_root": config.source_root,
+                "output_root": config.output_root,
+                "documents_read": len(documents),
+                "unsupported_inventoried": len(walked.unsupported),
+                "pages_read": result.pages_in,
+                "warnings": warnings,
+            },
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    if opts.write_summary_pdf:
+        write_run_summary(
+            build_summary_data(
+                matter_name=opts.matter_name,
+                source_root=config.source_root,
+                output_root=config.output_root,
+                generated_at=stamp.saved_at,
+                operator=stamp.username,
+                documents=documents,
+                unsupported=walked.unsupported,
+                tokens_before=before,
+                tokens_after=after,
+                ocr_threshold_pct=config.ocr_conf_threshold_pct,
+                id_regime=config.id_regime.value,
+                bates_note="",
+                warnings=tuple(warnings),
+                termination=termination,
+            ),
+            quarantine,
+        )
+
+    return PipelineOutcome(
+        result=result,
+        layout=layout,
+        accounting=report_acc,
+        manifest=mf.Manifest(),
+        assignment=AssignmentResult(
+            documents=documents,
+            regime=IdRegime.NATIVE,
+            assignments=(),
+            alignment=None,
+            matched_rows=(),
+            unmatched_row_count=0,
+            warnings=(f"no identifier was issued: the run ended "
+                      f"{termination.status.value}",),
+        ),
+        reconciliation=ReconciliationReport(
+            matched=(),
+            folder_only=(),
+            index_only=(),
+            snapshot=None,
+            root_prefix=None,
+            warnings=(f"reconciliation was not run: the run ended "
+                      f"{termination.status.value}",),
+        ),
+        log=bundle,
+        walk_notes=walk_notes,
+        termination=termination,
+        published=False,
+        incomplete_dir=quarantine.root,
+        timings_s=tuple(timings),
+    )
 
 
 def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOutcome:
@@ -373,6 +599,23 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     walk_notes = walker.RunNotes()
     walked = walker.run(config, opts.walk, walk_notes)
     mark("walk_extract", t)
+
+    # Codex B-1. A blocked or cancelled walk stops HERE, before Stage 3 and
+    # therefore long before Stage 5's purge. Every later stage — assignment,
+    # the purge, emission, accounting, the manifest — is unreachable for a run
+    # that did not complete, so none of them needs to know about the case, and
+    # none of them can be the place a future edit reintroduces it.
+    if not walk_notes.termination.publishable:
+        return _abort(
+            config=config,
+            walked=walked,
+            walk_notes=walk_notes,
+            layout=layout,
+            stamp=stamp,
+            opts=opts,
+            timings=timings,
+        )
+
     warnings: list[str] = list(walked.warnings)
     documents: tuple[DocumentRecord, ...] = walked.documents
 
@@ -384,11 +627,49 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     mark("bates", t)
 
     # ---- Stage 3b ----------------------------------------------------------
+    #
+    # ONE INVENTORY, not two (Codex review #1, finding B-7). Stage 3b used to
+    # see only the extracted documents, so a Tier-2 file kept an empty Doc ID
+    # and never reached ``build_index_rows`` — yet §5 lists ``Unsupported`` as a
+    # required Processing status *of the document index*, and the GUI tells the
+    # operator unsupported files are recorded there. On the real corpus the
+    # seven legacy ``.doc`` files were counted in the log and the summary and
+    # were absent from the first-class deliverable.
+    #
+    # They are assigned together rather than in a second pass because that is
+    # what makes acceptance criterion 5 hold by construction: one
+    # :class:`~dociq.docid.ids.DocIdMinter` sees every identifier this run
+    # issues, so LI and DIQ cannot collide with each other or with themselves.
+    # Two passes would mean two minters and two DIQ counters, and the second
+    # pass would have to be told which numbers the first had already used —
+    # exactly the bookkeeping the minter exists to remove.
+    #
+    # A Tier-2 file with a master-index row now MATCHES it and takes its LI
+    # identifier, which is also the right answer for reconciliation: the file is
+    # in the folder and in the index, and reporting it as index-only was a false
+    # gap. Container children that were Tier-2 (a .dwg inside a .zip) pick up a
+    # parent-derived identifier for the first time.
     t = time.monotonic()
+    inventory = tuple(documents) + tuple(walked.unsupported)
     assignment = assign_doc_ids(
-        documents, index, bates_ranges=ranges_by_sort_key(ranges)
+        inventory, index, bates_ranges=ranges_by_sort_key(ranges)
     )
-    documents = assignment.documents
+    # Split back on status, which is the exact discriminator: the walker has
+    # already moved every UNSUPPORTED record — including Tier-2 archive members
+    # — onto its unsupported list, so no record can be on the wrong side here.
+    documents = tuple(
+        d for d in assignment.documents
+        if d.status is not ProcessingStatus.UNSUPPORTED
+    )
+    unsupported = tuple(
+        d for d in assignment.documents
+        if d.status is ProcessingStatus.UNSUPPORTED
+    )
+    if len(documents) + len(unsupported) != len(inventory):
+        raise ContractViolation(  # pragma: no cover — guards a refactor
+            f"Stage 3b lost inventory: {len(inventory)} in, "
+            f"{len(documents)} documents + {len(unsupported)} unsupported out"
+        )
     warnings.extend(assignment.warnings)
     report = reconcile(assignment, index, bates_ranges=ranges)
     mark("assign_reconcile", t)
@@ -470,7 +751,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     result = RunResult(
         config=effective,
         documents=documents,
-        unsupported=walked.unsupported,
+        unsupported=unsupported,
         warnings=tuple(all_warnings),
         tokens_before=_to_contract_estimate(before, "before reduction"),
         tokens_after=_to_contract_estimate(after, "after reduction"),
@@ -481,12 +762,17 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
 
     # ---- Stage 5 -----------------------------------------------------------
     t = time.monotonic()
-    stale = _purge_stale_deliverables(layout)
+    stale = _purge_stale_deliverables(layout, walk_notes.termination)
     written: list[Path] = []
+    # Clean text is for EXTRACTED documents only. An unsupported file has no
+    # text to write and must not appear in ``sources.json``, which is the map
+    # Expert Assist reads to find a document's content — a Doc ID pointing at a
+    # file that was never read would be worse than its absence. It appears in
+    # the index instead, which is the inventory (B-7).
     text_result = write_clean_text(documents, layout)
     written.extend(layout.root / rel for _, rel in text_result.sources)
     written.append(write_sources_json(text_result, layout))
-    rows = build_index_rows(documents, bates_ranges=ranges)
+    rows = build_index_rows(documents + unsupported, bates_ranges=ranges)
     written.append(write_index_csv(rows, layout))
     if index is not None:
         written.append(write_reconciliation_csv(report, layout))
@@ -501,7 +787,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     bundle = build_log(
         effective,
         documents,
-        unsupported=walked.unsupported,
+        unsupported=unsupported,
         assignment=assignment,
         reconciliation=report if index is not None else None,
         renumbering=renumbering,
@@ -514,6 +800,15 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         stamp=stamp,
         output_hashes=_hashes_of(written, layout),
         run_notes={
+            # The terminal status is recorded on EVERY run, not only on the
+            # ones that end badly (Codex B-1). A consumer must be able to ask
+            # "did this run complete?" of any log it is handed and get an
+            # answer, rather than inferring completion from the absence of a
+            # field. It sits in `run`, not in `content`: a cancellation is a
+            # fact about this invocation, and hashing it would make an
+            # interrupted run and a clean one differ inside the byte-identical
+            # claim.
+            **walk_notes.termination.as_jsonable(),
             "stale_outputs_removed": list(stale),
             "load_dependent_extraction": list(walk_notes.load_dependent),
             "invocation_notes": list(walk_notes.invocation),
@@ -537,7 +832,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 generated_at=stamp.saved_at,
                 operator=stamp.username,
                 documents=documents,
-                unsupported=walked.unsupported,
+                unsupported=unsupported,
                 tokens_before=before,
                 tokens_after=after,
                 ocr_threshold_pct=effective.ocr_conf_threshold_pct,
@@ -545,6 +840,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 master_index=index.snapshot.filename if index else None,
                 bates_note=_bates_note(decision, ranges),
                 warnings=tuple(all_warnings),
+                termination=walk_notes.termination,
             ),
             layout,
         )
@@ -580,6 +876,8 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         stale_removed=stale,
         bates_ranges=ranges,
         timings_s=tuple(timings),
+        termination=walk_notes.termination,
+        published=True,
     )
 
 

@@ -20,6 +20,7 @@ from typing import Sequence
 
 from dociq.contracts import DocumentRecord, document_sort_key
 from dociq.emit.paths import OutputLayout
+from dociq.runstate import COMPLETED, RunTermination
 from dociq.verify.tokens import CapacityVerdict, TokenEstimate
 
 __all__ = ["SummaryData", "build_summary_data", "write_run_summary", "DOC_REMEDIATION_HINT"]
@@ -67,6 +68,12 @@ class SummaryData:
     master_index: str | None
     bates_note: str
     warnings: tuple[str, ...]
+    termination: RunTermination = COMPLETED
+    """How the run ENDED (Codex B-1). Printed on every page, including the
+    ordinary "completed" case: a reader must be able to see the status of the
+    run in front of them rather than infer completion from the absence of a
+    warning. An incomplete run's page is written under ``incomplete_run/`` and
+    never replaces a complete run's ``run_summary.pdf``."""
 
 
 def build_summary_data(
@@ -85,6 +92,7 @@ def build_summary_data(
     master_index: str | None = None,
     bates_note: str = "",
     warnings: Sequence[str] = (),
+    termination: RunTermination = COMPLETED,
 ) -> SummaryData:
     docs = sorted(documents, key=document_sort_key)
     flagged: list[str] = []
@@ -96,8 +104,14 @@ def build_summary_data(
             if pct < ocr_threshold_pct:
                 flagged.append(f"{doc.doc_id} p.{page.page_no} — {pct}% confidence")
     unsupported_sorted = sorted(unsupported, key=document_sort_key)
+    # The Doc ID leads the line (Codex B-7). Unsupported files now carry a
+    # stable identifier and a row in ``document_index.csv``; printing the path
+    # alone would leave the operator with no way to get from this page to that
+    # row, and the summary and the index would be describing the same inventory
+    # in two different vocabularies.
     listed = tuple(
-        f"{d.rel_path} ({d.ext.lstrip('.') or 'no extension'})"
+        f"{d.doc_id + ' — ' if d.doc_id else ''}{d.rel_path} "
+        f"({d.ext.lstrip('.') or 'no extension'})"
         for d in unsupported_sorted
     )
     return SummaryData(
@@ -122,6 +136,7 @@ def build_summary_data(
         master_index=master_index,
         bates_note=bates_note,
         warnings=tuple(warnings),
+        termination=termination,
     )
 
 
@@ -176,6 +191,20 @@ def write_run_summary(data: SummaryData, layout: OutputLayout) -> Path:
     c.drawString(x, y, f"Output: {_ellipsize(data.output_root, 105)}")
     y -= 11
     c.drawString(x, y, "Processed entirely offline — no network access at any point.")
+
+    # --- terminal status (Codex B-1) --------------------------------------
+    # One masthead line, above the headline: a token figure from a run that did
+    # not finish is a number about part of a corpus, and the reader must know
+    # that before they read it. One line, ellipsized, because §7 says one page —
+    # the full sentence is the first entry of the warning list below, and in
+    # ``incomplete_run/run_status.json``.
+    y -= 11
+    if not data.termination.complete:
+        c.setFillColorRGB(*_NAVY)
+        c.setFont("Helvetica-Bold", 8.5)
+    c.drawString(x, y, _ellipsize(data.termination.headline(), 105))
+    c.setFont("Helvetica", 8.5)
+    c.setFillColorRGB(*_MUTED)
 
     # --- token headline + capacity gauge (D-07) ---------------------------
     y -= 30

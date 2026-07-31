@@ -15,7 +15,14 @@ client matter:
 5. OCR ran from bundled models with no network call available;
 6. the outputs are byte-identical across repeated runs with varied hash seeds;
 7. every §7 deliverable is produced, container members carry a remapped
-   ``parent_doc_id``, and the amended ``RunResult`` fields are populated.
+   ``parent_doc_id``, and the amended ``RunResult`` fields are populated;
+8. the document index carries the WHOLE inventory — unsupported files included,
+   with an identifier and the ``Unsupported`` status and no clean-text
+   reference (Codex review #1, finding B-7);
+9. the run records its terminal status, outside the hashed content (finding
+   B-1). Runs that do NOT complete are covered by
+   ``tests/test_incomplete_runs.py``, which needs to force a preflight failure
+   and therefore cannot live in an end-to-end gate over a good corpus.
 
 Output is deliberately verbose about what passed. A gate whose green output is
 one word is a gate nobody can debug when it goes red.
@@ -24,6 +31,8 @@ one word is a gate nobody can debug when it goes red.
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 import shutil
 import socket
 import sys
@@ -237,6 +246,45 @@ def main(argv: list[str] | None = None) -> int:
         chk.expect(markers == result.pages_kept,
                    "one page marker per kept page, rendered only at emit",
                    f"{markers} marker(s), {result.pages_kept} kept page(s)")
+
+        # Codex review #1, finding B-7. §5 lists Unsupported as a processing
+        # status OF THE DOCUMENT INDEX, and the GUI tells the operator these
+        # files are recorded there; before this they carried an empty Doc ID
+        # and had no row at all.
+        index_rows = list(csv.DictReader(
+            lay.index_csv.read_text(encoding="utf-8").splitlines()))
+        by_id = {r["Doc ID"]: r for r in index_rows}
+        chk.expect(bool(result.unsupported)
+                   and all(d.doc_id for d in result.unsupported),
+                   "every unsupported file carries a Doc ID",
+                   ", ".join(sorted(d.doc_id for d in result.unsupported)))
+        chk.expect(all(by_id.get(d.doc_id, {}).get("Processing status")
+                       == "Unsupported" for d in result.unsupported),
+                   "every unsupported file has an index row with the "
+                   "Unsupported status")
+        chk.expect(len(index_rows) == len(result.documents)
+                   + len(result.unsupported),
+                   "the document index carries the whole inventory",
+                   f"{len(index_rows)} row(s) = {len(result.documents)} "
+                   f"document(s) + {len(result.unsupported)} unsupported")
+        sources = json.loads(lay.sources_json.read_text(encoding="utf-8"))
+        source_ids = sources if isinstance(sources, dict) else {
+            e["doc_id"] for e in sources.get("documents", ())}
+        chk.expect(all(d.doc_id not in source_ids for d in result.unsupported),
+                   "no unsupported file claims a clean-text file it never had")
+
+        # Codex review #1, finding B-1. The status is recorded on EVERY run, so
+        # a consumer never has to infer completion from a missing field.
+        log_doc = json.loads(lay.processing_log.read_text(encoding="utf-8"))
+        chk.expect(log_doc["run"].get("terminal_status") == "completed"
+                   and log_doc["run"].get("published") is True,
+                   "the processing log records the run's terminal status",
+                   str(log_doc["run"].get("terminal_status")))
+        chk.expect("terminal_status" not in json.dumps(log_doc["content"]),
+                   "the terminal status stays OUT of the hashed content — a "
+                   "cancellation is a fact about the invocation")
+        chk.expect(outcome.published and outcome.termination.complete,
+                   "the run published because it completed, and says so")
 
         print("\nAmended contract fields (A-01, A-02, A-03)")
         before, after = result.tokens_before, result.tokens_after

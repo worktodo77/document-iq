@@ -187,3 +187,82 @@ it must not be left to a widget either way.
 
 **Standing note:** the real adapter cannot be written honestly until A-01 and
 A-02 land, because it would have nowhere to read these values from.
+
+---
+
+## A-05 — `RunResult` cannot say whether the run COMPLETED
+
+**Raised by:** the B-1 fix branch (`fix/codex-r1-a`), 2026-07-31, from Codex
+review #1 finding B-1
+**Affects:** `RunResult`; Stage 1 (walk), the pipeline's publication decision,
+the log, the run summary, the GUI seam
+**Proposed severity:** MINOR (additive field with a safe default)
+**Status:** RAISED — **stop-the-line, not applied.** `contracts.py` was NOT
+modified on this branch.
+
+### The case
+
+Codex finding B-1 requires "a typed terminal status that prevents normal
+publication, or [that] make[s] the correctness gates fail while preserving the
+last complete deliverables", and states that the status "must also be visible in
+the machine-readable run result, manifest, log, PDF, and GUI."
+
+`RunResult` carries `config`, `documents`, `unsupported`, `warnings`,
+`tokens_before`, `tokens_after` and `reconciliation`. None of them can express
+*how the run ended*. The two failure modes are indistinguishable from a good
+run by inspection of the type:
+
+- a blocked run returns `RunResult(config=..., warnings=(message,))` — an empty
+  document set, which is what an empty folder also produces;
+- a cancelled run returns the partial document set, which is what a small
+  matter also produces.
+
+### Why a local workaround would be wrong
+
+`warnings: tuple[str, ...]` can carry the sentence, and on this branch it does —
+the disclosure goes in first. But a consumer deciding whether to trust a run
+would then have to match a prefix against a display string, which is exactly the
+coupling A-01 and A-03 were raised to avoid, and rewording a sentence would
+change what a consumer asserts.
+
+Inferring it is worse: "zero documents means blocked" is false for an empty
+folder, and "fewer documents than files scanned" is false for a corpus of
+unreadable files.
+
+### Proposed shape
+
+```python
+# in contracts.py, mirroring src/dociq/runstate.py:
+class TerminalStatus(str, enum.Enum):
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+
+# on RunResult, defaulted so the change is additive:
+terminal_status: TerminalStatus = TerminalStatus.COMPLETED
+terminal_status_reason: str = ""
+```
+
+An enum with a string value and a string, so identity hashing is unaffected in
+kind — but see the note below: it must join `_IDENTITY_EXCLUDED`. Two runs over
+byte-identical inputs can legitimately differ in it (the operator cancelled one
+of them), so hashing it would make the byte-identical claim false for a reason
+that has nothing to do with the evidence. That is the same argument
+`walker.RunNotes` already makes for the retry and resume disclosures.
+
+### What this branch did in the meantime
+
+`src/dociq/runstate.py` — a small non-contract module, importable by the GUI
+under the freeze's Track-C rule — defines `TerminalStatus` and
+`RunTermination`. `walker.RunNotes` carries it (it is a fact about the
+invocation, which is precisely what `RunNotes` is for), `PipelineOutcome`
+exposes it as `termination` / `published`, and it is rendered in
+`processing_log.json`'s `run` section, in `run_summary.pdf`, in the GUI seam's
+`RunOutcome` and in `SummaryView.status_banner()`.
+
+**`RunResult` itself still cannot say it.** In practice a consumer holding only
+a `RunResult` from an aborted run holds one that was never written to disk —
+the pipeline publishes nothing — and the first entry of `RunResult.warnings` is
+the disclosure. That is a mitigation, not the field Codex asked for. When this
+amendment lands, `runstate.TerminalStatus` becomes a re-export and the change is
+a one-line read in each of the sites above.

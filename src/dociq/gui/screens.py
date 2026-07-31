@@ -424,6 +424,18 @@ class SummaryScreen(QWidget):
         page, lay = _page(theme)
         self._lay = lay
 
+        # The run-status banner sits above everything, including the headline
+        # (Codex review #1, finding B-1). A blocked or cancelled run's figures
+        # describe part of a corpus, and the output folder still holds the
+        # PREVIOUS run's deliverables — the operator has to be told both before
+        # they read a single number. Empty and hidden on a completed run.
+        self._status = QLabel("")
+        self._status.setFont(theme.body(10))
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet(f"color: {theme.palette.warn};")
+        self._status.setVisible(False)
+        lay.addWidget(self._status)
+
         lay.addWidget(SectionLabel("Tokens before and after reduction", theme))
         self._headline = QLabel("—")
         self._headline.setFont(theme.headline(40))
@@ -520,6 +532,9 @@ class SummaryScreen(QWidget):
         self._paint_headline(view)
         self._waterfall.set_plan(view.plan)
         self._stale.setText("")
+        banner = view.status_banner()
+        self._status.setText(banner)
+        self._status.setVisible(bool(banner))
 
         clear_layout(self._stats)
         for value_, label, tone in (
@@ -542,8 +557,17 @@ class SummaryScreen(QWidget):
         self._chips.addStretch(1)
 
         self._regime.setText(view.id_regime_note)
-        self._output.setText(f"Outputs written to {view.output_root}"
-                             if view.output_root else "")
+        if not view.published:
+            # Never "Outputs written to ..." for a run that wrote none. That
+            # line beside an unchanged folder is the specific false statement
+            # finding B-1 is about.
+            self._output.setText(
+                f"No outputs were written. {view.output_root} still holds the "
+                "last completed run's deliverables."
+                if view.output_root else "No outputs were written.")
+        else:
+            self._output.setText(f"Outputs written to {view.output_root}"
+                                 if view.output_root else "")
         self._open.setEnabled(bool(view.output_root)
                               and Path(view.output_root).is_dir())
 

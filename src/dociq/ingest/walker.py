@@ -47,6 +47,7 @@ from ..contracts import (
     document_sort_key,
     to_jsonable,
 )
+from ..runstate import COMPLETED, RunTermination, TerminalStatus
 from . import extract as ex
 from .dating import detect_dates
 
@@ -114,9 +115,33 @@ class RunNotes:
     invocation: list[str] = field(default_factory=list)
     """Resume, cancellation, and read-retry notes."""
 
+    termination: RunTermination = COMPLETED
+    """How the walk ENDED (Codex B-1).
+
+    It lives here, beside the other facts about this invocation, for the
+    reason this class exists: two runs over byte-identical inputs can differ in
+    it — the operator cancelled one of them — so it must never reach the hashed
+    content. It is nonetheless the single most consequential thing the walk can
+    report, because :mod:`dociq.pipeline` refuses to publish anything unless it
+    says :attr:`~dociq.runstate.TerminalStatus.COMPLETED`.
+
+    Defaulting to COMPLETED is safe only because every abort path in
+    :func:`run` sets it before returning, and ``tests/test_incomplete_runs.py``
+    enumerates those paths. A new early return that forgets to set it is the
+    one way this can fail open, which is why the test enumerates rather than
+    samples.
+    """
+
     def messages(self) -> list[str]:
-        """Everything, for the operator-facing warning list."""
-        return list(self.load_dependent) + list(self.invocation)
+        """Everything, for the operator-facing warning list.
+
+        The termination headline goes FIRST when the run did not complete. A
+        run that was blocked or cancelled has exactly one thing the operator
+        needs to read before anything else, and the summary screen and the run
+        summary both truncate their warning lists.
+        """
+        head = [] if self.termination.complete else [self.termination.headline()]
+        return head + list(self.load_dependent) + list(self.invocation)
 
 
 @dataclass
@@ -893,6 +918,21 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
 
     warnings: list[str] = []
     scan_notes: list[str] = []
+
+    # Preflight 1 of 2 (Codex B-1). A source root that is not there produces an
+    # empty scan, which used to look exactly like a folder containing nothing:
+    # the run went green, and — because the pipeline purges before it emits —
+    # the previous complete reduction of that matter was deleted and replaced
+    # with an empty set. A mistyped path, a disconnected network share and an
+    # unmounted volume all land here.
+    if not root.is_dir():
+        blocked = (
+            f"The source folder could not be read: {config.source_root}. It is "
+            "not a directory, or the drive or network share it lives on is not "
+            "available. Nothing was scanned; check the path and re-run.")
+        notes.termination = RunTermination(TerminalStatus.BLOCKED, blocked)
+        return RunResult(config=config, warnings=(blocked,))
+
     entries = scan(root, recursive=opts.recursive, notes=scan_notes,
                    run_notes=notes)
     warnings.extend(sorted(scan_notes))
@@ -902,8 +942,11 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
         warnings.append(f"duplicate content (sha256 {h[:12]}…): "
                         + ", ".join(paths))
 
+    # Preflight 2 of 2. Same class as the source-root check above: the run
+    # never starts, so it has nothing to publish and nothing it may replace.
     disk = preflight_disk(entries, output_root)
     if disk:
+        notes.termination = RunTermination(TerminalStatus.BLOCKED, disk)
         return RunResult(config=config, warnings=(disk,))
 
     tier1 = [e for e in entries if e.tier == 1]
@@ -1086,6 +1129,12 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
     _clear_scratch(scratch)
 
     if was_cancelled:
+        notes.termination = RunTermination(
+            TerminalStatus.CANCELLED,
+            f"The run was stopped after {len(produced)} of {len(todo)} "
+            "file(s) had been read. What was extracted is partial and makes no "
+            "completeness claim over the corpus; re-run to produce "
+            "deliverables.")
         notes.invocation.append(
             "CANCELLED: the run was cancelled by the operator; these are "
             "partial results and no accounting claim over the corpus holds.")
