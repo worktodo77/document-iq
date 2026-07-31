@@ -2,7 +2,7 @@
 
 These are the freeze's teeth. Every invariant listed in
 ``docs/contracts/pagemodel_freeze.md`` has a test here that fails if a track
-quietly relaxes it. A track that needs different behaviour must go through the
+quietly relaxes it. A track that needs different behavior must go through the
 amendment procedure — which starts by changing one of these tests, in the open.
 """
 
