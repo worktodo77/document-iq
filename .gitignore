@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# PyInstaller
+*.spec.bak
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Matter data — NEVER commit client documents or outputs
+matter_data/
+test_matters/
+*.msg
+*.eml
