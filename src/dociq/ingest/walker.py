@@ -159,7 +159,63 @@ def tier_of(ext: str) -> int:
     return 1 if ex.is_tier1(ext) else 2
 
 
-def scan(root: Path, *, recursive: bool = True) -> list[FileEntry]:
+def _iter_files(root: Path, *, recursive: bool,
+                notes: list[str] | None = None) -> list[Path]:
+    """Every file under ``root``, guarded against a symlink/junction cycle.
+
+    ``Path.rglob`` alone will happily walk into a directory that loops back to
+    an ancestor — a Windows directory junction pointed at itself, or a
+    symlink cycle on any platform — re-discovering the same files at ever
+    deeper synthetic paths until a filesystem path-length limit finally stops
+    it (confirmed: ~260 chars on Windows, ~20 nesting levels here). Nothing
+    else in the pipeline catches this: every re-discovery hashes as a distinct
+    ``FileEntry`` with a distinct ``rel_path``, so the corpus inflates with
+    phantom duplicate documents that get extracted (and OCR'd, if scanned)
+    all over again — a determinism and cost hazard hiding inside what looks
+    like a normal file count.
+
+    ``Path.is_symlink()`` is not the guard: an NTFS directory junction is a
+    different reparse tag than a symlink and does not report as one, so a
+    symlink check silently misses exactly this case (junctions are the
+    Windows-native way productions get mapped in). ``os.path.realpath()``
+    resolves both kinds, so cycle detection tracks each directory's resolved
+    real path instead.
+    """
+    if not recursive:
+        return [p for p in sorted(root.glob("*"), key=lambda q: q.as_posix())
+                if p.is_file()]
+    files: list[Path] = []
+    seen_real = {os.path.realpath(root)}
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            children = sorted(current.iterdir(), key=lambda q: q.as_posix())
+        except OSError:
+            continue
+        for p in children:
+            try:
+                is_dir = p.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                real = os.path.realpath(p)
+                if real in seen_real:
+                    if notes is not None:
+                        notes.append(
+                            f"a symlink or junction loop was not followed at "
+                            f"'{rel_path_of(p, root)}' (already visited as "
+                            f"'{real}')")
+                    continue
+                seen_real.add(real)
+                stack.append(p)
+            else:
+                files.append(p)
+    return files
+
+
+def scan(root: Path, *, recursive: bool = True,
+        notes: list[str] | None = None) -> list[FileEntry]:
     """Inventory every file under ``root``, hashed and tiered, in contract order.
 
     Sorting happens here rather than at emit time so every consumer of a scan
@@ -167,11 +223,8 @@ def scan(root: Path, *, recursive: bool = True) -> list[FileEntry]:
     fast-forward a different set of files on the second run.
     """
     root = Path(root)
-    it = root.rglob("*") if recursive else root.glob("*")
     entries: list[FileEntry] = []
-    for p in sorted(it, key=lambda q: q.as_posix()):
-        if not p.is_file():
-            continue
+    for p in _iter_files(root, recursive=recursive, notes=notes):
         if STATE_DIR in p.parts:  # our own run state is not evidence
             continue
         ext = p.suffix.lower()
@@ -416,9 +469,35 @@ def _extract_one(entry: FileEntry, config: RunConfig,
                         config=config)]
     if entry.ext == ".zip":
         return _extract_archive(entry, raw, config, opt)
+    if entry.ext in (".eml", ".email", ".msg"):
+        return _extract_message(entry, raw, config, opt)
     got = ex.extract(entry.path.name, raw, opt)
     return [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
                     entry.sha256, got, config=config)]
+
+
+def _child_records(entry: FileEntry, exp: ex.ZipExpansion, config: RunConfig,
+                   opt: ex.ExtractOptions) -> list[DocumentRecord]:
+    """One :class:`DocumentRecord` per container member (archive member or
+    email attachment), parented to ``entry``. Shared by both container kinds
+    so a Tier-2-inside-a-container is handled identically either way (§3: a
+    Tier-2 file inside a container is still Tier-2, never blocking, never
+    silently extracted)."""
+    parent_key = entry.rel_path
+    out: list[DocumentRecord] = []
+    for m in exp.members:
+        child_ext = Path(m.name).suffix.lower()
+        child_sha = hashlib.sha256(m.raw).hexdigest()
+        child_rel = f"{entry.rel_path}/{unicodedata.normalize('NFC', m.name)}"
+        if ex.is_tier1(child_ext) and child_ext != ".zip":
+            got = ex.extract(Path(m.name).name, m.raw, opt)
+        else:
+            got = ex.ExtractedDoc(status=ProcessingStatus.UNSUPPORTED,
+                                  error=ex.tier2_hint(child_ext))
+        out.append(_record(entry, Path(m.name).name, child_ext, len(m.raw),
+                           child_sha, got, parent=parent_key, order=m.order,
+                           rel_path=child_rel, config=config))
+    return out
 
 
 def _extract_archive(entry: FileEntry, raw: bytes, config: RunConfig,
@@ -437,24 +516,45 @@ def _extract_archive(entry: FileEntry, raw: bytes, config: RunConfig,
                         ex.ExtractedDoc(status=ProcessingStatus.FAILED,
                                         error=ex.clip_message(str(exc), 300)),
                         config=config)]
-    parent_key = entry.rel_path
     out = [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
                    entry.sha256,
                    ex.ExtractedDoc(notes=exp.notes + (
                        f"archive expanded to {len(exp.members)} member(s)",)),
                    config=config)]
-    for m in exp.members:
-        child_ext = Path(m.name).suffix.lower()
-        child_sha = hashlib.sha256(m.raw).hexdigest()
-        child_rel = f"{entry.rel_path}/{unicodedata.normalize('NFC', m.name)}"
-        if ex.is_tier1(child_ext) and child_ext != ".zip":
-            got = ex.extract(Path(m.name).name, m.raw, opt)
+    out.extend(_child_records(entry, exp, config, opt))
+    return out
+
+
+def _extract_message(entry: FileEntry, raw: bytes, config: RunConfig,
+                     opt: ex.ExtractOptions) -> list[DocumentRecord]:
+    """The message (headers + body, as a normal Tier-1 record) plus one child
+    record per attachment.
+
+    §3: "attachments extracted as child documents linked to the parent
+    message ID" is a Tier-1 requirement for MSG/EML, not an enhancement.
+    ``ex.extract`` alone only ever produced the message's own page — nothing
+    walked the attachment list — so every attachment on every email vanished
+    with no record and no note, a silent deletion Principle 1 forbids. This
+    closes that gap the same way archive members are handled: attachments are
+    children with a ``parent_doc_id`` and a ``container_order``, not text
+    concatenated into the parent.
+    """
+    got = ex.extract(entry.path.name, raw, opt)
+    try:
+        if entry.ext == ".msg":
+            exp = ex.expand_msg_attachments(raw, opt.scratch_dir)
         else:
-            got = ex.ExtractedDoc(status=ProcessingStatus.UNSUPPORTED,
-                                  error=ex.tier2_hint(child_ext))
-        out.append(_record(entry, Path(m.name).name, child_ext, len(m.raw),
-                           child_sha, got, parent=parent_key, order=m.order,
-                           rel_path=child_rel, config=config))
+            exp = ex.expand_eml_attachments(raw)
+    except Exception as exc:
+        exp = ex.ZipExpansion((), (f"could not enumerate attachments: {exc}"[:200],))
+    extra_notes = exp.notes + ((f"{len(exp.members)} attachment(s) extracted "
+                                f"as child document(s)",) if exp.members else ())
+    out = [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
+                   entry.sha256,
+                   ex.ExtractedDoc(pages=got.pages, notes=got.notes + extra_notes,
+                                   status=got.status, error=got.error),
+                   config=config)]
+    out.extend(_child_records(entry, exp, config, opt))
     return out
 
 
@@ -477,8 +577,10 @@ def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
     output_root.mkdir(parents=True, exist_ok=True)
     scratch = output_root / STATE_DIR / "scratch"
 
-    entries = scan(root, recursive=opts.recursive)
     warnings: list[str] = []
+    scan_notes: list[str] = []
+    entries = scan(root, recursive=opts.recursive, notes=scan_notes)
+    warnings.extend(sorted(scan_notes))
 
     dups = duplicate_groups(entries)
     for h, paths in dups.items():
@@ -509,15 +611,35 @@ def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
     errors = _Errors()
     documents: list[DocumentRecord] = []
     todo: list[FileEntry] = []
+    n_stale = 0
     for e in tier1:
         cached = replay.get(e.rel_path)
-        if cached is not None:
+        # The journal identity check (contract/profile/OCR engine) says
+        # nothing about whether THIS file still has the content it had when
+        # the interrupted run read it. A file edited between the crash and
+        # the resumed run — the exact recovery scenario resume exists for —
+        # would otherwise be replayed under the new run's identity with the
+        # OLD text and the OLD sha256, silently: the emitted DocumentRecord
+        # would not match the byte on disk it claims to be a reduction of,
+        # which is a Principle-2 violation (the source anyone re-checks
+        # against no longer says what the record says). The cached list's
+        # first record is always the one built from this source file itself
+        # (see _extract_one / _extract_archive), so its sha256 is the
+        # journal-time hash to compare against the freshly scanned one.
+        if cached and cached[0].sha256 == e.sha256:
             documents.extend(cached)
         else:
+            if cached:
+                n_stale += 1
             todo.append(e)
+    n_replayed = (len(tier1) - len(todo))
     if replay:
-        warnings.append(f"resumed: {len(tier1) - len(todo)} document(s) replayed "
+        warnings.append(f"resumed: {n_replayed} document(s) replayed "
                         "from the previous interrupted run")
+    if n_stale:
+        warnings.append(
+            f"resume: {n_stale} document(s) changed on disk since the "
+            "interrupted run and were re-extracted rather than replayed")
 
     cancelled = opts.cancelled or (lambda: False)
     t0 = time.monotonic()

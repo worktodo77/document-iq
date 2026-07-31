@@ -896,6 +896,137 @@ class ZipExpansion:
     notes: tuple[str, ...] = ()
 
 
+def expand_eml_attachments(raw: bytes) -> ZipExpansion:
+    """Attachments of an RFC-822 email, as child members.
+
+    §3 requires MSG/EML attachments to be "extracted as child documents linked
+    to the parent message ID" — Tier 1, not optional. ``_extract_eml`` only
+    ever produced the message's own headers+body page; nothing walked
+    ``iter_attachments()``, so every attachment on every email in a matter
+    vanished with no record, no note, and no line in the Unsupported list —
+    a silent deletion Principle 1 forbids outright. This is the missing half.
+
+    A zip attachment is flattened one level via :func:`expand_zip`, the same
+    treatment a zip-inside-a-zip already gets, so "attach the production as a
+    zip" does not reopen the hole this closes.
+    """
+    import email
+    from email import policy
+
+    try:
+        msg = email.message_from_bytes(raw, policy=policy.default)
+    except Exception:
+        return ZipExpansion()
+
+    raw_members: list[tuple[str, bytes]] = []
+    notes: list[str] = []
+    try:
+        parts = list(msg.iter_attachments())
+    except Exception as exc:
+        return ZipExpansion((), (f"could not enumerate attachments: {exc}"[:200],))
+    for part in parts:
+        try:
+            name = part.get_filename() or f"attachment_{len(raw_members) + 1}"
+            payload = part.get_payload(decode=True)
+        except Exception as exc:
+            notes.append(f"an attachment could not be read: {exc}"[:200])
+            continue
+        if payload is None:
+            notes.append(f"attachment '{name}' had no decodable payload; skipped")
+            continue
+        raw_members.append((name, payload))
+
+    members: list[ZipMember] = []
+    for name, payload in raw_members:
+        if _ext(name) == ".zip":
+            try:
+                inner = expand_zip(payload)
+            except Exception as exc:
+                notes.append(f"attachment '{name}' is a zip that could not be "
+                             f"read: {exc}"[:200])
+                continue
+            notes.extend(f"{name}: {n}" for n in inner.notes)
+            for m in inner.members:
+                members.append(ZipMember(f"{name}/{m.name}", m.raw, len(members)))
+        else:
+            members.append(ZipMember(name, payload, len(members)))
+    return ZipExpansion(tuple(members), tuple(notes))
+
+
+def expand_msg_attachments(raw: bytes, scratch_dir: Path | None) -> ZipExpansion:
+    """Attachments of an Outlook ``.msg``, as child members. See
+    :func:`expand_eml_attachments` — same requirement, same prior gap.
+
+    ``extract-msg`` needs a real path, same as ``_extract_msg``; the scratch
+    file goes under the caller's working folder (§10) and is unlinked either
+    way. An embedded-message attachment (an ``.msg`` inside a ``.msg``, which
+    the library returns as a nested ``Message`` rather than bytes) is
+    disclosed rather than silently skipped: it is real content, just not one
+    this pass can flatten without recursing into a second temp-file dance.
+    """
+    try:
+        import extract_msg
+    except ImportError as exc:  # pragma: no cover — declared
+        raise ExtractionError("Outlook .msg support requires 'extract-msg'.") from exc
+    import tempfile
+
+    if scratch_dir is not None:
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+    tmp = None
+    notes: list[str] = []
+    raw_members: list[tuple[str, bytes]] = []
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=".msg", delete=False,
+            dir=str(scratch_dir) if scratch_dir is not None else None,
+        ) as tf:
+            tf.write(raw)
+            tmp = tf.name
+        m = extract_msg.Message(tmp)
+        for i, att in enumerate(getattr(m, "attachments", None) or []):
+            try:
+                name = (getattr(att, "longFilename", None)
+                        or getattr(att, "shortFilename", None)
+                        or f"attachment_{i + 1}")
+                data = getattr(att, "data", None)
+            except Exception as exc:
+                notes.append(f"an attachment could not be read: {exc}"[:200])
+                continue
+            if isinstance(data, (bytes, bytearray)):
+                raw_members.append((name, bytes(data)))
+            else:
+                # An embedded .msg (Outlook nests a Message object, not
+                # bytes) or an unreadable attachment kind. Disclosed, not
+                # dropped: the operator sees that content exists and was not
+                # brought in, rather than the run looking complete.
+                notes.append(f"attachment '{name}' is an embedded message or "
+                             "unsupported attachment kind; not extracted")
+    except Exception as exc:
+        return ZipExpansion((), (f"could not read .msg attachments: {exc}"[:200],))
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+
+    members: list[ZipMember] = []
+    for name, payload in raw_members:
+        if _ext(name) == ".zip":
+            try:
+                inner = expand_zip(payload)
+            except Exception as exc:
+                notes.append(f"attachment '{name}' is a zip that could not be "
+                             f"read: {exc}"[:200])
+                continue
+            notes.extend(f"{name}: {n}" for n in inner.notes)
+            for m2 in inner.members:
+                members.append(ZipMember(f"{name}/{m2.name}", m2.raw, len(members)))
+        else:
+            members.append(ZipMember(name, payload, len(members)))
+    return ZipExpansion(tuple(members), tuple(notes))
+
+
 def expand_zip(raw: bytes, depth: int = 0) -> ZipExpansion:
     """Expand a (possibly nested) ZIP into flat member byte blobs.
 

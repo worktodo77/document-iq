@@ -81,6 +81,15 @@ def _check_no_network(chk: _Check) -> None:
     ``socket.socket`` is replaced with a raiser for the duration, so any
     outbound attempt — the model download the vendored code used to permit —
     fails loudly instead of quietly succeeding on a connected machine.
+
+    Critically, the shared ``_OCR_ENGINE`` singleton is torn down first. By
+    the time this runs, Stage 1-2 has already OCR'd the fixture corpus and
+    left a warm engine behind; probing through the warm singleton would only
+    prove that *inference* needs no socket; the historical hazard this
+    guards against (``enable_os_trust()``) lived in *construction* — a
+    cold-cache model load — which a warm-engine probe never exercises. Forcing
+    a fresh ``RapidOCR(...)`` build under the blocked socket is the only way
+    this check is honest about what it claims.
     """
     real = socket.socket
 
@@ -95,6 +104,8 @@ def _check_no_network(chk: _Check) -> None:
     ok, msg = ocr_models_present()
     if not chk.expect(ok, "OCR models present locally", msg or str(ex.ocr_model_dir())):
         return
+    was_warm = ex._OCR_ENGINE is not None
+    ex._OCR_ENGINE = None  # force a genuine cold construction under the block
     socket.socket = _no_socket  # type: ignore[assignment]
     try:
         from PIL import Image, ImageDraw
@@ -104,7 +115,10 @@ def _check_no_network(chk: _Check) -> None:
         ImageDraw.Draw(img).text((10, 40), "OFFLINE OCR CHECK 2024", fill=0)
         arr = np.repeat(np.array(img)[:, :, None], 3, axis=2)
         text, confs = ex._ocr_array(arr)
-        chk.expect(bool(confs), "OCR ran with sockets disabled",
+        chk.expect(bool(confs),
+                   "OCR ran with sockets disabled, including cold engine "
+                   "construction" + (" (previously warm; reset for this "
+                   "check)" if was_warm else ""),
                    f"{len(confs)} line(s), text {text[:40]!r}")
     except _Blocked as exc:
         chk.fail("OCR ran with sockets disabled", str(exc))

@@ -97,6 +97,54 @@ def test_eml_headers_and_body_with_an_iso_date_token():
     assert got.pages[0].kind is PageKind.SYNTHETIC
 
 
+def _eml_with_attachment(body: str = "See attached.",
+                        attach_name: str = "report.txt",
+                        attach_bytes: bytes = b"attachment body text") -> bytes:
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = "engineer@example.com"
+    msg["To"] = "pm@example.com"
+    msg["Subject"] = "See attached"
+    msg.set_content(body)
+    msg.add_attachment(attach_bytes, maintype="application",
+                       subtype="octet-stream", filename=attach_name)
+    return msg.as_bytes()
+
+
+def test_eml_attachments_are_enumerated_as_child_members():
+    """§3: MSG/EML attachments are child documents linked to the parent
+    message — a Tier-1 requirement. Before this was added, ``_extract_eml``
+    read only headers and body; nothing in the extractor ever looked at
+    ``iter_attachments()``, so every attachment on every email vanished with
+    no record and no note anywhere in the pipeline."""
+    raw = _eml_with_attachment()
+    exp = ex.expand_eml_attachments(raw)
+    assert [m.name for m in exp.members] == ["report.txt"]
+    assert exp.members[0].raw == b"attachment body text"
+
+
+def test_eml_with_no_attachments_yields_no_members():
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = "a@example.com"
+    msg.set_content("no attachments here")
+    exp = ex.expand_eml_attachments(msg.as_bytes())
+    assert exp.members == ()
+
+
+def test_eml_zip_attachment_is_flattened_not_dropped():
+    """A zip attached to an email must not silently vanish either — it gets
+    the same one-level flatten a zip-inside-a-zip already gets."""
+    zip_bytes = _zip_of([("inner.txt", b"inner content")])
+    raw = _eml_with_attachment(attach_name="production.zip",
+                               attach_bytes=zip_bytes)
+    exp = ex.expand_eml_attachments(raw)
+    assert [m.name for m in exp.members] == ["production.zip/inner.txt"]
+    assert exp.members[0].raw == b"inner content"
+
+
 def test_unknown_extension_is_tier2_not_an_error():
     got = ex.extract("survey.xyz", b"whatever")
     assert got.status is ProcessingStatus.UNSUPPORTED
