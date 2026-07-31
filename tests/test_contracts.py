@@ -18,6 +18,7 @@ from dociq.contracts import (
     ContractViolation,
     Disposition,
     DocumentRecord,
+    EffectiveLimits,
     IdRegime,
     MasterIndexSnapshot,
     PageKind,
@@ -344,7 +345,7 @@ def test_changing_the_ocr_threshold_changes_the_run_identity():
 
 def test_contract_version_is_the_frozen_one():
     # Bumping this is the amendment procedure's final step, not its first.
-    assert CONTRACT_VERSION == "1.2.0"
+    assert CONTRACT_VERSION == "1.3.0"
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +392,51 @@ def test_char_count_and_floor_stay_in_identity():
 def test_a_nonsensical_ratio_band_is_rejected_at_construction(lo: float, hi: float):
     with pytest.raises(ContractViolation, match="ordered"):
         estimate(ratio_low=lo, ratio_high=hi)
+
+
+def limits(**kw: object) -> EffectiveLimits:
+    base = dict(
+        xlsx_max_rows=50000, csv_max_rows=50000, zip_max_mb=500,
+        zip_max_members=2000, zip_max_depth=3, file_timeout_s=3600,
+        retry_max=500, retry_budget_s=1800, recurse=True,
+        ocr_model_id="rapidocr-onnxruntime 1.2.3/abcd", workers=14,
+    )
+    base.update(kw)
+    return EffectiveLimits(**base)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["xlsx_max_rows", "csv_max_rows", "zip_max_mb", "zip_max_members",
+     "zip_max_depth", "file_timeout_s", "retry_max", "retry_budget_s",
+     "recurse", "ocr_model_id"],
+)
+def test_every_output_affecting_limit_changes_the_run_identity(field: str):
+    # A-04 / Codex B-2. When any of these bites, the same folder+profile+index
+    # yields different evidence — so an identical hash across the two would be
+    # agreement the bytes do not support.
+    base = RunConfig(source_root="s", output_root="o", limits=limits())
+    other = dataclasses.replace(base.limits, **{field: _perturb(getattr(base.limits, field))})
+    assert content_hash(base) != content_hash(
+        dataclasses.replace(base, limits=other)
+    )
+
+
+def _perturb(v: object) -> object:
+    if isinstance(v, bool):
+        return not v
+    if isinstance(v, int):
+        return v + 1
+    return str(v) + "x"
+
+
+def test_worker_count_is_recorded_but_not_hashed():
+    # Thread-pool width must not change output. If it ever does that is a
+    # determinism defect to fix, not a value to absorb into the identity.
+    a = RunConfig(source_root="s", output_root="o", limits=limits(workers=4))
+    b = RunConfig(source_root="s", output_root="o", limits=limits(workers=16))
+    assert content_hash(a) == content_hash(b)
+    assert json.loads(canonical_json(a))["limits"]["workers"] == 4
 
 
 def test_refutation_is_a_field_not_an_inference():

@@ -23,7 +23,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-CONTRACT_VERSION = "1.2.0"
+CONTRACT_VERSION = "1.3.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -34,7 +34,15 @@ with safe defaults, so no existing construction site changes.
 1.2.0 — amendment A-03: :class:`TokenEstimate` gained ``ratio_refuted``,
 defaulted to ``False``. Raised once the corpus measurement showed D-03's ratio
 band to be unreachable rather than merely optimistic, leaving consumers with no
-sanctioned way to know the band was not used.
+sanctioned way to know the band was not used. *(Codex review #1 finding B-6
+later showed that refutation is not established — the flag stays, but what
+sets it must be re-grounded.)*
+
+1.3.0 — amendment A-04, from Codex review #1 finding B-2: :class:`RunConfig`
+gained ``limits: EffectiveLimits | None``. Environment-controlled caps,
+timeouts, retry bounds and the OCR model identity could change output evidence
+while sitting outside the hashed configuration — a determinism-identity gap by
+:class:`RunConfig`'s own stated contract.
 """
 
 
@@ -320,6 +328,50 @@ class MasterIndexSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class EffectiveLimits:
+    """Every environment-controlled setting that can change output evidence
+    (amendment A-04, from Codex review #1 finding B-2).
+
+    :class:`RunConfig`'s contract is that anything influencing output and not
+    in it is a determinism bug. These settings were outside it: caps, timeouts,
+    retry bounds and the OCR model identity all live in module-level constants
+    read from the environment. When a cap or timeout *bites*, the same folder,
+    profile and index produce different evidence under an identical hashed
+    configuration — so the determinism identity was incomplete, by the
+    contract's own definition.
+
+    Per-document truncation notes disclose the effect but do not repair the
+    identity: a consumer comparing two runs' hashes would see agreement that
+    the bytes do not support.
+
+    All ints and strings, so identity hashing is unaffected.
+    """
+
+    xlsx_max_rows: int
+    csv_max_rows: int
+    zip_max_mb: int
+    zip_max_members: int
+    zip_max_depth: int
+    file_timeout_s: int
+    retry_max: int
+    retry_budget_s: int
+    recurse: bool
+
+    ocr_model_id: str = ""
+    """Stable identity of the OCR model artifact — package version plus a hash
+    of the model files. Two engines that read the same page differently are
+    different inputs, and a version string alone does not prove the bytes
+    match."""
+
+    workers: int = 0
+    """Recorded but NOT hashed by convention — see
+    :data:`_IDENTITY_EXCLUDED`. Thread-pool width must not change output; if it
+    ever does, that is a determinism defect to fix rather than a value to
+    absorb into the identity. Recording it keeps a performance report
+    interpretable."""
+
+
+@dataclass(frozen=True, slots=True)
 class RunConfig:
     """Everything that can change output bytes.
 
@@ -347,6 +399,12 @@ class RunConfig:
     ocr_engine_version: str = ""
     bates_pattern: str | None = None
     """Confirmed with the user on first detection per set (§4 Stage 3)."""
+
+    limits: EffectiveLimits | None = None
+    """The effective environment-controlled settings for this run (A-04).
+    ``None`` only for constructions that never reach a real run — the pipeline
+    must always populate it, and the manifest names it as part of the identity
+    the byte-identical claim covers."""
 
     @property
     def ocr_conf_threshold(self) -> float:
@@ -513,7 +571,7 @@ class ExtractionError(DocIQError):
 # ---------------------------------------------------------------------------
 
 _IDENTITY_EXCLUDED: frozenset[str] = frozenset(
-    {"ocr_conf", "ratio_low", "ratio_high"}
+    {"ocr_conf", "ratio_low", "ratio_high", "workers"}
 )
 """Fields excluded from identity hashing.
 
@@ -617,6 +675,7 @@ __all__ = [
     "TokenEstimate",
     "ReconciliationRow",
     "ReconciliationReport",
+    "EffectiveLimits",
     "MasterIndexSnapshot",
     "RunConfig",
     "RunResult",
