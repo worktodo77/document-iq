@@ -36,6 +36,26 @@ Consequence for the product's positioning, flagged: §7 and D-03 make the token 
 
 | D-18 | §7 page-marker format — keep or compact | **KEEP §7's format unchanged.** Alex ruled "measure it properly first"; the measurement settles it against changing. Full-corpus measurement (all 298 PDFs / 17,732 pages, via Track B's pre-token proxy): markers are **0.5% of the corpus without Bates, 1.2% with**. Compaction buys almost nothing — `[p1234]` and `===== PAGE 1234 =====` both yield **5 pre-tokens**, because pre-token count tracks the number of symbol runs, not string length; only the Bates variant compacts at all (13 → 10). A two-repo change against DocIQ *and* Expert Assist's parser to recover ~0.5% is not worth it. **Correction on the record:** the initial estimate that framed markers as the single largest economization lever used a chars÷3.5 approximation and was wrong in framing — the absolute figure (~230K pre-tokens for the Bates form) held, but the share did not. Character compaction does not imply token savings. | 2026-07-30 |
 
+## Sprint-1 verification log
+
+**Track B master-index robustness (2026-07-30).** The Track B critic found a
+High-severity defect: a negative `Original Sort` value loaded cleanly into a
+`MasterIndexRow` but violated `DocId`'s `base >= 0` requirement at assignment
+time, raising an unhandled `ContractViolation` that named neither the offending
+row nor the file — taking down identifier assignment for *every* document in the
+corpus, not just the bad row. Fixed at `5eb1f7a` (negative sort treated as "no
+usable value": skipped with a warning, row reconciles as index-only), with a
+regression test confirmed to go red on `a78f1b5`.
+
+The critic could not test this against the real index, correctly refusing to
+touch client data. Audited separately: the real Project 495 index is **clean** —
+9,259 rows, a perfect 1..9,259 sequence, zero non-numeric, zero negative, zero
+duplicate values. So the builder's "9,698 IDs, 0 collisions" claim is genuine,
+but it passed *because the file happened to be clean*, not because the code was
+robust to a dirty one. Recorded because it is a textbook instance of "the corpus
+doesn't exercise it selects nothing": the fix is warranted by the failure being
+loud and total, not by evidence from this corpus.
+
 ## Measured corpus token load (full corpus, 2026-07-30)
 
 Measured over **all 298 PDFs / 17,732 pages** of the real MODEC/Petrobras MPR
