@@ -442,7 +442,7 @@ exist — which is how an operator learns to click through the prompt.
 | 6 | runs fully offline | **PASS** — the self-test performs a cold OCR engine construction with `socket.socket` replaced by a raiser |
 | 7 | **byte-identical outputs on repeat runs** | **PASS on the fixture corpus AND on the real one** — 30 runs / 30 seeds on the fixtures, with the gate watched going red under three injected-nondeterminism probes; and **two full from-scratch OCR-enabled runs over the real 368-document, 18,556-page record produced one `corpus_sha256` (`bdb7d498…`), one log `content_sha256` (`5601badd…`), 370/370 deliverable files byte-identical, 372/372 adjacent files byte-identical, 0 unclassified**. See §6a |
 | 8 | handoff packages | **PARTIAL** — `upload_package/` with its README, `sources.json` and `document_index.csv` is built on every run and asserted present on the real corpus; the §8 Path-B layout check passes. Acceptance by an actual Claude Project is not testable offline |
-| 9 | OCR bake-off decides D-01 | **OUT OF SCOPE** — Tesseract is absent and was correctly not installed |
+| 9 | OCR bake-off decides D-01 | **CANCELLED by D-19** (Alex, 2026-07-31) — Tesseract written off; rapidocr is the engine unconditionally. Closed as cancelled, **not** as met: the artifact is a rapidocr characterization, never a comparison |
 
 ### D-I7 — a run that skipped OCR recorded that it had used rapidocr
 
