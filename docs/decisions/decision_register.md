@@ -56,6 +56,27 @@ robust to a dirty one. Recorded because it is a textbook instance of "the corpus
 doesn't exercise it selects nothing": the fix is warranted by the failure being
 loud and total, not by evidence from this corpus.
 
+**Sprint-1 integration (2026-07-31).** The stand-in emitter `verify/probe_emit.py`
+is deleted and the determinism proof re-run against the emitters that ship: 30
+runs, 30 distinct `PYTHONHASHSEED` values, subprocess per run, **1 distinct
+corpus hash, 0 diffs, 0 failures**, and the harness watched going red under three
+injected-nondeterminism probes. Five defects found and closed at the seam, each
+with a test proven red beforehand — the un-remapped `parent_doc_id`, D-04's
+renumbering check crying wolf on duplicate content, renumbering warnings inside
+the hashed log content, a re-run inheriting the previous run's residue, and a
+corpus that never exercised email-attachment expansion. Full account in
+`docs/verification/sprint1_integration_2026-07-31.md`.
+
+**A note on thread configuration, measured rather than assumed (2026-07-31).**
+Track A recorded thread oversubscription as an unquantified hypothesis. It was
+partly tested during the full-corpus run: the shipped defaults put **173 OS
+threads** on a 32-core box at **~12.5 cores busy**. Reducing to 4 document
+workers and 6 OCR page workers made throughput *worse* — 142 threads at **~2
+cores busy** — so the naive "pin the threads" remedy is refuted for this
+workload, and the run was returned to the defaults. What limits throughput here
+is not yet identified; it is a Sprint-2 performance question, and the one thing
+now established is that fewer workers is not the answer.
+
 ## Measured corpus token load (full corpus, 2026-07-30)
 
 Measured over **all 298 PDFs / 17,732 pages** of the real MODEC/Petrobras MPR

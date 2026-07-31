@@ -40,6 +40,7 @@ __all__ = [
     "BatesDecision",
     "DecisionStatus",
     "BatesRange",
+    "MIN_DOCUMENT_COVERAGE_PCT",
     "detect_candidates",
     "propose_format",
     "apply_bates",
@@ -241,6 +242,12 @@ class BatesProposal:
     """Runner-up formats as ``(label, page count)``, so a wrong first guess is
     visible and correctable instead of invisible."""
 
+    best_document_coverage_pct: int = 0
+    """Share of the pages of the single best-covered document that carry this
+    format. The corpus-wide figure cannot decide whether a production is
+    stamped: a fully stamped 306-page disclosure inside an 18,000-page record
+    is 1.7% of the corpus and 100% of itself."""
+
     @property
     def coverage_pct(self) -> int:
         """Integer percent — a float here would reach the log and the summary,
@@ -273,16 +280,45 @@ class BatesDecision:
         return self.format.pattern if self.format else None
 
 
+MIN_DOCUMENT_COVERAGE_PCT = 50
+"""How much of one document a format must stamp before it is proposed.
+
+An absolute page count cannot carry this decision. Measured on the real
+Petrobras record (368 documents, 18,521 pages): two stray lines that parse as
+``CP0001`` were enough to propose a Bates format for the whole corpus, on a set
+D-13 designates as the *negative* case — detection there must come back empty.
+Two pages in eighteen thousand is not a production.
+
+The test is applied per DOCUMENT rather than per corpus, and that is the point.
+A real production stamps essentially every page of the documents it covers, so a
+fully stamped 306-page disclosure sitting inside an 18,000-page record — D-13's
+MNFV set, exactly — is 1.7% of the corpus and 100% of itself, and must still be
+proposed. A corpus-wide floor would throw it away.
+
+Fifty percent, rather than something higher, because a production can carry
+unstamped inserts and because the operator confirms the proposal anyway: the
+cost of proposing wrongly is one dialog, and the cost of not proposing is a
+matter that silently loses its Bates locators.
+"""
+
+
 def propose_format(
     documents: Sequence[DocumentRecord],
     zone: BatesZone | None = None,
     *,
     min_pages: int = 2,
+    min_document_coverage_pct: int = MIN_DOCUMENT_COVERAGE_PCT,
 ) -> BatesProposal | None:
     """Propose the dominant stamp format, or ``None`` for an unstamped set.
 
     ``None`` is a completely ordinary outcome and carries no warning: §4 Stage 3
     and D-13 both say so, and the Petrobras corpus is the proof case.
+
+    A format must clear two bars: ``min_pages`` pages overall, and
+    :data:`MIN_DOCUMENT_COVERAGE_PCT` of at least one document's pages. Both
+    thresholds are named and adjustable rather than buried, because suppressing
+    a candidate is a decision and a silent one would be indistinguishable from
+    not looking.
     """
     candidates = detect_candidates(documents, zone)
     if not candidates:
@@ -301,6 +337,16 @@ def propose_format(
     if len(best) < min_pages:
         return None
 
+    pages_by_key = {document_sort_key(d): len(d.pages) for d in documents}
+    matched_by_key = Counter(c.sort_key for c in best)
+    best_doc_pct = max(
+        (round(100 * n / pages_by_key[key])
+         for key, n in matched_by_key.items() if pages_by_key.get(key)),
+        default=0,
+    )
+    if best_doc_pct < min_document_coverage_pct:
+        return None
+
     widths = tuple(sorted(Counter(c.digit_width for c in best)))
     fmt = BatesFormat(
         prefix=prefix, separator=sep, digit_widths=widths, suffix=suffix or None
@@ -317,9 +363,10 @@ def propose_format(
         format=fmt,
         pages_matched=len(best),
         pages_scanned=pages_scanned,
-        documents_matched=len({c.sort_key for c in best}),
+        documents_matched=len(matched_by_key),
         samples=samples,
         alternatives=alternatives,
+        best_document_coverage_pct=best_doc_pct,
     )
 
 

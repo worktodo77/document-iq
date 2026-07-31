@@ -133,6 +133,46 @@ def test_single_occurrence_is_not_promoted_to_a_format():
     assert propose_format((doc,)) is None
 
 
+def test_two_stray_lines_in_a_large_unstamped_record_propose_nothing():
+    """The defect the real Petrobras run exposed.
+
+    D-13 designates that record as the NEGATIVE case: detection must come back
+    empty. It did not — two lines that happened to parse as ``CP0001``, in a
+    368-document 18,521-page corpus, were enough to propose a format, because
+    the only bar was an absolute count of two pages.
+    """
+    noise = document(
+        "reports/long.pdf",
+        tuple(
+            page(i, f"Ordinary report body for page {i}.\nCP{i:04d}"
+                 if i <= 2 else f"Ordinary report body for page {i}.")
+            for i in range(1, 201)
+        ),
+    )
+    assert propose_format((noise,)) is None
+
+
+def test_a_fully_stamped_document_inside_a_large_record_is_still_proposed():
+    """The fix must not suppress the case it exists to protect.
+
+    A 306-page stamped disclosure inside an 18,000-page record is 1.7% of the
+    corpus and 100% of itself. A corpus-wide coverage floor would discard it;
+    the per-document test keeps it.
+    """
+    haystack = tuple(
+        document(
+            f"reports/bulk-{n:02d}.pdf",
+            tuple(page(i, f"Unstamped body {n}-{i}.") for i in range(1, 31)),
+        )
+        for n in range(10)
+    )
+    proposal = propose_format(haystack + (stamped(count=8),))
+    assert proposal is not None
+    assert proposal.format.prefix == "MNFV"
+    assert proposal.best_document_coverage_pct == 100
+    assert proposal.coverage_pct <= 3
+
+
 def test_ranges_feed_the_stage_3b_tertiary_key():
     doc = stamped()
     proposal = propose_format((doc,))
