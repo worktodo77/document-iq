@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from dociq.contracts import RunConfig, RunResult
+from dociq.runstate import COMPLETED, RunTermination, TerminalStatus
 
 DIRECT_CONTEXT_TOKENS = 200_000
 """How much text a Claude Project holds in direct context before it falls back
@@ -279,6 +280,19 @@ class RunOutcome:
     """The waterfall's levers. ``None`` when the run had no profile and nothing
     mechanical to report — the screen then shows the record at full size."""
 
+    termination: RunTermination = COMPLETED
+    """How the run ENDED (Codex review #1, finding B-1).
+
+    A frozen non-contract record, so it crosses the seam under rule 1. The GUI
+    must never present a blocked or cancelled run as an ordinary result: the
+    numbers on the summary screen would describe part of a corpus, and the
+    output folder the screen offers to open holds the PREVIOUS run's
+    deliverables, not this one's."""
+
+    published: bool = True
+    """Whether this run wrote the §7 deliverables. False for every non-complete
+    termination — see :attr:`termination`."""
+
 
 @dataclass(frozen=True, slots=True)
 class RunRequest:
@@ -389,6 +403,8 @@ __all__ = [
     "RunOutcome",
     "RunRequest",
     "ProgressEvent",
+    "RunTermination",
+    "TerminalStatus",
     "PipelineAPI",
     "get_pipeline",
     "set_pipeline",

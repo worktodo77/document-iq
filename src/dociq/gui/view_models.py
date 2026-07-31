@@ -23,6 +23,7 @@ from dociq.gui.pipeline import (
     TokenBasis,
     TokenEstimate,
 )
+from dociq.runstate import COMPLETED, RunTermination
 
 FLAG_OCR = "ocr"
 FLAG_UNSUPPORTED = "unsupported"
@@ -142,9 +143,13 @@ def _ocr_flags(result: RunResult) -> FlagGroup:
 
 
 def _unsupported_flags(result: RunResult) -> FlagGroup:
+    # The Doc ID leads the line (Codex review #1, finding B-7). The explanation
+    # below tells the operator these files are recorded in the document index —
+    # true only since B-7 gave them identifiers and index rows — and a claim
+    # that a row exists is worth nothing without the key to find it by.
     items = tuple(
         FlagItem(
-            primary=doc.filename,
+            primary=f"{doc.doc_id} — {doc.filename}" if doc.doc_id else doc.filename,
             secondary=doc.error or "listed on the unsupported inventory",
             locator=doc.rel_path,
         )
@@ -157,7 +162,8 @@ def _unsupported_flags(result: RunResult) -> FlagGroup:
         items=items,
         explanation=(
             "These files were inventoried and hashed but their text was not "
-            "extracted. They are recorded in the document index so the "
+            "extracted. Each one carries a Doc ID and a row in "
+            "document_index.csv with the processing status Unsupported, so the "
             "production stays complete; each line says how to include it if you "
             "need its contents."
         ),
@@ -210,6 +216,36 @@ class SummaryView:
     output_root: str
     id_regime_note: str
     plan: ReductionPlan | None = None
+    termination: RunTermination = COMPLETED
+    """How the run ENDED (Codex review #1, finding B-1). Read from the outcome,
+    never inferred from a count: a cancelled run and a small matter produce the
+    same numbers."""
+
+    published: bool = True
+
+    # -- run status ---------------------------------------------------------
+
+    @property
+    def complete(self) -> bool:
+        return self.termination.complete
+
+    def status_banner(self) -> str:
+        """The sentence the summary screen shows above everything else, or "".
+
+        Empty for a completed run: a banner that appears every time is a banner
+        nobody reads. For a blocked or cancelled run it is the first thing on
+        the screen, and it says the two things the operator would otherwise get
+        wrong — that these figures cover only part of the record, and that the
+        output folder still holds the previous run's deliverables.
+        """
+        if self.complete:
+            return ""
+        return (
+            f"{self.termination.headline()} The figures below describe only "
+            "what was read before the run stopped. Nothing in the output "
+            "folder was changed; a full record of this attempt is in "
+            "incomplete_run/."
+        )
 
     # -- the headline -------------------------------------------------------
 
@@ -342,6 +378,8 @@ def build_summary(outcome: RunOutcome,
         output_root=outcome.output_root,
         id_regime_note=note,
         plan=plan if plan is not None else outcome.plan,
+        termination=outcome.termination,
+        published=outcome.published,
     )
 
 

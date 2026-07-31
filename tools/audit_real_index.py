@@ -16,6 +16,10 @@ What it proves:
   minter *and* independently via set cardinality);
 * container children and unmatched folder files, added synthetically on top of
   the real row set, still collide with nothing;
+* **Tier-2 (unsupported) files are part of the same inventory** and are issued
+  identifiers from the same minter — Codex review #1, finding B-7. They used to
+  be assigned nothing at all, so criterion 5 was measured over a strictly
+  smaller set than the one the pipeline now numbers;
 * the assignment is byte-identical across repeated runs and independent of
   input order.
 """
@@ -33,14 +37,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 # crash on them and lose the whole report to an encoding error.
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from dociq.contracts import DocumentRecord, PageKind, PageRecord
+from dociq.contracts import (
+    DocumentRecord,
+    PageKind,
+    PageRecord,
+    ProcessingStatus,
+)
 from dociq.docid.assign import assign_doc_ids, index_row_key
 from dociq.docid.ids import DocId, assert_render_injective, parse_doc_id
 from dociq.docid.masterindex import load_master_index
 from dociq.docid.reconcile import reconcile
+from dociq.ingest.walker import tier_of
 
 CHILDREN_PER_CONTAINER = 3
 SYNTHETIC_EXTRAS = 25
+SYNTHETIC_TIER2 = 7
+"""Unindexed Tier-2 files hung off the modelled folder — the shape of the real
+run's seven legacy ``.doc`` files, which finding B-7 found absent from the
+index deliverable entirely."""
 
 
 def _page() -> PageRecord:
@@ -63,6 +77,12 @@ def build_folder_from_index(index) -> tuple[DocumentRecord, ...]:
         parts = [p for p in full.split("/") if p]
         rel = "/".join(parts[1:]) or "/".join(parts)  # drop the matter root
         digest = hashlib.sha256(f"{row.original_sort}".encode()).hexdigest()
+        ext = "." + (row.ext or "dat").lstrip(".")
+        # A row whose format DocIQ does not extract models a Tier-2 file: no
+        # pages, status Unsupported. Before B-7 these were never handed to the
+        # assigner at all, so this probe measured criterion 5 over a set the
+        # pipeline does not actually issue.
+        tier2 = tier_of(ext.lower()) == 2
         docs.append(
             DocumentRecord(
                 doc_id="",
@@ -70,8 +90,11 @@ def build_folder_from_index(index) -> tuple[DocumentRecord, ...]:
                 filename=rel.rsplit("/", 1)[-1],
                 sha256=digest,
                 size_bytes=(row.size_kb or 1) * 1024,
-                ext="." + (row.ext or "dat").lstrip("."),
-                pages=(_page(),),
+                ext=ext,
+                pages=() if tier2 else (_page(),),
+                status=(ProcessingStatus.UNSUPPORTED if tier2
+                        else ProcessingStatus.FULL),
+                error="Unrecognized format" if tier2 else None,
             )
         )
     return tuple(docs)
@@ -116,6 +139,28 @@ def add_unindexed(docs: tuple[DocumentRecord, ...]) -> tuple[DocumentRecord, ...
     return docs + extra
 
 
+def add_unindexed_tier2(docs: tuple[DocumentRecord, ...]) -> tuple[DocumentRecord, ...]:
+    """Legacy ``.doc`` files that are in the folder and NOT in the index.
+
+    The B-7 case in its purest form: inventoried, unextractable, and previously
+    issued no identifier and given no index row.
+    """
+    extra = tuple(
+        DocumentRecord(
+            doc_id="",
+            rel_path=f"UNINDEXED/legacy{i:03d}.doc",
+            filename=f"legacy{i:03d}.doc",
+            sha256=hashlib.sha256(f"legacy{i}".encode()).hexdigest(),
+            size_bytes=2048,
+            ext=".doc",
+            status=ProcessingStatus.UNSUPPORTED,
+            error="Legacy .doc is listed but not read (D-02)",
+        )
+        for i in range(SYNTHETIC_TIER2)
+    )
+    return docs + extra
+
+
 def main(path: str) -> int:
     index = load_master_index(path)
     print(f"index rows loaded          : {len(index.rows)}")
@@ -129,12 +174,20 @@ def main(path: str) -> int:
         f"{len({index_row_key(r) for r in index.rows})} / {len(index.rows)}"
     )
 
-    docs = add_unindexed(add_containers(build_folder_from_index(index)))
+    docs = add_unindexed_tier2(
+        add_unindexed(add_containers(build_folder_from_index(index))))
+    tier2 = [d for d in docs if d.status is ProcessingStatus.UNSUPPORTED]
     print(f"folder documents modelled  : {len(docs)}")
+    print(f"  of which Tier-2/unsupported: {len(tier2)}")
 
     result = assign_doc_ids(docs, index)
     ids = [d.doc_id for d in result.documents]
+    unsupported_ids = [d.doc_id for d in result.documents
+                       if d.status is ProcessingStatus.UNSUPPORTED]
     print(f"identifiers issued         : {len(ids)}")
+    print(f"  issued to unsupported     : {len(unsupported_ids)}")
+    print(f"  unsupported with NO id    : "
+          f"{sum(1 for i in unsupported_ids if not i)}")
     print(f"identifiers distinct       : {len(set(ids))}")
     print(f"collisions                 : {len(ids) - len(set(ids))}")
     li = [i for i in ids if i.startswith("LI-")]
@@ -182,6 +235,9 @@ def main(path: str) -> int:
         and not (set(li) & set(diq))
         and stable
         and len(result.matched_rows) == len(index.rows)
+        # B-7: every inventoried entry, unsupported included, carries an id.
+        and all(unsupported_ids)
+        and len(unsupported_ids) == len(tier2)
     )
     print(f"\nVERDICT: {'PASS' if verdict else 'FAIL'}")
     return 0 if verdict else 1

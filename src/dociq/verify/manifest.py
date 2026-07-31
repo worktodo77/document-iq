@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..contracts import CONTRACT_VERSION, DocIQError, canonical_json
+from ..runstate import INCOMPLETE_DIR
 
 MANIFEST_NAME = "output_manifest.json"
 
@@ -62,6 +63,21 @@ EXCLUDED_REASONS = {
 """Deliberately outside the claim. Anything not listed here and not matched by
 :data:`DETERMINISTIC_PATTERNS` is reported as ``unclassified`` rather than
 silently assumed either way — an output nobody decided about is a finding."""
+
+EXCLUDED_PREFIXES = {
+    f"{INCOMPLETE_DIR}/": (
+        "the record of a run that did NOT complete — it is not a deliverable "
+        "of this run and is deliberately outside the byte-identical claim"
+    ),
+}
+"""Whole sub-trees outside the claim, matched by relative-path prefix.
+
+``incomplete_run/`` (Codex review #1, finding B-1) is written by a blocked or
+cancelled run, which publishes nothing else. It is classified here so that a
+LATER, complete run into the same folder does not report it as an unclassified
+output and fail its own gate on the wreckage of an earlier attempt — and a
+complete run also purges it (``pipeline._STALE_PATTERNS``), so both halves of
+that interaction are covered."""
 
 LOG_NAME = "processing_log.json"
 LOG_CONTENT_KEY = "content"
@@ -214,6 +230,10 @@ def build(output_root: Path, *, require_outputs: bool = True) -> Manifest:
             continue
         if rel in EXCLUDED_REASONS:
             man.excluded[rel] = EXCLUDED_REASONS[rel]
+            continue
+        prefix = next((p for p in EXCLUDED_PREFIXES if rel.startswith(p)), None)
+        if prefix is not None:
+            man.excluded[rel] = EXCLUDED_PREFIXES[prefix]
         else:
             man.unclassified.append(rel)
 
