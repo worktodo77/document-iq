@@ -23,8 +23,11 @@ from dociq.contracts import (
     PageKind,
     PageRecord,
     ProcessingStatus,
+    ReconciliationReport,
+    ReconciliationRow,
     RunConfig,
     RunResult,
+    TokenEstimate,
     canonical_json,
     content_hash,
     document_sort_key,
@@ -341,7 +344,77 @@ def test_changing_the_ocr_threshold_changes_the_run_identity():
 
 def test_contract_version_is_the_frozen_one():
     # Bumping this is the amendment procedure's final step, not its first.
-    assert CONTRACT_VERSION == "1.0.0"
+    assert CONTRACT_VERSION == "1.1.0"
+
+
+# ---------------------------------------------------------------------------
+# Amendments A-01 / A-02 (contract 1.1.0)
+# ---------------------------------------------------------------------------
+
+
+def estimate(**kw: object) -> TokenEstimate:
+    base = dict(chars=1000, ratio_low=2.3, ratio_high=3.0)
+    base.update(kw)
+    return TokenEstimate(**base)  # type: ignore[arg-type]
+
+
+def test_amendment_is_additive_so_existing_construction_still_works():
+    # The whole justification for MINOR rather than MAJOR: no existing call
+    # site changes. If this fails, the amendment was mis-graded.
+    r = RunResult(config=RunConfig(source_root="s", output_root="o"))
+    assert (r.tokens_before, r.tokens_after, r.reconciliation) == (None, None, None)
+
+
+def test_token_ratio_floats_are_excluded_from_identity():
+    # Re-ruling D-03 must not invalidate the identity of runs already produced.
+    a = estimate(ratio_low=2.3, ratio_high=3.0)
+    b = estimate(ratio_low=3.3, ratio_high=3.6)
+    assert content_hash(a) == content_hash(b)
+    assert canonical_json(a) != canonical_json(b)
+
+
+def test_token_estimate_still_persists_its_band_and_provenance():
+    d = json.loads(canonical_json(estimate(provenance="pre-token proxy")))
+    assert d["ratio_low"] == 2.3
+    assert d["provenance"] == "pre-token proxy"
+
+
+def test_char_count_and_floor_stay_in_identity():
+    # Ints, and genuinely properties of the text rather than beliefs about it.
+    assert content_hash(estimate(chars=1000)) != content_hash(estimate(chars=1001))
+    assert content_hash(estimate(floor_tokens=0)) != content_hash(
+        estimate(floor_tokens=400)
+    )
+
+
+@pytest.mark.parametrize("lo,hi", [(0.0, 3.0), (-1.0, 3.0), (3.6, 3.3)])
+def test_a_nonsensical_ratio_band_is_rejected_at_construction(lo: float, hi: float):
+    with pytest.raises(ContractViolation, match="ordered"):
+        estimate(ratio_low=lo, ratio_high=hi)
+
+
+def test_reconciliation_categories_partition_the_rows():
+    rows = (
+        ReconciliationRow("folder-only", "DIQ-1", "a.pdf", ""),
+        ReconciliationRow("index-only", "LI-2", "b.pdf", ""),
+        ReconciliationRow("field-mismatch", "LI-3", "c.pdf", "size differs"),
+        ReconciliationRow("folder-only", "DIQ-4", "d.pdf", ""),
+    )
+    rep = ReconciliationReport(matched=370, rows=rows)
+    assert len(rep.folder_only) == 2
+    assert len(rep.index_only) == 1
+    assert len(rep.field_mismatch) == 1
+    assert len(rep.folder_only) + len(rep.index_only) + len(rep.field_mismatch) == 4
+
+
+def test_no_index_is_distinguishable_from_an_index_that_found_nothing():
+    # These must not render identically: "not checked" and "checked, all clean"
+    # are different evidentiary claims.
+    cfg = RunConfig(source_root="s", output_root="o")
+    assert RunResult(config=cfg).reconciliation is None
+    clean = RunResult(config=cfg, reconciliation=ReconciliationReport(matched=375))
+    assert clean.reconciliation is not None
+    assert clean.reconciliation.rows == ()
 
 
 def test_contract_imports_nothing_third_party():

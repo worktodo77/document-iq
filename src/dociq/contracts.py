@@ -23,8 +23,14 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-CONTRACT_VERSION = "1.0.0"
-"""Frozen 2026-07-30. Bumped only by the amendment procedure."""
+CONTRACT_VERSION = "1.1.0"
+"""Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
+
+1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
+rule and applied centrally: :class:`RunResult` gained ``tokens_before``,
+``tokens_after`` and ``reconciliation``, all defaulted to ``None``. Additive
+with safe defaults, so no existing construction site changes.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +355,88 @@ class RunConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenEstimate:
+    """The §7 token estimate for one body of text (amendment A-01).
+
+    Carried on :class:`RunResult` because §4 Stage 6 computes it, §7 writes it
+    to ``run_summary.pdf`` and §9 headlines it on the summary screen. Without
+    a field here the GUI would have to recompute it, putting a second estimator
+    in the product — and the two numbers would then disagree in the same matter
+    folder, one on screen and one in the PDF.
+    """
+
+    chars: int
+
+    ratio_low: float
+    ratio_high: float
+    """The chars-per-token band the range was built from. Floats, therefore
+    reporting-only and excluded from identity — see :data:`_IDENTITY_EXCLUDED`."""
+
+    floor_tokens: int = 0
+    """Hard lower bound on the true token count, from the text's pre-token
+    count: a byte-level BPE tokenizer cannot merge across a pre-token boundary,
+    so it can never emit fewer tokens than this. ``0`` means not measured.
+
+    Prefer displaying this over the estimate wherever one number must be shown.
+    A bound that holds for any tokenizer is defensible; a point estimate
+    derived from an assumed ratio is not."""
+
+    provenance: str = ""
+    """How the ratio was obtained, in words, travelling with the number.
+
+    D-03 specifies calibration "against the real Claude tokenizer", which
+    cannot be performed under Principle 4 (no network) with no tokenizer
+    artifact available offline. Whatever a build actually did must be stated
+    here and rendered beside the figure. An evidentiary tool may show an
+    approximation; it may not show an approximation dressed as a measurement."""
+
+    def __post_init__(self) -> None:
+        if self.ratio_low <= 0 or self.ratio_high < self.ratio_low:
+            raise ContractViolation(
+                f"token ratio band must be positive and ordered, got "
+                f"{self.ratio_low}–{self.ratio_high}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationRow:
+    """One discrepancy between the folder and the master index (§5)."""
+
+    category: str
+    """``"folder-only"`` | ``"index-only"`` | ``"field-mismatch"``."""
+
+    doc_id: str
+    filename: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationReport:
+    """The §5 reconciliation, a first-class deliverable (amendment A-02).
+
+    ``DocumentRecord.li_file_no`` records the *result* of one successful match,
+    which is not the same information: it cannot express an index row with no
+    file at all, nor a field disagreement between a matched pair. Both are
+    categories §5 requires the report to carry.
+    """
+
+    matched: int
+    rows: tuple[ReconciliationRow, ...] = ()
+
+    @property
+    def folder_only(self) -> tuple[ReconciliationRow, ...]:
+        return tuple(r for r in self.rows if r.category == "folder-only")
+
+    @property
+    def index_only(self) -> tuple[ReconciliationRow, ...]:
+        return tuple(r for r in self.rows if r.category == "index-only")
+
+    @property
+    def field_mismatch(self) -> tuple[ReconciliationRow, ...]:
+        return tuple(r for r in self.rows if r.category == "field-mismatch")
+
+
+@dataclass(frozen=True, slots=True)
 class RunResult:
     """The full outcome of one run — what the emit layer writes and the GUI
     displays."""
@@ -358,6 +446,16 @@ class RunResult:
     unsupported: tuple[DocumentRecord, ...] = ()
     """Tier-2 files: inventoried and hashed, never blocking (§3)."""
     warnings: tuple[str, ...] = ()
+
+    tokens_before: TokenEstimate | None = None
+    tokens_after: TokenEstimate | None = None
+    """§7 token estimate across the corpus, before and after reduction (A-01).
+    ``None`` means not computed."""
+
+    reconciliation: ReconciliationReport | None = None
+    """§5 master-index reconciliation (A-02). ``None`` means no master index
+    was supplied — which is not the same as a reconciliation that found
+    nothing, and the emit layer must not render the two identically."""
 
     @property
     def pages_in(self) -> int:
@@ -395,13 +493,24 @@ class ExtractionError(DocIQError):
 # persistence, per the durable-fingerprinted-artifact rule
 # ---------------------------------------------------------------------------
 
-_IDENTITY_EXCLUDED: frozenset[str] = frozenset({"ocr_conf"})
+_IDENTITY_EXCLUDED: frozenset[str] = frozenset(
+    {"ocr_conf", "ratio_low", "ratio_high"}
+)
 """Fields excluded from identity hashing.
 
 ``ocr_conf`` is a float and a *reporting* value; including it would make the
 byte-identical claim hostage to OCR float jitter. It is still persisted — it
 just does not participate in identity. Principle 5: "no floats in identity
 fields."
+
+``ratio_low``/``ratio_high`` (A-01) join it for the same reason: the token
+band is an estimate about the text, not a property of it, and re-ruling D-03
+must not invalidate the identity of runs already produced.
+
+Note this is matched by field *name* across every contract dataclass, so a
+field named ``ocr_conf`` on a future type is excluded automatically. That is
+deliberate — the failure mode it prevents (a float silently entering the hash)
+is worse than the one it risks (a field excluded that need not have been).
 """
 
 
@@ -486,6 +595,9 @@ __all__ = [
     "IdRegime",
     "PageRecord",
     "DocumentRecord",
+    "TokenEstimate",
+    "ReconciliationRow",
+    "ReconciliationReport",
     "MasterIndexSnapshot",
     "RunConfig",
     "RunResult",
