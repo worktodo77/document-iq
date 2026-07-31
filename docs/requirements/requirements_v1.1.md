@@ -15,6 +15,7 @@
 - UI direction, explorer icon, GUI logo ruled (D-07/D-08/D-09); LI brand assets committed in `assets/branding/`
 - §5 reconciliation matching inverted to reflect the real Project 495 index audit: **filepath+filename primary** (proven 100% unique), hash secondary, Bates when present (the audited index has no Bates column)
 - §11 reuse audit performed: decision **REUSE** of MIP 3.9 `docs_extract.py`
+- D-10 (velocity revision, ruled 2026-07-30): roadmap = 2 sprints / 3 parallel tracks / 2 Codex reviews; **RTF demoted to Tier 2** and **RAR added to Tier 2** on the Project 495 evidence
 
 ## 1. Purpose and Positioning
 
@@ -41,8 +42,8 @@ DocIQ is a **deterministic reducer, not an interpreter**. It performs no AI extr
 | 1 — Full | DOCX | Text extraction with page approximation noted in log |
 | 1 — Full | XLSX, XLS, CSV | Sheet-by-sheet extraction to delimited text; sheet name = section |
 | 1 — Full | MSG, EML | Message body + metadata (from/to/cc/date/subject); attachments extracted as child documents linked to the parent message ID |
-| 1 — Full | TXT, RTF | Pass-through with normalization |
-| 2 — Listed only | **DOC (legacy binary Word — D-02, with "open in Word and Save-As DOCX/PDF to include" remediation hint in the run summary)**, XER, MPP, DWG, images, unknown formats | Inventoried, hashed, and reported on the "Unsupported" list; never blocks a run |
+| 1 — Full | TXT | Pass-through with normalization |
+| 2 — Listed only | **DOC (legacy binary Word — D-02, with "open in Word and Save-As DOCX/PDF to include" remediation hint in the run summary)**, **RTF (D-10 — zero occurrences in the audited Project 495 record)**, XER, MPP, DWG, **RAR**, images, unknown formats | Inventoried, hashed, and reported on the "Unsupported" list; never blocks a run |
 
 Mixed PDFs (native + scanned pages in one file) are handled page-by-page.
 
