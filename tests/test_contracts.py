@@ -344,7 +344,7 @@ def test_changing_the_ocr_threshold_changes_the_run_identity():
 
 def test_contract_version_is_the_frozen_one():
     # Bumping this is the amendment procedure's final step, not its first.
-    assert CONTRACT_VERSION == "1.1.0"
+    assert CONTRACT_VERSION == "1.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +391,24 @@ def test_char_count_and_floor_stay_in_identity():
 def test_a_nonsensical_ratio_band_is_rejected_at_construction(lo: float, hi: float):
     with pytest.raises(ContractViolation, match="ordered"):
         estimate(ratio_low=lo, ratio_high=hi)
+
+
+def test_refutation_is_a_field_not_an_inference():
+    # A-03. Two estimates identical but for the flag: a consumer cannot tell
+    # them apart by arithmetic, which is the whole reason the field exists.
+    honest = estimate(chars=1000, floor_tokens=400, ratio_refuted=False)
+    refuted = estimate(chars=1000, floor_tokens=400, ratio_refuted=True)
+    assert honest.ratio_refuted is False
+    assert refuted.ratio_refuted is True
+    assert (honest.chars, honest.floor_tokens) == (refuted.chars, refuted.floor_tokens)
+
+
+def test_refutation_participates_in_identity():
+    # It is a bool describing what the run actually did, not a belief about
+    # the text — so unlike the ratio band it belongs in the hash.
+    assert content_hash(estimate(ratio_refuted=False)) != content_hash(
+        estimate(ratio_refuted=True)
+    )
 
 
 def test_reconciliation_categories_partition_the_rows():

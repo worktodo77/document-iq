@@ -23,13 +23,18 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-CONTRACT_VERSION = "1.1.0"
+CONTRACT_VERSION = "1.2.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
 rule and applied centrally: :class:`RunResult` gained ``tokens_before``,
 ``tokens_after`` and ``reconciliation``, all defaulted to ``None``. Additive
 with safe defaults, so no existing construction site changes.
+
+1.2.0 — amendment A-03: :class:`TokenEstimate` gained ``ratio_refuted``,
+defaulted to ``False``. Raised once the corpus measurement showed D-03's ratio
+band to be unreachable rather than merely optimistic, leaving consumers with no
+sanctioned way to know the band was not used.
 """
 
 
@@ -380,6 +385,20 @@ class TokenEstimate:
     Prefer displaying this over the estimate wherever one number must be shown.
     A bound that holds for any tokenizer is defensible; a point estimate
     derived from an assumed ratio is not."""
+
+    ratio_refuted: bool = False
+    """True when the text's own structure contradicts the configured ratio
+    band, so the band was not used (amendment A-03).
+
+    A separate field rather than something a consumer infers, for two reasons.
+    Inferring it — say, by comparing ``chars / floor_tokens`` against the band —
+    would put the pipeline's refutation test inside whatever code asks the
+    question, and two implementations of it would eventually disagree. Parsing
+    it back out of :attr:`provenance` would make a display string load-bearing.
+    A boolean the producer sets is the only version of this that cannot drift.
+
+    Consumers must render the refuted case differently rather than silently
+    showing a number computed some other way."""
 
     provenance: str = ""
     """How the ratio was obtained, in words, travelling with the number.
