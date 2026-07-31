@@ -23,7 +23,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-CONTRACT_VERSION = "1.4.0"
+CONTRACT_VERSION = "1.5.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -52,6 +52,16 @@ disk-headroom multiplier) is dispositioned as NOT NEEDED: it gates whether a
 run *starts* rather than what a completed run emits, an abort is B-1's typed
 terminal status rather than differing evidence, and it is a float, which
 Principle 5 bars from identity. It is recorded unhashed.
+
+1.5.0 — amendment A-06, from Codex review #1 finding B-1: :class:`RunResult`
+gained ``terminal_status`` and ``terminal_status_reason``, defaulted to
+COMPLETED so the change is additive.
+
+Deliberately **hashed**, against the raising package's suggestion to exclude
+them. Excluding would let a cancelled partial set and a complete set hash
+identically — which is precisely the confusion B-1 is about. A run's
+completeness is a property of the evidence it produced, not metadata about the
+invocation.
 """
 
 
@@ -101,6 +111,32 @@ class Disposition(str, enum.Enum):
 
     KEEP = "keep"
     DROP = "drop"
+
+
+class TerminalStatus(str, enum.Enum):
+    """How a run ended (amendment A-06, from Codex review #1 finding B-1).
+
+    A run that was blocked before it started, or cancelled part-way, is not a
+    run that produced a corpus — and before this existed the pipeline could not
+    tell the difference. An empty blocked run satisfied zero-equals-zero page
+    accounting, reported success, and replaced a complete prior output set.
+    Measured on the fixture corpus: 34 of 44 files destroyed, 10 overwritten,
+    ``ok=True``.
+    """
+
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+    """Rejected before the walk — disk preflight, or a source root that is not
+    reachable. Distinct from a source folder that exists and is empty, which is
+    a legitimate completed run."""
+
+    CANCELLED = "cancelled"
+    """Stopped part-way by the operator; documents gathered so far are real but
+    the set is partial."""
+
+    @property
+    def complete(self) -> bool:
+        return self is TerminalStatus.COMPLETED
 
 
 class ProcessingStatus(str, enum.Enum):
@@ -557,6 +593,16 @@ class RunResult:
     """§7 token estimate across the corpus, before and after reduction (A-01).
     ``None`` means not computed."""
 
+    terminal_status: TerminalStatus = TerminalStatus.COMPLETED
+    """How the run ended (A-06). Defaulted to COMPLETED so the change is
+    additive — every existing construction site describes a completed run.
+
+    **Publication rights are derived from this, never granted alongside it.**
+    A consumer must not treat a non-COMPLETED result as a corpus."""
+
+    terminal_status_reason: str = ""
+    """Why, when :attr:`terminal_status` is not COMPLETED. Empty otherwise."""
+
     reconciliation: ReconciliationReport | None = None
     """§5 master-index reconciliation (A-02). ``None`` means no master index
     was supplied — which is not the same as a reconciliation that found
@@ -697,6 +743,7 @@ __all__ = [
     "PageKind",
     "Disposition",
     "ProcessingStatus",
+    "TerminalStatus",
     "IdRegime",
     "PageRecord",
     "DocumentRecord",

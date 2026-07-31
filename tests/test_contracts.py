@@ -24,6 +24,7 @@ from dociq.contracts import (
     PageKind,
     PageRecord,
     ProcessingStatus,
+    TerminalStatus,
     ReconciliationReport,
     ReconciliationRow,
     RunConfig,
@@ -345,7 +346,33 @@ def test_changing_the_ocr_threshold_changes_the_run_identity():
 
 def test_contract_version_is_the_frozen_one():
     # Bumping this is the amendment procedure's final step, not its first.
-    assert CONTRACT_VERSION == "1.4.0"
+    assert CONTRACT_VERSION == "1.5.0"
+
+
+def test_a_run_result_describes_a_completed_run_by_default():
+    # A-06 additivity: every pre-existing construction site means "completed".
+    r = RunResult(config=RunConfig(source_root="s", output_root="o"))
+    assert r.terminal_status is TerminalStatus.COMPLETED
+    assert r.terminal_status.complete
+
+
+@pytest.mark.parametrize(
+    "status", [TerminalStatus.BLOCKED, TerminalStatus.CANCELLED]
+)
+def test_an_aborted_run_is_not_complete(status: TerminalStatus):
+    assert not status.complete
+
+
+def test_completeness_changes_the_run_identity():
+    # Deliberately hashed. Excluding it would let a cancelled partial set and a
+    # complete set hash identically — exactly the confusion B-1 is about.
+    cfg = RunConfig(source_root="s", output_root="o")
+    done = RunResult(config=cfg)
+    stopped = dataclasses.replace(
+        done, terminal_status=TerminalStatus.CANCELLED,
+        terminal_status_reason="operator stopped the run",
+    )
+    assert content_hash(done) != content_hash(stopped)
 
 
 def test_the_withdrawn_token_floor_is_reserved_and_says_so():
