@@ -23,7 +23,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-CONTRACT_VERSION = "1.3.0"
+CONTRACT_VERSION = "1.4.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -43,6 +43,15 @@ gained ``limits: EffectiveLimits | None``. Environment-controlled caps,
 timeouts, retry bounds and the OCR model identity could change output evidence
 while sitting outside the hashed configuration — a determinism-identity gap by
 :class:`RunConfig`'s own stated contract.
+
+1.4.0 — amendment A-05(a), from Codex review #1 finding B-6:
+:class:`TokenEstimate` gained ``structural_tokens`` and ``token_ceiling``, and
+``floor_tokens`` is **reserved and withdrawn** — the hard-lower-bound claim it
+documented does not hold. A-05(b) (a `EffectiveLimits` field for the
+disk-headroom multiplier) is dispositioned as NOT NEEDED: it gates whether a
+run *starts* rather than what a completed run emits, an abort is B-1's typed
+terminal status rather than differing evidence, and it is a float, which
+Principle 5 bars from identity. It is recorded unhashed.
 """
 
 
@@ -436,13 +445,32 @@ class TokenEstimate:
     reporting-only and excluded from identity — see :data:`_IDENTITY_EXCLUDED`."""
 
     floor_tokens: int = 0
-    """Hard lower bound on the true token count, from the text's pre-token
-    count: a byte-level BPE tokenizer cannot merge across a pre-token boundary,
-    so it can never emit fewer tokens than this. ``0`` means not measured.
+    """**RESERVED — do not populate.** Withdrawn by amendment A-05(a).
 
-    Prefer displaying this over the estimate wherever one number must be shown.
-    A bound that holds for any tokenizer is defensible; a point estimate
-    derived from an assumed ratio is not."""
+    This field once carried the pre-token count and was documented as a hard
+    lower bound, on the reasoning that a byte-level BPE cannot merge across a
+    pre-token boundary. Codex review #1 (B-6) established that the reasoning
+    does not hold: it is true of a tokenizer's **own** pre-tokenization, and
+    DocIQ's regex invents boundaries of its own — it splits digit runs every
+    three digits — so a coarser real pre-tokenizer merges across them and emits
+    *fewer* tokens than DocIQ counts pre-tokens. On 13%-digit material the
+    effect is material.
+
+    It stays at ``0`` until a real tokenizer measurement exists to fill it, so
+    a consumer reading ``0`` correctly learns "no lower bound was
+    established" — which is the true state of the world. Use
+    :attr:`structural_tokens` for the measurement and :attr:`token_ceiling` for
+    the one bound that is sound."""
+
+    structural_tokens: int = 0
+    """Tokens implied by the text's measured pre-token structure **under the
+    assumptions stated in :attr:`provenance`** (A-05a). Not a bound in either
+    direction. ``0`` means not measured."""
+
+    token_ceiling: int = 0
+    """Upper bound: ``tokens <= UTF-8 bytes``, because a byte-level vocabulary
+    always contains single-byte fallbacks. **The only tokenizer-independent
+    bound DocIQ asserts.** ``0`` means not measured."""
 
     ratio_refuted: bool = False
     """True when the text's own structure contradicts the configured ratio

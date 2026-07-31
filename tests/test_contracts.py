@@ -345,7 +345,33 @@ def test_changing_the_ocr_threshold_changes_the_run_identity():
 
 def test_contract_version_is_the_frozen_one():
     # Bumping this is the amendment procedure's final step, not its first.
-    assert CONTRACT_VERSION == "1.3.0"
+    assert CONTRACT_VERSION == "1.4.0"
+
+
+def test_the_withdrawn_token_floor_is_reserved_and_says_so():
+    # A-05(a). A consumer reading 0 must learn "no lower bound was
+    # established" — the true state — rather than "the text is empty".
+    import pathlib
+
+    src = (pathlib.Path(__file__).parent.parent / "src" / "dociq" / "contracts.py")
+    doc = src.read_text(encoding="utf-8")
+    assert "RESERVED — do not populate" in doc
+    assert estimate().floor_tokens == 0
+
+
+def test_the_only_asserted_bound_is_the_ceiling():
+    e = estimate(chars=1000, structural_tokens=400, token_ceiling=1000)
+    assert e.token_ceiling >= e.structural_tokens
+    assert e.floor_tokens == 0
+
+
+def test_structural_and_ceiling_are_ints_and_stay_in_identity():
+    assert content_hash(estimate(structural_tokens=400)) != content_hash(
+        estimate(structural_tokens=401)
+    )
+    assert content_hash(estimate(token_ceiling=900)) != content_hash(
+        estimate(token_ceiling=901)
+    )
 
 
 # ---------------------------------------------------------------------------
