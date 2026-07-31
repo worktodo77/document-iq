@@ -237,18 +237,23 @@ def _reconciliation_rows(report: ReconciliationReport) -> tuple[tuple[str, ...],
             )
         )
     for entry in report.index_only:
+        # A quarantined row gets its own category and an empty "LI File No"
+        # cell. Reusing the ordinary category would tell the operator the
+        # client failed to send a numbered document; the truth is that the
+        # index cell itself is unusable, and the fix is in the spreadsheet.
         out.append(
             (
-                "In index, not in folder",
+                "In index, unusable row" if entry.quarantined
+                else "In index, not in folder",
                 "",
                 entry.li_file_no,
-                entry.filename,
+                entry.filename or f"(index row {entry.index_row_number})",
                 entry.filepath,
                 "",
                 "",
                 "",
                 f"{entry.size_kb} KB" if entry.size_kb is not None else "",
-                "",
+                entry.reason or "",
             )
         )
     return tuple(out)

@@ -84,12 +84,25 @@ class FolderOnlyEntry:
 
 @dataclass(frozen=True, slots=True)
 class IndexOnlyEntry:
+    """An index row with no folder file behind it.
+
+    Two populations share this type, and :attr:`quarantined` tells them apart:
+
+    * an ordinary row that was numbered but never matched — it has a real
+      ``li_file_no``;
+    * a row the loader could not admit to the LI number space at all (D-1) —
+      ``li_file_no`` is ``""`` because there is none, and :attr:`reason` says
+      why. Nothing downstream may print an invented identifier for it.
+    """
+
     li_file_no: str
     index_row_number: int
     filename: str
     filepath: str
     ext: str | None
     size_kb: int | None
+    quarantined: bool = False
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +131,11 @@ class ReconciliationReport:
             "matched_with_discrepancies": sum(1 for m in self.matched if m.discrepancies),
             "folder_only": len(self.folder_only),
             "index_only": len(self.index_only),
+            # A subset of index_only, not an addition to it: rows the loader
+            # could not number at all. Broken out because "the client never
+            # sent us this file" and "your spreadsheet cell is malformed" are
+            # different jobs for different people.
+            "index_only_unnumbered": sum(1 for e in self.index_only if e.quarantined),
         }
 
 
@@ -208,11 +226,17 @@ def reconcile(
 
     matched: list[MatchedPair] = []
     folder_only: list[FolderOnlyEntry] = []
+    unassigned: list[str] = []
     child_count = 0
 
     for doc in sorted(result.documents, key=document_sort_key):
         assignment = by_doc_id.get(doc.doc_id)
         if assignment is None:  # pragma: no cover - assigner covers every doc
+            # Unreachable while the assigner assigns every document, which is
+            # exactly why it must not be a bare ``continue``: if that invariant
+            # ever breaks, a file would vanish from the completeness check that
+            # exists to prove nothing vanished.
+            unassigned.append(doc.rel_path)
             continue
         if doc.parent_doc_id is not None:
             child_count += 1
@@ -254,6 +278,10 @@ def reconcile(
         )
 
     claimed = set(result.matched_rows)
+    # Ordinary unmatched rows first, ordered by the identifier they own; then
+    # the quarantined rows, ordered by their position in the sheet because they
+    # own no identifier to order by. Both keys are total and derived only from
+    # loaded data, so the sequence is byte-stable across runs.
     index_only = tuple(
         IndexOnlyEntry(
             li_file_no=row.li_file_no,
@@ -263,11 +291,32 @@ def reconcile(
             ext=row.ext,
             size_kb=row.size_kb,
         )
-        for row in sorted(index.rows, key=lambda r: r.original_sort)
+        for row in sorted(index.rows, key=lambda r: (r.original_sort, r.row_number))
         if row.row_number not in claimed
+    ) + tuple(
+        # D-1: the loader's warning promises these reconcile as index-only.
+        # This is where that promise is kept. They carry no LI File No because
+        # they never received one.
+        IndexOnlyEntry(
+            li_file_no="",
+            index_row_number=row.row_number,
+            filename=row.filename,
+            filepath=row.filepath,
+            ext=row.ext,
+            size_kb=row.size_kb,
+            quarantined=True,
+            reason=row.detail,
+        )
+        for row in sorted(index.quarantined, key=lambda r: r.row_number)
     )
 
     warnings = list(index.warnings) + list(result.warnings)
+    if unassigned:  # pragma: no cover - assigner covers every doc
+        warnings.append(
+            f"{len(unassigned)} folder file(s) carried no identifier assignment "
+            "and could not be reconciled at all: "
+            + ", ".join(sorted(unassigned)[:5])
+        )
     if child_count:
         warnings.append(
             f"{child_count} container member(s) (archive entries, email "

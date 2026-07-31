@@ -291,6 +291,157 @@ def test_two_files_cannot_claim_one_index_row(tmp_path):
     assert any("already claimed" in w for w in result.warnings)
 
 
+def test_duplicate_digests_on_both_sides_are_ambiguous_not_arbitrary(tmp_path):
+    """Codex review #1, B-4.
+
+    Two moved files share a digest and two index rows share that same digest.
+    Neither pairing is knowable, so neither document may take a legacy ID and
+    neither row may be consumed: an arbitrary LI File No. is worse than none.
+    """
+    a = document("MOVED/Letter A.pdf", (page(1, "same"),))
+    b = document("MOVED/Letter B.pdf", (page(1, "same"),), sha256=a.sha256)
+    index = write_index(
+        tmp_path,
+        [
+            ["10", "Letter A.pdf", "pdf", "OLD", "2", "", "", "", a.sha256],
+            ["11", "Letter B.pdf", "pdf", "OLD", "2", "", "", "", a.sha256],
+        ],
+        headers=HEADERS + ["SHA256"],
+    )
+    result = assign_doc_ids((a, b), index)
+    ids = sorted(d.doc_id for d in result.documents)
+    assert all(i.startswith("DIQ-") for i in ids), ids
+    assert result.matched_rows == (), result.matched_rows
+    assert all(d.li_file_no is None for d in result.documents)
+    joined = " | ".join(result.warnings)
+    assert a.sha256[:12] in joined, result.warnings
+    assert "2 unmatched document" in joined, result.warnings
+    assert "2 unclaimed master-index row" in joined, result.warnings
+
+
+def test_one_document_against_duplicate_index_digests_is_ambiguous(tmp_path):
+    """One side duplicated is enough: the row choice would still be arbitrary."""
+    doc = document("MOVED/Letter 001.pdf", (page(1, "a"),))
+    index = write_index(
+        tmp_path,
+        [
+            ["10", "Letter 001.pdf", "pdf", "OLD", "2", "", "", "", doc.sha256],
+            ["11", "Letter 001 copy.pdf", "pdf", "OLD", "2", "", "", "", doc.sha256],
+        ],
+        headers=HEADERS + ["SHA256"],
+    )
+    result = assign_doc_ids((doc,), index)
+    assert result.documents[0].doc_id.startswith("DIQ-")
+    assert result.matched_rows == ()
+
+
+def test_the_collision_warning_names_the_method_that_claimed_the_row(tmp_path):
+    """The message must not claim a *stronger* key when the key was the same."""
+    a = document("A/Letter.pdf", (page(1, "one"),))
+    b = document("a/letter.pdf", (page(1, "two"),))
+    index = write_index(
+        tmp_path,
+        [["7", "Letter.pdf", "pdf", "A", "2", "", "", ""]],
+    )
+    result = assign_doc_ids((a, b), index)
+    joined = " | ".join(result.warnings)
+    assert "already claimed" in joined, result.warnings
+    assert "stronger key" not in joined, result.warnings
+    assert MatchMethod.PATH in joined, result.warnings
+
+
+def test_duplicate_bates_ranges_on_both_sides_are_ambiguous(tmp_path):
+    """The tertiary key carries the same defect class as the secondary one."""
+    a = document("MOVED/A.pdf", (page(1, "a"),))
+    b = document("MOVED/B.pdf", (page(1, "b"),))
+    index = write_index(
+        tmp_path,
+        [
+            ["20", "A.pdf", "pdf", "OLD", "2", "", "", "", "LI0001", "LI0009"],
+            ["21", "B.pdf", "pdf", "OLD", "2", "", "", "", "LI0001", "LI0009"],
+        ],
+        headers=HEADERS + ["Bates Start", "Bates End"],
+    )
+    ranges = {
+        document_sort_key(a): ("LI0001", "LI0009"),
+        document_sort_key(b): ("LI0001", "LI0009"),
+    }
+    result = assign_doc_ids((a, b), index, bates_ranges=ranges)
+    ids = sorted(d.doc_id for d in result.documents)
+    assert all(i.startswith("DIQ-") for i in ids), ids
+    assert result.matched_rows == (), result.matched_rows
+    joined = " | ".join(result.warnings)
+    assert "LI0001" in joined and "LI0009" in joined, result.warnings
+    assert "2 unmatched document" in joined, result.warnings
+
+
+def test_bates_still_matches_when_the_range_is_unique_on_both_sides(tmp_path):
+    a = document("MOVED/A.pdf", (page(1, "a"),))
+    index = write_index(
+        tmp_path,
+        [["20", "A.pdf", "pdf", "OLD", "2", "", "", "", "LI0001", "LI0009"]],
+        headers=HEADERS + ["Bates Start", "Bates End"],
+    )
+    result = assign_doc_ids(
+        (a,), index, bates_ranges={document_sort_key(a): ("LI0001", "LI0009")}
+    )
+    assert result.documents[0].doc_id == "LI-00020"
+    assert result.assignments[0].method == MatchMethod.BATES
+
+
+def test_ambiguous_fallback_warnings_are_deterministic(tmp_path):
+    a = document("MOVED/Letter A.pdf", (page(1, "same"),))
+    b = document("MOVED/Letter B.pdf", (page(1, "same"),), sha256=a.sha256)
+    index = write_index(
+        tmp_path,
+        [
+            ["10", "Letter A.pdf", "pdf", "OLD", "2", "", "", "", a.sha256],
+            ["11", "Letter B.pdf", "pdf", "OLD", "2", "", "", "", a.sha256],
+        ],
+        headers=HEADERS + ["SHA256"],
+    )
+    baseline = assign_doc_ids((a, b), index)
+    for _ in range(8):
+        again = assign_doc_ids((b, a), index)
+        assert again.warnings == baseline.warnings
+        assert [d.doc_id for d in again.documents] == [
+            d.doc_id for d in baseline.documents
+        ]
+
+
+def test_a_repeated_index_key_is_won_by_the_lowest_original_sort(tmp_path):
+    """Sibling of B-4: the warning promises a tie-break the code must perform."""
+    index = write_index(
+        tmp_path,
+        [
+            ["9", "Letter 001.pdf", "pdf", r"P 495\20260521\LETTERS", "2", "", "", ""],
+            ["4", "Letter 001.pdf", "pdf", r"P 495\20260521\LETTERS", "2", "", "", ""],
+        ],
+    )
+    result = assign_doc_ids(
+        (document("LETTERS/Letter 001.pdf", (page(1, "a"),)),), index
+    )
+    assert result.documents[0].doc_id == "LI-00004"
+    assert any("repeat a filepath+filename" in w for w in result.warnings)
+
+
+def test_an_ambiguous_container_parent_token_is_disclosed():
+    """Sibling of B-4: ``token_to_sortkey`` is also a many-to-one map."""
+    a = document("bundle.zip", (page(1, "x"),))
+    b = document("bundle.zip", (page(1, "y"),))
+    child = document(
+        "bundle.zip/member.pdf",
+        (page(1, "m"),),
+        parent_doc_id="bundle.zip",
+        container_order=1,
+    )
+    result = assign_doc_ids((a, b, child), None)
+    assert len(result.documents) == 3
+    assert any(
+        "names more than one scanned document" in w for w in result.warnings
+    ), result.warnings
+
+
 def test_every_document_survives_assignment(tmp_path):
     index = write_index(tmp_path, ROWS)
     docs = sample_docs()

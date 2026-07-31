@@ -20,6 +20,29 @@ text stream — the first and last few lines — which is where a footer or head
 stamp lands in every extractor's reading order. A stamp rendered mid-stream by
 an unusual extractor would be missed; that is a real limit of the text-only
 zone and is reported rather than papered over.
+
+**The persisted confirmation is the complete grammar.** A confirmed format is
+carried between runs as ``RunConfig.bates_pattern`` (and, for a recurring
+production, ``FormatProfile.bates_pattern``). A bare regex cannot carry it: a
+set of allowed digit widths flattens into a ``{min,max}`` span, and nothing in
+the escaped text says where the prefix stops and the separator starts. So
+:attr:`BatesFormat.pattern` emits a *canonical* string in two halves::
+
+    (?#dociq-bates:1;p=MNFV;s=%20;w=4,5;xs=-;x=CONF)^MNFV\\ (?:\\d{4}|\\d{5})\\-CONF$
+
+The leading ``(?#...)`` is a regular-expression comment — inert to matching,
+so the string remains a valid regex that any consumer can compile and that
+:meth:`FormatProfile.validate` accepts — and it carries the format's fields
+percent-encoded (``%``-escaping keeps ``;``, ``=`` and ``)`` out of the values,
+so the token can always be split back apart). The grammar of the token is:
+
+``(?#dociq-bates:1;`` *then* ``p=`` prefix ``;s=`` separator ``;w=`` widths,
+comma-separated ``;xs=`` suffix separator ``;x=`` suffix *then* ``)``.
+
+:func:`parse_pattern` reads it back and returns the exact
+:class:`BatesFormat`, or ``None`` when the string is not a DocIQ-issued
+pattern. ``None`` is what makes a run fail closed rather than proceed on a
+format it cannot enforce; see :func:`dociq.pipeline._bates_decision`.
 """
 
 from __future__ import annotations
@@ -29,6 +52,7 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Mapping, Sequence
+from urllib.parse import quote, unquote
 
 from dociq.contracts import DocumentRecord, PageRecord, document_sort_key
 
@@ -41,6 +65,9 @@ __all__ = [
     "DecisionStatus",
     "BatesRange",
     "MIN_DOCUMENT_COVERAGE_PCT",
+    "BatesPatternError",
+    "PATTERN_TOKEN_VERSION",
+    "parse_pattern",
     "detect_candidates",
     "propose_format",
     "apply_bates",
@@ -103,6 +130,30 @@ sequence. Stated, not tuned: it is the narrowest production numbering LI has
 seen, and widening it would make every page footer a candidate."""
 
 
+class BatesPatternError(ValueError):
+    """A stored Bates confirmation that cannot be reconstructed.
+
+    Raised only when a pattern is *present* and unreadable. Absence of a Bates
+    pattern is the ordinary case (D-13) and never raises anything.
+    """
+
+
+PATTERN_TOKEN_VERSION = "1"
+"""Version of the ``(?#dociq-bates:...)`` token documented in the module
+docstring. A future field is a new version, and an older reader returns ``None``
+for it rather than reconstructing a format it does not fully understand — which
+fails the run closed instead of enforcing half a grammar."""
+
+_TOKEN_RE = re.compile(
+    r"^\(\?\#dociq-bates:(?P<version>[0-9]+);(?P<body>[^)#]*)\)(?P<body_re>.*)$",
+    re.DOTALL,
+)
+_ENCODE_SAFE = ""
+"""``quote`` safe set: nothing. Every reserved character — including ``;``,
+``=``, ``)`` and ``%`` itself — is percent-encoded, so splitting the token on
+``;`` and ``=`` can never split inside a value."""
+
+
 @dataclass(frozen=True, slots=True)
 class BatesFormat:
     """The shape of one production's stamps.
@@ -110,37 +161,119 @@ class BatesFormat:
     ``digit_widths`` is a *set*, not a single width, because real productions
     mix them: the MNFV disclosure (D-13) contains both ``MNFV 0391`` and
     ``MNFV 02684``. Pinning a single width would reject half a production.
+
+    Every part of the grammar is a field, including ``suffix_sep`` — the
+    separator that precedes a confidentiality designation. Dropping it turned a
+    confirmed ``MNFV 000391-CONF`` into a pattern that only matched
+    ``MNFV 000391CONF``, which no page in the production carries.
     """
 
     prefix: str
     separator: str
     digit_widths: tuple[int, ...]
     suffix: str | None = None
+    suffix_sep: str = ""
+
+    @property
+    def widths(self) -> tuple[int, ...]:
+        """Allowed digit widths, sorted and deduplicated — the canonical form
+        used by the pattern, by :meth:`accepts_width` and by equality of the
+        persisted string."""
+        return tuple(sorted(set(self.digit_widths)))
+
+    def accepts_width(self, width: int) -> bool:
+        """Whether a run of ``width`` digits is in the confirmed format.
+
+        The one place width is judged, so the check cannot drift between
+        detection, application and the persisted pattern."""
+        return width in self.widths
 
     @property
     def pattern(self) -> str:
-        """A regex that matches exactly this format, for ``RunConfig.bates_pattern``."""
-        widths = sorted(set(self.digit_widths))
+        """The canonical persisted form: a matching regex prefixed by the
+        lossless ``(?#dociq-bates:...)`` token (module docstring).
+
+        The regex half enumerates the allowed widths as an alternation rather
+        than a ``{min,max}`` span, so even a consumer that ignores the token
+        enforces the exact confirmed widths.
+        """
+        widths = self.widths
         digits = (
             f"\\d{{{widths[0]}}}"
             if len(widths) == 1
-            else f"\\d{{{widths[0]},{widths[-1]}}}"
+            else "(?:" + "|".join(f"\\d{{{w}}}" for w in widths) + ")"
         )
         parts = [re.escape(self.prefix), re.escape(self.separator), digits]
         if self.suffix:
+            parts.append(re.escape(self.suffix_sep))
             parts.append(re.escape(self.suffix))
-        return "^" + "".join(parts) + "$"
+        token = (
+            f"(?#dociq-bates:{PATTERN_TOKEN_VERSION};"
+            f"p={quote(self.prefix, safe=_ENCODE_SAFE)};"
+            f"s={quote(self.separator, safe=_ENCODE_SAFE)};"
+            f"w={','.join(str(w) for w in widths)};"
+            f"xs={quote(self.suffix_sep, safe=_ENCODE_SAFE)};"
+            f"x={quote(self.suffix or '', safe=_ENCODE_SAFE)})"
+        )
+        return token + "^" + "".join(parts) + "$"
 
     @property
     def label(self) -> str:
-        widths = sorted(set(self.digit_widths))
+        widths = self.widths
         sample = "0" * (widths[0] - 1) + "1"
-        return f"{self.prefix}{self.separator}{sample}"
+        suffix = f"{self.suffix_sep}{self.suffix}" if self.suffix else ""
+        return f"{self.prefix}{self.separator}{sample}{suffix}"
 
-    def key(self) -> tuple[str, str, str]:
+    def key(self) -> tuple[str, str, str, str]:
         """Identity of the *shape*, ignoring digit width — the grouping key for
-        candidate aggregation."""
-        return (self.prefix, self.separator, self.suffix or "")
+        candidate aggregation. The suffix separator is part of the shape: a
+        production stamping ``-CONF`` and one stamping ``_CONF`` are two
+        formats, and merging them would apply either one to both."""
+        return (self.prefix, self.separator, self.suffix_sep, self.suffix or "")
+
+
+def parse_pattern(pattern: str | None) -> BatesFormat | None:
+    """Reconstruct the format a persisted pattern stands for.
+
+    Returns ``None`` — never a guess and never a partial format — when the
+    string is absent, is not a DocIQ-issued pattern, carries a token version
+    this build does not know, or does not round-trip to itself. The caller is
+    expected to treat ``None`` on a *present* pattern as a stop, because a
+    format that cannot be reconstructed cannot be enforced, and applying an
+    unenforceable format is how out-of-format locators get in.
+    """
+    if not pattern:
+        return None
+    m = _TOKEN_RE.match(pattern)
+    if not m or m.group("version") != PATTERN_TOKEN_VERSION:
+        return None
+    fields: dict[str, str] = {}
+    for part in m.group("body").split(";"):
+        if not part or "=" not in part:
+            return None
+        name, _, value = part.partition("=")
+        if name in fields:
+            return None
+        fields[name] = value
+    if set(fields) != {"p", "s", "w", "xs", "x"}:
+        return None
+    raw_widths = fields["w"].split(",")
+    if not all(w.isdigit() and int(w) > 0 for w in raw_widths):
+        return None
+    fmt = BatesFormat(
+        prefix=unquote(fields["p"]),
+        separator=unquote(fields["s"]),
+        digit_widths=tuple(sorted({int(w) for w in raw_widths})),
+        suffix=unquote(fields["x"]) or None,
+        suffix_sep=unquote(fields["xs"]),
+    )
+    # The round trip is the validation. A pattern whose regex half disagrees
+    # with its token — hand-edited, truncated, or written by a different
+    # version — is rejected rather than reconciled, because there is no honest
+    # way to choose which half the operator confirmed.
+    if fmt.pattern != pattern:
+        return None
+    return fmt
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,13 +289,36 @@ class BatesCandidate:
     digit_width: int
     suffix: str | None
     line_index: int
+    suffix_sep: str = ""
 
     @property
-    def format_key(self) -> tuple[str, str, str]:
-        return (self.prefix, self.separator, self.suffix or "")
+    def format_key(self) -> tuple[str, str, str, str]:
+        return (self.prefix, self.separator, self.suffix_sep, self.suffix or "")
 
 
-def _parse_line(line: str) -> tuple[str, str, int, int, str | None] | None:
+@dataclass(frozen=True, slots=True)
+class _ParsedLine:
+    """One zone line decomposed into every part of the grammar.
+
+    A record rather than a tuple because the tuple was the defect: callers
+    unpacked the parts they remembered and dropped the rest, which is how the
+    digit width reached ``apply_bates`` as ``_width`` and the suffix separator
+    never reached it at all.
+    """
+
+    prefix: str
+    separator: str
+    number: int
+    digit_width: int
+    suffix: str | None
+    suffix_sep: str
+
+    @property
+    def format_key(self) -> tuple[str, str, str, str]:
+        return (self.prefix, self.separator, self.suffix_sep, self.suffix or "")
+
+
+def _parse_line(line: str) -> _ParsedLine | None:
     m = _CANDIDATE_RE.match(line)
     if not m:
         return None
@@ -171,6 +327,8 @@ def _parse_line(line: str) -> tuple[str, str, int, int, str | None] | None:
         return None
     prefix = m.group("prefix_sep") or m.group("prefix_bare") or ""
     sep = m.group("sep") or ""
+    suffix = m.group("suffix")
+    suffix_sep = m.group("suffix_sep") or ""
     if not prefix:
         # A bare number in a footer is a page number far more often than a
         # Bates stamp. Only accept it when it is long enough that a page number
@@ -178,7 +336,14 @@ def _parse_line(line: str) -> tuple[str, str, int, int, str | None] | None:
         if len(digits) < 6:
             return None
         sep = ""
-    return prefix, sep, int(digits), len(digits), m.group("suffix")
+    return _ParsedLine(
+        prefix=prefix,
+        separator=sep,
+        number=int(digits),
+        digit_width=len(digits),
+        suffix=suffix,
+        suffix_sep=suffix_sep if suffix else "",
+    )
 
 
 def detect_candidates(
@@ -198,18 +363,18 @@ def detect_candidates(
                 parsed = _parse_line(line)
                 if parsed is None:
                     continue
-                prefix, sep, number, width, suffix = parsed
                 out.append(
                     BatesCandidate(
                         sort_key=key,
                         page_no=page.page_no,
                         raw=line,
-                        prefix=prefix,
-                        separator=sep,
-                        number=number,
-                        digit_width=width,
-                        suffix=suffix,
+                        prefix=parsed.prefix,
+                        separator=parsed.separator,
+                        number=parsed.number,
+                        digit_width=parsed.digit_width,
+                        suffix=parsed.suffix,
                         line_index=line_index,
+                        suffix_sep=parsed.suffix_sep,
                     )
                 )
                 break  # one stamp per page; the first zone line wins
@@ -324,7 +489,7 @@ def propose_format(
     if not candidates:
         return None
     pages_scanned = sum(len(d.pages) for d in documents)
-    by_shape: dict[tuple[str, str, str], list[BatesCandidate]] = {}
+    by_shape: dict[tuple[str, str, str, str], list[BatesCandidate]] = {}
     for c in candidates:
         by_shape.setdefault(c.format_key, []).append(c)
 
@@ -333,7 +498,7 @@ def propose_format(
     ranked = sorted(
         by_shape.items(), key=lambda kv: (-len(kv[1]), -len(kv[0][0]), kv[0])
     )
-    (prefix, sep, suffix), best = ranked[0]
+    (prefix, sep, suffix_sep, suffix), best = ranked[0]
     if len(best) < min_pages:
         return None
 
@@ -349,12 +514,22 @@ def propose_format(
 
     widths = tuple(sorted(Counter(c.digit_width for c in best)))
     fmt = BatesFormat(
-        prefix=prefix, separator=sep, digit_widths=widths, suffix=suffix or None
+        prefix=prefix,
+        separator=sep,
+        digit_widths=widths,
+        suffix=suffix or None,
+        suffix_sep=suffix_sep,
     )
     samples = tuple(c.raw for c in best[:3])
     alternatives = tuple(
         (
-            BatesFormat(k[0], k[1], tuple(sorted({c.digit_width for c in v})), k[2] or None).label,
+            BatesFormat(
+                prefix=k[0],
+                separator=k[1],
+                digit_widths=tuple(sorted({c.digit_width for c in v})),
+                suffix=k[3] or None,
+                suffix_sep=k[2],
+            ).label,
             len(v),
         )
         for k, v in ranked[1:4]
@@ -400,11 +575,18 @@ def apply_bates(
     untouched — same objects, same order. That is the unstamped-matter path and
     it is deliberately a no-op rather than a pass that writes ``None`` over
     ``None``: an identity return is trivially provable.
+
+    A line is written only if it matches the confirmed format *completely* —
+    prefix, separator, digit width, suffix separator and suffix. Width is not
+    cosmetic: a format confirmed for four or five digits used to accept
+    ``MNFV 1234567890``, and a locator that is not in the production is worse
+    than no locator, because the record it points at does not exist.
     """
     if decision is None or not decision.applies:
         return tuple(sorted(documents, key=document_sort_key))
     assert decision.format is not None
-    target = decision.format.key()
+    fmt = decision.format
+    target = fmt.key()
     z = zone or BatesZone()
 
     out: list[DocumentRecord] = []
@@ -417,8 +599,9 @@ def apply_bates(
                 parsed = _parse_line(line)
                 if parsed is None:
                     continue
-                prefix, sep, _number, _width, suffix = parsed
-                if (prefix, sep, suffix or "") == target:
+                if parsed.format_key == target and fmt.accepts_width(
+                    parsed.digit_width
+                ):
                     stamp = line
                     break
             if stamp is not None and page.bates != stamp:
@@ -450,7 +633,7 @@ def document_ranges(
         parsed = []
         for p in stamped:
             got = _parse_line(p.bates or "")
-            parsed.append(((got[2] if got else 0), p.bates or ""))
+            parsed.append(((got.number if got else 0), p.bates or ""))
         parsed.sort()
         out[document_sort_key(doc)] = BatesRange(
             start=parsed[0][1],

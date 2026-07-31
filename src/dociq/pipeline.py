@@ -64,10 +64,12 @@ from dociq.emit.paths import OutputLayout
 from dociq.emit.summary import build_summary_data, write_run_summary
 from dociq.identify.bates import (
     BatesDecision,
+    BatesPatternError,
     BatesRange,
     DecisionStatus,
     apply_bates,
     document_ranges,
+    parse_pattern,
     propose_format,
     ranges_by_sort_key,
 )
@@ -245,33 +247,112 @@ def _to_contract_reconciliation(
             )
         )
     for entry in report.index_only:
+        # A quarantined row (Codex review #1, D-1) has no Original Sort, so it
+        # has no LI File No to render. The old f-string produced "LI File No
+        # (index row 2) at dir" — an empty identifier laid out exactly like a
+        # real one, which is worse than saying nothing. Its own reason sentence
+        # already names the row and why it carries no number.
         rows.append(
             ReconciliationRow(
                 category="index-only",
                 doc_id="",
-                filename=entry.filename,
+                filename=entry.filename or f"(index row {entry.index_row_number})",
                 detail=(
-                    f"LI File No {entry.li_file_no} (index row "
-                    f"{entry.index_row_number}) at {entry.filepath}"
+                    entry.reason
+                    if entry.quarantined
+                    else f"LI File No {entry.li_file_no} (index row "
+                         f"{entry.index_row_number}) at {entry.filepath}"
                 ),
             )
         )
     return ContractReconciliation(matched=len(report.matched), rows=tuple(rows))
 
 
+def _stored_pattern(
+    config: RunConfig, options: PipelineOptions, warnings: list[str]
+) -> tuple[str, str] | None:
+    """The confirmed pattern this matter already carries, as ``(pattern,
+    source)``, or ``None`` when the matter carries none.
+
+    Two places can hold one: the run's own configuration and a format profile.
+    The run configuration wins, because it is the record of what this matter
+    was last run with, while a profile's pattern is the recurring format's
+    default. A disagreement between them is not silently resolved — the loser
+    is named in the warnings, because "the profile's format was not used" is
+    exactly the kind of fact an operator finds out too late.
+    """
+    from_profiles = [
+        (p.bates_pattern, f"profile {p.profile_id} v{p.version}")
+        for p in options.profiles
+        if p.bates_pattern
+    ]
+    if config.bates_pattern:
+        for pattern, source in from_profiles:
+            if pattern != config.bates_pattern:
+                warnings.append(
+                    f"Two different confirmed Bates formats are stored for this "
+                    f"matter: the run configuration's, which was used, and "
+                    f"{source}'s, which was NOT. Re-confirm the format if the "
+                    "profile is the current one."
+                )
+        return config.bates_pattern, "the run configuration"
+    if from_profiles:
+        return from_profiles[0][0], from_profiles[0][1]
+    return None
+
+
 def _bates_decision(
     documents: Sequence[DocumentRecord],
     options: PipelineOptions,
+    config: RunConfig,
     stamp: OperatorStamp,
     warnings: list[str],
 ) -> BatesDecision | None:
     """Stage 3's decision, or ``None`` for an unstamped set.
 
     An unstamped set is the ordinary case (§4 Stage 3, D-13) and produces no
-    warning at all.
+    warning at all: no stored pattern, no proposal, no decision, nothing
+    written, nothing said.
+
+    With no new operator decision, a *stored* confirmation is loaded and
+    applied — that is what "confirmed once per document set, then applied
+    automatically" means, and recording the old pattern in the run
+    configuration without deserializing it was not that. A stored pattern that
+    cannot be reconstructed into a complete format stops the run
+    (:class:`BatesPatternError`) rather than falling through to detection or to
+    the unstamped path: silently re-detecting would discard the operator's
+    ruling, and silently ignoring it would leave locators unenforced.
     """
     if options.bates_decision is not None:
         return options.bates_decision
+    stored = _stored_pattern(config, options, warnings)
+    if stored is not None:
+        pattern, source = stored
+        fmt = parse_pattern(pattern)
+        if fmt is None:
+            raise BatesPatternError(
+                f"The Bates format confirmed for this matter cannot be read "
+                f"back. {source} carries bates_pattern={pattern!r}, which is "
+                "not a complete DocIQ Bates pattern — it does not carry the "
+                "'(?#dociq-bates:1;...)' token that records the prefix, "
+                "separator, allowed digit widths, suffix separator and suffix. "
+                "DocIQ will not run on a confirmed format it cannot enforce, "
+                "because a partly enforced format writes locators that are not "
+                "in the production. Re-confirm the Bates format for this "
+                "document set (Stage 3), or clear bates_pattern to run the "
+                "matter as unstamped."
+            )
+        warnings.append(
+            f"Bates format {fmt.label} was applied from the confirmation "
+            f"already stored in {source}; §4 Stage 3's confirmation happened in "
+            "an earlier run, not this one."
+        )
+        return BatesDecision(
+            DecisionStatus.CONFIRMED,
+            fmt,
+            f"stored confirmation ({source})",
+            None,
+        )
     proposal = propose_format(documents)
     if proposal is None:
         return None
@@ -378,7 +459,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
 
     # ---- Stage 3 -----------------------------------------------------------
     t = time.monotonic()
-    decision = _bates_decision(documents, opts, stamp, warnings)
+    decision = _bates_decision(documents, opts, config, stamp, warnings)
     documents = apply_bates(documents, decision)
     ranges = document_ranges(documents)
     mark("bates", t)
@@ -418,7 +499,16 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         ocr_engine=config.ocr_engine if ocr_ran else OCR_DISABLED,
         ocr_engine_version=config.ocr_engine_version if ocr_ran else "",
         master_index=index.snapshot if index else config.master_index,
-        bates_pattern=(decision.pattern() if decision else config.bates_pattern),
+        # Only a decision that was actually APPLIED is persisted. Recording the
+        # pattern of a pending or rejected decision would make the next run
+        # load it as a confirmation — the operator's "not yet" silently
+        # promoted to "yes" by a re-run — and an explicit rejection has to be
+        # able to clear a stored pattern, or it could never be undone.
+        bates_pattern=(
+            decision.pattern()
+            if decision is not None and decision.applies
+            else (None if decision is not None else config.bates_pattern)
+        ),
         profile_id=opts.profiles[0].profile_id if opts.profiles else config.profile_id,
         profile_version=(
             opts.profiles[0].version if opts.profiles else config.profile_version

@@ -153,6 +153,15 @@ class FormatProfile:
 
     section_rules: tuple[SectionRule, ...] = ()
     bates_pattern: str | None = None
+    """The Bates format confirmed for this recurring production, in the
+    canonical form :attr:`dociq.identify.bates.BatesFormat.pattern` emits — a
+    matching regex carrying a ``(?#dociq-bates:1;...)`` token that records the
+    complete grammar. A run loads it and applies it; a run that cannot read it
+    back stops rather than proceeding on a format it cannot enforce. Validation
+    here stays at "is a compilable regex" deliberately: rejecting a
+    hand-written pattern at *load* time would take a profile's rules down with
+    it, and Stage 3 is where a Bates format is confirmed."""
+
     notes: str = ""
     created_by: str = ""
     created_at: str = ""

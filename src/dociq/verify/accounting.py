@@ -43,19 +43,53 @@ class AccountingReport:
     failed: int = 0
     discrepancies: list[Discrepancy] = field(default_factory=list)
 
+    documents_degraded: int = 0
+    """Documents carrying a RETRYABLE evidence gap (Codex review #1, B-3).
+
+    A count, not a discrepancy: a disclosed gap is Principle 1 working, not
+    the accounting failing. It is here because a gap recorded only inside one
+    document's notes is a gap nobody reads at 9,000 documents, and B-3's
+    requirement is that a failure stay auditable "in the parent record AND in
+    accounting"."""
+
+    documents_evidence_lost: int = 0
+    """Documents carrying a FINAL evidence gap — content named in the record
+    whose bytes are not in the corpus and will not be recovered by re-reading."""
+
     @property
     def ok(self) -> bool:
         return not self.discrepancies
+
+    @property
+    def evidence_line(self) -> str:
+        """The B-3 tally, or ``""`` when nothing read short.
+
+        Empty on a clean corpus deliberately: the ordinary run's accounting
+        text is unchanged, so this adds a line exactly when there is something
+        to say.
+        """
+        parts = []
+        if self.documents_degraded:
+            parts.append(f"{self.documents_degraded} document(s) read with a "
+                         "disclosed, retryable evidence gap")
+        if self.documents_evidence_lost:
+            parts.append(f"{self.documents_evidence_lost} document(s) name "
+                         "content whose bytes are NOT in the corpus")
+        return "EVIDENCE GAPS — " + "; ".join(parts) if parts else ""
 
     def render(self) -> str:
         """Human-readable, and the same text the log and the summary quote."""
         head = (f"pages in {self.pages_in} = kept {self.pages_kept} + dropped "
                 f"{self.pages_dropped} across {self.documents} document(s); "
                 f"{self.unsupported} unsupported, {self.failed} failed")
+        gaps = self.evidence_line
         if self.ok:
-            return f"PAGE ACCOUNTING OK — {head}"
-        lines = [f"PAGE ACCOUNTING FAILED — {head}",
-                 f"{len(self.discrepancies)} discrepancy(ies):"]
+            return (f"PAGE ACCOUNTING OK — {head}"
+                    + (f"\n{gaps}" if gaps else ""))
+        lines = [f"PAGE ACCOUNTING FAILED — {head}"]
+        if gaps:
+            lines.append(gaps)
+        lines.append(f"{len(self.discrepancies)} discrepancy(ies):")
         lines.extend(f"  - {d}" for d in self.discrepancies)
         return "\n".join(lines)
 
@@ -82,6 +116,9 @@ def check(result: RunResult) -> AccountingReport:
         rep.pages_dropped += doc.pages_dropped
         if doc.status is ProcessingStatus.FAILED:
             rep.failed += 1
+        transient, final = _evidence_gaps(doc)
+        rep.documents_degraded += 1 if transient else 0
+        rep.documents_evidence_lost += 1 if final else 0
         _check_document(doc, known, rep)
 
     if rep.pages_kept + rep.pages_dropped != rep.pages_in:
@@ -138,6 +175,23 @@ def _check_document(doc: DocumentRecord, known: set[str],
         rep.discrepancies.append(Discrepancy(
             doc.rel_path, "zero-page-success",
             "status FULL but no pages were produced"))
+
+
+def _evidence_gaps(doc: DocumentRecord) -> tuple[bool, bool]:
+    """``(has a retryable gap, has a final gap)`` for one document.
+
+    Reads the same marker vocabulary the extractor emits and the walker's
+    serial retry keys on, so there is one definition of "this read short" in
+    the product rather than three. Imported lazily: ``verify`` is allowed to
+    depend on ``ingest``, but only the corpus gate actually needs it.
+    """
+    from ..ingest.extract import has_final_marker, has_transient_marker
+
+    texts = list(doc.notes) + [n for p in doc.pages for n in p.notes]
+    if doc.error:
+        texts.append(doc.error)
+    return (any(has_transient_marker(t) for t in texts),
+            any(has_final_marker(t) for t in texts))
 
 
 def _duplicate_paths(result: RunResult) -> list[tuple[str, int]]:

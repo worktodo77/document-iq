@@ -296,3 +296,63 @@ def test_an_unstamped_corpus_produces_no_bates_and_no_error(outcome):
     )
     assert outcome.log.content["bates"]["status"] == "not-run"
     assert outcome.log.content["bates"]["pages_with_bates"] == 0
+    assert outcome.result.config.bates_pattern is None
+    assert not [w for w in outcome.result.warnings if "Bates" in w]
+
+
+# --- B-5: a stored confirmation is reused, or the run fails closed ---------
+
+
+def _run_with_pattern(tmp_path, name, pattern, **kw):
+    cfg = RunConfig(
+        source_root=str(FIXTURES),
+        output_root=str(tmp_path / name),
+        ocr_engine_version=ex.ocr_engine_version(),
+        bates_pattern=pattern,
+    )
+    return pipeline.run(
+        cfg,
+        pipeline.PipelineOptions(
+            walk=walker.WalkOptions(ocr_enabled=False, resume=False),
+            matter_name="fixture corpus",
+            stamp=STAMP,
+            **kw,
+        ),
+    )
+
+
+def test_a_stored_bates_pattern_is_loaded_and_applied(tmp_path):
+    """B-5 (iii). Recording the old pattern is not the same as applying it."""
+    from dociq.identify.bates import BatesFormat
+
+    stored = BatesFormat("MNFV", " ", (4, 6), suffix="CONF", suffix_sep="-").pattern
+    out = _run_with_pattern(tmp_path, "stored", stored)
+    assert out.log.content["bates"]["status"] == "confirmed"
+    assert out.log.content["bates"]["pattern"] == stored
+    assert out.result.config.bates_pattern == stored
+
+
+def test_an_unapplied_decision_is_not_persisted_as_a_confirmation(tmp_path):
+    """A pending decision persisted as a pattern would be loaded by the next
+    run as a confirmation — the operator's "not yet" promoted to "yes" by a
+    re-run. A rejection must likewise be able to clear a stored pattern."""
+    from dociq.identify.bates import BatesDecision, BatesFormat, DecisionStatus
+
+    fmt = BatesFormat("MNFV", " ", (6,))
+    stored = fmt.pattern
+    for status in (DecisionStatus.PENDING, DecisionStatus.REJECTED):
+        out = _run_with_pattern(
+            tmp_path,
+            f"unapplied-{status.value}",
+            stored,
+            bates_decision=BatesDecision(status, fmt),
+        )
+        assert out.result.config.bates_pattern is None
+
+
+def test_an_unreconstructible_stored_bates_pattern_fails_the_run_closed(tmp_path):
+    """B-5 (iii). A stored pattern that cannot be read back as a complete
+    format must stop the run, not be silently ignored."""
+    with pytest.raises(ValueError) as excinfo:
+        _run_with_pattern(tmp_path, "closed", r"^MNFV \d{4,6}CONF$")
+    assert "bates_pattern" in str(excinfo.value)

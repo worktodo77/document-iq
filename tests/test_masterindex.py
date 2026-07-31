@@ -87,7 +87,11 @@ def test_unusable_rows_are_skipped_with_a_warning_not_silently(tmp_path):
     rows = ROWS + [["not-a-number", "x.pdf", "pdf", "dir", "1", "", "", ""]]
     index = load_master_index(_write_csv(tmp_path, rows))
     assert len(index.rows) == 3
-    assert any("skipped" in w for w in index.warnings)
+    assert any("no usable Original Sort value" in w for w in index.warnings)
+    assert [q.reason for q in index.quarantined] == ["no usable Original Sort value"]
+    # The raw cells survive: the operator has to find the cell to repair it.
+    assert index.quarantined[0].original_sort_text == "not-a-number"
+    assert dict(index.quarantined[0].raw)["Filename"] == "x.pdf"
 
 
 def test_duplicate_original_sort_is_reported(tmp_path):
@@ -95,6 +99,37 @@ def test_duplicate_original_sort_is_reported(tmp_path):
     index = load_master_index(_write_csv(tmp_path, rows))
     assert len(index.rows) == 3
     assert any("duplicate Original Sort" in w for w in index.warnings)
+    assert index.quarantined[0].duplicate_of_row == 2
+
+
+def test_a_row_with_no_filename_is_quarantined_not_dropped(tmp_path):
+    rows = ROWS + [["9", "", "pdf", "dir", "1", "", "", ""]]
+    index = load_master_index(_write_csv(tmp_path, rows))
+    assert [q.reason for q in index.quarantined] == ["no filename"]
+
+
+def test_quarantined_rows_stay_out_of_the_li_number_space(tmp_path):
+    """The whole point of quarantine: retained for reporting, invisible to
+    every path that mints or matches an identifier."""
+    rows = ROWS + [
+        ["-5", "neg.pdf", "pdf", "dir", "1", "", "", ""],
+        ["2", "dupe.pdf", "pdf", "dir", "2", "", "", ""],
+    ]
+    index = load_master_index(_write_csv(tmp_path, rows))
+    assert index.quarantined_count == 2
+    assert index.max_original_sort == 3           # not touched by the -5 row
+    assert set(index.by_original_sort()) == {1, 2, 3}
+    assert index.by_original_sort()[2].filename == "Letter 001.pdf"
+    assert all(r.filename not in {"neg.pdf", "dupe.pdf"} for r in index.rows)
+    assert index.snapshot.row_count == 3
+    assert not index.has_hashes and not index.has_bates
+
+
+def test_wholly_blank_rows_are_not_quarantined(tmp_path):
+    """The one drop that stays a drop: a row with no cell to act on."""
+    rows = ROWS + [["", "", "", "", "", "", "", ""]]
+    index = load_master_index(_write_csv(tmp_path, rows))
+    assert index.quarantined == ()
 
 
 def test_negative_original_sort_is_skipped_with_a_warning_not_a_crash(tmp_path):
@@ -107,10 +142,9 @@ def test_negative_original_sort_is_skipped_with_a_warning_not_a_crash(tmp_path):
     index = load_master_index(_write_csv(tmp_path, rows))
     assert len(index.rows) == 3
     assert all(r.original_sort >= 0 for r in index.rows)
-    assert any(
-        "skipped" in w and "no usable Original Sort value" in w
-        for w in index.warnings
-    )
+    assert any("negative Original Sort value" in w for w in index.warnings)
+    assert [q.reason for q in index.quarantined] == ["negative Original Sort value"]
+    assert index.quarantined[0].original_sort_text == "-5"
 
     # And the downstream assigner must not crash when this index is used —
     # the negative-sort row simply reconciles as index-only.
@@ -126,6 +160,44 @@ def test_negative_original_sort_is_skipped_with_a_warning_not_a_crash(tmp_path):
     ]
     result = assign_doc_ids(docs, index)
     assert result.documents[0].doc_id  # got some identifier, run did not crash
+
+
+def _quarantine_index(tmp_path):
+    """An index carrying one of every skip reason, alongside three good rows."""
+    rows = ROWS + [
+        ["not-a-number", "invalid.pdf", "pdf", "dir", "1", "", "", ""],
+        ["-5", "neg.pdf", "pdf", "dir", "2", "", "", ""],
+        ["2", "dupe.pdf", "pdf", "dir", "3", "", "", ""],
+        ["9", "", "pdf", "dir", "4", "", "", ""],
+    ]
+    return load_master_index(_write_csv(tmp_path, rows))
+
+
+def test_quarantined_rows_reach_reconciliation_as_index_only(tmp_path):
+    """D-1: the loader's warnings promise a skipped row "will reconcile as
+    index-only". Retaining the row is what makes that promise true — a row that
+    is dropped on the floor cannot appear anywhere downstream, and an operator
+    reading the reconciliation would conclude the index never mentioned it."""
+    from dociq.contracts import DocumentRecord
+    from dociq.docid.assign import assign_doc_ids
+    from dociq.docid.reconcile import reconcile
+
+    index = _quarantine_index(tmp_path)
+    assert len(index.rows) == 3  # quarantined rows stay out of the LI space
+
+    docs = [
+        DocumentRecord(
+            doc_id="", rel_path="dir/1 - Main Contract.zip",
+            filename="1 - Main Contract.zip", sha256="a" * 64,
+            size_bytes=1, ext=".zip",
+        ),
+    ]
+    report = reconcile(assign_doc_ids(docs, index), index)
+    names = {e.filename for e in report.index_only}
+    assert {"invalid.pdf", "neg.pdf", "dupe.pdf"} <= names
+    quarantined = [e for e in report.index_only if getattr(e, "quarantined", False)]
+    assert len(quarantined) == 4
+    assert all(e.li_file_no == "" and e.reason for e in quarantined)
 
 
 def test_snapshot_hash_is_the_file_hash(tmp_path):

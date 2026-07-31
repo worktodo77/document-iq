@@ -307,7 +307,10 @@ def assign_doc_ids(
 
     Matching runs in three passes over the whole corpus rather than three
     attempts per document, so a weaker key can never steal a row that a stronger
-    key would have claimed for a different file.
+    key would have claimed for a different file. The two fallback keys — content
+    digest and Bates range — additionally match only where the key is unique on
+    *both* unmatched sides; a duplicate group is reported and left unassigned
+    rather than resolved by an arbitrary pick.
     """
     docs = sorted(documents, key=document_sort_key)
     warnings: list[str] = []
@@ -320,9 +323,17 @@ def assign_doc_ids(
     # Nested containers are real (a zip inside a zip), so the parent lookup
     # covers every document, not only top-level ones.
     token_to_sortkey: dict[str, tuple[str, str, int]] = {}
+    ambiguous_tokens: set[str] = set()
     for doc in docs:
+        key = document_sort_key(doc)
         for token in _pre_assignment_token(doc):
-            token_to_sortkey.setdefault(token, document_sort_key(doc))
+            if token_to_sortkey.setdefault(token, key) != key:
+                # Same many-to-one-used-as-one-to-one shape as the digest map:
+                # two documents answering to one parent token means the member's
+                # container is not knowable. The canonical first document still
+                # wins so the run stays deterministic, but the pick is disclosed
+                # rather than presented as a fact.
+                ambiguous_tokens.add(token)
 
     for doc in docs:
         if doc.parent_doc_id is None:
@@ -344,6 +355,11 @@ def assign_doc_ids(
             )
             orphans.append(doc)
             continue
+        if doc.parent_doc_id in ambiguous_tokens:
+            warnings.append(
+                f"{doc.rel_path}: container parent {doc.parent_doc_id!r} names more "
+                "than one scanned document; the canonically first one is used"
+            )
         children_by_parent[_bucket(target)].append(doc)
 
     _break_container_cycles(docs, children_by_parent, orphans, warnings)
@@ -354,10 +370,18 @@ def assign_doc_ids(
     # ---- pass 0: align the two path spaces ---------------------------------
     alignment: RootAlignment | None = None
     row_by_key: dict[str, MasterIndexRow] = {}
-    row_by_hash: dict[str, MasterIndexRow] = {}
-    rows_by_bates: dict[tuple[str, str], MasterIndexRow] = {}
+    # The fallback keys retain *every* candidate row, not one row per key. A
+    # digest or a Bates range is a legitimately many-to-one key — the same
+    # content really can appear twice in the index — so collapsing the group to
+    # a single row would silently hand one arbitrary legacy ID to the first
+    # document that asked and strand the other row (Codex review #1, B-4).
+    rows_by_hash: dict[str, list[MasterIndexRow]] = defaultdict(list)
+    rows_by_bates: dict[tuple[str, str], list[MasterIndexRow]] = defaultdict(list)
     if index is not None:
-        for row in index.rows:
+        # Sorted so the tie-break the warning below promises is the tie-break the
+        # code performs: on a repeated filepath+filename key the lowest Original
+        # Sort wins, not whichever row the spreadsheet happened to list first.
+        for row in sorted(index.rows, key=lambda r: (r.original_sort, r.row_number)):
             row_by_key.setdefault(index_row_key(row), row)
         duplicate_keys = len(index.rows) - len(row_by_key)
         if duplicate_keys:
@@ -378,28 +402,79 @@ def assign_doc_ids(
             )
         for row in index.rows:
             if row.sha256:
-                row_by_hash.setdefault(row.sha256, row)
+                rows_by_hash[row.sha256.strip().lower()].append(row)
             if row.bates_start and row.bates_end:
-                rows_by_bates.setdefault((row.bates_start, row.bates_end), row)
+                rows_by_bates[(row.bates_start, row.bates_end)].append(row)
 
     # ---- passes 1-3: claim index rows --------------------------------------
     claimed_rows: dict[int, tuple[str, str, int]] = {}
+    claimed_by: dict[int, tuple[str, str]] = {}
+    """``row_number -> (rel_path, method)`` of whichever file claimed the row.
+    The method is retained so a collision message can name the key that actually
+    won the row instead of asserting an unexamined "stronger key"."""
     match_for: dict[tuple[str, str, int], tuple[MasterIndexRow, str]] = {}
 
     def claim(doc: DocumentRecord, row: MasterIndexRow, method: str) -> bool:
         key = document_sort_key(doc)
         if row.row_number in claimed_rows:
-            other = claimed_rows[row.row_number]
+            holder_path, holder_method = claimed_by[row.row_number]
             warnings.append(
                 f"{doc.rel_path}: master-index row {row.row_number} "
                 f"(Original Sort {row.original_sort}) was already claimed by "
-                f"{other[0]!r} via a stronger key; this file takes a DIQ "
-                "identifier instead"
+                f"{holder_path!r} via a {holder_method} match; this file takes a "
+                "DIQ identifier instead"
             )
             return False
         claimed_rows[row.row_number] = key
+        claimed_by[row.row_number] = (doc.rel_path, method)
         match_for[key] = (row, method)
         return True
+
+    def fallback_claim(
+        rows_by_token: Mapping[object, list[MasterIndexRow]],
+        docs_by_token: Mapping[object, list[DocumentRecord]],
+        method: str,
+        describe,
+    ) -> None:
+        """Claim on a many-to-one key only where it is one-to-one in practice.
+
+        A digest (or a Bates range) identifies a document only when exactly one
+        still-unmatched file and exactly one still-unclaimed row carry it. Any
+        other shape — two files, two rows, or both — is genuinely ambiguous, and
+        guessing would stamp an LI File No. that names a different document.
+        Ambiguity is therefore disclosed and the whole group falls through: the
+        files take DIQ identifiers and the rows reconcile as index-only, which
+        is already how an unclaimed row is handled.
+
+        Tokens are walked in sorted order so the warnings are byte-stable.
+        """
+        for token in sorted(docs_by_token):
+            candidates = rows_by_token.get(token)
+            if not candidates:
+                continue
+            pending = [
+                d for d in docs_by_token[token] if document_sort_key(d) not in match_for
+            ]
+            if not pending:
+                continue
+            free = [r for r in candidates if r.row_number not in claimed_rows]
+            if len(pending) == 1 and len(free) == 1:
+                claim(pending[0], free[0], method)
+                continue
+            if not free:
+                warnings.append(
+                    f"{describe(token)}: {len(pending)} unmatched document(s) carry "
+                    f"it, but all {len(candidates)} master-index row(s) with that "
+                    "key were already claimed by an earlier pass; the document(s) "
+                    "take DIQ identifiers instead"
+                )
+            else:
+                warnings.append(
+                    f"{describe(token)}: {len(pending)} unmatched document(s) and "
+                    f"{len(free)} unclaimed master-index row(s) carry it, so the "
+                    f"{method} match is ambiguous; the document(s) take DIQ "
+                    "identifiers and the row(s) reconcile as index-only"
+                )
 
     if index is not None:
         prefix = alignment.prefix if alignment else ""
@@ -408,24 +483,30 @@ def assign_doc_ids(
             row = row_by_key.get(probe)
             if row is not None:
                 claim(doc, row, MatchMethod.PATH)
-        if row_by_hash:
+        if rows_by_hash:
+            docs_by_hash: dict[str, list[DocumentRecord]] = defaultdict(list)
             for doc in top_level:
-                if document_sort_key(doc) in match_for:
-                    continue
-                row = row_by_hash.get((doc.sha256 or "").lower())
-                if row is not None:
-                    claim(doc, row, MatchMethod.HASH)
+                digest = (doc.sha256 or "").strip().lower()
+                if digest:
+                    docs_by_hash[digest].append(doc)
+            fallback_claim(
+                rows_by_hash,
+                docs_by_hash,
+                MatchMethod.HASH,
+                lambda t: f"content digest {t[:12]}...",
+            )
         if rows_by_bates and bates_ranges:
+            docs_by_bates: dict[tuple[str, str], list[DocumentRecord]] = defaultdict(list)
             for doc in top_level:
-                key = document_sort_key(doc)
-                if key in match_for:
-                    continue
-                rng = bates_ranges.get(key)
-                if not rng or not rng[0] or not rng[1]:
-                    continue
-                row = rows_by_bates.get((rng[0], rng[1]))
-                if row is not None:
-                    claim(doc, row, MatchMethod.BATES)
+                rng = bates_ranges.get(document_sort_key(doc))
+                if rng and rng[0] and rng[1]:
+                    docs_by_bates[(rng[0], rng[1])].append(doc)
+            fallback_claim(
+                rows_by_bates,
+                docs_by_bates,
+                MatchMethod.BATES,
+                lambda t: f"Bates range {t[0]}-{t[1]}",
+            )
 
     # ---- mint identifiers ---------------------------------------------------
     li_width = base_width_for(
