@@ -362,6 +362,14 @@ def load_master_index(path: str | Path) -> MasterIndex:
 
     for i, row in enumerate(grid[1:], start=1):
         sort_value = _as_int(cell(row, "original_sort"))
+        if sort_value is not None and sort_value < 0:
+            # A negative Original Sort cannot become a Doc ID (DocId.base is
+            # non-negative by construction, D-04) and a hand-typed Excel cell
+            # can easily carry one (a stray "-", a fat-fingered minus). Treat
+            # it the same as "no usable value" rather than let it reach
+            # dociq.docid.ids and crash the whole run — one bad cell must not
+            # take down every other document's assignment (Principle 1).
+            sort_value = None
         filename = _cell_text(cell(row, "filename"))
         if sort_value is None or filename is None:
             warnings.append(

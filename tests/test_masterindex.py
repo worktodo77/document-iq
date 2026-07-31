@@ -97,6 +97,37 @@ def test_duplicate_original_sort_is_reported(tmp_path):
     assert any("duplicate Original Sort" in w for w in index.warnings)
 
 
+def test_negative_original_sort_is_skipped_with_a_warning_not_a_crash(tmp_path):
+    """A negative Original Sort cannot become a Doc ID (DocId.base is
+    non-negative by construction, D-04). A hand-typed Excel index can easily
+    carry one — a stray minus sign, a fat-fingered cell. It must be skipped
+    the same way an unusable value is, not reach dociq.docid.ids and crash
+    assign_doc_ids for the whole run over one bad row."""
+    rows = ROWS + [["-5", "neg.pdf", "pdf", "dir", "1", "", "", ""]]
+    index = load_master_index(_write_csv(tmp_path, rows))
+    assert len(index.rows) == 3
+    assert all(r.original_sort >= 0 for r in index.rows)
+    assert any(
+        "skipped" in w and "no usable Original Sort value" in w
+        for w in index.warnings
+    )
+
+    # And the downstream assigner must not crash when this index is used —
+    # the negative-sort row simply reconciles as index-only.
+    from dociq.contracts import DocumentRecord
+    from dociq.docid.assign import assign_doc_ids
+
+    docs = [
+        DocumentRecord(
+            doc_id="", rel_path="dir/1 - Main Contract.zip",
+            filename="1 - Main Contract.zip", sha256="a" * 64,
+            size_bytes=1, ext=".zip",
+        ),
+    ]
+    result = assign_doc_ids(docs, index)
+    assert result.documents[0].doc_id  # got some identifier, run did not crash
+
+
 def test_snapshot_hash_is_the_file_hash(tmp_path):
     import hashlib
 
