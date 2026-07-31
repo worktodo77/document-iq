@@ -286,18 +286,38 @@ def main(argv: list[str] | None = None) -> int:
         chk.expect(outcome.published and outcome.termination.complete,
                    "the run published because it completed, and says so")
 
-        print("\nAmended contract fields (A-01, A-02, A-03)")
+        print("\nAmended contract fields (A-01..A-06)")
         before, after = result.tokens_before, result.tokens_after
         chk.expect(before is not None and after is not None,
                    "RunResult carries the before/after token estimates")
         if before is not None and after is not None:
-            chk.expect(before.floor_tokens > 0 and before.provenance != "",
-                       "the token estimate carries a measured floor and a "
-                       "provenance",
-                       f"floor {before.floor_tokens} tokens over "
+            chk.expect(before.chars > 0 and before.provenance != "",
+                       "the token estimate carries a measured character count "
+                       "and a provenance",
                        f"{before.chars} chars")
             chk.expect("PROXY, NOT A TOKENIZER MEASUREMENT" in before.provenance,
                        "the provenance states plainly that no tokenizer was run")
+            # Codex review #1 finding B-6: the pre-token count is not a bound
+            # for any tokenizer but DocIQ's own regex, so the contract field
+            # that means "hard lower bound" must stay empty and the assumptions
+            # must travel with the figure instead.
+            chk.expect(before.floor_tokens == 0,
+                       "no hard token floor is claimed (finding B-6)")
+            chk.expect(all(a in before.provenance
+                           for a in ("ASSUMPTION A1", "ASSUMPTION A2",
+                                     "ASSUMPTION A3")),
+                       "every assumption travels with the token figure")
+            chk.expect("METHOD FOR THIS FIGURE" in before.provenance,
+                       "the provenance names the method this run used")
+        limits = result.config.limits
+        chk.expect(limits is not None and limits.zip_max_depth > 0
+                   and limits.retry_max > 0 and limits.file_timeout_s > 0,
+                   "the run identity records its effective limits (A-04)",
+                   f"zip depth {limits.zip_max_depth if limits else '-'}, "
+                   f"retry max {limits.retry_max if limits else '-'}")
+        chk.expect(limits is not None and limits.ocr_model_id != "",
+                   "the OCR model identity is recorded, models and all",
+                   (limits.ocr_model_id if limits else ""))
         chk.expect(result.reconciliation is None,
                    "reconciliation is None when no master index was supplied — "
                    "not an empty report")

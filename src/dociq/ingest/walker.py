@@ -38,6 +38,7 @@ from ..contracts import (
     CONTRACT_VERSION,
     Disposition,
     DocumentRecord,
+    EffectiveLimits,
     PageKind,
     PageRecord,
     ProcessingStatus,
@@ -142,6 +143,58 @@ class RunNotes:
         """
         head = [] if self.termination.complete else [self.termination.headline()]
         return head + list(self.load_dependent) + list(self.invocation)
+
+
+def effective_limits(
+    options: "WalkOptions | None" = None, *, ocr_enabled: bool | None = None
+) -> EffectiveLimits:
+    """Everything environment- or option-controlled that can change output bytes.
+
+    Amendment A-04, raised by Codex review #1 finding B-2. ``RunConfig``'s own
+    contract is that anything influencing output and absent from it is a
+    determinism bug, and these settings were absent: five caps in
+    :mod:`dociq.ingest.extract`, the per-file timeout, the two retry bounds,
+    whether the walk recursed, and which OCR model bytes read the scanned pages.
+    When any of them bites, two runs over the same folder, profile and index
+    produce different evidence while presenting the same hashed configuration.
+
+    Assembled here rather than in the pipeline because this module and
+    :mod:`dociq.ingest.extract` are where the values live; a copy anywhere else
+    is a copy that can go stale.
+
+    ``ocr_model_id`` is left empty when OCR did not run — an identity for models
+    that read nothing would be noise in the hash, and the disabled case is
+    already recorded by ``RunConfig.ocr_engine``.
+
+    Two settings that look as though they belong here and do not:
+
+    * ``DOCIQ_DISK_HEADROOM`` gates whether the run starts at all rather than
+      what a completed run emits, and it is a float, which Principle 5 bars from
+      identity fields. :class:`EffectiveLimits` has no field for it. Recorded in
+      the log's ``run`` section instead — see ``docs/contracts/amendments.md``
+      A-05 for the disclosure.
+    * ``DOCIQ_OCR_WORKERS``, like ``workers``, is pool width. Pool width must not
+      change output; if it ever does that is a determinism defect to fix, not a
+      value to absorb into the identity.
+    """
+    opts = options or WalkOptions()
+    caps = ex.effective_caps()
+    ocr_on = opts.ocr_enabled if ocr_enabled is None else ocr_enabled
+    return EffectiveLimits(
+        xlsx_max_rows=caps["xlsx_max_rows"],
+        csv_max_rows=caps["csv_max_rows"],
+        zip_max_mb=caps["zip_max_mb"],
+        zip_max_members=caps["zip_max_members"],
+        zip_max_depth=caps["zip_max_depth"],
+        # Rounded, not truncated: a sub-second timeout truncating to 0 would
+        # record "no timeout" for a run that timed out on every file.
+        file_timeout_s=round(opts.file_timeout_s),
+        retry_max=_RETRY_MAX,
+        retry_budget_s=round(_RETRY_BUDGET_S),
+        recurse=opts.recursive,
+        ocr_model_id=ex.ocr_model_id() if ocr_on else "",
+        workers=opts.workers,
+    )
 
 
 @dataclass

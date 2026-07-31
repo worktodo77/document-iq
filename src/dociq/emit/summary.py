@@ -246,6 +246,30 @@ def write_run_summary(data: SummaryData, layout: OutputLayout) -> Path:
     c.setFillColorRGB(*_INK)
     y = _paragraph(c, x, y, width - 2 * margin, data.capacity.statement, 9, 11)
 
+    # The method THIS run used, rendered from the estimate itself rather than
+    # from a literal. Codex review #1 finding B-6 found the footer asserting a
+    # calibrated character ratio on every run, including the default
+    # uncalibrated path and the path where the band was not used on its own. A
+    # provenance line that is right by construction is the only kind worth
+    # printing on an evidentiary deliverable.
+    y -= 8
+    c.setFont("Helvetica-Oblique", 8)
+    c.setFillColorRGB(*_MUTED)
+    y = _paragraph(
+        c,
+        x,
+        y,
+        width - 2 * margin,
+        f"How this figure was obtained: {data.tokens_after.method}. "
+        "No tokenizer was run; DocIQ has no lower bound on token count, only "
+        "the ceiling that a text cannot need more tokens than it has UTF-8 "
+        "bytes. Full assumptions in processing_log.json.",
+        8,
+        9.5,
+    )
+    c.setFont("Helvetica", 9)
+    c.setFillColorRGB(*_INK)
+
     # --- accounting -------------------------------------------------------
     y -= 14
     y = _rule(c, x, y, width - margin)
@@ -349,8 +373,11 @@ def write_run_summary(data: SummaryData, layout: OutputLayout) -> Path:
     c.drawString(
         margin,
         36,
-        "Token figures are estimates from a calibrated character ratio, not a "
-        "token count. " + data.tokens_after.basis.label + ".",
+        "Token figures are estimates, not a token count — method: "
+        + data.tokens_after.method_short
+        + ". "
+        + data.tokens_after.basis.label
+        + ".",
     )
     c.drawString(
         margin,

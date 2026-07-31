@@ -36,6 +36,7 @@ from dociq.contracts import (
     canonical_json,
     content_hash,
     document_sort_key,
+    to_jsonable,
 )
 from dociq.docid.assign import AssignmentResult
 from dociq.docid.reconcile import ReconciliationReport, RenumberWarning
@@ -43,6 +44,7 @@ from dociq.emit.paths import OutputLayout, write_text_deterministic
 from dociq.identify.bates import BatesDecision, BatesRange
 from dociq.profiles.apply import DropLogEntry
 from dociq.profiles.model import FormatProfile, OperatorStamp, operator_stamp
+from dociq.verify import tokens as tokens_mod
 from dociq.verify.tokens import TokenEstimate
 
 __all__ = ["build_log", "write_processing_log", "assert_float_free", "LogBundle"]
@@ -196,6 +198,13 @@ def build_log(
     # inputs differ in exactly these fields, so recording them in `content`
     # would make the byte-identical claim false on its face for the re-run case
     # D-04 mitigation (b) exists to support.
+    # `run_notes` is also where the caller records settings that are recorded
+    # but NOT hashed: pool widths (which must not change output — if one ever
+    # does, that is a determinism defect to fix, not an input to hash) and the
+    # disk-headroom multiplier (which gates whether the run starts rather than
+    # what it emits, and is a float, which Principle 5 bars from identity
+    # fields). They are supplied by the pipeline rather than read here, because
+    # `emit` does not depend on `ingest`.
     run.update(dict(run_notes or {}))
 
     bates_section: dict[str, Any] = {
@@ -289,6 +298,18 @@ def build_log(
             "ocr_engine": config.ocr_engine,
             "ocr_engine_version": config.ocr_engine_version,
             "bates_pattern": config.bates_pattern,
+            # A-04 / Codex review #1 finding B-2. Serialized through the
+            # contract's identity projection, which is the same projection the
+            # run hash uses — so what the log shows and what the hash covers
+            # cannot drift apart. `workers` drops out here by design and is
+            # recorded in the `run` section below: pool width is a performance
+            # setting, and if it ever changed output that would be a
+            # determinism defect to fix rather than an input to hash.
+            "limits": (
+                to_jsonable(config.limits, for_identity=True)
+                if config.limits is not None
+                else None
+            ),
         },
         "accounting": {
             "documents": len(docs),
@@ -357,14 +378,24 @@ def build_log(
         "token_estimate": (
             {
                 "chars": token_estimate.profile.chars,
+                "utf8_bytes": token_estimate.profile.utf8_bytes,
                 "pretokens": token_estimate.profile.pretokens,
+                "pretokens_note": (
+                    "DocIQ's own approximate pre-tokenization. NOT a lower "
+                    "bound on token count — see assumption A1."
+                ),
                 "tokens_low": token_estimate.low,
                 "tokens_high": token_estimate.high,
+                "token_ceiling": token_estimate.profile.token_ceiling,
                 "ratio_low_x100": token_estimate.basis.low_x100,
                 "ratio_high_x100": token_estimate.basis.high_x100,
                 "basis": token_estimate.basis.label,
-                "provenance": token_estimate.basis.provenance,
-                "clamped_low": token_estimate.clamped_low,
+                "method": token_estimate.method,
+                "provenance": token_estimate.provenance_text(),
+                "assumptions": list(tokens_mod.ASSUMPTIONS),
+                "sound_bound": tokens_mod.SOUND_BOUND,
+                "ratio_refuted": token_estimate.ratio_refuted,
+                "widened": token_estimate.widened,
                 "clamped_high": token_estimate.clamped_high,
             }
             if token_estimate is not None

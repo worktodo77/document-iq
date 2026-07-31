@@ -58,23 +58,33 @@ from dociq.gui.pipeline import (
 
 CHARS_PER_TOKEN_LOW = 3.3
 CHARS_PER_TOKEN_HIGH = 3.6
-"""D-03's ruled band — **CONFIGURATION, AND REFUTED ON THIS MATERIAL.**
+"""D-03's ruled band — **CONFIGURATION, NOT A MEASUREMENT.**
 
 Track B measured 3.03 chars per pre-token on a 40-PDF sample and 2.53 across the
 full record (298 PDFs / 17,732 pages / 49,031,833 chars / 19,388,495 pre-tokens).
-A tokenizer cannot emit fewer tokens than the text has pre-tokens, so a ratio
-above ~3.0 is unreachable here and this band would understate load by 15–45%.
 
-It stays in the fixture because the run still records what was configured — but
-nothing derived from it is displayed as fact, and D-03 is back with Alex for
-re-ruling. Do not replace these numbers with a guessed band."""
+An earlier version of this comment called the band *refuted* on that evidence,
+on the argument that a tokenizer cannot emit fewer tokens than the text has
+pre-tokens. Codex review #1 finding B-6 established that the argument does not
+hold: those pre-tokens are DocIQ's own approximate split, and a real tokenizer
+with a coarser one merges across boundaries DocIQ invented. Under the
+assumptions stated in :mod:`dociq.verify.tokens`, 2.53 chars/pre-token is
+CONSISTENT with the ruled band.
+
+It stays in the fixture because the run records what was configured — and
+nothing derived from it is displayed as fact. Do not replace these numbers with
+a guessed band."""
 
 # The measured record, for the disclosure the shell shows above every screen.
 MEASURED_DOCUMENTS = 298
 MEASURED_PAGES = 17_732
 MEASURED_CHARS = 49_031_833
-MEASURED_FLOOR_TOKENS = 19_388_495
-"""Track B's full-corpus pre-token count — a floor, not an estimate."""
+MEASURED_PRETOKENS = 19_388_495
+"""Track B's full-corpus pre-token count under DocIQ's own approximate split.
+
+**Not a token floor.** Naming it one was the defect in Codex review #1 finding
+B-6. It is a structural measurement of the source text; the token figure it
+implies depends on assumptions stated in :mod:`dociq.verify.tokens`."""
 
 AUTOMATIC_SAVING_SHARE = 0.14
 """Share of the record removed as exact-hash duplicates and page furniture.
@@ -183,18 +193,21 @@ _PAGE_TABLE_ROWS = (
 """An MPR page is mostly table. Prose-only filler would give the fixture a
 chars-per-pre-token profile no page in the real record has, and the shell would
 then be reviewed against text that flatters it. Whatever ratio this yields is
-measured from the text, never asserted — see :func:`_floor_tokens`."""
+measured from the text, never asserted — see :func:`_structural_tokens`."""
 
 _PRE_TOKEN = re.compile(r"\w+|[^\w\s]")
-"""The pre-token split a BPE tokenizer applies before merging.
+"""An approximation of the pre-token split a BPE tokenizer applies before
+merging.
 
-Counting these gives a HARD LOWER BOUND on the token count: merges only ever
-reduce a pre-token to one token, never below, so no tokenizer can emit fewer
-tokens than there are pre-tokens. That is why the shell prefers this figure to
-any chars-per-token estimate — it is a bound the expert can defend."""
+Counting these characterizes the text's structure. It is **not** a lower bound
+on token count: the split is this fixture's own, and a tokenizer with a coarser
+one merges across boundaries invented here (Codex review #1, finding B-6). The
+shell still prefers this figure to a chars-per-token estimate because it is
+derived from the text in front of it rather than from a ruled constant — and it
+labels it an estimate."""
 
 
-def _floor_tokens(text: str) -> int:
+def _structural_tokens(text: str) -> int:
     return len(_PRE_TOKEN.findall(text))
 
 
@@ -280,26 +293,45 @@ def _build_document(index: int, rel_path: str, pages: int, scanned: int,
     return doc
 
 
-PROVENANCE_FLOOR = (
-    "counted from this record's own text — one token per pre-token, which no "
-    "tokenizer can go below"
+_TOKENS_PER_PRETOKEN_LOW = 0.70
+"""The fewest tokens per pre-token the estimator assumes, as a fraction.
+
+Restated rather than imported: the pagemodel freeze forbids the GUI package
+from importing ``dociq.verify``. A copied constant is a constant that can drift,
+so ``tests/test_tokens.py`` asserts this value equals
+``dociq.verify.tokens.TOKENS_PER_PRETOKEN_LOW_X100 / 100`` — the test can import
+both sides even though the module may not."""
+
+
+PROVENANCE_STRUCTURAL = (
+    "estimated from this record's own text — one token per pre-token of DocIQ's "
+    "approximate split, which is a characterization of the text, not a bound: a "
+    "tokenizer with coarser pre-tokenization emits fewer"
 )
 """What the shell prints beside every figure it shows. Written here, in the
-pipeline, because the GUI must never author a provenance claim of its own."""
+pipeline, because the GUI must never author a provenance claim of its own.
+
+The earlier wording — "which no tokenizer can go below" — was the claim Codex
+review #1 finding B-6 withdrew."""
 
 
-def _estimate(text_chars: int, floor: int) -> TokenEstimate:
+def _estimate(text_chars: int, structural: int) -> TokenEstimate:
     """Build the figure and its provenance together, so they cannot separate."""
     return TokenEstimate(
         chars=text_chars,
         ratio_low=CHARS_PER_TOKEN_LOW,
         ratio_high=CHARS_PER_TOKEN_HIGH,
-        floor_tokens=floor,
-        provenance=PROVENANCE_FLOOR,
-        # Refuted by measurement, not by opinion: if the text carries more
-        # pre-tokens than the configured ratio allows, the ratio is impossible
-        # on this material and the screen has to say so.
-        ratio_refuted=bool(floor) and (text_chars / floor) < CHARS_PER_TOKEN_LOW,
+        structural_tokens=structural,
+        provenance=PROVENANCE_STRUCTURAL,
+        # A conditional inconsistency, not a refutation: the ruled band is
+        # flagged only when it sits below what the measured structure allows
+        # once the coarser-pre-tokenization allowance is applied. See
+        # dociq.verify.tokens.TOKENS_PER_PRETOKEN_LOW_X100.
+        ratio_refuted=(
+            bool(structural)
+            and (text_chars / (structural * _TOKENS_PER_PRETOKEN_LOW))
+            > CHARS_PER_TOKEN_HIGH
+        ),
     )
 
 
@@ -312,20 +344,20 @@ def _build_plan(documents: tuple[DocumentRecord, ...],
     the frozen contract has nowhere to carry them yet.
     """
     chars: dict[str, int] = {}
-    floor: dict[str, int] = {}
+    structural: dict[str, int] = {}
     pages: dict[str, int] = {}
     for doc in documents:
         for page in doc.pages:
             key = page.section or "Progress by Discipline"
             chars[key] = chars.get(key, 0) + len(page.text)
-            floor[key] = floor.get(key, 0) + _floor_tokens(page.text)
+            structural[key] = structural.get(key, 0) + _structural_tokens(page.text)
             pages[key] = pages.get(key, 0) + 1
 
     levers = [
         ReductionLever(
             key=name,
             label=_LABELS[name],
-            tokens=floor.get(name, 0),
+            tokens=structural.get(name, 0),
             pages=pages.get(name, 0),
             kind=LEVER_EXPERT,
             engaged=apply_profile and name in _DEFAULT_DROPS,
@@ -333,29 +365,29 @@ def _build_plan(documents: tuple[DocumentRecord, ...],
         for name, _label in _LEVER_SECTIONS
         if pages.get(name, 0)
     ]
-    total_floor = sum(floor.values())
+    total_structural = sum(structural.values())
     levers.append(ReductionLever(
         key="automatic",
         label="Duplicate copies and page furniture",
-        tokens=round(total_floor * AUTOMATIC_SAVING_SHARE),
+        tokens=round(total_structural * AUTOMATIC_SAVING_SHARE),
         pages=round(sum(pages.values()) * AUTOMATIC_SAVING_SHARE),
         kind=LEVER_AUTOMATIC,
         engaged=True,
         estimated=True,  # the mock models no duplicates; this is a projection
     ))
     return ReductionPlan(
-        full_tokens=total_floor,
+        full_tokens=total_structural,
         levers=tuple(levers),
-        basis=TokenBasis.of(_estimate(sum(chars.values()), total_floor)),
+        basis=TokenBasis.of(_estimate(sum(chars.values()), total_structural)),
     )
 
 
 def at_measured_scale(plan: ReductionPlan) -> ReductionPlan:
-    """The same plan, scaled up to the measured record's token floor.
+    """The same plan, scaled up to the measured record's structural estimate.
 
     The fixture corpus is 8,387 pages; the record Track B measured is 17,732
-    PDF pages carrying a floor of 19.4M tokens — about 97× direct-context
-    capacity, not 3.6×. The screens have to be reviewed at the magnitude they
+    PDF pages whose measured structure implies roughly 19.4M tokens (an
+    estimate, not a floor) — about 97× direct-context capacity, not 3.6×. The screens have to be reviewed at the magnitude they
     will actually meet, because a two-digit multiplier and a three-digit one are
     not the same layout problem.
 
@@ -364,9 +396,9 @@ def at_measured_scale(plan: ReductionPlan) -> ReductionPlan:
     """
     if plan.full_tokens <= 0:
         return plan
-    factor = MEASURED_FLOOR_TOKENS / plan.full_tokens
+    factor = MEASURED_PRETOKENS / plan.full_tokens
     return ReductionPlan(
-        full_tokens=MEASURED_FLOOR_TOKENS,
+        full_tokens=MEASURED_PRETOKENS,
         levers=tuple(
             ReductionLever(le.key, le.label, round(le.tokens * factor),
                            round(le.pages * factor), le.kind, le.engaged,
@@ -399,13 +431,13 @@ class MockPipeline:
         has been forwarded.
         """
         pages = sum(p for _r, p, _s, _st in _CORPUS)
-        factor = MEASURED_FLOOR_TOKENS / DIRECT_CONTEXT_TOKENS
+        factor = MEASURED_PRETOKENS / DIRECT_CONTEXT_TOKENS
         return (
             f"Sample data — Sprint-1 shell. These figures come from a fixture of "
             f"{len(_CORPUS)} documents / {pages:,} pages, not from a real run. "
             f"The measured record is {MEASURED_DOCUMENTS} PDFs / "
-            f"{MEASURED_PAGES:,} pages with a floor of "
-            f"{MEASURED_FLOOR_TOKENS / 1e6:.1f}M tokens — about {factor:.0f}× "
+            f"{MEASURED_PAGES:,} pages implying an estimated "
+            f"{MEASURED_PRETOKENS / 1e6:.1f}M tokens — about {factor:.0f}× "
             "direct-context capacity."
         )
 
@@ -497,7 +529,7 @@ class MockPipeline:
         )
 
         chars_before = sum(len(p.text) for d in documents for p in d.pages)
-        floor_before = sum(_floor_tokens(p.text)
+        structural_before = sum(_structural_tokens(p.text)
                            for d in documents for p in d.pages)
         chars_after = sum(
             len(p.text)
@@ -505,8 +537,8 @@ class MockPipeline:
             for p in d.pages
             if p.disposition is Disposition.KEEP
         )
-        floor_after = sum(
-            _floor_tokens(p.text)
+        structural_after = sum(
+            _structural_tokens(p.text)
             for d in documents
             for p in d.pages
             if p.disposition is Disposition.KEEP
@@ -532,8 +564,8 @@ class MockPipeline:
 
         return RunOutcome(
             result=result,
-            tokens_before=_estimate(chars_before, floor_before),
-            tokens_after=_estimate(chars_after, floor_after),
+            tokens_before=_estimate(chars_before, structural_before),
+            tokens_after=_estimate(chars_after, structural_after),
             reconciliation=recon,
             output_root=request.output_root,
             plan=_build_plan(tuple(documents), apply_profile),

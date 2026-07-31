@@ -11,9 +11,16 @@ people learn to ignore.
 So the manifest carries three lists, all explicit:
 
 * ``deterministic`` — the freeze document's named four artifacts. Hashed, and
-  asserted byte-identical across runs with the same folder + profile + master
-  index (Principle 5 as amended by D-04). This set, and only this set, feeds
+  asserted byte-identical across runs with the same **run identity** (Principle
+  5 as amended by D-04 and A-04). This set, and only this set, feeds
   ``corpus_sha256``.
+
+  The identity is the hashed projection of ``RunConfig``, and the manifest names
+  it in full in :data:`IDENTITY_NOTE`. Naming only "folder + profile + master
+  index" was Codex review #1 finding B-2: environment-controlled caps, the
+  per-file timeout, the retry bounds, the recursion flag and the OCR model bytes
+  could all change the evidence from outside a claim that did not mention them,
+  so the claim was not checkable.
 * ``adjacent`` — the rest of §7's deliverables that *are* mechanically derived
   and reproducible (the reconciliation CSV, the issued-ID ledger, the matter
   profile copy, the Path-A upload package). They are hashed and compared
@@ -83,6 +90,34 @@ LOG_NAME = "processing_log.json"
 LOG_CONTENT_KEY = "content"
 LOG_RUN_KEY = "run"
 
+CLAIM = (
+    "byte-identical across runs with the same run identity — for the files "
+    f"under 'deterministic' and for the '{LOG_CONTENT_KEY}' section of "
+    f"{LOG_NAME} only"
+)
+
+IDENTITY_NOTE = (
+    "The run identity is the hashed projection of RunConfig: source folder, "
+    "output folder, profile id and version, master-index snapshot "
+    "(filename, sha256, row count), OCR confidence threshold, OCR engine and "
+    "engine version, confirmed Bates pattern, and RunConfig.limits — the "
+    "XLSX/CSV row caps, the ZIP size/member/depth caps, the per-file timeout, "
+    "the retry maximum and retry budget, whether the walk recursed, and the OCR "
+    "model identity (package version plus a hash of the model files). "
+    "Thread-pool width is recorded in limits.workers and deliberately EXCLUDED "
+    "from the hash: pool width must not change output, and treating it as an "
+    "input would hide a determinism defect rather than expose one. Run "
+    "timestamp, operator and host are outside the hash by design, so a rerun at "
+    "a different time still proves byte-identical content."
+)
+"""What the claim actually covers, named in full.
+
+Codex review #1 finding B-2: the claim used to name "the same source folder,
+profile and master index", while caps, timeouts, retry bounds and the OCR model
+bytes could all change the evidence from outside it. A claim that does not name
+its own identity is not checkable, which is the one thing this manifest exists
+to be."""
+
 
 @dataclass
 class Manifest:
@@ -111,10 +146,8 @@ class Manifest:
     def to_jsonable(self) -> dict:
         return {
             "contract_version": self.contract_version,
-            "claim": ("byte-identical across runs with the same source folder, "
-                      "profile and master index — for the files under "
-                      "'deterministic' and for the '{}' section of {} only"
-                      .format(LOG_CONTENT_KEY, LOG_NAME)),
+            "claim": CLAIM,
+            "claim_identity": IDENTITY_NOTE,
             "corpus_sha256": self.corpus_sha256,
             "deterministic": dict(sorted(self.deterministic.items())),
             "adjacent": dict(sorted(self.adjacent.items())),

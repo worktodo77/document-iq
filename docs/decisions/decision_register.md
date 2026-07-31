@@ -86,14 +86,19 @@ now established is that fewer workers is not the answer.
 
 ## Measured corpus token load (full corpus, 2026-07-30)
 
+> **CORRECTED 2026-07-31 (Codex review #1, finding B-6).** This section
+> originally called the pre-token count a *hard lower bound* on token count for
+> any byte-level BPE tokenizer, and treated it as refuting D-03. **Both claims
+> were overstated and are withdrawn.** The correction is at the foot of this
+> section; the measurements themselves are unchanged and still stand.
+
 Measured over **all 298 PDFs / 17,732 pages** of the real MODEC/Petrobras MPR
-corpus using Track B's pre-token proxy (`verify/tokens.measure`), which yields a
-*hard lower bound* on token count for any byte-level BPE tokenizer:
+corpus using Track B's pre-token proxy (`verify/tokens.measure`):
 
 | quantity | measured |
 |---|---|
 | characters | 49,031,833 |
-| **pre-tokens (token floor)** | **19,388,495** |
+| **pre-tokens (DocIQ's own split — see the correction below)** | **19,388,495** |
 | density | 2.53 chars/pre-token |
 | per page | 2,765 chars / 1,093 pre-tokens |
 
@@ -117,15 +122,59 @@ whitespace-only pages, applies no normalization, runs no OCR and covers the 298
 PDFs only. On 131 identical pages, PyMuPDF yields 16.7% more pre-tokens than the
 pypdf text DocIQ actually extracts, and contract normalization removes about 5%
 more. Use the pipeline's number for the corpus DocIQ ships; the figure above
-remains valid as what the source PDFs contain under a different reader. Both
-still refute D-03's band, now on a third independent measurement. Detail in
-`docs/verification/sprint1_integration_2026-07-31.md` §5.
+remains valid as what the source PDFs contain under a different reader. Detail
+in `docs/verification/sprint1_integration_2026-07-31.md` §5.
 
-Two knock-on notes: the density figure independently corroborates Track B's
-refutation of D-03's 3.30–3.60 chars/token band (measured 2.53 here, 3.03 on
-Track B's 40-PDF sample — both below the ruled floor), and every token figure in
-the Sprint-1 UI mockups (3.4M → 850K) is now known to be far too small and must
-not be carried into the build as if measured.
+Every token figure in the Sprint-1 UI mockups (3.4M → 850K) remains known to be
+far too small and must not be carried into the build as if measured.
+
+### CORRECTION — the "19.4M token floor" and the D-03 refutation (2026-07-31)
+
+Codex review #1 finding B-6 is accepted in full. Two things this section
+asserted are not supported by the evidence:
+
+**1. There is no 19,388,495-token floor.** The argument was that a byte-level
+BPE tokenizer cannot merge across a pre-token boundary, so it cannot emit fewer
+tokens than the text has pre-tokens. That holds for a tokenizer's **own**
+pre-tokenization. It does not hold for boundaries DocIQ's approximate regex
+invented: `PRETOKEN_RE` splits digit runs every three digits, and a real
+tokenizer that keeps longer digit runs together merges straight across those
+splits and emits fewer tokens than DocIQ counted pre-tokens. The corpus is
+**13% digits**, so this is where the material actually is, not a corner case.
+
+19,388,495 is a **pre-token count under DocIQ's own split** — a characterization
+of the text's structure, not a bound on any tokenizer's output.
+
+**The one bound that does survive** is the ceiling: `tokens <= UTF-8 bytes`,
+because a byte-level vocabulary always contains single-byte fallbacks. That
+holds for any such tokenizer and DocIQ still asserts it.
+
+**2. D-03 is NOT established as refuted, and its status returns to RULED.** With
+the assumed allowance for coarser pre-tokenization (0.70–1.60 tokens per DocIQ
+pre-token, both assumed and both stated in `verify/tokens.ASSUMPTIONS`), 2.53
+chars/pre-token implies roughly **1.58–3.61 chars/token** — which *overlaps*
+D-03's ruled 3.30–3.60 band. At the coarse end the corpus lands near 3.5
+chars/token, inside the band. The same arithmetic on the 40-PDF sample (3.03)
+and on the pipeline's own emitted text (2.91) also overlaps.
+
+What survives, and is worth keeping: this material is far denser than ordinary
+prose (4.4–4.5 chars/pre-token), so D-03's band sits at the **coarse end** of
+what the structure allows rather than in the middle of it, and a figure built on
+the band should be read as an optimistic member of a wide range. That is a
+characterization, not a refutation.
+
+**3. The strategic conclusion is unchanged and does not depend on the withdrawn
+claims.** Even at the top of the ruled band (3.60 chars/token) the corpus is
+~13.6M tokens, ~68× the 200K direct-context working figure; a 90% reduction
+still leaves ~1.4M, ~7× over. **No combination of reductions brings this record
+into direct context.** Path B (Claude reading the matter folder from disk)
+remains the only viable route at this scale, and D-15 stands.
+
+**4. What is needed to settle it.** Someone with network access must count real
+Claude tokens on a sample of this material. Until then every DocIQ token figure
+is an estimate under stated assumptions, and the deliverables say so — the
+processing log carries the assumptions verbatim, the run summary PDF names the
+method that run used, and the GUI no longer renders "tokens at least".
 
 ## §10 restated against a completed full-corpus run (2026-07-31)
 

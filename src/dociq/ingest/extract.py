@@ -44,6 +44,7 @@ disables. Nothing depends on it today.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import io
 import os
 import re
@@ -196,6 +197,28 @@ _ZIP_MAX_MEMBERS = int(os.environ.get("DOCIQ_ZIP_MAX_MEMBERS", "2000"))
 _ZIP_MAX_DEPTH = int(os.environ.get("DOCIQ_ZIP_MAX_DEPTH", "3"))
 
 
+def effective_caps() -> dict[str, int]:
+    """The caps this process will actually apply, for the run identity.
+
+    Read from the same module-level constants the extractors use, not from the
+    environment a second time: a second read could disagree with the first if
+    the environment changed after import, and the identity must record what the
+    run *did*, not what it was asked to do.
+
+    Codex review #1 finding B-2: when one of these bites, the same folder,
+    profile and index produce different evidence under an identical hashed
+    configuration. Per-document truncation notes disclose the effect; they do
+    not repair the identity.
+    """
+    return {
+        "xlsx_max_rows": _XLSX_MAX_ROWS,
+        "csv_max_rows": _CSV_MAX_ROWS,
+        "zip_max_mb": _ZIP_MAX_MB,
+        "zip_max_members": _ZIP_MAX_MEMBERS,
+        "zip_max_depth": _ZIP_MAX_DEPTH,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class ExtractedDoc:
     """What one Tier-1 file yielded. Never raises out of :func:`extract`."""
@@ -295,6 +318,70 @@ def ocr_engine_version() -> str:
         return version("rapidocr_onnxruntime")
     except Exception:
         return "unknown"
+
+
+_MODEL_ID_CACHE: dict[tuple, str] = {}
+_MODEL_ID_LOCK = threading.Lock()
+
+
+def _model_stat_key(d: Path) -> tuple:
+    """Cheap identity of the model directory: name, size and mtime per file.
+
+    Used only as a *cache key*, never as the recorded identity. Sizes and mtimes
+    are what a stale cache would miss; the recorded identity is always the
+    content hash below.
+    """
+    out = []
+    for name in _MODEL_FILES:
+        p = d / name
+        try:
+            st = p.stat()
+            out.append((name, st.st_size, st.st_mtime_ns))
+        except OSError:
+            out.append((name, -1, -1))
+    return (str(d),) + tuple(out)
+
+
+def ocr_model_id() -> str:
+    """Stable identity of the OCR model artifacts — package version PLUS a hash
+    of the model bytes.
+
+    Recorded in ``RunConfig.limits.ocr_model_id`` and therefore in the hashed
+    run identity (Codex review #1 finding B-2). A version string alone is not
+    enough: ``DOCIQ_OCR_MODEL_DIR`` can point the same installed package at
+    different ONNX files, and two engines that read a page differently are
+    different inputs to the run, however they were installed.
+
+    The hash is over the three model files' names and bytes in a fixed order, so
+    it is independent of directory listing order and of where the files live.
+    Nothing is downloaded — Principle 4 — and a missing or unreadable model
+    yields an explicit ``models-unavailable`` identity rather than a silent
+    empty string that would compare equal to a run that had no OCR at all.
+    """
+    version = ocr_engine_version()
+    try:
+        d = ocr_model_dir()
+    except Exception:
+        return f"rapidocr_onnxruntime {version}; models-unavailable"
+    key = _model_stat_key(d)
+    with _MODEL_ID_LOCK:
+        hit = _MODEL_ID_CACHE.get(key)
+    if hit is not None:
+        return hit
+    h = hashlib.sha256()
+    try:
+        for name in _MODEL_FILES:
+            h.update(name.encode("utf-8"))
+            h.update(b"\0")
+            with open(d / name, "rb") as fh:
+                while chunk := fh.read(1 << 20):
+                    h.update(chunk)
+        ident = f"rapidocr_onnxruntime {version}; models {h.hexdigest()[:32]}"
+    except OSError:
+        ident = f"rapidocr_onnxruntime {version}; models-unavailable"
+    with _MODEL_ID_LOCK:
+        _MODEL_ID_CACHE[key] = ident
+    return ident
 
 
 def _ocr_engine():
