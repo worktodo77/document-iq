@@ -47,9 +47,29 @@ Harness unchanged in shape: each repetition runs the whole pipeline in a
 once at interpreter start and setting it in-process would make the varied-seed
 claim unfalsifiable. Comparison is over the output manifest.
 
-- **8 runs, 8 distinct seeds** — in the self-test, on every invocation.
-- **30 runs, 30 distinct seeds** — RESULT_30
-- **fail-before established** — FAILBEFORE
+- **8 runs, 8 distinct seeds** — in the self-test, on every invocation. Result:
+  1 distinct corpus hash, 0 diffs, 42 checks passed, exit 0.
+- **30 runs, 30 distinct `PYTHONHASHSEED` values, subprocess per run** — result:
+  **1 distinct corpus hash, 0 diffs, 0 failures**, `corpus_sha256`
+  `5544e622d46b3747b0ed9cf4bb267a796c46797226cccbf0e34f959206aacea0`.
+  (Track A's recorded hash `b587bb6a…` does not carry forward and should not be
+  compared against: it was the *stand-in's* output, and the fixture corpus has
+  since gained the email-with-attachment case.)
+
+### Fail-before: the gate has been watched going red
+
+A gate nobody has seen fail is not a gate. Three probes, each injecting one
+run-varying byte into one artifact of the **real** emit layer, each run at 3
+repetitions, with the tree restored afterwards and the baseline hash re-proven:
+
+| probe | artifact | result |
+|---|---|---|
+| a timestamp appended in `emit/cleantext.render_document` | `clean_text/*.txt` — inside the claim | **RED**, naming the file and the log's content hash |
+| a varying key added to the log's `content` | `processing_log.json[content]` — inside the claim | **RED**, naming the content hash |
+| a timestamp appended by `IssuedIdLedger.write` | `doc_ids_issued.json` — adjacent, outside the claim | **RED**, and labelled "outside the four-artifact claim, still a finding" |
+
+Baseline before the probes and after restoration: `ok=True`, 1 distinct hash,
+same value both times.
 
 ### The claim, stated precisely (unchanged)
 
@@ -112,6 +132,56 @@ The contract docstring is deliberately **not** amended. The field is a string an
 holds one under either convention; what was underspecified is the handover point,
 which is a coordination rule. It is recorded in `pagemodel_freeze.md`.
 
+### D-I3 — D-04's renumbering check cried wolf on any corpus with duplicate content
+
+`detect_renumbering` keyed the previous run's ledger by SHA-256 alone. Duplicate
+content is ordinary on a matter record — the walker detects and reports it, and a
+file that also appears inside an archive is the same bytes at two paths — so one
+twin overwrote the other in the dict and every other twin read as "this file's
+identifier changed".
+
+**Measured:** two consecutive, identical runs over the fixture corpus produced
+**three phantom `id-moved` warnings**, telling the operator that identifiers had
+moved when nothing had changed at all. D-04 accepted renumbering as its single
+biggest risk and gave it a loud check; a check that fires on every re-run is a
+check people learn to ignore.
+
+Matching is now `(sha256, rel_path)` first, falling back to SHA-256 alone only
+where that hash names exactly one previous file. Where twins are genuinely
+ambiguous nothing is reported, because guessing would manufacture the warning
+the pass exists to avoid. A real move with an unambiguous hash is still
+reported, and has its own test so the fix cannot buy silence by refusing to look.
+*Fail-before:* both anchors reverted → red; restored → green.
+
+### D-I4 — the byte-identical claim was hostage to the destination folder
+
+Renumbering warnings were written into the log's **hashed** `content`. They are a
+comparison against a ledger that the *destination* happens to hold, and the
+destination is not one of the determinism contract's inputs — the same finding
+D-A1 already made about `output_root`. A corrupt leftover ledger would have
+broken the byte-identical claim with no input change anywhere.
+
+Moved to the log's `run` section, still written, still in `RunResult.warnings`
+and still on the run summary. *Fail-before:* a test that plants a corrupt ledger
+in the destination, asserts the `ledger-unusable` warning is raised, and asserts
+the content hash still equals a clean run's — red with the section back in
+`content`.
+
+### D-I5 — a re-run into a used output folder inherited the previous run's residue
+
+Both the manifest and the log's `output_hashes` were built by globbing the output
+root. A `clean_text/LI-06881.txt` left behind by a run against an older master
+index would therefore be hashed as if this run had produced it — and it would
+still be sitting in the folder Expert Assist reads, under an identifier this run
+gave to a different document.
+
+Two fixes, because there are two failures: the log now hashes an explicit list of
+what this run wrote, and the pipeline purges the previous run's deliverables
+before emit. The purge is recorded in the log's `run` section — nothing is
+deleted silently — and `doc_ids_issued.json` is deliberately **not** purged,
+because it is this run's input to the D-04 check. *Fail-before:* a planted ghost
+file survives and changes `corpus_sha256` with the purge disabled.
+
 ### D-I2 — renumbering warnings reached the log but not the run result
 
 D-04 mitigation (b) detects that a newer index snapshot has renumbered issued
@@ -122,6 +192,20 @@ audit trail would have told an operator different things about whether
 identifiers moved. The check now runs before the result is assembled; only the
 ledger *write* stays in emit, and it necessarily happens after the previous
 ledger is read.
+
+### D-I6 — the fixture corpus never exercised email-attachment expansion
+
+Track A's critic added attachment expansion to the walker (§3 requires it: an
+attachment that vanishes is a silent deletion). The unit test covers it. The
+**corpus** did not: `09_notice.eml` carries no attachment, so the self-test, the
+determinism proof and every end-to-end assertion ran past the path entirely.
+
+"The corpus doesn't exercise it" is not a reason to leave a path uncovered — it
+is a reason to put the case in the corpus. `14_transmittal.eml` now carries a
+PDF attachment, with its MIME boundary and headers written by hand for the same
+reason the other email is: a library's own boundary and Message-ID generation is
+clock- and random-seeded, and these bytes must be identical on every
+regeneration. The attachment case is now inside the 30-run determinism proof.
 
 ## 4. The amended contract fields are populated
 
