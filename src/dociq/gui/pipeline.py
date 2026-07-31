@@ -67,8 +67,86 @@ class FolderPreview:
     rather than inventing a number."""
 
 
+@dataclass(frozen=True, slots=True)
+class TokenEstimate:
+    """A token figure and — inseparably — how it was obtained.
+
+    Shaped to the announced contract v1.1.0 so the seam becomes a thin read of
+    ``RunResult.tokens_before`` / ``tokens_after`` on rebase.
+
+    **The provenance is not decoration.** DocIQ is an evidentiary tool: a number
+    on screen that cannot say where it came from is a claim the expert would
+    have to defend without support. Track B measured 2.53 chars per pre-token
+    across the full 298-PDF record, which makes D-03's ruled 3.3–3.6 band
+    *unreachable* on this material — a tokenizer cannot emit fewer tokens than
+    the text has pre-tokens. So the ratio is configuration, the provenance
+    travels beside every figure derived from it, and the GUI renders neither
+    ratio nor band as fact.
+    """
+
+    chars: int
+    ratio_low: float
+    ratio_high: float
+    floor_tokens: int = 0
+    """A hard lower bound counted from the text (its pre-token count), or 0 when
+    it was not measured. A bound that can be defended beats a point estimate
+    that cannot, so this is preferred for display wherever it exists."""
+
+    provenance: str = ""
+    """How the figure was obtained, in the pipeline's own words. The GUI shows
+    this verbatim and never substitutes a literal of its own."""
+
+    ratio_refuted: bool = False
+    """Set when the text's own structure contradicts the configured ratio — the
+    measured chars-per-pre-token is below ``ratio_low``, so the ratio estimate
+    is not merely optimistic but impossible. The screen must say so rather than
+    quietly printing a number.
+
+    NOTE: the announced v1.1.0 shape carries ``provenance`` but no such flag;
+    see ``docs/contracts/amendments.md`` A-03. Until that is settled the seam
+    models it explicitly rather than parsing it back out of prose."""
+
+    @property
+    def high(self) -> int:
+        """Upper end of the ratio range: the *smaller* chars-per-token ratio."""
+        return round(self.chars / self.ratio_low)
+
+    @property
+    def low(self) -> int:
+        return round(self.chars / self.ratio_high)
+
+    @property
+    def is_bound(self) -> bool:
+        return self.floor_tokens > 0
+
+    @property
+    def tokens(self) -> int:
+        """The figure to display: the measured floor where one exists, the
+        conservative end of the ratio range otherwise."""
+        return self.floor_tokens if self.is_bound else self.high
+
+
+@dataclass(frozen=True, slots=True)
+class TokenBasis:
+    """Provenance carried alongside a whole set of token figures.
+
+    The waterfall shows a dozen numbers that all share one basis; repeating a
+    :class:`TokenEstimate` on each lever would let them drift apart, and a lever
+    whose provenance disagreed with the headline's would be worse than no
+    provenance at all.
+    """
+
+    provenance: str = ""
+    is_bound: bool = False
+    ratio_refuted: bool = False
+
+    @classmethod
+    def of(cls, estimate: "TokenEstimate") -> "TokenBasis":
+        return cls(estimate.provenance, estimate.is_bound, estimate.ratio_refuted)
+
+
 LEVER_EXPERT = "expert"
-"""A section an expert chose to drop (§6). Interactive, accent-coloured."""
+"""A section an expert chose to drop (§6). Interactive, accent-colored."""
 
 LEVER_AUTOMATIC = "automatic"
 """A saving the tool made mechanically — exact-hash duplicates, page furniture.
@@ -95,6 +173,13 @@ class ReductionLever:
     """Whether it is currently dropping. Expert levers start where the profile
     left them; automatic levers are always engaged."""
 
+    estimated: bool = False
+    """True when this lever's saving is projected rather than counted.
+
+    Shown on the row. A projected figure standing next to counted ones, in the
+    same column, in the same type, is a claim the run cannot support — and the
+    reader has no way to tell which is which unless the row says so."""
+
     @property
     def locked(self) -> bool:
         return self.kind == LEVER_AUTOMATIC
@@ -112,6 +197,8 @@ class ReductionPlan:
     full_tokens: int
     levers: tuple[ReductionLever, ...] = ()
     capacity: int = DIRECT_CONTEXT_TOKENS
+    basis: TokenBasis = TokenBasis()
+    """Where every figure in this plan came from. Travels with the numbers."""
 
     def with_toggled(self, key: str) -> "ReductionPlan":
         """A copy with one expert lever flipped. Locked levers ignore the call
@@ -119,10 +206,11 @@ class ReductionPlan:
         levers = tuple(
             lever if (lever.key != key or lever.locked)
             else ReductionLever(lever.key, lever.label, lever.tokens,
-                                lever.pages, lever.kind, not lever.engaged)
+                                lever.pages, lever.kind, not lever.engaged,
+                                lever.estimated)
             for lever in self.levers
         )
-        return ReductionPlan(self.full_tokens, levers, self.capacity)
+        return ReductionPlan(self.full_tokens, levers, self.capacity, self.basis)
 
     @property
     def engaged(self) -> tuple[ReductionLever, ...]:
@@ -153,29 +241,6 @@ class ReductionPlan:
     @property
     def fits(self) -> bool:
         return self.remaining_tokens <= self.capacity
-
-
-@dataclass(frozen=True, slots=True)
-class TokenEstimate:
-    """A conservative token range, per D-03 (chars ÷ a calibrated ratio).
-
-    Produced by the pipeline, never by the GUI. Carries the character count and
-    the ratios so the summary can state its own basis rather than presenting a
-    number with no provenance.
-    """
-
-    chars: int
-    ratio_low: float
-    ratio_high: float
-
-    @property
-    def high(self) -> int:
-        """Upper end of the range: the *smaller* chars-per-token ratio."""
-        return round(self.chars / self.ratio_low)
-
-    @property
-    def low(self) -> int:
-        return round(self.chars / self.ratio_high)
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +325,17 @@ class PipelineAPI(Protocol):
     ) -> RunOutcome:
         ...
 
+    def disclosure(self) -> str:
+        """A standing notice the window shows above every screen, or "".
+
+        Exists so a stand-in pipeline cannot be mistaken for a real one. The
+        real adapter returns ""; the Sprint-1 mock returns what its figures are
+        and how they differ from the measured record. A shell that looks exactly
+        like the finished product while showing invented numbers is the single
+        most expensive misunderstanding this project could ship.
+        """
+        ...
+
 
 _OVERRIDE: PipelineAPI | None = None
 
@@ -303,6 +379,7 @@ __all__ = [
     "LEVER_AUTOMATIC",
     "LEVER_EXPERT",
     "ProfileInfo",
+    "TokenBasis",
     "ReductionLever",
     "ReductionPlan",
     "FolderPreview",

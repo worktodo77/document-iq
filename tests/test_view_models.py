@@ -11,7 +11,10 @@ from dociq.contracts import Disposition, PageKind  # noqa: E402
 from dociq.gui.mock_pipeline import MockPipeline  # noqa: E402
 from dociq.gui.pipeline import (  # noqa: E402
     DIRECT_CONTEXT_TOKENS,
+    ReductionPlan,
+    RunOutcome,
     RunRequest,
+    TokenBasis,
     TokenEstimate,
 )
 from dociq.gui.view_models import (  # noqa: E402
@@ -148,9 +151,9 @@ def test_the_expected_case_is_over_capacity_and_is_not_a_failure() -> None:
 def test_toggling_a_lever_reflows_the_whole_projection() -> None:
     outcome = _outcome()
     before = build_summary(outcome)
-    after = build_summary(outcome, outcome.plan.with_toggled("Organisation Charts"))
+    after = build_summary(outcome, outcome.plan.with_toggled("Organization Charts"))
     charts = next(le for le in outcome.plan.levers
-                  if le.key == "Organisation Charts")
+                  if le.key == "Organization Charts")
     assert after.tokens_after == before.tokens_after - charts.tokens
     assert after.tokens_before == before.tokens_before
 
@@ -172,9 +175,102 @@ def test_run_accounting_does_not_follow_a_toggle() -> None:
     stay the run's own, or the screen would claim an output it never wrote."""
     outcome = _outcome()
     before = build_summary(outcome)
-    after = build_summary(outcome, outcome.plan.with_toggled("Organisation Charts"))
+    after = build_summary(outcome, outcome.plan.with_toggled("Organization Charts"))
     assert after.pages_kept == before.pages_kept
     assert after.pages_dropped == before.pages_dropped
+
+
+# ------------------------------------------------- provenance and hard bounds
+
+def _view_with(estimate: TokenEstimate) -> object:
+    """A summary whose whole basis is ``estimate`` and nothing else."""
+    outcome = _outcome()
+    plan = ReductionPlan(
+        full_tokens=estimate.tokens or 1,
+        levers=(),
+        basis=TokenBasis.of(estimate),
+    )
+    return build_summary(
+        RunOutcome(outcome.result, estimate, estimate,
+                   outcome.reconciliation, outcome.output_root, plan),
+    )
+
+
+def test_the_screen_never_states_a_ratio_band() -> None:
+    """The defect this test exists for: the summary printed "conservative end of
+    a 3.3–3.6 characters-per-token estimate" as its provenance. Track B then
+    measured 2.53 chars per pre-token on the real record, which makes that band
+    arithmetically impossible — the screen was asserting a method that had been
+    refuted. No figure of the GUI's own authorship belongs in a basis line."""
+    note = build_summary(_outcome()).basis_note()
+    assert not any(ch.isdigit() for ch in note), note
+
+
+def test_the_basis_line_is_the_pipeline_s_words() -> None:
+    est = TokenEstimate(1000, 3.3, 3.6, floor_tokens=400,
+                        provenance="counted three ways on a Tuesday")
+    assert "counted three ways on a Tuesday" in _view_with(est).basis_note()
+
+
+def test_an_unrecorded_basis_says_so_rather_than_inventing_one() -> None:
+    est = TokenEstimate(1000, 3.3, 3.6)
+    assert _view_with(est).basis_note() == "basis not recorded"
+
+
+def test_a_refuted_ratio_is_stated_plainly() -> None:
+    est = TokenEstimate(1000, 3.3, 3.6, floor_tokens=400,
+                        provenance="counted from the text", ratio_refuted=True)
+    note = _view_with(est).basis_note()
+    assert "did not fit" in note
+    assert "counted from the text" in note
+
+
+def test_a_floor_is_preferred_to_an_estimate_and_labelled_as_a_bound() -> None:
+    """A bound that can be defended beats a point estimate that cannot."""
+    est = TokenEstimate(1_000_000, 3.3, 3.6, floor_tokens=400_000,
+                        provenance="pre-token count")
+    assert est.tokens == 400_000        # not 1_000_000 / 3.3 = 303_030
+    assert est.is_bound
+    view = _view_with(est)
+    assert view.headline_unit() == "tokens at least"
+    assert view.capacity_line().startswith("at least ")
+
+
+def test_an_estimate_without_a_floor_is_not_called_a_bound() -> None:
+    est = TokenEstimate(1_000_000, 3.3, 3.6, provenance="chars over a ratio")
+    view = _view_with(est)
+    assert not view.is_bound
+    assert view.headline_unit() == "tokens"
+    assert not view.capacity_line().startswith("at least")
+
+
+def test_the_multiplier_survives_three_digits() -> None:
+    """The measured record is ~97× capacity and a larger matter is more. The
+    factor is written without a decimal past 10× so three digits still fit."""
+    est = TokenEstimate(0, 3.3, 3.6, floor_tokens=250 * DIRECT_CONTEXT_TOKENS,
+                        provenance="pre-token count")
+    line = _view_with(est).capacity_line()
+    assert "250× above direct-context capacity" in line
+    assert "." not in line.split("×")[0]
+
+
+def test_the_measured_scale_is_the_fixture_shape_at_the_real_magnitude() -> None:
+    from dociq.gui.mock_pipeline import MEASURED_FLOOR_TOKENS, at_measured_scale
+
+    plan = _outcome().plan
+    scaled = at_measured_scale(plan)
+    assert scaled.full_tokens == MEASURED_FLOOR_TOKENS
+    assert len(scaled.levers) == len(plan.levers)
+    assert [le.engaged for le in scaled.levers] == [le.engaged for le in plan.levers]
+    assert round(scaled.over_capacity_factor) >= 50
+
+
+def test_a_projected_lever_is_marked_as_projected() -> None:
+    """The automatic saving is a fixture projection, not a count. Standing in
+    the same column as counted figures, it has to say which it is."""
+    levers = {le.key: le for le in _outcome().plan.levers}
+    assert levers["automatic"].estimated
+    assert not any(le.estimated for le in levers.values() if not le.locked)
 
 
 def test_mock_is_deterministic() -> None:

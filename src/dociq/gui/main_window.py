@@ -28,7 +28,7 @@ from dociq.gui.screens import (
 )
 from dociq.gui.theme import Theme, build_theme, stylesheet
 from dociq.gui.view_models import SummaryView, build_summary
-from dociq.gui.widgets import HeaderBar, Rule, ICON_ICO
+from dociq.gui.widgets import DisclosureBar, HeaderBar, Rule, ICON_ICO
 
 SETUP, PROGRESS, SUMMARY, DETAIL = range(4)
 
@@ -87,6 +87,9 @@ class MainWindow(QMainWindow):
         lay.setSpacing(0)
         lay.addWidget(HeaderBar(self.theme))
         lay.addWidget(Rule(self.theme, strong=True))
+        disclosure = getattr(self._pipeline, "disclosure", lambda: "")()
+        if disclosure:
+            lay.addWidget(DisclosureBar(disclosure, self.theme))
 
         self.stack = QStackedWidget()
         self.setup = SetupScreen(self.theme, self._pipeline.profiles())

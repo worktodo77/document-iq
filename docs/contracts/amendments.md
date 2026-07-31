@@ -124,7 +124,66 @@ fills it; Sprint 2's adapter must read it from the pipeline.
 
 ---
 
-**Status:** both raised for the central amendment. Track C did not modify
-`contracts.py` and does not depend on either amendment landing before Sprint 2
-integration — but the real adapter cannot be written honestly until they do,
-because it would have nowhere to read these values from.
+**Status of A-01 and A-02:** ACCEPTED by the coordinator 2026-07-30, being
+applied centrally as contract **v1.1.0** (additive, safe defaults), with two
+additions to the proposed shape — `TokenEstimate.floor_tokens` and
+`TokenEstimate.provenance`. Track C's seam records have been reshaped to match,
+so the rebase turns them into a thin read of `RunResult.tokens_before` /
+`tokens_after` / `reconciliation`. Track C did not modify `contracts.py`.
+
+---
+
+## A-03 — nowhere to carry "the configured ratio was refuted"
+
+**Raised by:** Track C (GUI shell), 2026-07-30, on the v1.1.0 shape
+**Affects:** `TokenEstimate`
+**Proposed severity:** MINOR (additive field with a safe default)
+
+### The case
+
+The coordinator's instruction is explicit: *"when `ratio_refuted` is set (Track
+B's `verify/tokens.py` sets it when the text's own structure contradicts the
+ruled band), the screen must say so plainly."* The announced v1.1.0
+`TokenEstimate` carries `floor_tokens` and `provenance` but no such flag.
+
+The distinction is not cosmetic. Three states have to be told apart on screen:
+
+| state | what the screen must say |
+|---|---|
+| estimated from a ratio that holds | "estimated — <provenance>" |
+| counted, a hard floor | "a floor, not an estimate — <provenance>" |
+| counted, **and the configured ratio is impossible on this text** | "…; the configured ratio did not fit this text, so it was not used" |
+
+The third is the one that matters most, because it is the case the real corpus
+is in: 2.53 chars per pre-token against a ruled band of 3.3–3.6.
+
+### Why a local workaround would be wrong
+
+The GUI could infer it — compare `chars / floor_tokens` against `ratio_low` and
+decide for itself. That puts the refutation *test* in a widget, where it would
+sit alongside Track B's implementation of the same test in `verify/tokens.py`
+and eventually disagree with it. Which value the screen shows and which the
+`processing_log` records would then depend on which code ran.
+
+Parsing it back out of the `provenance` string is worse: it makes a prose field
+load-bearing, so rewording a sentence changes what the screen asserts.
+
+### Proposed shape
+
+```python
+ratio_refuted: bool = False   # on TokenEstimate, defaulted False
+```
+
+Boolean, so identity hashing is unaffected.
+
+### What Track C did in the meantime
+
+The seam's `TokenEstimate` carries the flag explicitly and the mock sets it from
+a measurement of its own text. **Nothing in the GUI decides refutation.** If the
+field is declined, the GUI needs a defined provenance vocabulary instead — but
+it must not be left to a widget either way.
+
+---
+
+**Standing note:** the real adapter cannot be written honestly until A-01 and
+A-02 land, because it would have nowhere to read these values from.

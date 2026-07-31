@@ -39,7 +39,7 @@ second asset."""
 NAME = "Document IQ"
 ACCENT_TAIL = "IQ"
 """The part of the name set in light blue. Split by suffix rather than by index
-so renaming the product does not silently recolour the wrong letters."""
+so renaming the product does not silently recolor the wrong letters."""
 
 CAPTION = "LONG INTERNATIONAL"
 CAPTION_TRACKING = 0.20
@@ -127,9 +127,9 @@ def render_lockup(pal: Palette | None = None, scale: int = SCALE):
     d = ImageDraw.Draw(im)
 
     text_x = pad + tile_px + gap
-    # Optical centring: the name's cap-height block and the caption are treated
-    # as one text column vertically centred on the tile, rather than each being
-    # centred on its own, which would leave the caption looking dropped.
+    # Optical centering: the name's cap-height block and the caption are treated
+    # as one text column vertically centered on the tile, rather than each being
+    # centered on its own, which would leave the caption looking dropped.
     name_baseline = pad + int(tile_px * 0.56)
     cap_baseline = pad + int(tile_px * 0.90)
 

@@ -1,4 +1,4 @@
-"""The brand generators: sampled colours, .ico structure, and determinism.
+"""The brand generators: sampled colors, .ico structure, and determinism.
 
 The determinism claim matters because the icon ships inside the exe: a generator
 whose output moved between runs would make the build unreproducible, and the
@@ -49,7 +49,7 @@ def test_palette_is_sampled_from_the_art_not_transcribed() -> None:
 def test_sampled_pair_is_in_the_ruled_brand_families() -> None:
     """D-07 names the families ``#0E4D80`` navy and ``#2E9FD4`` light blue. The
     sampled values must land in those families — if they do not, either the art
-    changed or the sampler is picking the wrong two colours."""
+    changed or the sampler is picking the wrong two colors."""
     pal = sample_palette()
     assert _distance(pal.navy, "#0E4D80") < 40, pal.navy
     assert _distance(pal.accent, "#2E9FD4") < 40, pal.accent
@@ -152,9 +152,9 @@ def test_generator_output_is_byte_identical_across_runs(module: str,
     assert len(digests) == 1, "generator output differs between runs"
 
 
-def test_lockup_names_the_product_in_two_colours() -> None:
+def test_lockup_names_the_product_in_two_colors() -> None:
     """The D-09 rule that is easiest to lose in a refactor: "IQ" is the accent
-    colour, the rest of the name is navy. Asserted on pixels, since that is
+    color, the rest of the name is navy. Asserted on pixels, since that is
     where the requirement lives."""
     pal = sample_palette()
     im = render_lockup(scale=2).convert("RGB")

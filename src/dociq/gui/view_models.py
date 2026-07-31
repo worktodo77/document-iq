@@ -20,6 +20,7 @@ from dociq.gui.pipeline import (
     DIRECT_CONTEXT_TOKENS,
     ReductionPlan,
     RunOutcome,
+    TokenBasis,
     TokenEstimate,
 )
 
@@ -215,22 +216,50 @@ class SummaryView:
     @property
     def tokens_before(self) -> int:
         return (self.plan.full_tokens if self.plan
-                else self.capacity_before.tokens.high)
+                else self.capacity_before.tokens.tokens)
 
     @property
     def tokens_after(self) -> int:
         return (self.plan.remaining_tokens if self.plan
-                else self.capacity.tokens.high)
+                else self.capacity.tokens.tokens)
 
     def headline(self) -> str:
         """"1.33M → 678K" — the before/after Alex ruled, not a single figure."""
         return f"{compact(self.tokens_before)} → {compact(self.tokens_after)}"
 
     def basis_note(self) -> str:
-        """Where the number comes from, so it is never a bare assertion."""
-        est = self.capacity.tokens
-        return (f"conservative end of a {est.ratio_low}–{est.ratio_high} "
-                "characters-per-token estimate")
+        """Where the figure came from, in the pipeline's words — never the GUI's.
+
+        A screen in an evidentiary tool must not author a provenance claim. The
+        earlier version of this method printed the configured chars-per-token
+        band as if it were the method used; Track B then measured 2.53 chars per
+        pre-token across the record, which makes that band arithmetically
+        unreachable. Printing it was a false provenance claim, and no literal
+        ratio appears here now — only what the pipeline says it did.
+        """
+        basis = self.basis
+        if not basis.provenance:
+            return "basis not recorded"
+        if basis.ratio_refuted:
+            return (f"{basis.provenance}; the configured ratio did not fit "
+                    "this text, so it was not used")
+        if basis.is_bound:
+            return f"a floor, not an estimate — {basis.provenance}"
+        return f"estimated — {basis.provenance}"
+
+    @property
+    def basis(self) -> TokenBasis:
+        if self.plan is not None:
+            return self.plan.basis
+        return TokenBasis.of(self.capacity.tokens)
+
+    @property
+    def is_bound(self) -> bool:
+        return self.basis.is_bound
+
+    def headline_unit(self) -> str:
+        """"tokens" or "tokens at least" — a bound must not read as a point."""
+        return "tokens at least" if self.is_bound else "tokens"
 
     def fits(self) -> bool:
         return self.tokens_after <= self.capacity.capacity
@@ -241,11 +270,16 @@ class SummaryView:
         The over-capacity case is the EXPECTED case on a real matter, so it is
         phrased as a measurement, not as a failure."""
         capacity = self.capacity.capacity
+        lead = "at least " if self.is_bound else ""
         if self.fits():
             pct = 100.0 * self.tokens_after / capacity
-            return f"{pct:.0f}% of direct-context capacity"
-        return (f"{self.tokens_after / capacity:.1f}× above direct-context "
-                "capacity")
+            return f"{lead}{pct:.0f}% of direct-context capacity"
+        factor = self.tokens_after / capacity
+        # One decimal below 10x, none above: "96.9x" reads as precision the
+        # figure does not have, and three digits plus a decimal overflows the
+        # caption on a 1280-wide window.
+        shown = f"{factor:.1f}" if factor < 10 else f"{factor:.0f}"
+        return f"{lead}{shown}× above direct-context capacity"
 
     def route_line(self) -> str:
         """What to do about it — never a dead end.
@@ -257,7 +291,7 @@ class SummaryView:
         if self.fits():
             return ("It fits in a Claude Project as it stands — direct context, "
                     "no retrieval mode.")
-        return ("This is normal for a full matter record. Analyse it with "
+        return ("This is normal for a full matter record. Analyze it with "
                 "Expert Assist in Claude Cowork, which reads the matter folder "
                 "straight from disk — no upload, no capacity limit. Uploading "
                 "to a Project stays possible; it would run in retrieval mode.")

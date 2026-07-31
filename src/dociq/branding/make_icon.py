@@ -6,7 +6,7 @@ overlapping the lower right, the front page carrying a light-blue "IQ" tab.
 
 WHY THIS IS A SCRIPT AND NOT A HAND-DRAWN FILE
 The tile is DERIVED from ``assets/branding/li_monogram_source.png`` — the LI
-bars are recoloured and the globe is carried through from the real brand art,
+bars are recolored and the globe is carried through from the real brand art,
 never redrawn. A brand refresh is a re-run of this script, and the provenance of
 every shipped pixel is this file. Adapted from the LI PDF Cleaner's
 ``make_brand_icon.py`` so the two products' icons stay one family.
@@ -20,7 +20,7 @@ is the 16 px taskbar entry.
 
 At 32 px the three fan edges land as one grey smear and "IQ" as two smudges, so
 below 64 px the overlay says less on purpose. Both levels share the silhouette
-and the colour blocking, so it reads as one icon at every size. The threshold is
+and the color blocking, so it reads as one icon at every size. The threshold is
 judged on the ladder ``--preview`` writes, not asserted.
 
 Usage (from the repo root, with src/ on PYTHONPATH):
@@ -88,7 +88,7 @@ def _font(px: int):
 
 # ------------------------------------------------------------------ brand art
 def _white_mark(src, width: int, navy: tuple[int, int, int]):
-    """The LI monogram with its navy bars recoloured to white.
+    """The LI monogram with its navy bars recolored to white.
 
     Tolerance is generous because the art is antialiased: the bar edges are navy
     blended toward transparent, and leaving them navy would ring the white
@@ -144,7 +144,7 @@ def _moat(stack, navy: tuple[int, int, int], grow: int):
     Without this the white sheets sit directly against the white monogram bars
     and the two shapes fuse — badly at 256 px, fatally at 16 px, where the icon
     became a navy square with an indistinct pale smear. The moat is the tile's
-    own colour, so it reads as the page floating above the mark rather than as
+    own color, so it reads as the page floating above the mark rather than as
     an added outline.
     """
     import numpy as np
@@ -226,7 +226,7 @@ def _stack(w: int, h: int, simple: bool, pal: Palette):
     if simple:
         front = _sheet(w, h, PAPER, navy, 0.08, edge)
         # One accent band where the "IQ" tab sits on the full artwork: at 24 px
-        # this block of colour is the only thing that survives resampling, and
+        # this block of color is the only thing that survives resampling, and
         # it is what makes the small icon and the large icon the same icon.
         ImageDraw.Draw(front).rectangle(
             (int(w * 0.17), int(h * 0.58), int(w * 0.83), int(h * 0.80)),
@@ -407,7 +407,7 @@ def ladder(layers: dict[int, object], pal: Palette, path: Path) -> Path:
         for i, line in enumerate((
             "Every size the .ico ships, at 1:1 on a light desktop",
             f"and on a dark taskbar. Under {SIMPLE_BELOW} px the artwork",
-            "simplifies: same silhouette and colour blocking, one",
+            "simplifies: same silhouette and color blocking, one",
             "page instead of three, no lettering.",
         )):
             d.text((24, 402 + i * 20), line, font=small, fill=(110, 120, 132))

@@ -20,6 +20,7 @@ the real adapter instead.
 
 from __future__ import annotations
 
+import re
 import time
 
 from dociq.contracts import (
@@ -33,6 +34,7 @@ from dociq.contracts import (
     RunResult,
 )
 from dociq.gui.pipeline import (
+    DIRECT_CONTEXT_TOKENS,
     LEVER_AUTOMATIC,
     LEVER_EXPERT,
     FolderPreview,
@@ -44,6 +46,7 @@ from dociq.gui.pipeline import (
     ReductionPlan,
     RunOutcome,
     RunRequest,
+    TokenBasis,
     TokenEstimate,
     config_from,
 )
@@ -55,16 +58,31 @@ from dociq.gui.pipeline import (
 
 CHARS_PER_TOKEN_LOW = 3.3
 CHARS_PER_TOKEN_HIGH = 3.6
-"""D-03's expected calibration band for table-heavy MPR text. **UNCONFIRMED** —
-Track B owns the real measurement against the Claude tokenizer; these are the
-requirement's stated expectations, not measurements."""
+"""D-03's ruled band — **CONFIGURATION, AND REFUTED ON THIS MATERIAL.**
 
-AUTOMATIC_SAVING_TOKENS = 340_000
-AUTOMATIC_SAVING_PAGES = 1_180
-"""Exact-hash duplicate copies and page furniture the tool removes on its own.
+Track B measured 3.03 chars per pre-token on a 40-PDF sample and 2.53 across the
+full record (298 PDFs / 17,732 pages / 49,031,833 chars / 19,388,495 pre-tokens).
+A tokenizer cannot emit fewer tokens than the text has pre-tokens, so a ratio
+above ~3.0 is unreachable here and this band would understate load by 15–45%.
+
+It stays in the fixture because the run still records what was configured — but
+nothing derived from it is displayed as fact, and D-03 is back with Alex for
+re-ruling. Do not replace these numbers with a guessed band."""
+
+# The measured record, for the disclosure the shell shows above every screen.
+MEASURED_DOCUMENTS = 298
+MEASURED_PAGES = 17_732
+MEASURED_CHARS = 49_031_833
+MEASURED_FLOOR_TOKENS = 19_388_495
+"""Track B's full-corpus pre-token count — a floor, not an estimate."""
+
+AUTOMATIC_SAVING_SHARE = 0.14
+"""Share of the record removed as exact-hash duplicates and page furniture.
+
 **ILLUSTRATIVE** — the mock models no duplicates; Track A's inventory (§4 Stage
-1) produces the real figure. Kept as its own lever because it must never be
-merged into the expert's total."""
+1) produces the real figure. Held as a share rather than an absolute so it
+cannot silently stop matching the corpus it is applied to. Its own lever,
+because a mechanical saving must never be merged into the expert's total."""
 
 MINUTES_PER_GIGABYTE = 18
 """**ILLUSTRATIVE** wall-clock rate behind the "about N minutes" line beside the
@@ -84,7 +102,7 @@ SECTIONS: tuple[tuple[str, str, bool], ...] = (
     ("Progress by Discipline", "Progress by discipline", False),
     ("Photographic Record", "Photo logs", True),
     ("HSE Statistics", "HSE statistics tables", True),
-    ("Organisation Charts", "Organisation charts", False),
+    ("Organization Charts", "Organization charts", False),
     ("Transmittal Sheets", "Transmittal sheets", False),
 )
 _DEFAULT_DROPS = frozenset(name for name, _label, drop in SECTIONS if drop)
@@ -147,22 +165,52 @@ _UNSUPPORTED: tuple[tuple[str, str], ...] = (
      "RAR archive — listed only; extract it beside the folder to include its contents"),
 )
 
-_PAGE_TEXT = (
-    "The Contractor advised that topsides module M-04 remained on the fabrication "
-    "yard pending release of the revised piping isometrics. Progress against the "
-    "approved baseline is reported below by discipline, with manhours expended and "
-    "earned value as at the report date. Outstanding technical queries are listed "
-    "at Appendix C together with the dates on which each was raised and the "
-    "response required date. "
+_PAGE_PROSE = (
+    "Progress against the approved baseline is reported below by discipline, "
+    "with manhours expended and earned value as at the report date.\n"
 )
+
+_PAGE_TABLE_ROWS = (
+    "DISC\tPLAN%\tACT%\tVAR\tMHRS\tEV\tCPI\tSPI\n",
+    "PIP\t42.1\t38.6\t-3.5\t18422\t0.92\t0.97\t0.91\n",
+    "STR\t61.0\t60.4\t-0.6\t24109\t0.99\t1.01\t0.99\n",
+    "ELE\t22.8\t17.2\t-5.6\t9033\t0.75\t0.88\t0.76\n",
+    "INS\t15.4\t11.9\t-3.5\t4127\t0.77\t0.90\t0.77\n",
+    "MEC\t55.2\t54.8\t-0.4\t16240\t0.98\t1.00\t0.99\n",
+    "CIV\t88.9\t88.1\t-0.8\t7715\t0.99\t1.02\t0.99\n",
+    "TEL\t31.7\t24.3\t-7.4\t2860\t0.71\t0.84\t0.77\n",
+)
+"""An MPR page is mostly table. Prose-only filler would give the fixture a
+chars-per-pre-token profile no page in the real record has, and the shell would
+then be reviewed against text that flatters it. Whatever ratio this yields is
+measured from the text, never asserted — see :func:`_floor_tokens`."""
+
+_PRE_TOKEN = re.compile(r"\w+|[^\w\s]")
+"""The pre-token split a BPE tokenizer applies before merging.
+
+Counting these gives a HARD LOWER BOUND on the token count: merges only ever
+reduce a pre-token to one token, never below, so no tokenizer can emit fewer
+tokens than there are pre-tokens. That is why the shell prefers this figure to
+any chars-per-token estimate — it is a bound the expert can defend."""
+
+
+def _floor_tokens(text: str) -> int:
+    return len(_PRE_TOKEN.findall(text))
 
 
 def _page_text(doc_index: int, page_no: int) -> str:
-    """Deterministic filler of a plausible length. No randomness anywhere in the
-    mock: a render must be reproducible to be worth reviewing."""
-    want = 430 + ((doc_index * 31 + page_no * 17) % 190)
-    reps = want // len(_PAGE_TEXT) + 1
-    return (_PAGE_TEXT * reps)[:want].strip()
+    """A deterministic MPR-shaped page: a line of prose over a progress table.
+
+    Composed of whole rows rather than truncated to a character budget — a cut
+    that lands mid-table would change the page's token profile depending on
+    where it fell, which is exactly the kind of accident that makes a fixture
+    quietly unrepresentative. No randomness anywhere in the mock: a render must
+    be reproducible to be worth reviewing.
+    """
+    rows = 4 + ((doc_index * 3 + page_no * 5) % 5)
+    body = "".join(_PAGE_TABLE_ROWS[i % len(_PAGE_TABLE_ROWS)]
+                   for i in range(rows))
+    return (_PAGE_PROSE + body).strip()
 
 
 def _section(page_no: int, total: int) -> str:
@@ -174,7 +222,7 @@ def _section(page_no: int, total: int) -> str:
     if page_no % 9 == 0:
         return "HSE Statistics"
     if page_no % 17 == 0:
-        return "Organisation Charts"
+        return "Organization Charts"
     if page_no % 23 == 0:
         return "Transmittal Sheets"
     return "Progress by Discipline"
@@ -232,14 +280,27 @@ def _build_document(index: int, rel_path: str, pages: int, scanned: int,
     return doc
 
 
-def _tokens(chars: int) -> int:
-    """The conservative end of the D-03 range — the number the waterfall shows.
+PROVENANCE_FLOOR = (
+    "counted from this record's own text — one token per pre-token, which no "
+    "tokenizer can go below"
+)
+"""What the shell prints beside every figure it shows. Written here, in the
+pipeline, because the GUI must never author a provenance claim of its own."""
 
-    Conservative means the LOWER chars-per-token ratio, which yields the LARGER
-    token count. An estimate that flatters the corpus is the one that gets
-    someone half way through an upload before it fails.
-    """
-    return round(chars / CHARS_PER_TOKEN_LOW)
+
+def _estimate(text_chars: int, floor: int) -> TokenEstimate:
+    """Build the figure and its provenance together, so they cannot separate."""
+    return TokenEstimate(
+        chars=text_chars,
+        ratio_low=CHARS_PER_TOKEN_LOW,
+        ratio_high=CHARS_PER_TOKEN_HIGH,
+        floor_tokens=floor,
+        provenance=PROVENANCE_FLOOR,
+        # Refuted by measurement, not by opinion: if the text carries more
+        # pre-tokens than the configured ratio allows, the ratio is impossible
+        # on this material and the screen has to say so.
+        ratio_refuted=bool(floor) and (text_chars / floor) < CHARS_PER_TOKEN_LOW,
+    )
 
 
 def _build_plan(documents: tuple[DocumentRecord, ...],
@@ -251,18 +312,20 @@ def _build_plan(documents: tuple[DocumentRecord, ...],
     the frozen contract has nowhere to carry them yet.
     """
     chars: dict[str, int] = {}
+    floor: dict[str, int] = {}
     pages: dict[str, int] = {}
     for doc in documents:
         for page in doc.pages:
             key = page.section or "Progress by Discipline"
             chars[key] = chars.get(key, 0) + len(page.text)
+            floor[key] = floor.get(key, 0) + _floor_tokens(page.text)
             pages[key] = pages.get(key, 0) + 1
 
     levers = [
         ReductionLever(
             key=name,
             label=_LABELS[name],
-            tokens=_tokens(chars.get(name, 0)),
+            tokens=floor.get(name, 0),
             pages=pages.get(name, 0),
             kind=LEVER_EXPERT,
             engaged=apply_profile and name in _DEFAULT_DROPS,
@@ -270,16 +333,49 @@ def _build_plan(documents: tuple[DocumentRecord, ...],
         for name, _label in _LEVER_SECTIONS
         if pages.get(name, 0)
     ]
+    total_floor = sum(floor.values())
     levers.append(ReductionLever(
         key="automatic",
         label="Duplicate copies and page furniture",
-        tokens=AUTOMATIC_SAVING_TOKENS,
-        pages=AUTOMATIC_SAVING_PAGES,
+        tokens=round(total_floor * AUTOMATIC_SAVING_SHARE),
+        pages=round(sum(pages.values()) * AUTOMATIC_SAVING_SHARE),
         kind=LEVER_AUTOMATIC,
         engaged=True,
+        estimated=True,  # the mock models no duplicates; this is a projection
     ))
-    full = _tokens(sum(chars.values()))
-    return ReductionPlan(full_tokens=full, levers=tuple(levers))
+    return ReductionPlan(
+        full_tokens=total_floor,
+        levers=tuple(levers),
+        basis=TokenBasis.of(_estimate(sum(chars.values()), total_floor)),
+    )
+
+
+def at_measured_scale(plan: ReductionPlan) -> ReductionPlan:
+    """The same plan, scaled up to the measured record's token floor.
+
+    The fixture corpus is 8,387 pages; the record Track B measured is 17,732
+    PDF pages carrying a floor of 19.4M tokens — about 97× direct-context
+    capacity, not 3.6×. The screens have to be reviewed at the magnitude they
+    will actually meet, because a two-digit multiplier and a three-digit one are
+    not the same layout problem.
+
+    Shape-preserving and clearly named: this is the fixture at real scale, not a
+    second set of invented figures.
+    """
+    if plan.full_tokens <= 0:
+        return plan
+    factor = MEASURED_FLOOR_TOKENS / plan.full_tokens
+    return ReductionPlan(
+        full_tokens=MEASURED_FLOOR_TOKENS,
+        levers=tuple(
+            ReductionLever(le.key, le.label, round(le.tokens * factor),
+                           round(le.pages * factor), le.kind, le.engaged,
+                           le.estimated)
+            for le in plan.levers
+        ),
+        capacity=plan.capacity,
+        basis=plan.basis,
+    )
 
 
 class MockPipeline:
@@ -292,6 +388,26 @@ class MockPipeline:
         self.step_delay_s = step_delay_s
 
     # -- the API ------------------------------------------------------------
+
+    def disclosure(self) -> str:
+        """Say, on screen, that these figures are a fixture — and how far the
+        fixture sits from the record that was actually measured.
+
+        A shell that looks like the finished product while showing invented
+        numbers is the most expensive misunderstanding this project could ship,
+        and "it was in the handover notes" is not a defence once a screenshot
+        has been forwarded.
+        """
+        pages = sum(p for _r, p, _s, _st in _CORPUS)
+        factor = MEASURED_FLOOR_TOKENS / DIRECT_CONTEXT_TOKENS
+        return (
+            f"Sample data — Sprint-1 shell. These figures come from a fixture of "
+            f"{len(_CORPUS)} documents / {pages:,} pages, not from a real run. "
+            f"The measured record is {MEASURED_DOCUMENTS} PDFs / "
+            f"{MEASURED_PAGES:,} pages with a floor of "
+            f"{MEASURED_FLOOR_TOKENS / 1e6:.1f}M tokens — about {factor:.0f}× "
+            "direct-context capacity."
+        )
 
     def profiles(self) -> tuple[ProfileInfo, ...]:
         return PROFILES
@@ -381,8 +497,16 @@ class MockPipeline:
         )
 
         chars_before = sum(len(p.text) for d in documents for p in d.pages)
+        floor_before = sum(_floor_tokens(p.text)
+                           for d in documents for p in d.pages)
         chars_after = sum(
             len(p.text)
+            for d in documents
+            for p in d.pages
+            if p.disposition is Disposition.KEEP
+        )
+        floor_after = sum(
+            _floor_tokens(p.text)
             for d in documents
             for p in d.pages
             if p.disposition is Disposition.KEEP
@@ -408,10 +532,8 @@ class MockPipeline:
 
         return RunOutcome(
             result=result,
-            tokens_before=TokenEstimate(chars_before, CHARS_PER_TOKEN_LOW,
-                                        CHARS_PER_TOKEN_HIGH),
-            tokens_after=TokenEstimate(chars_after, CHARS_PER_TOKEN_LOW,
-                                       CHARS_PER_TOKEN_HIGH),
+            tokens_before=_estimate(chars_before, floor_before),
+            tokens_after=_estimate(chars_after, floor_after),
             reconciliation=recon,
             output_root=request.output_root,
             plan=_build_plan(tuple(documents), apply_profile),

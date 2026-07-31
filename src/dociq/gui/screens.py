@@ -437,9 +437,18 @@ class SummaryScreen(QWidget):
         head_row.addStretch(1)
         lay.addLayout(head_row)
 
-        self._basis = QLabel("")
-        self._basis.setFont(theme.mono(8))
-        self._basis.setStyleSheet(f"color: {theme.palette.ink_muted};")
+        # Two lines, not one: the capacity comparison is a short mono figure and
+        # the provenance is a sentence. Set as one unwrapped mono label they ran
+        # off the window and forced the whole page wider than the viewport,
+        # clipping the footer buttons — at the measured record's scale the
+        # provenance sentence is long enough to break the layout on its own.
+        self._capacity_line = QLabel("")
+        self._capacity_line.setFont(theme.mono(8))
+        self._capacity_line.setStyleSheet(f"color: {theme.palette.navy};")
+        self._capacity_line.setWordWrap(True)
+        lay.addWidget(self._capacity_line)
+        self._basis = _muted("", theme, 9)
+        self._basis.setWordWrap(True)
         lay.addWidget(self._basis)
         lay.addSpacing(UNIT)
 
@@ -488,7 +497,7 @@ class SummaryScreen(QWidget):
         self._open = _button("Open the output folder", theme)
         self._open.clicked.connect(self.open_output_requested.emit)
         foot.addWidget(self._open)
-        self._claude = _button("Analyse in Claude", theme, "primary")
+        self._claude = _button("Analyze in Claude", theme, "primary")
         self._claude.setEnabled(False)
         self._claude.setToolTip(
             "Available once the pipeline is wired in Sprint 2 — the handoff "
@@ -540,8 +549,9 @@ class SummaryScreen(QWidget):
 
     def _paint_headline(self, view: SummaryView) -> None:
         self._headline.setText(view.headline())
-        self._unit.setText("tokens")
-        self._basis.setText(f"{view.capacity_line()} · {view.basis_note()}")
+        self._unit.setText(view.headline_unit())
+        self._capacity_line.setText(view.capacity_line())
+        self._basis.setText(view.basis_note())
         self._route.setText(view.route_line())
 
     def _toggle_lever(self, key: str) -> None:

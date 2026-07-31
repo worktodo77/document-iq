@@ -1,18 +1,18 @@
-"""Brand colours, SAMPLED from the brand art — never transcribed from prose.
+"""Brand colors, SAMPLED from the brand art — never transcribed from prose.
 
-D-07 names the colours as families (``#0E4D80`` navy, ``#2E9FD4`` light blue)
+D-07 names the colors as families (``#0E4D80`` navy, ``#2E9FD4`` light blue)
 and the branding README is explicit that the exact values must come from
 ``li_monogram_source.png`` at build time. A hex literal copied out of a document
 is a second source of truth that drifts the first time the art is refreshed, so
 this module reads the art instead.
 
 The sampling rule is deliberately blunt and therefore stable: over the fully
-opaque pixels of the art, the two most frequent chromatic colours ARE the brand
+opaque pixels of the art, the two most frequent chromatic colors ARE the brand
 pair — the monogram bars and the globe disc together cover ~82% of the opaque
 area, and nothing else in the file comes close. Ties break on the RGB triple so
 the result cannot depend on dict or set iteration order.
 
-Every other colour the interface uses is derived from that pair by a fixed
+Every other color the interface uses is derived from that pair by a fixed
 blend, so a brand refresh moves the whole system at once.
 """
 
@@ -36,9 +36,9 @@ _NEAR_BLACK = 24
 
 _MIN_PAIR_DISTANCE = 60
 """Squared-free Euclidean RGB distance the accent must clear from the structure
-colour. Anti-aliased fringes of the navy bars are frequent enough to place in
+color. Anti-aliased fringes of the navy bars are frequent enough to place in
 the top few counts; they sit well inside this radius and the globe sits well
-outside it, so the rule separates a fringe from a second brand colour without
+outside it, so the rule separates a fringe from a second brand color without
 tuning against a specific image."""
 
 
@@ -53,7 +53,7 @@ def _blend(fg: tuple[int, int, int], bg: tuple[int, int, int], t: float) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Palette:
-    """The interface's whole colour system, derived from two sampled values."""
+    """The interface's whole color system, derived from two sampled values."""
 
     navy: str
     """Structure: the monogram tile, headings, rules that carry weight."""
@@ -89,13 +89,13 @@ class Palette:
         """Secondary text — captions, units, column labels.
 
         Derived from :attr:`ink` rather than from navy: a 50% navy on white is
-        a pleasant rule colour and an unreadable type colour (~2.5:1 against
+        a pleasant rule color and an unreadable type color (~2.5:1 against
         the ground). This lands near 4.6:1, which small caption type needs."""
         return _blend(_rgb(self.ink), (255, 255, 255), 0.62)
 
     @property
     def hairline(self) -> str:
-        """The editorial grid. One weight, one colour, everywhere."""
+        """The editorial grid. One weight, one color, everywhere."""
         return _blend(self.navy_rgb, (255, 255, 255), 0.16)
 
     @property
@@ -119,8 +119,8 @@ class Palette:
     @property
     def warn(self) -> str:
         """Attention, not alarm: DocIQ flags for review, it never fails a page
-        silently and it never scolds. Amber, fixed — it is a status colour, not
-        a brand colour, and must not shift when the brand art is refreshed."""
+        silently and it never scolds. Amber, fixed — it is a status color, not
+        a brand color, and must not shift when the brand art is refreshed."""
         return "#B26A00"
 
     @property
@@ -186,7 +186,7 @@ def _sample(path: Path) -> Palette:
             break
     if accent is None:
         raise ValueError(
-            f"{path}: only one brand colour found — the art is not the LI monogram"
+            f"{path}: only one brand color found — the art is not the LI monogram"
         )
     # The lighter of the two is the accent by construction of the family: the
     # globe disc is light blue on a navy field, never the reverse.

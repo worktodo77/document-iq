@@ -48,12 +48,12 @@ def _load_fonts() -> None:
               f"{', '.join(missing)}")
 
 from dociq.gui.main_window import DETAIL, PROGRESS, SETUP, SUMMARY, MainWindow  # noqa: E402
-from dociq.gui.mock_pipeline import MockPipeline  # noqa: E402
+from dociq.gui.mock_pipeline import MockPipeline, at_measured_scale  # noqa: E402
 from dociq.gui.view_models import FLAG_OCR, FLAG_RECONCILIATION  # noqa: E402
 from dociq.gui.pipeline import RunRequest  # noqa: E402
 
 SIZE = (1180, 800)
-TALL = 1020
+TALL = 1100
 """Height used for the summary renders — the waterfall makes that page taller
 than a laptop viewport, and it scrolls in the app."""
 
@@ -125,10 +125,17 @@ def render(out: Path) -> int:
     #      its own render: the stack re-flows and the screen says the files on
     #      disk have not caught up.
     plan = outcome.plan
-    for key in ("Organisation Charts", "Transmittal Sheets"):
+    for key in ("Organization Charts", "Transmittal Sheets"):
         window.summary.plan_changed.emit(plan.with_toggled(key))
         plan = plan.with_toggled(key)
     _grab(window, out / "04b_summary_toggled.png")
+
+    # 4d — the fixture at the MEASURED record's scale (19.4M token floor, ~97×
+    #      capacity). Reviewed separately because a two-digit multiplier and a
+    #      three-digit one are different layout problems, and the real record is
+    #      the one the screen has to survive.
+    window.summary.plan_changed.emit(at_measured_scale(outcome.plan))
+    _grab(window, out / "04d_summary_measured_scale.png")
 
     # 4c — every expert lever off: the record at full size, still not a failure
     #      state. This is the case a first-time operator lands in.

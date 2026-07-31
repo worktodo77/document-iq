@@ -1,7 +1,7 @@
 """The D-07 "counsel docket" design system, in one place.
 
-Every colour comes from :mod:`dociq.branding.palette`, which samples the brand
-art — no hex literal for a brand colour appears anywhere else in the GUI. Every
+Every color comes from :mod:`dociq.branding.palette`, which samples the brand
+art — no hex literal for a brand color appears anywhere else in the GUI. Every
 spacing value is a multiple of :data:`UNIT`, so the hairline grid stays a grid
 rather than a set of numbers that happen to look aligned.
 
@@ -59,7 +59,7 @@ def font_report() -> str:
 
 @dataclass(frozen=True)
 class Theme:
-    """Resolved fonts and colours for one application run.
+    """Resolved fonts and colors for one application run.
 
     The family fields carry a ``_family`` suffix because the type scale below
     exposes methods named for the *roles* (``mono()``, ``label()``…). A field
@@ -125,7 +125,7 @@ class Theme:
         f.setWeight(QFont.Weight.DemiBold)
         return f
 
-    # -- colour -------------------------------------------------------------
+    # -- color -------------------------------------------------------------
 
     def color(self, name: str) -> QColor:
         return QColor(self.palette.as_dict()[name])
@@ -146,7 +146,7 @@ def stylesheet(theme: Theme) -> str:
 
     Kept small on purpose: anything with a shape of its own is painted by a
     widget in :mod:`dociq.gui.widgets` where the geometry can be reasoned about,
-    and QSS is used only for flat fills, type colour and the hairline borders.
+    and QSS is used only for flat fills, type color and the hairline borders.
     """
     p = theme.palette
     return f"""

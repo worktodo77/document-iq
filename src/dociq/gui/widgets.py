@@ -153,6 +153,34 @@ def load_lockup() -> QPixmap | None:
     return None if pix.isNull() else pix
 
 
+class DisclosureBar(QWidget):
+    """A standing notice under the header, for what the run itself is.
+
+    Used by the Sprint-1 shell to say its figures come from a fixture and how
+    far that fixture sits from the measured record. It is not dismissible and it
+    is not a tooltip: a screenshot of this window will be forwarded to people
+    who were not in the conversation, and the caveat has to travel with it.
+    """
+
+    def __init__(self, text: str, theme: Theme, parent=None) -> None:
+        super().__init__(parent)
+        self._theme = theme
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(UNIT * 5, UNIT, UNIT * 5, UNIT)
+        label = QLabel(text)
+        label.setFont(theme.body(9))
+        label.setWordWrap(True)
+        label.setStyleSheet(f"color: {theme.palette.warn}; background: transparent;")
+        lay.addWidget(label, 1)
+
+    def paintEvent(self, _event) -> None:
+        p = self._theme.palette
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(p.warn_tint))
+        painter.fillRect(0, self.height() - HAIRLINE, self.width(), HAIRLINE,
+                         QColor(p.warn))
+
+
 class Chip(QWidget):
     """A flag, as D-07 asks for them: a pill with a count and a plain label,
     clickable through to the detail behind it."""
@@ -221,7 +249,7 @@ class WaterfallRow(QWidget):
     toggles that section's KEEP/DROP and the whole waterfall re-flows. There is
     no separate checklist — the picture and the next action are the same object.
 
-    Colour encodes CATEGORY only (expert lever / automatic saving / capacity),
+    Color encodes CATEGORY only (expert lever / automatic saving / capacity),
     never magnitude: every row states its own number and its own state in words,
     so the screen carries the same information in monochrome.
     """
@@ -337,10 +365,14 @@ class WaterfallRow(QWidget):
         painter.setFont(font)
         self._mark(painter, UNIT * 0.5, cy)
         painter.setPen(QColor(text_color))
+        # Elided rather than clipped: a label cut mid-glyph renders a tofu box
+        # that reads as a missing font, not as a truncation.
+        label_w = self.LABEL_W - UNIT * 3.5
         painter.drawText(
-            QRectF(UNIT * 3, 0, self.LABEL_W - UNIT * 3.5, h),
+            QRectF(UNIT * 3, 0, label_w, h),
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-            self._label,
+            QFontMetrics(font).elidedText(self._label, Qt.TextElideMode.ElideRight,
+                                          int(label_w)),
         )
 
         bar_x = self.LABEL_W
@@ -357,11 +389,22 @@ class WaterfallRow(QWidget):
             # the bars move toward it. A solid fill here would read as another
             # quantity in the same series.
             pen = QPen(QColor(p.navy), 1.6)
-            pen.setStyle(Qt.PenStyle.DashLine)
-            painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(QRectF(bar_x + 0.8, bar_top + 0.8,
-                                    max(2.0, fill_w - 1.6), bar_h - 1.6))
+            if fill_w < UNIT * 1.5:
+                # Against the measured record the capacity is ~1% of the bar,
+                # and a dashed rectangle that narrow renders as a smudge that
+                # reads like a glyph fault. A tick says "reference line" at any
+                # width. The figure itself is printed in the delta column
+                # either way, so nothing is hidden by the change of shape.
+                painter.setPen(pen)
+                painter.drawLine(int(bar_x + max(1.0, fill_w)), int(bar_top - 2),
+                                 int(bar_x + max(1.0, fill_w)),
+                                 int(bar_top + bar_h + 2))
+            else:
+                pen.setStyle(Qt.PenStyle.DashLine)
+                painter.setPen(pen)
+                painter.drawRect(QRectF(bar_x + 0.8, bar_top + 0.8,
+                                        max(2.0, fill_w - 1.6), bar_h - 1.6))
         else:
             color = {
                 self.TOTAL: QColor(p.hairline_strong),
@@ -461,12 +504,15 @@ class ReductionWaterfall(QWidget):
             if not lever.locked:
                 continue
             running -= lever.tokens if lever.engaged else 0
+            note = "automatic, estimated" if lever.estimated else "automatic"
             rows.append(WaterfallRow(
                 WaterfallRow.AUTOMATIC, lever.key, lever.label, running / full,
-                f"−{compact_tokens(lever.tokens)}  automatic", self._theme,
+                f"−{compact_tokens(lever.tokens)}  {note}", self._theme,
                 hint=("Removed mechanically — exact duplicates and page "
                       "furniture. Not an expert decision, and recorded "
-                      "separately in the log."),
+                      "separately in the log."
+                      + (" This saving is projected, not counted."
+                         if lever.estimated else "")),
             ))
 
         rows.append(WaterfallRow(
@@ -474,11 +520,17 @@ class ReductionWaterfall(QWidget):
             compact_tokens(max(0, running)), self._theme,
             hint="The reduced corpus, as it stands with these choices.",
         ))
+        # "unconfirmed" is on the row, not only in its tooltip: the capacity is
+        # the line every other bar is judged against, and an unverified
+        # reference presented as a fact would put every comparison above it in
+        # doubt without saying so.
         rows.append(WaterfallRow(
             WaterfallRow.CAPACITY, "capacity", "Direct-context capacity",
-            plan.capacity / full, compact_tokens(plan.capacity), self._theme,
+            plan.capacity / full,
+            f"{compact_tokens(plan.capacity)}  unconfirmed", self._theme,
             hint=("How much a Claude Project holds without falling back to "
-                  "retrieval. This figure is not yet confirmed."),
+                  "retrieval. This figure has not been confirmed against "
+                  "Anthropic's published limits."),
         ))
 
         for row in rows:

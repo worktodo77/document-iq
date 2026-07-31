@@ -206,7 +206,7 @@ def test_a_locked_row_is_not_clickable(window) -> None:
 
 
 def test_every_row_states_its_own_number_and_state_in_words(window) -> None:
-    """Non-visual parity: colour encodes category, never magnitude, so each row
+    """Non-visual parity: color encodes category, never magnitude, so each row
     must be readable in monochrome."""
     from dociq.gui.widgets import ReductionWaterfall, WaterfallRow
 
@@ -249,6 +249,93 @@ def test_the_scope_and_the_time_sit_beside_the_action(window) -> None:
     scope = window.setup._scope.text()
     assert f"{preview.file_count:,} documents" in scope
     assert f"about {preview.estimated_minutes} minutes" in scope
+
+
+def _no_horizontal_overflow(screen) -> bool:
+    from PySide6.QtWidgets import QScrollArea
+
+    area = screen.findChild(QScrollArea)
+    return area.horizontalScrollBar().maximum() == 0
+
+
+def test_the_summary_never_scrolls_sideways_at_any_scale(window) -> None:
+    """Regression: the basis line was one unwrapped mono label. At the measured
+    record's scale the provenance sentence made the page wider than the window
+    and clipped the footer buttons off the right-hand edge."""
+    from dociq.gui.mock_pipeline import at_measured_scale
+
+    pipeline = MockPipeline()
+    outcome = pipeline.run(_request(), lambda _e: None, lambda: False)
+    window.resize(1040, 720)  # the product's minimum window
+    window.show()
+    window.show_outcome(outcome)
+    QApplication.processEvents()
+    assert _no_horizontal_overflow(window.summary)
+
+    window.summary.plan_changed.emit(at_measured_scale(outcome.plan))
+    QApplication.processEvents()
+    assert _no_horizontal_overflow(window.summary)
+
+
+def test_a_three_digit_multiplier_still_fits(window) -> None:
+    """A larger matter than the measured one puts three digits in the caption."""
+    from dociq.gui.pipeline import ReductionPlan
+
+    pipeline = MockPipeline()
+    outcome = pipeline.run(_request(), lambda _e: None, lambda: False)
+    window.resize(1040, 720)
+    window.show()
+    window.show_outcome(outcome)
+    huge = ReductionPlan(
+        full_tokens=250 * outcome.plan.capacity,
+        levers=outcome.plan.levers,
+        capacity=outcome.plan.capacity,
+        basis=outcome.plan.basis,
+    )
+    window.summary.plan_changed.emit(huge)
+    QApplication.processEvents()
+    assert "×" in window.summary._capacity_line.text()
+    assert _no_horizontal_overflow(window.summary)
+
+
+def test_a_stand_in_pipeline_discloses_itself_on_screen(window) -> None:
+    """A shell that looks like the finished product while showing invented
+    numbers is the most expensive misunderstanding this project could ship."""
+    from dociq.gui.widgets import DisclosureBar
+
+    bars = window.findChildren(DisclosureBar)
+    assert len(bars) == 1
+    text = bars[0].findChild(QLabel).text()
+    assert "Sample data" in text
+    assert "298" in text and "17,732" in text  # the measured record, stated
+
+    class _Silent(MockPipeline):
+        def disclosure(self) -> str:
+            return ""
+
+    quiet = MainWindow(pipeline=_Silent())
+    try:
+        assert quiet.findChildren(DisclosureBar) == []
+    finally:
+        quiet.close()
+
+
+def test_the_chrome_is_us_english() -> None:
+    """Long International is a US firm and §8 specifies "Analyze in Claude"."""
+    import re
+
+    gui = Path(__file__).resolve().parents[1] / "src" / "dociq"
+    en_gb = re.compile(
+        r"\b(analyse|analysed|organis\w+|recognis\w+|colour\w*|centre|"
+        r"licence|behaviour\w*)\b", re.IGNORECASE)
+    offenders = []
+    for path in sorted(gui.rglob("*.py")):
+        if path.name == "contracts.py":  # frozen — not ours to edit
+            continue
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if en_gb.search(line):
+                offenders.append(f"{path.name}:{n}: {line.strip()}")
+    assert not offenders, "en-GB spelling found:\n" + "\n".join(offenders)
 
 
 def test_the_offline_indicator_is_always_present(window) -> None:
