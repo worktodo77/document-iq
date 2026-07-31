@@ -296,6 +296,12 @@ def scan(root: Path, *, recursive: bool = True,
                 break
             except OSError as exc:
                 first_error = first_error or exc
+                if attempt == 1:
+                    # A share lock or a backup agent's handle is measured in
+                    # milliseconds. Retrying in the same instruction would test
+                    # almost nothing; a tenth of a second costs nothing on a
+                    # path that only runs when a read has already failed.
+                    time.sleep(0.1)
                 if attempt == 2:
                     # Unreadable at hash time, twice. Recorded as a Tier-2
                     # zero-hash entry so it still appears in the inventory: a
@@ -737,9 +743,35 @@ def _summarize(recs: Sequence[DocumentRecord]) -> str:
     return head + "; " + " | ".join(ex.clip_message(b, 200) for b in shown) + tail
 
 
+def _abandoned(entry: FileEntry, config: RunConfig, where: str,
+               detail: str = "") -> DocumentRecord:
+    """The record for a file the watchdog gave up on.
+
+    The message carries NO elapsed time. It used to — "abandoned after 37s" —
+    and ``DocumentRecord.error`` is hashed content, so two runs that both timed
+    out on the same file produced different bytes because one machine was a
+    little busier than the other. That is a determinism break living inside the
+    guard whose job is to stop one stuck file hanging the run, and it would
+    have shown up on exactly the corpora big enough to need the guard.
+
+    How long it took is a fact about the invocation and goes in the run notes.
+    That the limit was reached is a fact about the document, and it is what the
+    record keeps.
+    """
+    msg = f"abandoned {where}: extraction did not finish within the per-file limit"
+    if detail:
+        msg += f" ({detail})"
+    return _record(entry, entry.path.name, entry.ext, entry.size_bytes,
+                   entry.sha256,
+                   ex.ExtractedDoc(status=ProcessingStatus.FAILED,
+                                   error=ex.clip_message(msg, 300)),
+                   config=config)
+
+
 def _extract_serially(entry: FileEntry, config: RunConfig,
                       opt: ex.ExtractOptions,
-                      timeout_s: float) -> list[DocumentRecord]:
+                      timeout_s: float,
+                      notes: RunNotes) -> list[DocumentRecord]:
     """Re-extract ``entry`` alone, still under a watchdog.
 
     Alone is the point — nothing else of this run's is running — but "alone and
@@ -761,15 +793,13 @@ def _extract_serially(entry: FileEntry, config: RunConfig,
             return fut.result(timeout=timeout_s)
         except Exception as exc:
             fut.cancel()
-            waited = int(time.monotonic() - t0)
-            msg = (f"abandoned after {waited}s on the serial retry"
-                   if not str(exc) else
-                   f"serial retry failed after {waited}s: {exc}")
-            return [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
-                            entry.sha256,
-                            ex.ExtractedDoc(status=ProcessingStatus.FAILED,
-                                            error=ex.clip_message(msg, 300)),
-                            config=config)]
+            notes.invocation.append(
+                f"SERIAL RETRY ABANDONED: '{entry.rel_path}' was re-read alone "
+                f"and still did not finish, after {int(time.monotonic() - t0)}s "
+                f"against a {timeout_s:.0f}s limit"
+                + (f" ({exc})" if str(exc) else ""))
+            return [_abandoned(entry, config, "on the serial retry",
+                               ex.sanitize_message(str(exc))[:120])]
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
@@ -807,7 +837,7 @@ def _retry_degraded(produced: dict[str, list[DocumentRecord]],
         if entry is None:  # pragma: no cover — produced keys come from entries
             continue
         first = produced[rel]
-        again = _extract_serially(entry, config, opt, timeout_s)
+        again = _extract_serially(entry, config, opt, timeout_s, notes)
         p_first, p_again = _outcome_profile(first), _outcome_profile(again)
         if p_again <= p_first:
             produced[rel] = again
@@ -1019,14 +1049,12 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
                         inflight.pop(fut, None)
                         started.pop(e.rel_path, None)
                         fut.cancel()
-                        rec = _record(e, e.path.name, e.ext, e.size_bytes,
-                                      e.sha256,
-                                      ex.ExtractedDoc(
-                                          status=ProcessingStatus.FAILED,
-                                          error=f"abandoned after "
-                                                f"{int(now - st)}s (extraction "
-                                                f"did not finish)"),
-                                      config=config)
+                        rec = _abandoned(e, config, "inside the extraction pool")
+                        notes.invocation.append(
+                            f"WATCHDOG: '{e.rel_path}' was abandoned after "
+                            f"{int(now - st)}s of execution against a "
+                            f"{opts.file_timeout_s:.0f}s per-file limit; it is "
+                            "re-read serially before the run writes it off.")
                         produced[e.rel_path] = [rec]
                         journal.add(e.rel_path, [rec])
                         n_failed_so_far += 1
@@ -1091,6 +1119,11 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
     documents.sort(key=document_sort_key)
     all_unsupported = sorted(list(unsupported) + tier2_children,
                              key=document_sort_key)
+    # The final progress tick reports the count AFTER the retry pass. Leaving
+    # the pooled count would tell the operator the run failed on documents it
+    # went back and read.
+    n_failed_so_far = sum(1 for d in documents
+                          if d.status is ProcessingStatus.FAILED)
     emit_progress("")
     return RunResult(config=config, documents=tuple(documents),
                      unsupported=tuple(all_unsupported),

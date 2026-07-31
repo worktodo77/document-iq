@@ -23,6 +23,8 @@ the hashed ``content``.
 from __future__ import annotations
 
 import json
+import re
+import time
 from dataclasses import replace
 
 from dociq import pipeline
@@ -303,3 +305,43 @@ def test_a_permanently_unreadable_file_is_not_called_an_unknown_format(
     row = next(d for d in r.unsupported if d.rel_path == "locked.pdf")
     assert "Could not be opened for reading" in (row.error or "")
     assert ex.UNKNOWN_HINT not in (row.error or "")
+
+
+def test_an_abandoned_extraction_records_no_wall_clock_in_hashed_content(
+        tmp_path, monkeypatch):
+    """A watchdog timeout wrote "abandoned after 37s" into the document's
+    error, and that string is hashed content. Two runs over the same corpus
+    that both time out on the same file therefore produced different bytes,
+    by construction, on a machine that was merely a little busier the second
+    time — a determinism break hiding inside the guard that exists to keep a
+    stuck file from hanging the run.
+
+    How long it took is a fact about the invocation. That the limit was
+    reached is a fact about the document, and it is the one the record keeps.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "slow.txt").write_text("x", encoding="utf-8")
+    for i in range(4):  # so the pool loop returns before the slow file does
+        (src / f"quick{i}.txt").write_text("y", encoding="utf-8")
+    real = ex.extract
+
+    def slow(filename, raw, opt=None):
+        if filename == "slow.txt":
+            time.sleep(8)
+        return real(filename, raw, opt)
+
+    monkeypatch.setattr(walker.ex, "extract", slow)
+
+    errors = []
+    for i in range(2):
+        notes = walker.RunNotes()
+        r = walker.run(_cfg(src, tmp_path / f"out{i}"),
+                       _opts(file_timeout_s=0.3), notes)
+        doc = next(d for d in r.documents if d.rel_path == "slow.txt")
+        assert doc.status is ProcessingStatus.FAILED
+        assert not re.search(r"\d", doc.error or ""), doc.error
+        errors.append(doc.error)
+        assert any("did not finish" in n for n in notes.messages()), notes.messages()
+
+    assert errors[0] == errors[1], errors

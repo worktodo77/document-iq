@@ -448,8 +448,13 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # list that becomes hashed `content` — would make a run that needed a retry
     # produce different bytes from a run that did not, which is the very defect
     # the retry exists to remove.
-    all_warnings = (warnings + [w.message for w in renumbering]
-                    + walk_notes.messages())
+    #
+    # They go FIRST, not last. The run summary renders the first four warnings
+    # and folds the rest into a count, so appending a "this document failed
+    # under load and was re-read" disclosure to the end of a list of 300 would
+    # satisfy the letter of "recorded" and none of the point.
+    all_warnings = (walk_notes.messages() + warnings
+                    + [w.message for w in renumbering])
 
     # ---- Stage 6 (measure first — the log records the numbers) -------------
     t = time.monotonic()
