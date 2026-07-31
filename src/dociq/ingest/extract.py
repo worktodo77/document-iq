@@ -1,6 +1,6 @@
 """Per-page text extraction — vendored from MIP 3.9 ``api/docs_extract.py``.
 
-The §11 reuse audit ruled REUSE on that module, so its hard-won behaviour is
+The §11 reuse audit ruled REUSE on that module, so its hard-won behavior is
 kept verbatim: hybrid per-page native/OCR routing, content-sniffing recovery
 for misnamed production files, ZIP anti-DoS guards, per-page OCR failure
 isolation, XLSX/CSV row caps with disclosed truncation, CSV encoding and
