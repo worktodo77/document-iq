@@ -746,10 +746,14 @@ def _extract_pptx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                     cells = [cell.text.strip() for cell in row.cells]
                     if any(cells):
                         parts.append("\t".join(cells))
+        # has_notes_slide FIRST: python-pptx's notes_slide property *creates* a
+        # notes slide when none exists. Reading it unguarded manufactures parts
+        # the source file never had, on every slide of every deck —
+        # unacceptable in a tool whose claim is that every output is
+        # mechanically derived from the source.
         try:
-            notes_slide = slide.notes_slide
-            if notes_slide is not None:
-                for ph in notes_slide.placeholders:
+            if slide.has_notes_slide:
+                for ph in slide.notes_slide.placeholders:
                     if ph.has_text_frame:
                         note_text = ph.text_frame.text.strip()
                         if note_text:

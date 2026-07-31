@@ -156,3 +156,57 @@ def test_clean_text_carries_a_marker_for_every_page_including_empty(emitted):
     text = (out / "clean_text" / f"{ids[doc.rel_path]}.txt").read_text(
         encoding="utf-8")
     assert text.count("===== PAGE") == doc.pages_in == 3
+
+
+def test_an_empty_output_root_is_a_hard_failure_not_a_stable_hash(tmp_path):
+    """An empty manifest hashes perfectly stably, so two runs that produced
+    nothing would compare byte-identical and the gate would go green on a
+    pipeline that did no work."""
+    with pytest.raises(manifest.EmptyOutputError):
+        manifest.build(tmp_path / "never-created")
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(manifest.EmptyOutputError):
+        manifest.build(tmp_path / "empty")
+    assert manifest.build(tmp_path / "empty", require_outputs=False).deterministic == {}
+
+
+def test_determinism_reports_a_run_that_produced_nothing(tmp_path, monkeypatch):
+    from dociq.verify import determinism
+
+    monkeypatch.setattr(determinism, "_one_run", lambda src, out, seed: None)
+    rep = determinism.prove(tmp_path, runs=3, workdir=tmp_path / "det")
+    assert not rep.ok
+    assert len(rep.failures) == 3
+    assert any("no subject" in f or "does not exist" in f for f in rep.failures)
+
+
+def test_pptx_extraction_never_touches_notes_slide_on_a_deck_without_notes(
+        monkeypatch):
+    """python-pptx's ``notes_slide`` property CREATES a notes slide when none
+    exists. Reading it unguarded manufactures parts the source file never had,
+    on every slide of every deck. Make the property fatal and prove the
+    extractor no longer reaches it."""
+    import io as _io
+
+    from pptx import Presentation
+    from pptx.slide import Slide
+
+    from dociq.ingest import extract as _ex
+
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    buf = _io.BytesIO()
+    prs.save(buf)
+
+    class _Touched(BaseException):
+        """Not an Exception: the extractor wraps the notes read in a broad
+        ``except Exception`` — a probe that the code under test can swallow is
+        a probe that cannot fail."""
+
+    def explode(self):
+        raise _Touched("notes_slide read on a deck with no notes")
+
+    monkeypatch.setattr(Slide, "notes_slide", property(explode))
+    got = _ex.extract("deck.pptx", buf.getvalue())
+    assert got.status is not ProcessingStatus.FAILED
+    assert len(got.pages) == 1

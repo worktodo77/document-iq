@@ -60,6 +60,34 @@ and the cap is applied after sorting, with the omission disclosed.
 widths 1/2/4/8/16, and `test_error_cap_keeps_a_deterministic_slice…` red on the
 cap. Both restored to green after.
 
+**D-A4 — an empty output root produced a stable, passing corpus hash.**
+`manifest.build()` on a directory holding none of the claimed artifacts
+returned an empty manifest — which hashes perfectly stably, so two runs that
+produced *nothing* compared byte-identical and the determinism gate went green
+on a pipeline that did no work. Found while spot-checking an artifact against a
+mistyped path. `build()` now raises `EmptyOutputError` unless
+`require_outputs=False`, and `determinism.prove()` records such a run as a
+failure rather than skipping it. *Fail-before:* the new test asserts the raise;
+before the guard, `build()` returned `corpus_sha256 ddb0faadea310a47…` for
+`C:\does
+ot\exist`.
+
+**D-A5 — PPTX extraction manufactured notes slides in the source document.**
+python-pptx's `slide.notes_slide` property *creates* a notes slide when none
+exists (documented side effect). The vendored code read it unguarded on every
+slide, so a 30-slide deck with 3 real notes pages had 27 notes-slide parts
+built that the file never contained. Nothing is written back, so no file was
+corrupted — but a tool whose claim is "every output is mechanically derived
+from the source" should not be constructing parts of the source. Guarded with
+`has_notes_slide`. *Measured:* it is **not** a material performance problem —
+the largest deck in the corpus (34.6 MB, 30 slides) parsed in 0.16 s unguarded
+and 0.09 s guarded. The initial hypothesis that PPTX was the corpus bottleneck
+was wrong, and is recorded as wrong.
+*Fail-before:* the probe replaces `notes_slide` with a raiser derived from
+`BaseException` — the extractor wraps the notes read in a broad
+`except Exception`, so an `AssertionError` probe would have been swallowed and
+could never have failed. Unguarding the read turns it red.
+
 **D-A3 — error messages were truncated silently** (`[:200]`, `[:300]`,
 `[:400]`). A bound that removes text without a mark is a silent cap.
 `clip_message()` appends `[…truncated at N chars]`; every site now uses it.
@@ -72,8 +100,11 @@ it would be read after interpreter start and the varied-seed claim would be
 unfalsifiable. Comparison is over the manifest, i.e. exactly the four artifacts
 the claim names.
 
-- **8 runs, 8 distinct seeds** — in the selftest, every invocation.
-- **30 runs, 30 distinct seeds** — see §3.1.
+- **8 runs, 8 distinct seeds** — in the selftest, every invocation. Result:
+  1 distinct corpus hash, 0 diffs.
+- **30 runs, 30 distinct `PYTHONHASHSEED` values** — result: **1 distinct
+  corpus hash, 0 diffs, 0 failures**, `corpus_sha256`
+  `b587bb6af8b3c97dfdbf43e6832c44fb4480d70e218b9fe5cc17c547e9cacc6e`.
 - **rapidocr engine stability: 30 repeats on a real scanned MPR page → 1
   distinct result**, identical text and identical per-line confidences to 6
   decimal places (bake-off §3). This is the precondition for the claim over any
@@ -185,7 +216,25 @@ change extracted bytes travels in `ExtractOptions` / `RunConfig`. MIP 3.9's
 mutable `_DATE_CONVENTION` global was **not** vendored — the convention is a
 parameter in `dating.detect_dates`.
 
-## 5. Known gaps, stated rather than papered over
+## 5. Coordination note for Track B — `parent_doc_id` before Stage 3b
+
+Track A produces records **before** doc IDs exist: `doc_id` is `""` on every
+record it emits, because Stage 3b is Track B's. An archive member therefore
+cannot carry its parent's *doc ID* — that ID has not been assigned yet.
+
+Track A sets `parent_doc_id` to the **parent's `rel_path`** and
+`container_order` to the member's position in `infolist()` order. Track B's ID
+assigner must remap `parent_doc_id` from rel_path to the assigned doc ID at
+the same moment it assigns IDs.
+
+This is not a contract violation — the field is a string and holds one — but
+the field name invites the assumption that it already holds a doc ID, and an
+assigner that assumes so would emit `LI-06881.01` children hung off nothing.
+Flagged rather than worked around. It is not raised as a stop-the-line event
+because the contract *can* express the linkage; what is underspecified is the
+handover point, which is a coordination question.
+
+## 6. Known gaps, stated rather than papered over
 
 1. **`verify/probe_emit.py` is provisional and must be deleted at
    integration**, not merged. Track B owns `emit/`. It exists because a

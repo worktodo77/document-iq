@@ -28,7 +28,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..contracts import CONTRACT_VERSION, canonical_json
+from ..contracts import CONTRACT_VERSION, DocIQError, canonical_json
 
 MANIFEST_NAME = "output_manifest.json"
 
@@ -126,9 +126,28 @@ def _log_content_hash(path: Path) -> str | None:
         canonical_json(data[LOG_CONTENT_KEY]).encode("utf-8")).hexdigest()
 
 
-def build(output_root: Path) -> Manifest:
-    """Hash the outputs present under ``output_root``."""
+class EmptyOutputError(DocIQError):
+    """The output root holds none of the artifacts the claim is about.
+
+    An empty manifest still produces a perfectly stable ``corpus_sha256``, so
+    two runs that produced *nothing* compare byte-identical and the determinism
+    gate goes green on an empty folder. A gate that passes when the pipeline
+    did no work is worse than no gate, so this is a hard failure rather than
+    an empty result.
+    """
+
+
+def build(output_root: Path, *, require_outputs: bool = True) -> Manifest:
+    """Hash the outputs present under ``output_root``.
+
+    Args:
+        require_outputs: raise :class:`EmptyOutputError` when nothing the claim
+            covers is present. Off only for tests that build a manifest of a
+            deliberately empty tree.
+    """
     output_root = Path(output_root)
+    if require_outputs and not output_root.is_dir():
+        raise EmptyOutputError(f"output root does not exist: {output_root}")
     man = Manifest()
 
     covered: set[Path] = set()
@@ -157,6 +176,12 @@ def build(output_root: Path) -> Manifest:
             man.excluded[rel] = EXCLUDED_REASONS[rel]
         else:
             man.unclassified.append(rel)
+
+    if require_outputs and not man.deterministic:
+        raise EmptyOutputError(
+            f"{output_root} holds none of {DETERMINISTIC_PATTERNS} — the "
+            "byte-identical claim has no subject, and comparing two empty "
+            "manifests would pass trivially")
     return man
 
 

@@ -98,13 +98,22 @@ def prove(source_root: Path, *, runs: int = 8,
         if err:
             rep.failures.append(f"run {i} (seed {seed}): {err}")
             continue
-        man = mf.build(out)
+        try:
+            man = mf.build(out)
+        except mf.EmptyOutputError as exc:
+            # A run that produced nothing must not be compared as if it had:
+            # two empty manifests are byte-identical to each other.
+            rep.failures.append(f"run {i} (seed {seed}): {exc}")
+            continue
         manifests.append(man)
         rep.corpus_hashes.append(man.corpus_sha256)
         if man.unclassified:
             rep.diffs.append(f"run {i}: unclassified outputs "
                              f"{sorted(man.unclassified)}")
 
+    if len(manifests) < runs:
+        rep.diffs.append(f"only {len(manifests)} of {runs} runs produced "
+                         "comparable output")
     for i in range(1, len(manifests)):
         for d in mf.compare(manifests[0], manifests[i]):
             rep.diffs.append(f"run 0 vs run {i}: {d}")
