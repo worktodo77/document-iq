@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dociq.contracts import IdRegime, document_sort_key
+from dociq.contracts import IdRegime, content_hash, document_sort_key
 from dociq.docid.assign import (
     MatchMethod,
     assign_doc_ids,
@@ -15,6 +15,7 @@ from dociq.docid.assign import (
 from dociq.docid.masterindex import load_master_index
 from dociq.docid.reconcile import (
     IssuedIdLedger,
+    LedgerEntry,
     detect_renumbering,
     reconcile,
 )
@@ -158,6 +159,72 @@ def test_container_children_take_parent_derived_ids(tmp_path):
     assert ids["bundle.zip"] == "LI-06881"
     assert ids["bundle.zip/member0.pdf"] == "LI-06881.01"
     assert ids["bundle.zip/member2.pdf"] == "LI-06881.03"
+
+
+def test_container_children_have_their_parent_remapped_to_a_doc_id(tmp_path):
+    """Stage 1 names the parent by rel_path; after Stage 3b it must be a Doc ID.
+
+    Without the remap the index's "Parent doc" column ships a filesystem path
+    while every other identifier column ships a Doc ID, and nothing resolves the
+    two against each other.
+    """
+    index = write_index(
+        tmp_path, [["6881", "bundle.zip", "zip", "P 495", "2", "", "", ""]]
+    )
+    parent = document("bundle.zip", (page(1, "x"),))
+    kid = document(
+        "bundle.zip/member0.pdf",
+        (page(1, "m"),),
+        parent_doc_id="bundle.zip",
+        container_order=0,
+    )
+    by_path = {d.rel_path: d for d in assign_doc_ids((parent, kid), index).documents}
+    assert by_path["bundle.zip"].parent_doc_id is None
+    assert by_path["bundle.zip/member0.pdf"].parent_doc_id == "LI-06881"
+
+
+def test_nested_children_are_remapped_at_every_level():
+    parent = document("outer.zip", (page(1, "x"),))
+    inner = document(
+        "outer.zip/inner.zip", (page(1, "y"),), parent_doc_id="outer.zip",
+        container_order=0,
+    )
+    leaf = document(
+        "outer.zip/inner.zip/a.pdf",
+        (page(1, "z"),),
+        parent_doc_id="outer.zip/inner.zip",
+        container_order=0,
+    )
+    by_path = {
+        d.rel_path: d for d in assign_doc_ids((parent, inner, leaf), None).documents
+    }
+    assert by_path["outer.zip/inner.zip"].parent_doc_id == "DIQ-000001"
+    assert by_path["outer.zip/inner.zip/a.pdf"].parent_doc_id == "DIQ-000001.01"
+
+
+def test_assignment_is_idempotent_over_an_already_assigned_corpus():
+    """Re-running Stage 3b must not orphan every member it previously linked."""
+    parent = document("outer.zip", (page(1, "x"),))
+    inner = document(
+        "outer.zip/inner.zip", (page(1, "y"),), parent_doc_id="outer.zip",
+        container_order=0,
+    )
+    once = assign_doc_ids((parent, inner), None)
+    twice = assign_doc_ids(once.documents, None)
+    assert not any("not among the scanned documents" in w for w in twice.warnings)
+    assert {d.rel_path: d.doc_id for d in twice.documents} == {
+        d.rel_path: d.doc_id for d in once.documents
+    }
+
+
+def test_a_detached_member_no_longer_points_at_a_document_that_is_not_there():
+    orphan = document(
+        "ghost.zip/a.pdf", (page(1, "z"),), parent_doc_id="missing.zip",
+        container_order=0,
+    )
+    result = assign_doc_ids((orphan,), None)
+    assert result.documents[0].parent_doc_id is None
+    assert any("not among the scanned documents" in w for w in result.warnings)
 
 
 def test_nested_container_children_nest_their_ids():
@@ -328,6 +395,59 @@ def test_identical_reruns_produce_no_renumbering_warnings(tmp_path):
     a = IssuedIdLedger.from_assignment(assign_doc_ids(docs, index), index.snapshot)
     b = IssuedIdLedger.from_assignment(assign_doc_ids(docs, index), index.snapshot)
     assert detect_renumbering(a, b) == ()
+
+
+def _twin_corpus():
+    """Two copies of the same bytes at two paths — the ordinary case.
+
+    A file that also appears inside an archive is the same content twice, and the
+    walker detects and reports exactly that. ``document()`` derives the hash from
+    path + text, so the hash is pinned explicitly here to make them true twins.
+    """
+    body = (page(1, "identical content"),)
+    sha = "a" * 64
+    return (
+        document("loose/report.csv", body, sha256=sha),
+        document(
+            "bundle.zip/report.csv", body, sha256=sha,
+            parent_doc_id="bundle.zip", container_order=0,
+        ),
+        document("bundle.zip", (page(1, "container"),)),
+    )
+
+
+def test_duplicate_content_does_not_manufacture_renumbering_warnings():
+    """Two identical runs over a corpus with duplicate content must be silent.
+
+    Keying the previous ledger by sha256 alone lets one twin overwrite the
+    other, so every other twin reads as "this file's identifier changed" on a
+    re-run where nothing changed. A mitigation that cries wolf on every re-run
+    of a real matter record is not a mitigation.
+    """
+    docs = _twin_corpus()
+    a = IssuedIdLedger.from_assignment(assign_doc_ids(docs, None), None)
+    b = IssuedIdLedger.from_assignment(assign_doc_ids(docs, None), None)
+    assert detect_renumbering(a, b) == ()
+
+
+def test_a_real_move_is_still_reported_when_the_hash_is_unambiguous():
+    """The fix must not buy silence by refusing to look."""
+    before = (document("old/name.pdf", (page(1, "x"),), sha256="b" * 64),)
+    after = (document("new/name.pdf", (page(1, "x"),), sha256="b" * 64),)
+    a = IssuedIdLedger.from_assignment(assign_doc_ids(before, None), None)
+    b = IssuedIdLedger.from_assignment(assign_doc_ids(after, None), None)
+    a = IssuedIdLedger(
+        snapshot=None,
+        entries=(LedgerEntry("DIQ-000042", "b" * 64, "old/name.pdf", None),),
+        contract_version=a.contract_version,
+    )
+    a = IssuedIdLedger(
+        snapshot=None, entries=a.entries, contract_version=a.contract_version,
+        content_sha256=content_hash(a),
+    )
+    warnings = detect_renumbering(a, b)
+    assert [w.kind for w in warnings] == ["id-moved"]
+    assert warnings[0].previous_doc_id == "DIQ-000042"
 
 
 def test_ledger_round_trips_and_detects_tampering(tmp_path):

@@ -203,6 +203,52 @@ def eml_file(path: Path) -> None:
     path.write_bytes("\r\n".join(lines).encode("utf-8"))
 
 
+def eml_with_attachment(path: Path, attachment: Path) -> None:
+    """A message carrying a PDF — §3's "attachments extracted as child documents".
+
+    The corpus needs this case in its own right, not only in a unit test. Email
+    attachment expansion has a *different producer* in the walker from archive
+    expansion, so a ZIP proving the container path proves nothing about this one;
+    and until the attachment case is in the corpus, the determinism proof and the
+    self-test never touch it. "The corpus doesn't exercise it" is not a reason to
+    leave it out — it is a reason to put it in.
+
+    Written by hand for the same reason as :func:`eml_file`: a library's own
+    boundary and Message-ID generation is clock- and random-seeded, and these
+    bytes have to be identical on every regeneration.
+    """
+    import base64
+
+    payload = base64.b64encode(attachment.read_bytes()).decode("ascii")
+    body = "\r\n".join(payload[i:i + 76] for i in range(0, len(payload), 76))
+    lines = [
+        "From: engineer@example.com",
+        "To: contractor@example.com",
+        "Subject: Transmittal 2024-07-18 - one attachment",
+        "Date: Thu, 18 Jul 2024 11:00:00 +0000",
+        "Message-ID: <fixture-0002@example.com>",
+        "MIME-Version: 1.0",
+        'Content-Type: multipart/mixed; boundary="dociq-fixture-boundary"',
+        "",
+        "--dociq-fixture-boundary",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        "Please find the monthly report attached.",
+        "Issued 2024-07-18 under clause 20.1.",
+        "",
+        "--dociq-fixture-boundary",
+        'Content-Type: application/pdf; name="attached_report.pdf"',
+        "Content-Transfer-Encoding: base64",
+        'Content-Disposition: attachment; filename="attached_report.pdf"',
+        "",
+        body,
+        "",
+        "--dociq-fixture-boundary--",
+        "",
+    ]
+    path.write_bytes("\r\n".join(lines).encode("utf-8"))
+
+
 def nested_zip(path: Path, inner_sources: list[Path]) -> None:
     """A ZIP holding a ZIP — exercises the depth guard and child ordering."""
     inner = io.BytesIO()
@@ -253,6 +299,7 @@ def build(out: Path | None = None) -> Path:
     csv_file(src / "07_ncr_log.csv")
     txt_file(src / "08_daily_log.txt")
     eml_file(src / "09_notice.eml")
+    eml_with_attachment(src / "14_transmittal.eml", src / "01_native_report.pdf")
     tier2_file(src / "13_legacy.doc")
     misnamed_pdf(sub / "10_misnamed.docx")
     nested_zip(src / "11_production.zip",

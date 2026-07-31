@@ -8,10 +8,19 @@ a generation timestamp and ``document_index.xlsx``'s container format embeds a
 creation time — and a gate that goes red for a known-benign reason is a gate
 people learn to ignore.
 
-So the manifest carries two lists, both explicit:
+So the manifest carries three lists, all explicit:
 
-* ``deterministic`` — hashed, and asserted byte-identical across runs with the
-  same folder + profile + master index (Principle 5 as amended by D-04).
+* ``deterministic`` — the freeze document's named four artifacts. Hashed, and
+  asserted byte-identical across runs with the same folder + profile + master
+  index (Principle 5 as amended by D-04). This set, and only this set, feeds
+  ``corpus_sha256``.
+* ``adjacent`` — the rest of §7's deliverables that *are* mechanically derived
+  and reproducible (the reconciliation CSV, the issued-ID ledger, the matter
+  profile copy, the Path-A upload package). They are hashed and compared
+  between runs, so a break in one is still caught, but they are kept out of
+  ``corpus_sha256`` because the frozen claim names four artifacts and widening
+  a claim quietly is how a claim stops meaning anything. A file here that
+  differs between runs is a real finding.
 * ``excluded`` — present in the output, deliberately outside the claim, each
   with the reason it cannot be byte-identical.
 
@@ -36,6 +45,15 @@ DETERMINISTIC_PATTERNS = ("clean_text/*.txt", "sources.json",
                           "document_index.csv")
 """Covered by the byte-identical claim, in the order the freeze doc lists them."""
 
+ADJACENT_PATTERNS = ("reconciliation.csv", "doc_ids_issued.json",
+                     "profile/*.yaml", "upload_package/*")
+"""Reproducible §7/§8 deliverables outside the freeze's named four.
+
+Hashed and compared, but deliberately not part of ``corpus_sha256`` — see the
+module docstring. ``upload_package/*`` is copies of files already inside the
+claim plus a generated README, so it cannot be the *source* of a break, but a
+difference there would mean the copy step is not reproducing what it copied."""
+
 EXCLUDED_REASONS = {
     "run_summary.pdf": "embeds a generation timestamp",
     "document_index.xlsx": "the xlsx container embeds a creation timestamp",
@@ -55,6 +73,8 @@ class Manifest:
     contract_version: str = CONTRACT_VERSION
     deterministic: dict[str, str] = field(default_factory=dict)
     """``{relative path: sha256}`` — the claim's subject."""
+    adjacent: dict[str, str] = field(default_factory=dict)
+    """``{relative path: sha256}`` — reproducible, compared, outside the claim."""
     log_content_sha256: str | None = None
     excluded: dict[str, str] = field(default_factory=dict)
     """``{relative path: reason it is outside the claim}``."""
@@ -81,6 +101,12 @@ class Manifest:
                       .format(LOG_CONTENT_KEY, LOG_NAME)),
             "corpus_sha256": self.corpus_sha256,
             "deterministic": dict(sorted(self.deterministic.items())),
+            "adjacent": dict(sorted(self.adjacent.items())),
+            "adjacent_note": (
+                "reproducible deliverables compared between runs but outside "
+                "the frozen four-artifact claim, so they do not feed "
+                "corpus_sha256"
+            ),
             "log_content_sha256": self.log_content_sha256,
             "excluded": dict(sorted(self.excluded.items())),
             "unclassified": sorted(self.unclassified),
@@ -88,7 +114,8 @@ class Manifest:
 
     def render(self) -> str:
         lines = [f"corpus hash {self.corpus_sha256[:16]}… over "
-                 f"{len(self.deterministic)} deterministic file(s)"]
+                 f"{len(self.deterministic)} deterministic file(s), "
+                 f"{len(self.adjacent)} adjacent file(s) compared separately"]
         if self.log_content_sha256:
             lines.append(f"  {LOG_NAME}[{LOG_CONTENT_KEY}] "
                          f"{self.log_content_sha256[:16]}…")
@@ -100,12 +127,18 @@ class Manifest:
         return "\n".join(lines)
 
 
-def _sha256_file(path: Path) -> str:
+def sha256_file(path: Path) -> str:
+    """Hash a file in bounded memory. Public because the processing log records
+    the same hashes the manifest does, and two implementations of "the hash of
+    this file" would eventually disagree."""
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+_sha256_file = sha256_file
 
 
 def _log_content_hash(path: Path) -> str | None:
@@ -158,6 +191,13 @@ def build(output_root: Path, *, require_outputs: bool = True) -> Manifest:
                 man.deterministic[p.relative_to(output_root).as_posix()] = \
                     _sha256_file(p)
 
+    for pattern in ADJACENT_PATTERNS:
+        for p in sorted(output_root.glob(pattern)):
+            if p.is_file() and p not in covered:
+                covered.add(p)
+                man.adjacent[p.relative_to(output_root).as_posix()] = \
+                    _sha256_file(p)
+
     log = output_root / LOG_NAME
     if log.is_file():
         covered.add(log)
@@ -185,10 +225,16 @@ def build(output_root: Path, *, require_outputs: bool = True) -> Manifest:
     return man
 
 
-def write(output_root: Path) -> Path:
-    """Build the manifest and write it. Returns the path."""
+def write(output_root: Path, man: Manifest | None = None) -> Path:
+    """Write the manifest. Returns the path.
+
+    ``man`` is accepted so a caller that already built one does not hash every
+    deliverable a second time — on a 17,732-page corpus that is not a rounding
+    error — and, more importantly, so the manifest that is written is provably
+    the same object the caller asserted against.
+    """
     output_root = Path(output_root)
-    man = build(output_root)
+    man = man if man is not None else build(output_root)
     path = output_root / MANIFEST_NAME
     path.write_text(
         json.dumps(man.to_jsonable(), indent=2, sort_keys=True,
@@ -215,6 +261,14 @@ def compare(a: Manifest, b: Manifest) -> list[str]:
             diffs.append(f"{name}: missing from the second run")
         elif ha != hb:
             diffs.append(f"{name}: {ha[:16]}… != {hb[:16]}…")
+    for name in sorted(set(a.adjacent) | set(b.adjacent)):
+        ha, hb = a.adjacent.get(name), b.adjacent.get(name)
+        if ha is None or hb is None:
+            diffs.append(f"{name}: present in only one run (outside the "
+                         "four-artifact claim, still a finding)")
+        elif ha != hb:
+            diffs.append(f"{name}: {ha[:16]}… != {hb[:16]}… (outside the "
+                         "four-artifact claim, still a finding)")
     for name in sorted(set(a.unclassified) ^ set(b.unclassified)):
         diffs.append(f"{name}: unclassified output present in only one run")
     return diffs

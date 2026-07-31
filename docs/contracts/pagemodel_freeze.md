@@ -89,6 +89,38 @@ present.
   logic. Enforced by a test that asserts the import graph.
 - **May not** compute page accounting itself — read the derived properties.
 
+## `parent_doc_id` — the convention, settled at integration (2026-07-31)
+
+The contract types `parent_doc_id` as a Doc ID, but Doc IDs do not exist until
+Stage 3b. Both tracks flagged the gap (Track A's verification record §5, Track
+B's integration note §1). It is settled as follows, and the settlement is a
+handover rule rather than a contract change — the field is a string and holds
+one either way:
+
+| stage | what `parent_doc_id` holds |
+|---|---|
+| after Stage 1 (`ingest/walker`) | the **parent's `rel_path`** |
+| after Stage 3b (`docid/assign`) | the **parent's assigned Doc ID** |
+
+Stage 3b performs the swap, at the same moment it mints the child's own ID —
+the first moment both halves exist. Consumers therefore see a Doc ID, which is
+what the field name promises and what the index's "Parent doc" column ships.
+
+Two consequences, both of which were defects until integration closed them:
+
+- `docid/assign` still resolves **both** conventions. That branch is not dead
+  code: after the remap, a corpus fed through Stage 3b a second time (a resumed
+  run, a re-assignment against a newer index) names its parent the other way,
+  and dropping the branch would orphan every container member on the second
+  pass.
+- `verify/accounting`'s orphan-child check accepts both forms, because the gate
+  runs on both sides of the boundary.
+
+A container member whose parent is **not** in the run is identified as a
+top-level file, and its `parent_doc_id` is cleared to `None` so the record says
+the same thing the warning says. The provenance survives in the assignment note
+and in the warning naming the parent that was not scanned.
+
 ## Invariants the whole pipeline rests on
 
 1. **Page numbering is a gapless 1..N sequence in order**, per document,
@@ -127,6 +159,15 @@ Explicitly **not** byte-identical, and excluded from the content hash:
 
 The hash manifest states this split explicitly rather than leaving the claim
 ambiguous. A claim that is true only of some files must say which.
+
+**Third category, added at integration (2026-07-31): `adjacent`.** The full
+pipeline writes §7/§8 deliverables the freeze did not name — `reconciliation.csv`,
+`doc_ids_issued.json`, the matter profile copy, and the Path-A
+`upload_package/`. They *are* reproducible, so declaring them "excluded because
+they cannot be byte-identical" would be false; folding them into the claim would
+widen a frozen claim quietly. The manifest therefore hashes and compares them,
+and keeps them out of `corpus_sha256`. A difference in an adjacent file is
+reported as a finding, not ignored. The claim above is unchanged.
 
 ## Known hazards inherited from the vendored MIP 3.9 extractor
 

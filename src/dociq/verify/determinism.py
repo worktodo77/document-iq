@@ -6,6 +6,12 @@ ordering-, timing- or hash-seed-sensitive gets the long run count and a varied
 ``PYTHONHASHSEED`` per repetition — a dict-ordering bug is invisible under a
 single seed by construction.
 
+Each repetition runs :func:`dociq.pipeline.run` — the shipped orchestration,
+writing the shipped emitters. Sprint 1 briefly proved this against
+``verify/probe_emit.py``, a stand-in for an emit layer that lived in another
+worktree; that proof was about the stand-in, which is a materially weaker claim
+than the one the gate needs, and the stand-in is deleted.
+
 Runs are executed in a subprocess when the seed must vary, because
 ``PYTHONHASHSEED`` is read once at interpreter start: setting it in-process and
 declaring the seed varied would be a probe that cannot fail.
@@ -52,17 +58,29 @@ class DeterminismReport:
 
 
 _RUNNER = """\
-import json, sys
-from pathlib import Path
+import sys
 from dociq.contracts import RunConfig
 from dociq.ingest import extract as ex, walker
-from dociq.verify import probe_emit
+from dociq import pipeline
+from dociq.profiles.model import OperatorStamp
 
 src, out = sys.argv[1], sys.argv[2]
 cfg = RunConfig(source_root=src, output_root=out,
                 ocr_engine_version=ex.ocr_engine_version())
-probe_emit.write(walker.run(cfg, walker.WalkOptions(resume=False)))
+# A FIXED operator stamp. The stamp reaches only the log's `run` section, the
+# summary PDF and the profile copy — none of which are inside the claim — but
+# pinning it means a diff anywhere in the deterministic set is unambiguously a
+# determinism defect rather than "the clock moved".
+stamp = OperatorStamp("determinism-probe", "2026-07-30T00:00:00Z", "probe")
+pipeline.run(cfg, pipeline.PipelineOptions(
+    walk=walker.WalkOptions(resume=False),
+    matter_name="determinism probe",
+    stamp=stamp,
+))
 """
+"""The subprocess body. It runs the REAL pipeline — Track B's emit layer, not a
+stand-in — because the byte-identical claim is about the files DocIQ ships. A
+proof over a probe emitter proves the probe."""
 
 
 def _one_run(source_root: Path, out: Path, seed: str) -> str | None:

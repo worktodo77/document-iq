@@ -1,10 +1,11 @@
-"""End-to-end self-test for the Track A ingestion spine. Exit 0 is the gate.
+"""End-to-end self-test for the whole DocIQ pipeline. Exit 0 is the gate.
 
     python -m dociq.selftest [--runs N] [--keep]
 
-It builds the synthetic fixture corpus, runs the full walk → extract → page
-model → probe emit → verify path over it, and asserts the things that would
-otherwise be discovered in a client matter:
+It builds the synthetic fixture corpus, runs §4's six stages over it through
+:func:`dociq.pipeline.run` — the shipped orchestration, writing the shipped
+emitters — and asserts the things that would otherwise be discovered in a
+client matter:
 
 1. every fixture format produced the pages it should have, including the mixed
    native+scanned PDF and the genuinely blank page;
@@ -12,7 +13,9 @@ otherwise be discovered in a client matter:
 3. normalization is idempotent on every page that came out of the corpus;
 4. the §4 Stage-6 accounting gate reconciles to zero discrepancy;
 5. OCR ran from bundled models with no network call available;
-6. the outputs are byte-identical across repeated runs with varied hash seeds.
+6. the outputs are byte-identical across repeated runs with varied hash seeds;
+7. every §7 deliverable is produced, container members carry a remapped
+   ``parent_doc_id``, and the amended ``RunResult`` fields are populated.
 
 Output is deliberately verbose about what passed. A gate whose green output is
 one word is a gate nobody can debug when it goes red.
@@ -27,11 +30,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .contracts import PageKind, ProcessingStatus, RunConfig
+from . import pipeline
+from .contracts import PageKind, RunConfig
 from .ingest import extract as ex
 from .ingest import walker
 from .ingest.pagemodel import normalize
-from .verify import accounting, determinism, manifest, probe_emit
+from .profiles.model import OperatorStamp
+from .verify import determinism
 
 MARKER_FRAGMENT = "===== PAGE"
 
@@ -45,6 +50,8 @@ _EXPECTED = {
     "07_ncr_log.csv": (1, {PageKind.SYNTHETIC}),
     "08_daily_log.txt": (1, {PageKind.SYNTHETIC}),
     "09_notice.eml": (1, {PageKind.SYNTHETIC}),
+    "14_transmittal.eml": (1, {PageKind.SYNTHETIC}),
+    "14_transmittal.eml/attached_report.pdf": (2, {PageKind.NATIVE}),
 }
 
 
@@ -143,7 +150,11 @@ def main(argv: list[str] | None = None) -> int:
         out = work / "out"
         cfg = RunConfig(source_root=str(src), output_root=str(out),
                         ocr_engine_version=ex.ocr_engine_version())
-        result = walker.run(cfg, walker.WalkOptions(resume=False))
+        outcome = pipeline.run(cfg, pipeline.PipelineOptions(
+            walk=walker.WalkOptions(resume=False),
+            matter_name="DocIQ self-test corpus",
+            stamp=OperatorStamp("selftest", "2026-07-30T00:00:00Z", "selftest")))
+        result = outcome.result
 
         print("\nStage 1-2 — walk and extract")
         by_path = {d.rel_path: d for d in result.documents}
@@ -166,6 +177,15 @@ def main(argv: list[str] | None = None) -> int:
                    f"{len(zip_children)} child document(s)")
         chk.expect(all(d.container_order is not None for d in zip_children),
                    "every archive child carries a container_order")
+        # Stage 1 names the parent by rel_path; Stage 3b must have replaced that
+        # with the parent's assigned Doc ID, or the index ships a "Parent doc"
+        # column that resolves to nothing.
+        ids = {d.doc_id for d in result.documents}
+        chk.expect(bool(zip_children)
+                   and all(d.parent_doc_id in ids for d in zip_children),
+                   "every container member's parent_doc_id was remapped to a "
+                   "Doc ID that is in the run",
+                   ", ".join(sorted({d.parent_doc_id or "" for d in zip_children})))
         chk.expect(any("recovered via" in n for d in result.documents
                        for n in d.notes),
                    "misnamed file recovered by content sniffing")
@@ -196,22 +216,72 @@ def main(argv: list[str] | None = None) -> int:
         print("\nPrinciple 4 — no network")
         _check_no_network(chk)
 
+        print("\nStage 5 — the §7 deliverables")
+        lay = outcome.layout
+        for label, path in (("clean_text/", lay.clean_text),
+                            ("sources.json", lay.sources_json),
+                            ("document_index.csv", lay.index_csv),
+                            ("document_index.xlsx", lay.index_xlsx),
+                            ("processing_log.json", lay.processing_log),
+                            ("run_summary.pdf", lay.run_summary),
+                            ("upload_package/", lay.upload_package),
+                            ("doc_ids_issued.json", lay.issued_ids)):
+            chk.expect(path.exists(), f"{label} written")
+        n_text = len(list(lay.clean_text.glob("*.txt")))
+        chk.expect(n_text == len(result.documents),
+                   "one clean_text file per document",
+                   f"{n_text} file(s), {len(result.documents)} document(s)")
+        markers = sum(1 for p in lay.clean_text.glob("*.txt")
+                      for line in p.read_text(encoding="utf-8").splitlines()
+                      if line.startswith(MARKER_FRAGMENT))
+        chk.expect(markers == result.pages_kept,
+                   "one page marker per kept page, rendered only at emit",
+                   f"{markers} marker(s), {result.pages_kept} kept page(s)")
+
+        print("\nAmended contract fields (A-01, A-02, A-03)")
+        before, after = result.tokens_before, result.tokens_after
+        chk.expect(before is not None and after is not None,
+                   "RunResult carries the before/after token estimates")
+        if before is not None and after is not None:
+            chk.expect(before.floor_tokens > 0 and before.provenance != "",
+                       "the token estimate carries a measured floor and a "
+                       "provenance",
+                       f"floor {before.floor_tokens} tokens over "
+                       f"{before.chars} chars")
+            chk.expect("PROXY, NOT A TOKENIZER MEASUREMENT" in before.provenance,
+                       "the provenance states plainly that no tokenizer was run")
+        chk.expect(result.reconciliation is None,
+                   "reconciliation is None when no master index was supplied — "
+                   "not an empty report")
+
         print("\nStage 6 — accounting and manifest")
-        probe_emit.write(result)
-        report = accounting.check(result)
+        report = outcome.accounting
         chk.expect(report.ok, "page accounting reconciles to zero discrepancy",
                    report.render().splitlines()[0])
         if not report.ok:
             for d in report.discrepancies:
                 print(f"        {d}")
-        man = manifest.build(out)
+        man = outcome.manifest
         chk.expect(not man.unclassified, "every output is classified by the "
                    "byte-identical claim", man.render().splitlines()[0])
+        for name in sorted(man.unclassified):
+            print(f"        UNCLASSIFIED {name}")
         chk.expect(man.log_content_sha256 is not None,
                    "the log's content section is hashed separately from its run "
                    "section")
+        chk.expect(len(man.deterministic) == n_text + 2,
+                   "the claim covers clean_text/*, sources.json and "
+                   "document_index.csv and nothing else",
+                   f"{len(man.deterministic)} file(s) in the claim, "
+                   f"{len(man.adjacent)} adjacent")
+        chk.expect(set(man.excluded) >= {"run_summary.pdf",
+                                         "document_index.xlsx",
+                                         "processing_log.json"},
+                   "run_summary.pdf and document_index.xlsx are declared "
+                   "outside the claim, with reasons",
+                   "; ".join(f"{k}" for k in sorted(man.excluded)))
 
-        print("\nPrinciple 5 — determinism")
+        print("\nPrinciple 5 — determinism (over the REAL emit layer)")
         det = determinism.prove(src, runs=args.runs, workdir=work / "det")
         chk.expect(det.ok, f"outputs byte-identical over {args.runs} runs",
                    det.render().splitlines()[0])

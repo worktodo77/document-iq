@@ -169,6 +169,7 @@ def build_log(
     stamp: OperatorStamp | None = None,
     tool_version: str = "",
     output_hashes: Mapping[str, str] | None = None,
+    run_notes: Mapping[str, Any] | None = None,
 ) -> LogBundle:
     """Assemble the log. Pure — nothing here touches the filesystem."""
     docs = sorted(documents, key=document_sort_key)
@@ -189,6 +190,13 @@ def build_log(
         # is not one of those inputs, and hashing it would make the same corpus
         # reduced into two different directories fail its own determinism proof.
     }
+    # Facts about THIS invocation rather than about the inputs — what the run
+    # cleared out of the destination, for instance. They belong beside the
+    # timestamp for the same reason: a first run and a re-run over identical
+    # inputs differ in exactly these fields, so recording them in `content`
+    # would make the byte-identical claim false on its face for the re-run case
+    # D-04 mitigation (b) exists to support.
+    run.update(dict(run_notes or {}))
 
     bates_section: dict[str, Any] = {
         "status": bates_decision.status.value if bates_decision else "not-run",
@@ -248,17 +256,27 @@ def build_log(
             }
             for a in (assignment.assignments if assignment else ())
         ],
-        "renumbering_warnings": [
-            {
-                "kind": w.kind,
-                "doc_id": w.doc_id,
-                "previous_doc_id": w.previous_doc_id,
-                "rel_path": w.rel_path,
-                "message": w.message,
-            }
-            for w in renumbering
-        ],
     }
+
+    # D-04 (b)'s renumbering warnings live in the `run` section, NOT in the
+    # hashed content. They are a comparison against a ledger the *destination*
+    # folder happens to hold, and the destination is not one of the determinism
+    # contract's inputs — the same reason `output_root` sits in `run`. Hashing
+    # them would mean a first run and a re-run over identical inputs produced
+    # different content, and a corrupt leftover ledger could break the
+    # byte-identical claim with no input change anywhere. They are still written
+    # to the log, still in the run summary, and still in RunResult.warnings.
+    renumbering_section = [
+        {
+            "kind": w.kind,
+            "doc_id": w.doc_id,
+            "previous_doc_id": w.previous_doc_id,
+            "rel_path": w.rel_path,
+            "message": w.message,
+        }
+        for w in renumbering
+    ]
+    run["renumbering_warnings"] = renumbering_section
 
     flagged = [e for doc in docs for e in _flagged_pages(doc, config.ocr_conf_threshold_pct)]
 

@@ -65,8 +65,16 @@ def check(result: RunResult) -> AccountingReport:
     reportable, and raising would hide every discrepancy after the first."""
     rep = AccountingReport(documents=len(result.documents),
                            unsupported=len(result.unsupported))
+    # A container member names its parent by ``rel_path`` before Stage 3b and by
+    # the parent's Doc ID after it (``docid.assign`` performs the swap). The
+    # gate runs on both sides of that boundary — Track A's spine calls it on the
+    # raw walk, the full pipeline calls it on the assigned corpus — so it has to
+    # recognize both forms. Accepting only one would report every archive member
+    # in a completed run as an orphan.
     known = {d.rel_path for d in result.documents} | {
         d.rel_path for d in result.unsupported}
+    known |= {d.doc_id for d in result.documents if d.doc_id}
+    known |= {d.doc_id for d in result.unsupported if d.doc_id}
 
     for doc in result.documents:
         rep.pages_in += doc.pages_in

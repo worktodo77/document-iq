@@ -421,11 +421,33 @@ def detect_renumbering(
             ),
         )
 
-    prev_by_hash = {e.sha256: e for e in previous.entries if e.sha256}
+    # Matched on (sha256, rel_path) FIRST, and on sha256 alone only where that
+    # hash names exactly one previous file.
+    #
+    # Hash alone is not an identity on a real matter record. Duplicate content
+    # is ordinary — the walker detects and reports it, and a file that also
+    # appears inside an archive is the same bytes at two paths. Keying a dict by
+    # sha256 lets the last twin win, so every *other* twin reads as "this file's
+    # identifier changed" on a re-run where nothing changed at all. Measured on
+    # the fixture corpus: three phantom id-moved warnings from two consecutive
+    # identical runs. A mitigation that cries wolf on every re-run is not a
+    # mitigation, and D-04 accepted renumbering as its single biggest risk.
+    prev_by_pair = {(e.sha256, e.rel_path): e for e in previous.entries if e.sha256}
+    by_hash: dict[str, list[LedgerEntry]] = {}
+    for e in previous.entries:
+        if e.sha256:
+            by_hash.setdefault(e.sha256, []).append(e)
     prev_by_id = {e.doc_id: e for e in previous.entries}
     out: list[RenumberWarning] = []
     for entry in current.entries:
-        old = prev_by_hash.get(entry.sha256)
+        old = prev_by_pair.get((entry.sha256, entry.rel_path))
+        if old is None:
+            # Not at the same path any more. A move or a rename is still the
+            # same evidence — but only when the hash names one previous file.
+            # With twins there is no way to say which one moved, and guessing
+            # would manufacture the warning this pass exists to avoid.
+            twins = by_hash.get(entry.sha256, ())
+            old = twins[0] if len(twins) == 1 else None
         if old is not None and old.doc_id != entry.doc_id:
             out.append(
                 RenumberWarning(

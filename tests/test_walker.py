@@ -70,9 +70,27 @@ def test_tier2_files_are_inventoried_hashed_and_never_block(tmp_path):
 
 def test_archive_children_carry_parent_and_order(tmp_path):
     r = walker.run(_cfg(tmp_path), _fast())
-    kids = [d for d in r.documents if d.parent_doc_id]
-    assert kids and all(d.parent_doc_id == "11_production.zip" for d in kids)
+    kids = [d for d in r.documents if d.parent_doc_id == "11_production.zip"]
+    assert kids
     assert sorted(d.container_order for d in kids) == [0, 1, 2]
+
+
+def test_stage_one_names_the_parent_by_rel_path_for_every_container_kind(tmp_path):
+    """The convention the freeze document now records, over the whole corpus.
+
+    Both container kinds are asserted together because they have different
+    producers in this module, and an assigner downstream has to handle one rule,
+    not two.
+    """
+    r = walker.run(_cfg(tmp_path), _fast())
+    paths = {d.rel_path for d in r.documents} | {d.rel_path for d in r.unsupported}
+    kids = [d for d in r.documents if d.parent_doc_id]
+    assert {d.parent_doc_id for d in kids} >= {
+        "11_production.zip", "14_transmittal.eml"}
+    for kid in kids:
+        assert kid.parent_doc_id in paths
+        assert kid.rel_path.startswith(kid.parent_doc_id + "/")
+        assert kid.container_order is not None
 
 
 def test_every_record_validates(tmp_path):

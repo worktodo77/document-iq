@@ -210,10 +210,15 @@ def _pre_assignment_token(doc: DocumentRecord) -> tuple[str, ...]:
 
     The frozen contract types ``parent_doc_id`` as a Doc ID, but Doc IDs do not
     exist until this stage runs — so a container child produced by Stage 1 must
-    reference its parent by *something*. Rather than guess which convention
-    Track A picked, both plausible ones resolve: the parent's pre-assigned
-    ``doc_id`` if it already carries one, and the parent's ``rel_path``.
-    Whichever resolved is recorded in the assignment note.
+    reference its parent by *something*.
+
+    Stage 1's convention is settled: Track A names the parent by ``rel_path``
+    (its verification record §5). Both tokens still resolve, and the ``doc_id``
+    branch is not dead code — this stage *rewrites* ``parent_doc_id`` to the
+    parent's assigned Doc ID, so a corpus that has already been through Stage 3b
+    (a resumed run, a re-assignment against a newer index) arrives here naming
+    its parent the other way. Dropping that branch would make assignment
+    succeed once and orphan every container member the second time.
     """
     tokens = [doc.rel_path]
     if doc.doc_id:
@@ -438,14 +443,25 @@ def assign_doc_ids(
         key = document_sort_key(doc)
         matched = match_for.get(key)
         note = None
+        # A detached member is identified as a TOP-LEVEL file, and its record
+        # has to say the same thing the warning says. Left in place, its
+        # ``parent_doc_id`` would name a document that is not in the run: the
+        # index would show a Parent doc that resolves to nothing, reconciliation
+        # would keep excluding it as "a container member with no index row by
+        # design" when it was in fact offered to the matcher, and the accounting
+        # gate would report an orphan the assigner had already handled. The
+        # provenance is not lost — it is in the assignment note below and in the
+        # warning naming the parent that was not scanned.
+        parent: object = _KEEP_PARENT
         if key in orphan_keys:
             note = "container member whose parent was not scanned"
+            parent = None
         if matched is not None:
             row, method = matched
             did = DocId(IdNamespace.LI, row.original_sort, li_width)
             rendered = minter.mint(did)
             docid_by_key[key] = did
-            out_by_key[key] = _with_id(doc, rendered, row.li_file_no)
+            out_by_key[key] = _with_id(doc, rendered, row.li_file_no, parent)
             assignments.append(
                 IdAssignment(
                     doc_id=rendered,
@@ -462,7 +478,7 @@ def assign_doc_ids(
             did = DocId(IdNamespace.DIQ, diq_counter, diq_width)
             rendered = minter.mint(did)
             docid_by_key[key] = did
-            out_by_key[key] = _with_id(doc, rendered, None)
+            out_by_key[key] = _with_id(doc, rendered, None, parent)
             assignments.append(
                 IdAssignment(
                     doc_id=rendered,
@@ -508,11 +524,23 @@ def assign_doc_ids(
     )
 
 
+_KEEP_PARENT = object()
+"""Sentinel: ``None`` is a meaningful value for ``parent_doc_id`` (top-level),
+so "leave it alone" needs to be a different value from "clear it"."""
+
+
 def _with_id(
-    doc: DocumentRecord, doc_id: str, li_file_no: str | None
+    doc: DocumentRecord,
+    doc_id: str,
+    li_file_no: str | None,
+    parent_doc_id: object = _KEEP_PARENT,
 ) -> DocumentRecord:
     """Build the enriched record. Never mutates — the dataclass is frozen."""
-    return replace(doc, doc_id=doc_id, li_file_no=li_file_no)
+    if parent_doc_id is _KEEP_PARENT:
+        return replace(doc, doc_id=doc_id, li_file_no=li_file_no)
+    return replace(
+        doc, doc_id=doc_id, li_file_no=li_file_no, parent_doc_id=parent_doc_id
+    )
 
 
 def _assign_children(
@@ -549,7 +577,14 @@ def _assign_children(
         child = parent_id.child(position, width)
         rendered = minter.mint(child)
         key = document_sort_key(member)
-        out_by_key[key] = _with_id(member, rendered, None)
+        # The REMAP. Stage 1 has no Doc IDs to work with, so it names the parent
+        # by ``rel_path`` (Track A's verification record §5 states the
+        # convention). Leaving it there would ship an index whose "Parent doc"
+        # column holds a path while every other identifier column holds a Doc
+        # ID, and a reader resolving one against the other would find nothing.
+        # Stage 3b is the first moment both halves exist, so it is the only
+        # place the swap can happen.
+        out_by_key[key] = _with_id(member, rendered, None, parent_rendered)
         assignments.append(
             IdAssignment(
                 doc_id=rendered,

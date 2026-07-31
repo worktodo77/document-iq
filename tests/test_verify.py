@@ -15,9 +15,11 @@ from dociq.contracts import (
     RunConfig,
     RunResult,
 )
+from dociq import pipeline
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
-from dociq.verify import accounting, manifest, probe_emit
+from dociq.profiles.model import OperatorStamp
+from dociq.verify import accounting, manifest
 
 from .conftest import FIXTURES
 
@@ -94,12 +96,19 @@ def test_report_names_the_document_not_just_a_boolean():
 
 @pytest.fixture(scope="module")
 def emitted(tmp_path_factory):
+    """A real run of the shipped pipeline over the fixture corpus.
+
+    OCR is off: these tests are about the manifest and the emit layer, and a
+    real OCR pass would add minutes to the suite without changing what they
+    assert. The OCR path is proven in the self-test and in ``test_extract``.
+    """
     out = tmp_path_factory.mktemp("emit")
     cfg = RunConfig(source_root=str(FIXTURES), output_root=str(out),
                     ocr_engine_version=ex.ocr_engine_version())
-    result = walker.run(cfg, walker.WalkOptions(ocr_enabled=False, resume=False))
-    probe_emit.write(result)
-    return out, result
+    outcome = pipeline.run(cfg, pipeline.PipelineOptions(
+        walk=walker.WalkOptions(ocr_enabled=False, resume=False),
+        stamp=OperatorStamp("test", "2026-07-30T00:00:00Z", "test")))
+    return out, outcome.result
 
 
 def test_manifest_covers_exactly_the_claimed_files(emitted):
@@ -152,9 +161,7 @@ def test_clean_text_carries_a_marker_for_every_page_including_empty(emitted):
     out, result = emitted
     doc = next(d for d in result.documents
                if d.rel_path == "04_empty_page.pdf")
-    ids = probe_emit._doc_ids(result)
-    text = (out / "clean_text" / f"{ids[doc.rel_path]}.txt").read_text(
-        encoding="utf-8")
+    text = (out / "clean_text" / f"{doc.doc_id}.txt").read_text(encoding="utf-8")
     assert text.count("===== PAGE") == doc.pages_in == 3
 
 

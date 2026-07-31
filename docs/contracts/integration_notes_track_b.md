@@ -28,6 +28,24 @@ and (defensively) membership cycles are both handled.
 other branch can be deleted, and the contract docstring for `parent_doc_id`
 should say so explicitly.
 
+> **ANSWERED at integration, 2026-07-31.** Stage 1 uses the parent's
+> `rel_path`. See `pagemodel_freeze.md` §`parent_doc_id`. Two corrections to the
+> expectation above:
+>
+> 1. The assigner did **not** remap the field — it minted child Doc IDs and left
+>    `DocumentRecord.parent_doc_id` holding the rel_path, so the index deliverable
+>    shipped a filesystem path in its "Parent doc" column while every other
+>    identifier column shipped a Doc ID. Fixed in `docid/assign._assign_children`,
+>    with tests proven red beforehand.
+> 2. The `doc_id` branch is **not** deleted. Now that Stage 3b rewrites the
+>    field, a corpus re-entering Stage 3b arrives naming its parent by Doc ID;
+>    deleting the branch would orphan every container member on a second pass.
+>    Both branches are live and each has a test.
+>
+> The contract docstring is deliberately **not** amended: the field is a string
+> and the question is a handover rule, not a type. The rule lives in the freeze
+> document instead.
+
 ## 2. Bates zone is text position, not page geometry — disclosed limitation
 
 §4 Stage 3 says "page corners/footers". The frozen contract carries page *text*,
