@@ -19,53 +19,73 @@ statement into an evidentiary tool.
 
 What *is* measured, on the real Petrobras/MODEC MPR corpus, is the corpus's
 **pre-token structure**: the count of whitespace/punctuation/digit-run segments
-that any modern byte-level BPE tokenizer produces before merges are applied.
-That yields two bounds which hold for any such tokenizer, independent of its
-vocabulary:
+produced by :data:`PRETOKEN_RE`, which is DocIQ's own approximation of the
+pre-tokenization step of a modern byte-level BPE tokenizer.
 
-* ``tokens >= pretokens`` — BPE merges never cross a pre-token boundary, so a
-  text cannot tokenize to fewer tokens than it has pre-tokens.
-* ``tokens <= characters`` — a byte-level vocabulary contains every single
-  byte, so no text needs more tokens than it has characters (bytes, for
-  non-ASCII; the estimator uses the UTF-8 byte count for that bound).
+## Exactly one of the two bounds is tokenizer-independent
 
-The shipped ratio band is D-03's ruled 3.3–3.6 chars/token. The corpus
-measurement's role is to *test* that band rather than to originate it: the
-measured chars-per-pretoken figure implies a chars-per-token range once a
-tokens-per-pretoken factor is assumed, and :func:`calibrate` reports whether
-the ruled band survives that check. Where the two disagree, the module widens
-the displayed range rather than narrowing it.
+* ``tokens <= utf8_bytes`` — **SOUND, and asserted.** A byte-level vocabulary
+  contains every single byte, so a byte-level BPE tokenizer can always fall
+  back to one token per byte and never needs more than that. This holds for any
+  such tokenizer, whatever its vocabulary or its pre-tokenizer.
 
-## What the measurement actually found (2026-07-30, Sprint 1)
+* ``tokens >= pretokens`` — **NOT SOUND, and no longer asserted.** Codex review
+  #1 finding B-6 is correct on this point and it is worth stating precisely why,
+  because the old argument sounds right. A byte-level BPE cannot merge across
+  *its own* pre-token boundaries. It can merge freely across boundaries that
+  **this module invented**. :data:`PRETOKEN_RE` splits digit runs every three
+  digits (``\\d{1,3}``) and cuts letter runs from punctuation runs; a real
+  tokenizer whose pre-tokenization is coarser — longer digit runs, punctuation
+  glued to an adjacent word — emits *fewer* tokens than this module counts
+  pre-tokens.
+
+  This is not a theoretical caveat on this corpus. The measured MPR text is
+  **13% digits**, which is precisely where the invented boundaries are densest,
+  so the inflation lands exactly where the material is.
+
+So the pre-token count is a **characterization of the text's structure under
+stated assumptions**, not a floor. It is still the most informative thing DocIQ
+can measure offline, and it is still what makes the D-03 band checkable — it
+just may not be quoted as a bound.
+
+## The assumptions, stated once, and travelling with every figure
+
+:data:`TOKENS_PER_PRETOKEN_LOW_X100` and :data:`TOKENS_PER_PRETOKEN_HIGH_X100`
+are the two assumed constants of the whole estimator. Both are assumptions, not
+measurements; :data:`ASSUMPTIONS` states them in words and every
+:class:`TokenEstimate` carries them into ``provenance``, which reaches the
+processing log, the run summary PDF, the upload package README and the GUI.
+
+## What the measurement found, and what it does and does not establish
 
 Measured by ``tools/calibrate_tokens.py`` over 40 randomly sampled PDFs of the
 real MPR corpus (1,201 pages, 2,221,486 characters, no client text retained):
+**3.03 characters per pre-token**, 13% of characters digits, 23% whitespace.
+The first full pipeline run measured **2.91** chars/pre-token over its own
+emitted page text, and ``tools/calibrate_tokens.py`` over all 298 PDFs measured
+**2.53**.
 
-* **3.03 characters per pre-token**, 13% of characters digits, 23% whitespace.
-* Because a tokenizer cannot emit fewer tokens than there are pre-tokens, this
-  corpus cannot exceed **3.03 chars/token** — so D-03's expected 3.30–3.60 band
-  is not merely optimistic for this material, it is unreachable.
-* Sanity check of the same proxy on ordinary English prose: 4.4–4.5
-  chars/pre-token, which lands at roughly 4.2–4.3 chars/token once a ~1.05
-  tokens-per-pre-token factor is applied — the widely reported figure for
-  English. The proxy therefore behaves correctly on the case with a known
-  answer, which is the only external check available offline.
+Under the assumptions above, 2.53 chars/pre-token implies roughly 1.58–3.61
+chars/token — which **overlaps D-03's ruled 3.30–3.60 band**. At the coarse end
+of the assumed pre-tokenization allowance the corpus lands at about 3.5
+chars/token, inside the ruled band.
 
-The shipped band is **not** silently overridden — D-03 is a ruling, not a
-default. Instead, :func:`estimate_tokens` detects that the band is refuted by
-the text's own structure and rebuilds the range from that structure, setting
-:attr:`TokenEstimate.ratio_refuted`. On the sampled corpus the honest range is
-roughly 734K–1.2M tokens where the ruled band alone would have said 617K–673K:
-the ruled band would have understated the load by 15–45%.
+**D-03 is therefore NOT refuted.** The earlier claim in this module — that the
+band was "unreachable" and had been refuted by the corpus's own structure — was
+built on the unsound floor argument and has been withdrawn. What survives is
+weaker and still useful: the corpus is denser than ordinary prose, the ruled
+band sits at the coarse end of what the structure allows rather than in the
+middle of it, and the true figure cannot be pinned down without a tokenizer.
 
-**This is a decision for Alex, not for the code:** D-03's band should be
-re-ruled downward (roughly 2.3–3.0 chars/token for table-heavy MPR text) once
-someone with network access can count real Claude tokens on a sample.
+:attr:`TokenEstimate.ratio_refuted` is kept (contract v1.2.0, amendment A-03)
+but is now set only when the ruled band lies entirely *below* the range the
+measured structure allows under the stated assumptions — a conditional
+inconsistency, disclosed as such in ``provenance``, never a universal
+refutation.
 
-Every estimate therefore carries its :class:`CalibrationBasis`, whose
-``provenance`` field states this in one line, and the run summary prints it.
-When a real tokenizer becomes available offline, :func:`calibrate` is the
-single place that changes.
+The remaining honest recommendation is unchanged in direction and weaker in
+force: **someone with network access should count real Claude tokens on a
+sample of this material.** Until then no number here is a count.
 
 ## Why integers
 
@@ -83,6 +103,8 @@ from typing import Iterable, Sequence
 
 __all__ = [
     "PRETOKEN_RE",
+    "ASSUMPTIONS",
+    "SOUND_BOUND",
     "TextProfile",
     "CalibrationBasis",
     "DEFAULT_BASIS",
@@ -93,6 +115,8 @@ __all__ = [
     "estimate_for_texts",
     "calibrate",
     "DIRECT_CONTEXT_TOKENS",
+    "TOKENS_PER_PRETOKEN_LOW_X100",
+    "TOKENS_PER_PRETOKEN_HIGH_X100",
 ]
 
 # An approximation of the pre-tokenization split used by modern byte-level BPE
@@ -101,9 +125,10 @@ __all__ = [
 # Unicode property classes, so `[^\W\d_]` stands in for "letter".
 #
 # This is a *structural* approximation, not a claim about any specific vendor's
-# regex. It is used only to compute a lower bound on token count, and the bound
-# survives moderate differences in the split: a coarser real split produces
-# fewer pre-tokens than this one, and a finer one produces more tokens.
+# regex — and the difference matters. A real tokenizer with a COARSER split
+# merges across boundaries invented here and emits fewer tokens than this regex
+# yields pre-tokens, which is why the pre-token count is not a bound. See the
+# module docstring.
 PRETOKEN_RE = re.compile(
     r"'(?:s|t|re|ve|m|ll|d)"
     r"| ?[^\W\d_]+"
@@ -120,6 +145,58 @@ mode" (§7). Operator-configurable rather than authoritative: context windows
 change, and this build has no network with which to check one."""
 
 
+TOKENS_PER_PRETOKEN_LOW_X100 = 70
+"""Assumed FEWEST tokens per DocIQ pre-token: 0.70.
+
+Below 1.00 deliberately, and this is the correction Codex review #1 finding B-6
+forced. A tokenizer emits fewer tokens than DocIQ counts pre-tokens whenever its
+pre-tokenization is coarser than :data:`PRETOKEN_RE` — most importantly on digit
+runs, which this regex cuts every three digits while a real pre-tokenizer may
+keep whole. On text that is 13% digits an allowance of this size is not
+generous, it is the minimum honest one.
+
+0.70 is **assumed, not derived**. It cannot be derived without the artifact
+Principle 4 forbids fetching. It is stated here rather than buried in an
+expression so a future calibration run has exactly one number to replace at the
+low end."""
+
+TOKENS_PER_PRETOKEN_HIGH_X100 = 160
+"""Assumed MOST tokens per DocIQ pre-token: 1.60. Reflects long words,
+identifiers and digit runs splitting further than this regex does. Also
+assumed, for the same reason and with the same remedy."""
+
+ASSUMPTIONS: tuple[str, ...] = (
+    "ASSUMPTION A1 (pre-tokenization). DocIQ's pre-token regex is an "
+    "approximation of a byte-level BPE pre-tokenizer, not any vendor's. A real "
+    "tokenizer with a coarser split — notably one that keeps digit runs longer "
+    "than three digits together — merges across boundaries DocIQ invented and "
+    "emits FEWER tokens than DocIQ counts pre-tokens. The allowance for this is "
+    f"{TOKENS_PER_PRETOKEN_LOW_X100 / 100:.2f} tokens per pre-token and it is "
+    "assumed, not measured. This material is about 13% digits, so the allowance "
+    "is material rather than nominal.",
+    "ASSUMPTION A2 (merge depth). At the other end, a pre-token may split into "
+    f"as many as {TOKENS_PER_PRETOKEN_HIGH_X100 / 100:.2f} tokens for long "
+    "words, identifiers and numbers. Also assumed, not measured.",
+    "ASSUMPTION A3 (no tokenizer was run). No token in any DocIQ figure was "
+    "produced by a tokenizer. Principle 4 forbids the network and no offline "
+    "Claude tokenizer artifact exists, so every figure here is derived from "
+    "character and pre-token counts alone.",
+)
+"""The complete set of assumptions any DocIQ token figure rests on.
+
+Kept as data rather than prose in a docstring because it travels: it is written
+into ``TokenEstimate.provenance``, which reaches the processing log, the run
+summary PDF, the upload package README and the GUI. A figure whose assumptions
+stay in the source file is a figure whose reader cannot check it."""
+
+SOUND_BOUND = (
+    "The one tokenizer-independent bound DocIQ asserts is tokens <= UTF-8 "
+    "bytes: a byte-level vocabulary always contains single-byte fallbacks, so "
+    "no text needs more tokens than it has bytes. There is no corresponding "
+    "lower bound — DocIQ's pre-token count is NOT one (see ASSUMPTION A1)."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class TextProfile:
     """Mechanical measurements of a body of text. No estimation here."""
@@ -129,23 +206,38 @@ class TextProfile:
     pretokens: int
     unmatched_chars: int
     """Characters no pre-token rule consumed. Counted as one pre-token each so
-    the lower bound stays a lower bound; a non-zero value means the regex above
-    has a gap and is worth investigating."""
+    the structural characterization stays complete; a non-zero value means the
+    regex above has a gap and is worth investigating."""
 
     digit_chars: int
     punct_chars: int
     whitespace_chars: int
 
     @property
-    def token_floor(self) -> int:
-        """Hard lower bound on the real token count."""
-        return self.pretokens
+    def token_ceiling(self) -> int:
+        """Hard upper bound, sound for any byte-level tokenizer: the vocabulary
+        can always fall back to single bytes. This is the only tokenizer-
+        independent bound in the module — see :data:`SOUND_BOUND`."""
+        return max(self.utf8_bytes, 1)
 
     @property
-    def token_ceiling(self) -> int:
-        """Hard upper bound: a byte-level vocabulary can always fall back to
-        single bytes."""
-        return max(self.utf8_bytes, 1)
+    def assumed_token_low(self) -> int:
+        """Fewest tokens the measured structure allows **under**
+        :data:`ASSUMPTIONS`. Not a bound: a tokenizer whose pre-tokenization is
+        coarser than assumption A1 allows would go below it."""
+        if not self.pretokens:
+            return 0
+        return max(1, round(self.pretokens * TOKENS_PER_PRETOKEN_LOW_X100 / 100))
+
+    @property
+    def assumed_token_high(self) -> int:
+        """Most tokens the measured structure allows under :data:`ASSUMPTIONS`."""
+        if not self.pretokens:
+            return 0
+        return max(
+            self.assumed_token_low,
+            round(self.pretokens * TOKENS_PER_PRETOKEN_HIGH_X100 / 100),
+        )
 
     @property
     def chars_per_pretoken_x100(self) -> int:
@@ -227,16 +319,32 @@ class CalibrationBasis:
 DEFAULT_BASIS = CalibrationBasis(
     low_x100=330,
     high_x100=360,
-    label="D-03 ruled band (3.30–3.60 chars/token)",
+    label="D-03 ruled band (3.30–3.60 chars/token), uncalibrated",
     provenance=(
         "PROXY, NOT A TOKENIZER MEASUREMENT. The band is the range ruled in "
-        "D-03 for table-heavy MPR text. It was checked against the real MPR "
-        "corpus by measuring pre-token structure (a bound that holds for any "
-        "byte-level BPE tokenizer), not by running Claude's tokenizer, which is "
-        "unavailable offline. Treat the displayed range as an estimate with "
-        "roughly +/-10% uncertainty, not a count."
+        "D-03 for table-heavy MPR text. No tokenizer was run: Claude's is "
+        "unavailable offline and Principle 4 forbids fetching one. The band was "
+        "checked for consistency against the real MPR corpus by measuring "
+        "pre-token structure — a CHARACTERIZATION under stated assumptions, not "
+        "a bound (see ASSUMPTION A1). Treat the displayed range as an estimate, "
+        "not a count."
     ),
 )
+
+
+# Method labels. Constants rather than inline literals because the PDF, the log
+# and the GUI must all render the same words for the same run — the exact defect
+# B-6 recorded against the summary footer, which named a method the run had not
+# used.
+METHOD_BAND = (
+    "characters ÷ the D-03 ruled chars-per-token band; the measured pre-token "
+    "structure is consistent with that band"
+)
+METHOD_WIDENED = (
+    "the D-03 ruled band WIDENED to its union with the measured pre-token "
+    "structure, which lies entirely above the band"
+)
+METHOD_EMPTY = "no text measured"
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,25 +355,87 @@ class TokenEstimate:
     basis: CalibrationBasis
     low: int
     high: int
-    clamped_low: bool = False
+    method: str = METHOD_EMPTY
+    """The method actually used for THIS estimate, in words. Rendered verbatim
+    by every consumer; never re-derived by one."""
+
     clamped_high: bool = False
-    """True when a hard bound overrode the ratio. Surfaced because it means the
-    ratio band and the text's actual structure disagree — dense numeric tables
-    are the usual cause, and that is precisely the case D-03 worried about."""
+    """True when the sound ``tokens <= utf8_bytes`` ceiling overrode the range's
+    upper end."""
+
+    widened: bool = False
+    """True when the reported range is the union of the ruled band and the
+    structure-implied range rather than the band alone."""
 
     ratio_refuted: bool = False
-    """True when the ENTIRE ratio band is impossible for this text: the band
-    predicts fewer tokens than the text has pre-tokens, and a BPE tokenizer
-    cannot merge across a pre-token boundary. The range then comes from the
-    text's own structure instead. Measured on the real MPR corpus, this is the
-    normal case — see the module docstring."""
+    """True when the ruled band lies entirely BELOW the range the measured
+    pre-token structure allows under :data:`ASSUMPTIONS` — so the band alone
+    would understate the load.
+
+    This is a **conditional** inconsistency, not a proof: it depends on
+    assumption A1, which is not verified and cannot be offline. Before Codex
+    review #1 finding B-6 this flag was set by an unsound argument (the
+    pre-token count treated as a hard floor) and was therefore set on the real
+    corpus. Under the corrected assumptions it is not."""
 
     @property
     def headline(self) -> str:
         return f"≈ {_compact(self.low)}–{_compact(self.high)} tokens"
 
+    @property
+    def method_short(self) -> str:
+        """A few words naming the method, for a single-line footer.
+
+        Derived from :attr:`method` rather than chosen independently, so the
+        short form cannot say something the long form does not."""
+        if self.method == METHOD_EMPTY:
+            return "no text measured"
+        if self.widened:
+            return "ruled band widened by measured structure"
+        return "ruled band, structure-checked"
+
     def capacity(self, limit: int = DIRECT_CONTEXT_TOKENS) -> "CapacityVerdict":
         return CapacityVerdict.of(self, limit)
+
+    def provenance_text(self, label: str = "") -> str:
+        """The full provenance string that must travel with this figure.
+
+        Built here, once, so the processing log, the summary PDF, the upload
+        package README, the GUI and the contract projection cannot render
+        different accounts of the same number. Finding B-6 is precisely what a
+        second, hand-written account produces.
+        """
+        where = f" ({label})" if label else ""
+        parts = [
+            self.basis.provenance,
+            f"METHOD FOR THIS FIGURE{where}: {self.method}.",
+        ]
+        if self.ratio_refuted:
+            parts.append(
+                "CONDITIONAL INCONSISTENCY: the ruled band "
+                f"{self.basis.display} lies entirely below the "
+                f"{self.profile.assumed_token_low:,}–"
+                f"{self.profile.assumed_token_high:,} token range the measured "
+                f"structure allows ({self.profile.pretokens:,} pre-tokens at "
+                f"{self.profile.chars_per_pretoken_x100 / 100:.2f} characters "
+                "each), so the band alone would understate this text. This "
+                "follows from ASSUMPTION A1 and is not a proof that the band is "
+                "wrong."
+            )
+        if self.clamped_high:
+            parts.append(
+                "The upper end was reduced to the sound ceiling of "
+                f"{self.profile.token_ceiling:,} tokens (UTF-8 bytes)."
+            )
+        parts.append(
+            f"Measured{where}: {self.profile.chars:,} characters, "
+            f"{self.profile.utf8_bytes:,} UTF-8 bytes, "
+            f"{self.profile.pretokens:,} DocIQ pre-tokens; reported range "
+            f"{self.low:,}–{self.high:,} tokens."
+        )
+        parts.append(SOUND_BOUND)
+        parts.extend(ASSUMPTIONS)
+        return " ".join(parts)
 
 
 def _compact(n: int) -> str:
@@ -327,10 +497,27 @@ def estimate_tokens(
 ) -> TokenEstimate:
     """Estimate a conservative token range.
 
-    The ratio band produces the range; the two hard bounds then clamp it. The
-    clamp is not cosmetic — for a page of pure numeric table, the pre-token
-    floor can exceed what a 3.6 chars/token ratio predicts, and reporting the
-    lower figure would understate the load in exactly the case that matters.
+    Two ranges are computed and compared:
+
+    * the **ratio range**, ``characters ÷ the ruled band``; and
+    * the **structure range**, the measured pre-token count times the assumed
+      tokens-per-pre-token band (:data:`ASSUMPTIONS`).
+
+    When they overlap the ruled band governs — D-03 is a ruling, and a corpus
+    check that agrees with it is not a reason to discard it. When the structure
+    range lies entirely *above* the ruled band the reported range widens to the
+    union, because in that direction the band would understate the load, which
+    is the error that matters for a capacity decision.
+
+    The reverse case — a structure range entirely *below* the band, which
+    happens on artificial text with very long words — does **not** widen
+    downward. The band is the conservative statement there, and widening toward
+    one token for a 36,000-character string would trade a defensible estimate
+    for a meaningless one.
+
+    The only clamp applied is the sound ``tokens <= utf8_bytes`` ceiling. The
+    pre-token count is deliberately NOT used as a floor: see the module
+    docstring and Codex review #1 finding B-6.
     """
     b = basis or DEFAULT_BASIS
     profile = (
@@ -339,37 +526,36 @@ def estimate_tokens(
         else measure(text_or_profile)
     )
     if profile.chars == 0:
-        return TokenEstimate(profile=profile, basis=b, low=0, high=0)
+        return TokenEstimate(
+            profile=profile, basis=b, low=0, high=0, method=METHOD_EMPTY
+        )
 
-    low = math.floor(profile.chars * 100 / b.high_x100)
-    high = math.ceil(profile.chars * 100 / b.low_x100)
-    floor_, ceiling = profile.token_floor, profile.token_ceiling
+    band_low = math.floor(profile.chars * 100 / b.high_x100)
+    band_high = math.ceil(profile.chars * 100 / b.low_x100)
+    s_low, s_high = profile.assumed_token_low, profile.assumed_token_high
 
-    refuted = high < floor_
-    if refuted:
-        # The ratio band is not merely optimistic, it is impossible: it predicts
-        # fewer tokens than the text has pre-tokens. Reporting the floor as a
-        # point estimate would trade one wrong number for another, so the range
-        # is rebuilt from the structure that refuted it — pre-token count, times
-        # the assumed tokens-per-pre-token band.
-        low = floor_
-        high = max(floor_, round(floor_ * TOKENS_PER_PRETOKEN_HIGH_X100 / 100))
+    structure_above = bool(profile.pretokens) and s_low > band_high
+    if structure_above:
+        low, high = min(band_low, s_low), max(band_high, s_high)
+        method = METHOD_WIDENED
+    else:
+        low, high = band_low, band_high
+        method = METHOD_BAND
 
-    clamped_low = clamped_high = False
-    if low < floor_:
-        low, clamped_low = floor_, True
+    clamped_high = False
+    ceiling = profile.token_ceiling
     if high > ceiling:
         high, clamped_high = ceiling, True
-    if high < low:
-        high = low
+    low = max(1, min(low, high))
     return TokenEstimate(
         profile=profile,
         basis=b,
         low=low,
         high=high,
-        clamped_low=clamped_low or refuted,
+        method=method,
         clamped_high=clamped_high,
-        ratio_refuted=refuted,
+        widened=structure_above,
+        ratio_refuted=structure_above,
     )
 
 
@@ -386,18 +572,6 @@ def estimate_for_texts(
 # ---------------------------------------------------------------------------
 # Calibration (dev-time)
 # ---------------------------------------------------------------------------
-
-TOKENS_PER_PRETOKEN_LOW_X100 = 100
-"""A pre-token can be a single token — the merge tables of a 100k+ vocabulary
-cover most whole words. This is the definitional floor, not an estimate."""
-
-TOKENS_PER_PRETOKEN_HIGH_X100 = 160
-"""Assumed ceiling for English technical prose with numeric tables: roughly
-1.6 tokens per pre-token, reflecting that long words, identifiers and digit
-runs split. **This is the one assumed constant in the whole estimator** — it is
-not measured, because measuring it needs the tokenizer DocIQ cannot have. It is
-stated here rather than buried in an arithmetic expression so that a future
-calibration run has exactly one number to replace."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,6 +600,10 @@ def calibrate(
     overlaps it. On disagreement the recommendation *widens* to the union rather
     than narrowing: an estimator that is wrong in the confident direction is
     worse than one that is vague.
+
+    ``consistent`` is a statement about two ranges overlapping under
+    :data:`ASSUMPTIONS`. It is not evidence about any real tokenizer, and a
+    ``consistent=False`` result is not a refutation of D-03.
     """
     base = shipped or DEFAULT_BASIS
     total = _EMPTY
@@ -453,8 +631,8 @@ def calibrate(
     if total.unmatched_chars:
         notes.append(
             f"{total.unmatched_chars} character(s) matched no pre-token rule and "
-            "were counted individually; the token floor remains valid but the "
-            "pre-token regex has a gap worth closing"
+            "were counted individually; the pre-token characterization remains "
+            "complete but the regex has a gap worth closing"
         )
     if overlaps:
         notes.append(
@@ -476,11 +654,16 @@ def calibrate(
             high_x100=max(base.high_x100, implied_high),
             label="widened after corpus check",
             provenance=base.provenance
-            + " Widened after a corpus pre-token check disagreed with the ruled band.",
+            + " Widened after a corpus pre-token check disagreed with the ruled "
+            "band under ASSUMPTION A1.",
             measured_chars=total.chars,
             measured_pretokens=total.pretokens,
             measured_documents=len(texts),
         )
+    notes.append(
+        "This check compares two computed ranges under stated assumptions. It "
+        "is not a tokenizer measurement and cannot refute D-03 on its own."
+    )
     return CalibrationReport(
         profile=total,
         documents=len(texts),

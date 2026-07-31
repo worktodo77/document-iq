@@ -38,7 +38,10 @@ both are determinism defects that the fixture corpus did not exercise.
 
 **D-A1 — `output_root` was inside the log's hashed `content` section.**
 Two runs of identical inputs into different output folders produced different
-corpus hashes. The determinism contract is "same folder + same profile + same
+corpus hashes. (Amended 2026-07-31 by contract v1.3.0 / A-04, from Codex review
+#1 finding B-2: the identity also covers `RunConfig.limits` — caps, timeouts,
+retry bounds, recursion and the OCR model bytes.) The determinism contract is
+"same folder + same profile + same
 master index"; where the operator chose to put the deliverables is not an input
 to what they contain. `output_root` moved to the log's `run` section.
 *Found by:* the first 3-run determinism probe, which went red immediately.

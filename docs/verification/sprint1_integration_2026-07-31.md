@@ -223,9 +223,13 @@ Track C raised amendments A-01/A-02 under the stop-the-line rule. They were
 `None` everywhere until integration.
 
 - **`tokens_before` / `tokens_after`** come from `verify/tokens.py` — before is
-  every page, after is the KEEP pages. `floor_tokens` carries the measured
-  pre-token count, which is a hard lower bound for any byte-level BPE tokenizer
-  and is the figure to display where only one can be shown.
+  every page, after is the KEEP pages. **CORRECTED 2026-07-31 (Codex review #1,
+  finding B-6):** `floor_tokens` used to carry the measured pre-token count and
+  this note called it a hard lower bound for any byte-level BPE tokenizer. It is
+  not one — the pre-tokens are DocIQ's own approximate split and a coarser real
+  tokenizer merges across them. `floor_tokens` is now left at 0 and the
+  measurement travels in `provenance` and the processing log, labeled as a
+  characterization under stated assumptions.
 - **`provenance`** is assembled from what the run actually did, not quoted from
   a constant: it repeats that no tokenizer was run (D-03's "calibrated against
   the real Claude tokenizer" cannot be honored offline), and it states this run's
@@ -391,9 +395,15 @@ two figures were never measuring the same thing.
 **Consequence:** the pipeline's number is the one that describes the corpus
 DocIQ actually ships, and it should supersede the register's for any statement
 about the deliverable. The register's figure remains valid as what the *source
-PDFs* contain under a different reader. Neither is a Claude token count, and
-`ratio_refuted` is `True` on both estimates — D-03's 3.30–3.60 band remains
-unreachable on this material, now on a third independent measurement.
+PDFs* contain under a different reader. Neither is a Claude token count.
+
+**CORRECTED 2026-07-31 (Codex review #1, finding B-6):** this paragraph
+originally read that `ratio_refuted` is `True` on both estimates and that D-03's
+band "remains unreachable on this material, now on a third independent
+measurement". The refutation argument does not hold (see
+`docs/decisions/decision_register.md`, "CORRECTION"), and under the corrected
+assumptions `ratio_refuted` is **`False`** on both. The character and pre-token
+measurements above are unchanged.
 
 Two smaller results fall out of the same numbers:
 

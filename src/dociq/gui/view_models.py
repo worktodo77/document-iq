@@ -91,8 +91,10 @@ class CapacityReading:
 def format_tokens(estimate: TokenEstimate) -> tuple[str, str]:
     """(headline, unit) — e.g. ``("152–166", "thousand tokens")``.
 
-    A range, never a single number: D-03 rules the estimate is a calibrated
-    ratio and must be shown conservatively rather than as a false precision.
+    A range, never a single number: D-03 rules the estimate is a chars-per-token
+    ratio and must be shown conservatively rather than as a false precision. No
+    calibration against a real tokenizer was performed — see
+    :mod:`dociq.verify.tokens`.
     """
     lo, hi = estimate.low, estimate.high
     if hi >= 1_000_000:
@@ -232,19 +234,24 @@ class SummaryView:
 
         A screen in an evidentiary tool must not author a provenance claim. The
         earlier version of this method printed the configured chars-per-token
-        band as if it were the method used; Track B then measured 2.53 chars per
-        pre-token across the record, which makes that band arithmetically
-        unreachable. Printing it was a false provenance claim, and no literal
-        ratio appears here now — only what the pipeline says it did.
+        band as if it were the method used. No literal ratio appears here now —
+        only what the pipeline says it did.
+
+        The wording is also where Codex review #1 finding B-6 landed in the UI:
+        this method used to say "a floor, not an estimate" whenever a pre-token
+        count was present. DocIQ has no floor to offer, so it says "estimated"
+        and names where the estimate came from instead.
         """
         basis = self.basis
         if not basis.provenance:
             return "basis not recorded"
         if basis.ratio_refuted:
-            return (f"{basis.provenance}; the configured ratio did not fit "
-                    "this text, so it was not used")
-        if basis.is_bound:
-            return f"a floor, not an estimate — {basis.provenance}"
+            return (f"{basis.provenance}; the configured ratio band sits below "
+                    "what this text's structure allows, so the range was "
+                    "widened rather than taken from the band alone")
+        if basis.is_structural:
+            return ("estimated from this text's own measured structure, not a "
+                    f"token count — {basis.provenance}")
         return f"estimated — {basis.provenance}"
 
     @property
@@ -254,12 +261,19 @@ class SummaryView:
         return TokenBasis.of(self.capacity.tokens)
 
     @property
-    def is_bound(self) -> bool:
-        return self.basis.is_bound
+    def is_structural(self) -> bool:
+        return self.basis.is_structural
 
     def headline_unit(self) -> str:
-        """"tokens" or "tokens at least" — a bound must not read as a point."""
-        return "tokens at least" if self.is_bound else "tokens"
+        """The unit under the headline figure.
+
+        Always plain "tokens". It used to read "tokens at least" whenever a
+        pre-token count was available, which asserted a lower bound DocIQ cannot
+        support (finding B-6). The unit is not where the method is stated —
+        :meth:`basis_note` and :meth:`capacity_line` carry that, and a longer
+        unit string overflows the headline row at 1040 px, which
+        ``test_gui_states`` catches."""
+        return "tokens"
 
     def fits(self) -> bool:
         return self.tokens_after <= self.capacity.capacity
@@ -270,7 +284,10 @@ class SummaryView:
         The over-capacity case is the EXPECTED case on a real matter, so it is
         phrased as a measurement, not as a failure."""
         capacity = self.capacity.capacity
-        lead = "at least " if self.is_bound else ""
+        # "about", never "at least": DocIQ has no lower bound on token count
+        # (finding B-6), so a lead-in that promises one is a false claim in the
+        # one line the operator reads most.
+        lead = "about "
         if self.fits():
             pct = 100.0 * self.tokens_after / capacity
             return f"{lead}{pct:.0f}% of direct-context capacity"

@@ -119,6 +119,9 @@ WHAT THIS FOLDER IS
 
   {document_count} documents, {page_count} original pages.
   Estimated size: {estimate.headline} ({estimate.basis.label}).
+  Method: {estimate.method}. No tokenizer was run, and DocIQ asserts no lower
+  bound on token count — only that a text cannot need more tokens than it has
+  UTF-8 bytes. Full assumptions in processing_log.json.
   {estimate.capacity().statement}
 
 HOW TO USE IT

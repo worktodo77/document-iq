@@ -71,6 +71,7 @@ from dociq.identify.bates import (
     propose_format,
     ranges_by_sort_key,
 )
+from dociq.ingest import extract as ex
 from dociq.ingest import walker
 from dociq.profiles.apply import apply_profiles
 from dociq.profiles.model import FormatProfile, OperatorStamp, operator_stamp, write_matter_copy
@@ -161,40 +162,25 @@ class PipelineOutcome:
         return dict(self.timings_s).get(stage, 0.0)
 
 
-def _measured_provenance(est: MeasuredEstimate, label: str) -> str:
-    """The provenance string that travels with a token figure.
-
-    Assembled from what this run actually did rather than quoted from a
-    constant, so a figure can never claim a basis the run did not use. §7 makes
-    the token estimate the headline; a headline whose basis is a stale literal is
-    the failure this string exists to prevent.
-    """
-    profile = est.profile
-    parts = [est.basis.provenance]
-    if est.ratio_refuted:
-        parts.append(
-            f"THE RATIO BAND WAS NOT USED FOR THIS {label.upper()} FIGURE: the "
-            f"text measures {profile.chars_per_pretoken_x100 / 100:.2f} "
-            f"characters per pre-token, so the band {est.basis.display} predicts "
-            f"fewer tokens than the text has pre-tokens ({profile.pretokens:,}) "
-            "and no byte-level BPE tokenizer can emit that few. The range below "
-            "is rebuilt from the measured pre-token structure instead."
-        )
-    elif est.clamped_low or est.clamped_high:
-        parts.append(
-            "A hard bound overrode the ratio at one end of the range "
-            f"(low clamped: {est.clamped_low}, high clamped: {est.clamped_high})."
-        )
-    parts.append(
-        f"Measured on this run ({label}): {profile.chars:,} characters, "
-        f"{profile.pretokens:,} pre-tokens, reported range "
-        f"{est.low:,}-{est.high:,} tokens."
-    )
-    return " ".join(parts)
-
-
 def _to_contract_estimate(est: MeasuredEstimate, label: str) -> TokenEstimate:
     """Project the measured estimate onto the frozen contract type.
+
+    ``provenance`` comes from :meth:`MeasuredEstimate.provenance_text`, which is
+    the one place a token figure's account of itself is written. It used to be
+    assembled here as well, and the two accounts drifted — Codex review #1
+    finding B-6 caught the run summary asserting a calibrated ratio for runs
+    that used no such thing.
+
+    ``floor_tokens`` is deliberately left at 0, its "not measured" value. The
+    contract defines it as a *hard lower bound* on the true token count, and
+    DocIQ has no such bound to offer: the pre-token count that used to be put
+    here is a characterization under stated assumptions, not a floor (finding
+    B-6, and the ``verify.tokens`` module docstring). Shipping the pre-token
+    count in a field the contract calls a hard bound would put the withdrawn
+    claim straight back into the machine-readable result. The measured pre-token
+    count is not lost — it travels in ``provenance`` and in the processing log's
+    ``token_estimate`` block, where it is labeled for what it is. See
+    ``docs/contracts/amendments.md`` A-05 for the proposed contract-side repair.
 
     ``ratio_refuted`` is copied from the estimator's own test result. The
     contract says a consumer must never infer it, and the only way to keep that
@@ -203,9 +189,9 @@ def _to_contract_estimate(est: MeasuredEstimate, label: str) -> TokenEstimate:
         chars=est.profile.chars,
         ratio_low=est.basis.low_x100 / 100,
         ratio_high=est.basis.high_x100 / 100,
-        floor_tokens=est.profile.token_floor,
+        floor_tokens=0,
         ratio_refuted=est.ratio_refuted,
-        provenance=_measured_provenance(est, label),
+        provenance=est.provenance_text(label),
     )
 
 
@@ -412,9 +398,18 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # recorded configuration claimed both runs used rapidocr 1.2.3. The engine
     # fields are the contract's own place to say this, so the run stamps what it
     # actually did rather than what it was configured with.
+    #
+    # The same argument extends to everything A-04 added (Codex review #1
+    # finding B-2): the XLSX/CSV/ZIP caps, the ZIP depth, the per-file timeout,
+    # the retry bounds, whether the walk recursed, and the bytes of the OCR
+    # model. Each can change the emitted evidence, and each sat outside the
+    # hashed configuration until now. They are captured from the modules that
+    # own them, so the recorded identity is what the run used rather than a
+    # restatement that can go stale.
     ocr_ran = (opts.walk or walker.WalkOptions()).ocr_enabled
     effective = replace(
         config,
+        limits=walker.effective_limits(opts.walk, ocr_enabled=ocr_ran),
         ocr_engine=config.ocr_engine if ocr_ran else OCR_DISABLED,
         ocr_engine_version=config.ocr_engine_version if ocr_ran else "",
         master_index=index.snapshot if index else config.master_index,
@@ -514,6 +509,18 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         stamp=stamp,
         output_hashes=_hashes_of(written, layout),
         run_notes={
+            # Recorded, never hashed. Pool widths must not change output; if one
+            # ever does, that is a determinism defect to fix rather than a value
+            # to absorb into the identity (A-04's note on
+            # ``EffectiveLimits.workers``). The disk-headroom multiplier gates
+            # whether the run starts rather than what a completed run emits, and
+            # it is a float, which Principle 5 bars from identity fields — see
+            # ``docs/contracts/amendments.md`` A-05 for the disclosure.
+            "pool": {
+                "workers": effective.limits.workers if effective.limits else None,
+                "ocr_page_workers": ex._OCR_PAGE_WORKERS,
+                "disk_headroom_x100": round(walker._DISK_HEADROOM * 100),
+            },
             "stale_outputs_removed": list(stale),
             "load_dependent_extraction": list(walk_notes.load_dependent),
             "invocation_notes": list(walk_notes.invocation),

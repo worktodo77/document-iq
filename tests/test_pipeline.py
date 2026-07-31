@@ -114,9 +114,15 @@ def test_token_estimates_are_populated_and_carry_their_provenance(outcome):
     r = outcome.result
     assert r.tokens_before is not None and r.tokens_after is not None
     assert r.tokens_before.chars > 0
-    assert r.tokens_before.floor_tokens > 0
+    # Deliberately 0 — Codex review #1 finding B-6. The contract defines
+    # `floor_tokens` as a hard lower bound and DocIQ has none to offer; the
+    # pre-token count that used to be shipped here was a characterization under
+    # stated assumptions. It is not lost, it moved into `provenance`.
+    assert r.tokens_before.floor_tokens == 0
     assert "PROXY, NOT A TOKENIZER MEASUREMENT" in r.tokens_before.provenance
-    assert "Measured on this run" in r.tokens_before.provenance
+    assert "Measured (before reduction)" in r.tokens_before.provenance
+    assert "ASSUMPTION A1" in r.tokens_before.provenance
+    assert "pre-tokens" in r.tokens_before.provenance
 
 
 def test_ratio_refuted_is_the_pipelines_own_verdict_not_a_consumers_guess(outcome):

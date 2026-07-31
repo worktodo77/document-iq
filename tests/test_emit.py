@@ -397,3 +397,44 @@ def test_path_b_reports_what_is_missing(tmp_path):
     ea = expert_assist_layout(OutputLayout.at(tmp_path / "empty"))
     assert not ea.ready
     assert "sources.json" in ea.missing
+
+
+def _pdf_text(path) -> str:
+    import pypdf
+
+    return " ".join(
+        p.extract_text() or "" for p in pypdf.PdfReader(str(path)).pages
+    ).replace("\n", " ")
+
+
+def test_summary_renders_the_method_this_run_actually_used(tmp_path):
+    """Codex review #1, finding B-6.
+
+    The footer used to say token figures came from "a calibrated character
+    ratio" on every run — including the default uncalibrated path and the path
+    where the ratio band was not used on its own. A provenance line that is
+    right by construction is the only kind worth printing on an evidentiary
+    deliverable.
+    """
+    pytest.importorskip("pypdf")
+    layout = OutputLayout.at(tmp_path)
+    docs = assigned(3)
+    data = summary_data(docs)
+    text = _pdf_text(write_run_summary(data, layout))
+    assert "calibrated character ratio" not in text
+    assert data.tokens_after.method_short in text
+    assert "How this figure was obtained" in text
+    assert "no lower bound" in text.lower() or "no tokenizer was run" in text.lower()
+
+
+def test_summary_never_calls_the_token_figure_a_floor(tmp_path):
+    pytest.importorskip("pypdf")
+    layout = OutputLayout.at(tmp_path)
+    text = _pdf_text(write_run_summary(summary_data(assigned(3)), layout)).lower()
+    for banned in ("at least", "hard floor", "cannot emit fewer",
+                   "guaranteed", "a floor, not an estimate"):
+        assert banned not in text, banned
+    assert "no lower bound" in text, (
+        "the absence of a floor is a fact the reader needs stated, not merely "
+        "a phrase the PDF avoids"
+    )

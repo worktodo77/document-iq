@@ -70,7 +70,18 @@ and the destination is not one of those inputs. `output_root` therefore lives in
 the log's `run` section alongside the timestamp and operator. `source_root`
 stays in `content` — it *is* an input.
 
-## 4. D-03's token ratio band is refuted by the real corpus — a decision for Alex
+## 4. D-03's token ratio band vs the real corpus — a decision for Alex
+
+> **CORRECTED 2026-07-31 (Codex review #1, finding B-6).** This section claimed
+> the band was *refuted* and *unreachable*, on the argument that a tokenizer
+> cannot emit fewer tokens than the text has pre-tokens. That argument holds
+> only for a tokenizer's own pre-tokenization, not for the boundaries DocIQ's
+> approximate regex invents (it splits digit runs every three digits, on
+> material that is 13% digits). Under the assumptions now stated in
+> `verify/tokens.ASSUMPTIONS`, 3.03 chars/pre-token implies roughly 1.89–4.33
+> chars/token, which **overlaps** the ruled band. **D-03 is not refuted.** The
+> measurement below is unchanged; only what was inferred from it is withdrawn.
+> See `docs/decisions/decision_register.md`, "CORRECTION".
 
 Measured on 40 randomly sampled PDFs of the real MPR corpus (1,201 pages,
 2,221,486 characters): **3.03 characters per pre-token**. Since a BPE tokenizer

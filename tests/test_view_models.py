@@ -199,15 +199,15 @@ def _view_with(estimate: TokenEstimate) -> object:
 def test_the_screen_never_states_a_ratio_band() -> None:
     """The defect this test exists for: the summary printed "conservative end of
     a 3.3–3.6 characters-per-token estimate" as its provenance. Track B then
-    measured 2.53 chars per pre-token on the real record, which makes that band
-    arithmetically impossible — the screen was asserting a method that had been
-    refuted. No figure of the GUI's own authorship belongs in a basis line."""
+    measured 2.53 chars per pre-token on the real record. No figure of the
+    GUI's own authorship belongs in a basis line — whatever the pipeline did is
+    the only thing the screen may report."""
     note = build_summary(_outcome()).basis_note()
     assert not any(ch.isdigit() for ch in note), note
 
 
 def test_the_basis_line_is_the_pipeline_s_words() -> None:
-    est = TokenEstimate(1000, 3.3, 3.6, floor_tokens=400,
+    est = TokenEstimate(1000, 3.3, 3.6, structural_tokens=400,
                         provenance="counted three ways on a Tuesday")
     assert "counted three ways on a Tuesday" in _view_with(est).basis_note()
 
@@ -217,49 +217,61 @@ def test_an_unrecorded_basis_says_so_rather_than_inventing_one() -> None:
     assert _view_with(est).basis_note() == "basis not recorded"
 
 
-def test_a_refuted_ratio_is_stated_plainly() -> None:
-    est = TokenEstimate(1000, 3.3, 3.6, floor_tokens=400,
+def test_a_conditional_inconsistency_is_stated_without_being_promoted() -> None:
+    """Codex review #1, finding B-6.
+
+    The band sitting below what the text's structure allows is a conditional
+    inconsistency under a stated assumption, not a proof the band is wrong. The
+    screen must report the first and must not read as the second."""
+    est = TokenEstimate(1000, 3.3, 3.6, structural_tokens=400,
                         provenance="counted from the text", ratio_refuted=True)
     note = _view_with(est).basis_note()
-    assert "did not fit" in note
+    assert "widened" in note
     assert "counted from the text" in note
+    assert "impossible" not in note and "refuted" not in note
 
 
-def test_a_floor_is_preferred_to_an_estimate_and_labelled_as_a_bound() -> None:
-    """A bound that can be defended beats a point estimate that cannot."""
-    est = TokenEstimate(1_000_000, 3.3, 3.6, floor_tokens=400_000,
+def test_a_structural_estimate_is_preferred_but_never_called_a_bound() -> None:
+    """Derived from THIS text beats a ruled constant — and it is still an
+    estimate. "tokens at least" asserted a floor DocIQ cannot support."""
+    est = TokenEstimate(1_000_000, 3.3, 3.6, structural_tokens=400_000,
                         provenance="pre-token count")
     assert est.tokens == 400_000        # not 1_000_000 / 3.3 = 303_030
-    assert est.is_bound
+    assert est.is_structural
     view = _view_with(est)
-    assert view.headline_unit() == "tokens at least"
-    assert view.capacity_line().startswith("at least ")
+    assert view.headline_unit() == "tokens"
+    assert "at least" not in view.headline_unit()
+    assert not view.capacity_line().startswith("at least ")
+    assert view.capacity_line().startswith("about ")
 
 
-def test_an_estimate_without_a_floor_is_not_called_a_bound() -> None:
+def test_no_screen_wording_promises_a_lower_bound() -> None:
     est = TokenEstimate(1_000_000, 3.3, 3.6, provenance="chars over a ratio")
     view = _view_with(est)
-    assert not view.is_bound
+    assert not view.is_structural
     assert view.headline_unit() == "tokens"
-    assert not view.capacity_line().startswith("at least")
+    assert "at least" not in view.capacity_line()
+    assert "at least" not in view.basis_note()
+    assert "floor" not in view.basis_note()
 
 
 def test_the_multiplier_survives_three_digits() -> None:
     """The measured record is ~97× capacity and a larger matter is more. The
     factor is written without a decimal past 10× so three digits still fit."""
-    est = TokenEstimate(0, 3.3, 3.6, floor_tokens=250 * DIRECT_CONTEXT_TOKENS,
+    est = TokenEstimate(0, 3.3, 3.6,
+                        structural_tokens=250 * DIRECT_CONTEXT_TOKENS,
                         provenance="pre-token count")
     line = _view_with(est).capacity_line()
     assert "250× above direct-context capacity" in line
-    assert "." not in line.split("×")[0]
+    assert "." not in line.split("×")[0].replace("about ", "")
 
 
 def test_the_measured_scale_is_the_fixture_shape_at_the_real_magnitude() -> None:
-    from dociq.gui.mock_pipeline import MEASURED_FLOOR_TOKENS, at_measured_scale
+    from dociq.gui.mock_pipeline import MEASURED_PRETOKENS, at_measured_scale
 
     plan = _outcome().plan
     scaled = at_measured_scale(plan)
-    assert scaled.full_tokens == MEASURED_FLOOR_TOKENS
+    assert scaled.full_tokens == MEASURED_PRETOKENS
     assert len(scaled.levers) == len(plan.levers)
     assert [le.engaged for le in scaled.levers] == [le.engaged for le in plan.levers]
     assert round(scaled.over_capacity_factor) >= 50

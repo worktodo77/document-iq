@@ -77,34 +77,42 @@ class TokenEstimate:
     **The provenance is not decoration.** DocIQ is an evidentiary tool: a number
     on screen that cannot say where it came from is a claim the expert would
     have to defend without support. Track B measured 2.53 chars per pre-token
-    across the full 298-PDF record, which makes D-03's ruled 3.3–3.6 band
-    *unreachable* on this material — a tokenizer cannot emit fewer tokens than
-    the text has pre-tokens. So the ratio is configuration, the provenance
-    travels beside every figure derived from it, and the GUI renders neither
-    ratio nor band as fact.
+    across the full 298-PDF record — dense material, well below ordinary prose.
+    So the ratio is configuration, the provenance travels beside every figure
+    derived from it, and the GUI renders neither ratio nor band as fact.
+
+    **What this type no longer claims.** It used to carry ``floor_tokens``, a
+    "hard lower bound" taken from the pre-token count, and the screen rendered
+    it as "tokens at least". Codex review #1 finding B-6 established that the
+    pre-token count is not a bound for any tokenizer but DocIQ's own regex, so
+    the field is replaced by :attr:`structural_tokens` — the same measurement,
+    named for what it is, and rendered as an estimate rather than a floor.
     """
 
     chars: int
     ratio_low: float
     ratio_high: float
-    floor_tokens: int = 0
-    """A hard lower bound counted from the text (its pre-token count), or 0 when
-    it was not measured. A bound that can be defended beats a point estimate
-    that cannot, so this is preferred for display wherever it exists."""
+    structural_tokens: int = 0
+    """Tokens implied by the text's measured pre-token structure under the
+    assumptions stated in :mod:`dociq.verify.tokens`, or 0 when not measured.
+
+    **Not a bound in either direction.** A tokenizer whose pre-tokenization is
+    coarser than DocIQ's approximation emits fewer tokens than this. It is
+    preferred for display over the ratio range because it is derived from THIS
+    text rather than from a ruled constant — but it is displayed as an estimate,
+    with its assumptions one click away, never as a floor."""
 
     provenance: str = ""
     """How the figure was obtained, in the pipeline's own words. The GUI shows
     this verbatim and never substitutes a literal of its own."""
 
     ratio_refuted: bool = False
-    """Set when the text's own structure contradicts the configured ratio — the
-    measured chars-per-pre-token is below ``ratio_low``, so the ratio estimate
-    is not merely optimistic but impossible. The screen must say so rather than
-    quietly printing a number.
+    """Set when the ruled ratio band lies entirely below the range the measured
+    structure allows under those assumptions, so the band alone would understate
+    the load. The screen must say so rather than quietly printing a number.
 
-    NOTE: the announced v1.1.0 shape carries ``provenance`` but no such flag;
-    see ``docs/contracts/amendments.md`` A-03. Until that is settled the seam
-    models it explicitly rather than parsing it back out of prose."""
+    A conditional inconsistency, not a proof the band is wrong — the wording the
+    screen uses must not promote it into one (finding B-6)."""
 
     @property
     def high(self) -> int:
@@ -116,14 +124,16 @@ class TokenEstimate:
         return round(self.chars / self.ratio_high)
 
     @property
-    def is_bound(self) -> bool:
-        return self.floor_tokens > 0
+    def is_structural(self) -> bool:
+        """True when the figure comes from this text's own measured structure
+        rather than from the ruled ratio band."""
+        return self.structural_tokens > 0
 
     @property
     def tokens(self) -> int:
-        """The figure to display: the measured floor where one exists, the
-        conservative end of the ratio range otherwise."""
-        return self.floor_tokens if self.is_bound else self.high
+        """The figure to display: the structural estimate where one was
+        measured, the conservative end of the ratio range otherwise."""
+        return self.structural_tokens if self.is_structural else self.high
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,12 +147,13 @@ class TokenBasis:
     """
 
     provenance: str = ""
-    is_bound: bool = False
+    is_structural: bool = False
     ratio_refuted: bool = False
 
     @classmethod
     def of(cls, estimate: "TokenEstimate") -> "TokenBasis":
-        return cls(estimate.provenance, estimate.is_bound, estimate.ratio_refuted)
+        return cls(estimate.provenance, estimate.is_structural,
+                   estimate.ratio_refuted)
 
 
 LEVER_EXPERT = "expert"

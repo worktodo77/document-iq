@@ -144,7 +144,12 @@ and in the warning naming the parent that was not scanned.
 
 ## The byte-identical claim, stated precisely
 
-Byte-identical across runs with the same folder + profile + master index:
+Byte-identical across runs with the same **run identity** — folder, profile,
+master index, and (contract v1.3.0, amendment A-04, from Codex review #1
+finding B-2) `RunConfig.limits`: the XLSX/CSV/ZIP caps, ZIP depth, per-file
+timeout, retry bounds, recursion flag and OCR model identity. Thread-pool
+width is recorded and deliberately excluded. `output_manifest.json` states the
+full identity in its `claim_identity` field:
 
 - `clean_text/*.txt`
 - `sources.json`

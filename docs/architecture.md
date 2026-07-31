@@ -30,7 +30,8 @@ src/dociq/
               handoff.py   — upload_package builder, README generator, Cowork launch
   verify/     accounting.py — pages in = kept + dropped, zero-discrepancy gate
               manifest.py   — output hash manifest
-              tokens.py     — calibrated chars-ratio estimate, range display
+              tokens.py     — chars-ratio estimate (UNcalibrated — no
+                              tokenizer offline), range display, assumptions
   gui/        app.py, screens/ — PySide6, D-07 "Counsel docket" design system
   branding/   make_icon.py, make_logo.py — generators adapted from Cleaner recipe
   selftest.py — end-to-end self test on a bundled synthetic fixture set (exit 0 gate)
