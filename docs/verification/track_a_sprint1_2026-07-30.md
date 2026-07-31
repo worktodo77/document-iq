@@ -215,6 +215,55 @@ change extracted bytes travels in `ExtractOptions` / `RunConfig`. MIP 3.9's
 mutable `_DATE_CONVENTION` global was **not** vendored — the convention is a
 parameter in `dating.detect_dates`.
 
+## 4a. Performance findings from the real-corpus run
+
+Measured on the D-12 corpus (298 PDF / 53 DOCX / 17 PPTX / 7 DOC; 17,732 PDF
+pages, 461 scanned) on the shared build machine — other tracks' test suites
+were running concurrently, so every wall-clock figure here is an upper bound
+rather than a clean benchmark.
+
+**Clean numbers:**
+
+- **Inventory (walk + SHA-256 + tiering): 375 files, ~2.6 GB, in 5.2 s.**
+  Stage 1 is not a cost centre.
+- **OCR: 5.74 s/page mean, 5.1 s median, 23.3 s max** (bake-off, single
+  threaded, 200 dpi). 461 scanned pages projects to ~44 minutes of OCR *work*.
+
+**A wrong conclusion, recorded because it was nearly reported as a finding.**
+Watching the progress log against wall-clock, it appeared that the
+coordinating loop had stalled for tens of minutes while extraction continued —
+the "GIL-starved main thread" story, and a plausible one. It was false.
+Checking the process creation time against the last logged `elapsed_s` showed
+the log 12 seconds behind reality: the loop was reporting normally and my
+sense of elapsed time was wrong. The claim is recorded here as **withdrawn**
+rather than deleted, because the same mistake is easy to make again from the
+same evidence, and because the fix it motivated (below) survives on its own
+measurement.
+
+**Thread oversubscription is real and unquantified.** The process carried
+**175 OS threads** on a 32-core box while using ~13.7 cores. RapidOCR holds
+three ONNX sessions, each defaulting to one intra-op thread per core, and up to
+16 page OCRs run concurrently; the product is far more runnable threads than
+cores. Pinning `intra_op_num_threads=1` and letting the page pool supply the
+parallelism is the standard remedy — but it is a hypothesis, not a finding,
+until it is measured, and nothing here measures it.
+
+**A measured inefficiency, fixed: the resume journal serialized every document
+three times.** `canonical_json({..., "doc": json.loads(canonical_json(d))})`
+walks the document's entire text twice, parses the result, and dumps it again —
+on the coordinating thread, under a lock. Replaced with one conversion and one
+dump. Measured on a synthetic 900-page scanned document (2.1 MB of JSON):
+**255 ms → 88 ms, a 2.9× reduction**, median of 5 runs, outputs asserted equal.
+The same triple round-trip was present in the probe emitter's log writer and is
+fixed with it.
+
+The §10 target ("~5,700 pages, ~50% scanned, under 60 minutes") should not be
+restated on these numbers, because they were taken on a contended machine and
+before the thread-pinning work above. What the corpus reality section of the
+decision register already established still holds and is now supported by
+measurement: **OCR is not the cost centre on this corpus** (461 pages, not
+~2,850), and the non-OCR path over 17,732 pages is.
+
 ## 5. Coordination note for Track B — `parent_doc_id` before Stage 3b
 
 Track A produces records **before** doc IDs exist: `doc_id` is `""` on every

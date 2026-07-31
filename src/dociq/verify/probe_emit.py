@@ -29,9 +29,9 @@ from ..contracts import (
     CONTRACT_VERSION,
     DocumentRecord,
     RunResult,
-    canonical_json,
     content_hash,
     document_sort_key,
+    to_jsonable,
 )
 
 PROVISIONAL = True
@@ -124,17 +124,17 @@ def _write_log(path: Path, result: RunResult, ids: dict[str, str]) -> None:
     # master index". Hashing it made two runs of identical inputs into two
     # different corpora, which is exactly the false negative that trains people
     # to stop trusting the gate. It lives in the ``run`` section instead.
-    cfg = json.loads(canonical_json(result.config))
+    cfg = to_jsonable(result.config)
     run_only = {"output_root": cfg.pop("output_root")}
     content = {
         "contract_version": CONTRACT_VERSION,
         "config": cfg,
         "documents": [
             {"doc_id": ids[d.rel_path],
-             "document": json.loads(canonical_json(d)),
+             "document": to_jsonable(d),
              "identity_hash": content_hash(d)}
             for d in sorted(result.documents, key=document_sort_key)],
-        "unsupported": [json.loads(canonical_json(d))
+        "unsupported": [to_jsonable(d)
                         for d in sorted(result.unsupported, key=document_sort_key)],
         "warnings": list(result.warnings),
         "totals": {"pages_in": result.pages_in, "pages_kept": result.pages_kept,

@@ -45,6 +45,7 @@ from ..contracts import (
     RunResult,
     canonical_json,
     document_sort_key,
+    to_jsonable,
 )
 from . import extract as ex
 from .dating import detect_dates
@@ -320,12 +321,20 @@ class _ResumeWriter:
     def add(self, source_rel: str, docs: list[DocumentRecord]) -> None:
         if self._fh is None:
             return
+        # One conversion, one dump. The obvious spelling —
+        # canonical_json({..., "doc": json.loads(canonical_json(d))}) — walks
+        # the document's entire text three times and parses it once more in
+        # between, on the coordinating thread, under a lock. On a 900-page
+        # scanned PDF that stalls the run's whole progress and watchdog loop;
+        # measured on the 17,732-page corpus, where the loop stopped reporting
+        # for tens of minutes while extraction carried on underneath it.
         with self._lock:
             try:
                 for d in docs:
-                    self._fh.write(canonical_json(
-                        {"source_rel_path": source_rel,
-                         "doc": json.loads(canonical_json(d))}) + "\n")
+                    self._fh.write(json.dumps(
+                        {"source_rel_path": source_rel, "doc": to_jsonable(d)},
+                        sort_keys=True, ensure_ascii=False,
+                        separators=(",", ":")) + "\n")
                 self._fh.flush()
             except (OSError, ValueError):
                 self._fh = None
