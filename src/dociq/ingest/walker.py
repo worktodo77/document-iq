@@ -256,12 +256,33 @@ def _iter_files(root: Path, *, recursive: bool,
         current = stack.pop()
         try:
             children = sorted(current.iterdir(), key=lambda q: q.as_posix())
-        except OSError:
+        except OSError as exc:
+            # Codex review #1, B-3 sibling sweep. This was a bare ``continue``:
+            # a directory that would not list — permissions, a share that went
+            # away, a lock — removed EVERY file beneath it from the inventory,
+            # not merely from extraction. No note, no warning, no line in any
+            # deliverable. It is the largest silent deletion in the pipeline,
+            # and it is invisible precisely because the missing files never
+            # became records that something downstream could miss.
+            if notes is not None:
+                notes.append(
+                    f"a folder could not be listed and NOTHING inside it was "
+                    f"inventoried: '{rel_path_of(current, root)}' ({exc}). "
+                    "Check the folder's permissions and re-run; the documents "
+                    "under it are absent from this run entirely.")
             continue
         for p in children:
             try:
                 is_dir = p.is_dir()
-            except OSError:
+            except OSError as exc:
+                # Same class, one entry rather than a subtree: a path that
+                # cannot be stat'd was skipped outright, so it appeared in no
+                # list at all — not even the Unsupported one, which is where an
+                # unreadable-but-present file belongs.
+                if notes is not None:
+                    notes.append(
+                        f"an entry could not be examined and is absent from "
+                        f"this run: '{rel_path_of(p, root)}' ({exc})")
                 continue
             if is_dir:
                 real = os.path.realpath(p)

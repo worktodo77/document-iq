@@ -29,6 +29,7 @@ from dociq.contracts import DocIQError, MasterIndexSnapshot
 __all__ = [
     "MasterIndexError",
     "MasterIndexRow",
+    "QuarantinedRow",
     "MasterIndex",
     "load_master_index",
     "normalize_header",
@@ -145,6 +146,63 @@ class MasterIndexRow:
         return str(self.original_sort)
 
 
+QUARANTINE_NO_SORT = "no usable Original Sort value"
+QUARANTINE_NEGATIVE_SORT = "negative Original Sort value"
+QUARANTINE_NO_FILENAME = "no filename"
+QUARANTINE_DUPLICATE_SORT = "duplicate Original Sort value"
+"""The complete set of reasons a data row can be held out of the LI number
+space. Named rather than spelled inline so the loader's warning, the retained
+row and the reconciliation entry cannot drift apart."""
+
+
+@dataclass(frozen=True, slots=True)
+class QuarantinedRow:
+    """An index row the loader could not admit to the LI number space.
+
+    D-1: the loader warns about these rows and states they will reconcile as
+    index-only. Retaining them is what makes that statement true. They keep
+    every raw cell — the operator's job is to repair the *spreadsheet*, and the
+    only way to find the offending cell is to be shown what it said.
+
+    A quarantined row deliberately has **no** ``original_sort`` and **no**
+    ``li_file_no``: it never entered the identifier space, and rendering an
+    invented one would be worse than rendering none.
+    """
+
+    row_number: int
+    """1-based position among data rows, on the same counter as
+    :attr:`MasterIndexRow.row_number`, so the two sets never collide."""
+
+    reason: str
+    """One of the ``QUARANTINE_*`` constants."""
+
+    original_sort_text: str
+    """Whatever the Original Sort cell actually said, verbatim (possibly '')."""
+
+    filename: str
+    filepath: str
+    ext: str | None = None
+    size_kb: int | None = None
+    duplicate_of_row: int | None = None
+    """For :data:`QUARANTINE_DUPLICATE_SORT`, the row that claimed the value
+    first; ``None`` otherwise."""
+
+    raw: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def detail(self) -> str:
+        """One operator-facing sentence, safe to put in a spreadsheet cell."""
+        text = (
+            f"index row {self.row_number} was not assigned an LI File No: "
+            f"{self.reason}"
+        )
+        if self.original_sort_text:
+            text += f" (Original Sort cell read {self.original_sort_text!r})"
+        if self.duplicate_of_row is not None:
+            text += f"; first claimed by index row {self.duplicate_of_row}"
+        return text
+
+
 @dataclass(frozen=True, slots=True)
 class MasterIndex:
     """A loaded index plus everything needed to explain how it was read."""
@@ -158,6 +216,18 @@ class MasterIndex:
     for the alias resolution."""
     unmapped_headers: tuple[str, ...]
     warnings: tuple[str, ...] = ()
+    quarantined: tuple[QuarantinedRow, ...] = ()
+    """Rows retained for reconciliation but held out of the LI number space.
+
+    Deliberately a *separate* collection from :attr:`rows`. Every property and
+    lookup below reads :attr:`rows` only, so a quarantined row cannot reach
+    :attr:`max_original_sort`, :meth:`by_original_sort`, :attr:`has_hashes`,
+    :attr:`has_bates`, or the assigner — it has no identifier to lend.
+    """
+
+    @property
+    def quarantined_count(self) -> int:
+        return len(self.quarantined)
 
     @property
     def has_hashes(self) -> bool:
@@ -313,10 +383,16 @@ def load_master_index(path: str | Path) -> MasterIndex:
     """Read an index from ``.xlsx``, ``.xls`` or ``.csv``.
 
     Raises :class:`MasterIndexError` with an operator-actionable message when
-    the file cannot be understood. Rows that are individually unusable (blank,
-    or a non-integer sort value) are skipped *with a warning*, never silently:
-    a skipped row becomes an "in index, not in folder" entry that an operator
+    the file cannot be understood. A row that is individually unusable (no
+    usable Original Sort, a negative one, no filename, or an Original Sort some
+    earlier row already claimed) is held out of the LI number space *with a
+    warning*, never silently — and is retained as a :class:`QuarantinedRow` so
+    it still surfaces as an "in index, not in folder" entry that an operator
     would otherwise chase for hours.
+
+    Wholly blank spreadsheet rows are the one thing dropped outright: they
+    carry no cell an operator could act on, and Excel appends them by the
+    thousand.
     """
     p = Path(path)
     if not p.is_file():
@@ -351,6 +427,7 @@ def load_master_index(path: str | Path) -> MasterIndex:
 
     header_names = [str(h) if h is not None else "" for h in headers]
     rows: list[MasterIndexRow] = []
+    quarantined: list[QuarantinedRow] = []
     warnings: list[str] = []
     seen_sort: dict[int, int] = {}
 
@@ -360,30 +437,66 @@ def load_master_index(path: str | Path) -> MasterIndex:
             return None
         return row[col]
 
+    def raw_cells(row: Sequence[object]) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (header_names[c] if c < len(header_names) else f"column {c + 1}",
+             _cell_text(v) or "")
+            for c, v in enumerate(row)
+        )
+
+    def quarantine(
+        row: Sequence[object],
+        i: int,
+        reason: str,
+        *,
+        duplicate_of: int | None = None,
+    ) -> None:
+        """Hold a row out of the LI number space without losing it."""
+        quarantined.append(
+            QuarantinedRow(
+                row_number=i,
+                reason=reason,
+                original_sort_text=_cell_text(cell(row, "original_sort")) or "",
+                filename=_cell_text(cell(row, "filename")) or "",
+                filepath=_cell_text(cell(row, "filepath")) or "",
+                ext=_cell_text(cell(row, "ext")),
+                size_kb=_as_int(cell(row, "size_kb")),
+                duplicate_of_row=duplicate_of,
+                raw=raw_cells(row),
+            )
+        )
+        detail = f" (first seen at row {duplicate_of})" if duplicate_of else ""
+        warnings.append(
+            f"index row {i}: {reason}{detail} — the row is kept out of the LI "
+            "number space and is reported as index-only in reconciliation"
+        )
+
     for i, row in enumerate(grid[1:], start=1):
-        sort_value = _as_int(cell(row, "original_sort"))
-        if sort_value is not None and sort_value < 0:
+        raw_sort = _as_int(cell(row, "original_sort"))
+        sort_value = raw_sort
+        negative = raw_sort is not None and raw_sort < 0
+        if negative:
             # A negative Original Sort cannot become a Doc ID (DocId.base is
             # non-negative by construction, D-04) and a hand-typed Excel cell
-            # can easily carry one (a stray "-", a fat-fingered minus). Treat
-            # it the same as "no usable value" rather than let it reach
+            # can easily carry one (a stray "-", a fat-fingered minus). Keep it
+            # out of the number space rather than let it reach
             # dociq.docid.ids and crash the whole run — one bad cell must not
             # take down every other document's assignment (Principle 1).
             sort_value = None
         filename = _cell_text(cell(row, "filename"))
-        if sort_value is None or filename is None:
-            warnings.append(
-                f"index row {i}: skipped — "
-                f"{'no usable Original Sort value' if sort_value is None else 'no filename'}"
+        if sort_value is None:
+            quarantine(
+                row,
+                i,
+                QUARANTINE_NEGATIVE_SORT if negative else QUARANTINE_NO_SORT,
             )
+            continue
+        if filename is None:
+            quarantine(row, i, QUARANTINE_NO_FILENAME)
             continue
         prior = seen_sort.get(sort_value)
         if prior is not None:
-            warnings.append(
-                f"index row {i}: duplicate Original Sort {sort_value} "
-                f"(first seen at row {prior}); the later row is kept out of the "
-                "LI number space and will reconcile as index-only"
-            )
+            quarantine(row, i, QUARANTINE_DUPLICATE_SORT, duplicate_of=prior)
             continue
         seen_sort[sort_value] = i
         bates_start = _cell_text(cell(row, "bates_start"))
@@ -401,11 +514,7 @@ def load_master_index(path: str | Path) -> MasterIndex:
                 )
                 bates_start = parts[0].strip() or None
                 bates_end = (parts[1].strip() if len(parts) > 1 else parts[0].strip()) or None
-        raw = tuple(
-            (header_names[c] if c < len(header_names) else f"column {c + 1}",
-             _cell_text(v) or "")
-            for c, v in enumerate(row)
-        )
+        raw = raw_cells(row)
         rows.append(
             MasterIndexRow(
                 row_number=i,
@@ -427,12 +536,28 @@ def load_master_index(path: str | Path) -> MasterIndex:
     if not rows:
         raise MasterIndexError(
             f"{p.name}: no usable rows. Every row lacked an Original Sort value "
-            "or a filename."
+            "or a filename, carried a negative Original Sort, or repeated an "
+            "Original Sort an earlier row had already used."
         )
 
+    # ``row_count`` deliberately keeps the meaning it has always had: the
+    # number of rows admitted to the LI number space, i.e. ``len(rows)``.
+    # Widening it to include quarantined rows would silently change a figure
+    # that is already printed in the processing log and in the workbook's
+    # "Master index rows" line, and would make it disagree with
+    # ``max_original_sort`` and the assigner's match denominator. The
+    # quarantined population is reported separately, through
+    # ``MasterIndex.quarantined_count``, the loader warnings, and the
+    # reconciliation's index-only rows.
     snapshot = MasterIndexSnapshot(
         filename=p.name, sha256=file_sha256(p), row_count=len(rows)
     )
+    if quarantined:
+        warnings.append(
+            f"{len(quarantined)} of {len(rows) + len(quarantined)} index data "
+            f"row(s) could not be given an LI File No; 'Master index rows' "
+            f"below counts the {len(rows)} usable row(s) only"
+        )
     return MasterIndex(
         snapshot=snapshot,
         rows=tuple(rows),
@@ -441,4 +566,5 @@ def load_master_index(path: str | Path) -> MasterIndex:
         resolved_columns=tuple(resolved),
         unmapped_headers=tuple(unmapped),
         warnings=tuple(warnings),
+        quarantined=tuple(quarantined),
     )

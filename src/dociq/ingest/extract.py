@@ -121,6 +121,7 @@ M_ZIP_MEMBER = "archive member unreadable"
 M_ZIP_ATTACH = "attached archive unreadable"
 M_PHOTO_PROBE = "image/EXIF probe failed"
 M_SLIDE_NOTES = "slide notes could not be read"
+M_EML_BODY = "email body could not be read"
 
 TRANSIENT_MARKERS: tuple[str, ...] = (
     M_OCR_PAGE,
@@ -132,17 +133,60 @@ TRANSIENT_MARKERS: tuple[str, ...] = (
     M_ZIP_ATTACH,
     M_PHOTO_PROBE,
     M_SLIDE_NOTES,
+    M_EML_BODY,
+)
+
+# The second half of the vocabulary (Codex review #1, B-3).
+#
+# Some evidence gaps are not worth re-reading for: the same bytes re-parsed the
+# same way will reach the same wall. An embedded .msg that this pass cannot
+# flatten, a MIME part with no decodable payload, an email whose envelope will
+# not parse at all — none of those are races, and putting them in
+# TRANSIENT_MARKERS would spend the whole retry budget proving it.
+#
+# They are still evidence gaps, and B-3's requirement is that EVERY exception
+# path yielding less evidence carries a marker, not only the retryable ones.
+# Without a final vocabulary the choice was between "retry something that
+# cannot improve" and "disclose in prose that nothing downstream can find
+# mechanically", and the second is how these paths went unnoticed.
+
+M_EML_PARSE = "email envelope would not parse"
+M_ATTACH_SKIPPED = "attachment content was not brought in"
+
+FINAL_MARKERS: tuple[str, ...] = (
+    M_EML_PARSE,
+    M_ATTACH_SKIPPED,
 )
 
 
 def has_transient_marker(text: str | None) -> bool:
-    """True when a note says this document read with less than it holds.
+    """True when a note says this document read with less than it holds, and a
+    re-read alone might recover it.
 
     "Transient" is the possibility being tested, not a claim: the same phrase
     covers a permanently corrupt page and a page that lost a race under load,
     and telling them apart is exactly what the walker's serial retry does.
     """
     return bool(text) and any(m in text for m in TRANSIENT_MARKERS)
+
+
+def has_final_marker(text: str | None) -> bool:
+    """True when a note says evidence is missing and a re-read will not help.
+
+    Not retried, still audited: :mod:`dociq.verify.accounting` counts these so
+    a final gap is a number on the run's own accounting line rather than one
+    sentence inside one document's notes.
+    """
+    return bool(text) and any(m in text for m in FINAL_MARKERS)
+
+
+def has_evidence_marker(text: str | None) -> bool:
+    """True when a note says ANY evidence is missing, transient or final.
+
+    The check a caller wants when the question is "did this document read
+    completely", as opposed to "should this document be re-read".
+    """
+    return has_transient_marker(text) or has_final_marker(text)
 
 
 _XLSX_MAX_ROWS = int(os.environ.get("DOCIQ_XLSX_MAX_ROWS", "50000"))
@@ -406,31 +450,61 @@ def _ocr_pdf_pages(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
 # ---------------------------------------------------------------------------
 
 
-def _gps_to_decimal(ref, vals) -> float:
+def _gps_to_decimal(ref, vals) -> float | None:
+    """One GPS coordinate as signed decimal degrees, or ``None``.
+
+    Used to return ``0.0`` from a bare ``except``, which is not a failure value
+    at all: it is a valid coordinate on the equator and on the prime meridian,
+    and the caller's ``if lat or lon`` test then read an unparseable fix as "no
+    fix" and dropped it with no record (Codex review #1, B-3, sibling class).
+    ``None`` is unambiguous and the caller discloses it.
+    """
     try:
         d, m, s = (float(v) for v in vals)
         dec = d + m / 60.0 + s / 3600.0
         return -dec if str(ref).upper() in ("S", "W") else dec
     except Exception:
-        return 0.0
+        return None
 
 
-def _exif_from_image_bytes(img: bytes) -> dict:
-    """``{'date': 'YYYY-MM-DD HH:MM', 'gps': 'lat, lon'}`` — best-effort read."""
+def exif_from_image_bytes(img: bytes) -> tuple[dict, list[str]]:
+    """``({'date': ..., 'gps': ...}, notes)`` — best-effort EXIF read.
+
+    **Why this returns notes.** It used to return a bare dict and swallow four
+    separate exceptions into ``pass``: the whole-image open, the EXIF-IFD read
+    that holds ``DateTimeOriginal``, the GPS-IFD read, and each coordinate's
+    own conversion. A site photo's camera date and GPS fix are the only
+    evidence such a document carries — OCR never looks where a camera writes —
+    so each of those silent paths deleted the entire evidentiary content of the
+    page and reported a clean read. That is the same Principle-1 defect as the
+    EML body walk, in the class Codex review #1 (B-3) named alongside it.
+
+    A dict cannot say "there was EXIF here and I could not read it", so the
+    return type had to widen. The notes carry :data:`M_PHOTO_PROBE`, which is
+    already a transient marker, so a photo whose EXIF would not read is re-read
+    serially like any other degraded document.
+    """
     out: dict = {}
+    notes: list[str] = []
     try:
         from PIL import ExifTags, Image
 
         with Image.open(io.BytesIO(img)) as im:
             exif = im.getexif()
             if not exif:
-                return out
+                return out, notes
             dt = None
             try:  # DateTimeOriginal lives in the EXIF IFD; fall back to DateTime
                 ifd = exif.get_ifd(ExifTags.IFD.Exif)
                 dt = ifd.get(ExifTags.Base.DateTimeOriginal)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Not silent even though a fallback follows: if the fallback
+                # also comes back empty, the document loses its date and the
+                # only reason would otherwise be invisible.
+                notes.append(f"{M_PHOTO_PROBE}: the EXIF sub-directory holding "
+                             f"DateTimeOriginal could not be read ({exc}); the "
+                             "capture date falls back to the basic DateTime tag"
+                             [:300])
             dt = dt or exif.get(ExifTags.Base.DateTime)
             if dt:
                 s = str(dt).strip()  # "YYYY:MM:DD HH:MM:SS"
@@ -442,25 +516,39 @@ def _exif_from_image_bytes(img: bytes) -> dict:
                 if gps:
                     lat = _gps_to_decimal(gps.get(1), gps.get(2) or ())
                     lon = _gps_to_decimal(gps.get(3), gps.get(4) or ())
-                    if lat or lon:
+                    if lat is None or lon is None:
+                        if gps.get(2) or gps.get(4):
+                            notes.append(
+                                f"{M_PHOTO_PROBE}: this image carries a GPS tag "
+                                "whose coordinates could not be converted; the "
+                                "location is absent from this document")
+                    elif lat or lon:
                         out["gps"] = f"{lat:.6f}, {lon:.6f}"
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return out
+            except Exception as exc:
+                notes.append(f"{M_PHOTO_PROBE}: the image's GPS sub-directory "
+                             f"could not be read ({exc}); the location is "
+                             "absent from this document"[:300])
+    except Exception as exc:
+        notes.append(f"{M_PHOTO_PROBE}: the embedded image could not be opened "
+                     f"for an EXIF read ({exc}); the camera date and GPS are "
+                     "absent from this document"[:300])
+    return out, notes
 
 
 def _photo_block(raw: bytes, n_pages: int,
-                 content_len: int) -> tuple[str, str]:
-    """``(marker text, note)`` for an image-based PDF (a photo print-out).
+                 content_len: int) -> tuple[str, list[str]]:
+    """``(marker text, notes)`` for an image-based PDF (a photo print-out).
 
-    The note is empty except when the probe itself failed. It used to return
+    The notes are empty except when the probe itself failed. It used to return
     ``""`` from a bare ``except Exception``, which meant a file whose EXIF read
     threw — for any reason, including a transient one — silently lost its
     ``[PHOTO]`` block and its camera date, and the run said nothing at all. A
     swallowed exception that changes the emitted text is a Principle-1
     violation whatever caused it.
+
+    Widened from one note to a list by Codex review #1 (B-3): the EXIF read
+    below can now fail in four distinguishable ways and reporting only the
+    first would reintroduce the same silence one level down.
 
     Photo test: trivial text layer plus at least one large embedded image; EXIF
     comes from the largest such image. A site photo carries its evidence where
@@ -468,8 +556,8 @@ def _photo_block(raw: bytes, n_pages: int,
     text is what lets Stage 1 date the document at all.
     """
     if content_len >= max(40, 8 * n_pages):
-        return "", ""
-    exif_note = ""
+        return "", []
+    exif_notes: list[str] = []
     try:
         import fitz
 
@@ -485,14 +573,15 @@ def _photo_block(raw: bytes, n_pages: int,
                     if biggest is None or w * h > biggest[0]:
                         biggest = (w * h, xref)
             if biggest is None:
-                return "", ""
-            meta = {}
+                return "", []
+            meta: dict = {}
             try:
-                meta = _exif_from_image_bytes(doc.extract_image(biggest[1])["image"])
+                meta, exif_notes = exif_from_image_bytes(
+                    doc.extract_image(biggest[1])["image"])
             except Exception as exc:
-                exif_note = (f"{M_PHOTO_PROBE}: the embedded image's EXIF could "
-                             f"not be read ({exc}); the camera date and GPS are "
-                             "absent from this document")[:300]
+                exif_notes = [(f"{M_PHOTO_PROBE}: the embedded image's EXIF could "
+                               f"not be read ({exc}); the camera date and GPS are "
+                               "absent from this document")[:300]]
             parts = [f"[PHOTO] Image-based document ({len(doc)} page(s), "
                      f"{n_imgs} image(s))."]
             if meta.get("date"):
@@ -501,11 +590,11 @@ def _photo_block(raw: bytes, n_pages: int,
                 parts.append(f"GPS: {meta['gps']}.")
             parts.append("Visual content not machine-read — view the source image "
                          "for what the photo shows.")
-            return " ".join(parts), exif_note
+            return " ".join(parts), exif_notes
     except Exception as exc:
-        return "", (f"{M_PHOTO_PROBE}: this document was probed as an "
-                    f"image-based (photo) PDF and the probe raised ({exc}); "
-                    "no [PHOTO] block was emitted")[:300]
+        return "", [(f"{M_PHOTO_PROBE}: this document was probed as an "
+                     f"image-based (photo) PDF and the probe raised ({exc}); "
+                     "no [PHOTO] block was emitted")[:300]]
 
 
 # ---------------------------------------------------------------------------
@@ -537,9 +626,8 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     n = len(native)
     # Measure actual page CONTENT so an empty text layer is not masked.
     content_len = sum(len(t.strip()) for t in native)
-    photo, photo_note = _photo_block(raw, n, content_len)
-    if photo_note:
-        notes.append(photo_note)
+    photo, photo_notes = _photo_block(raw, n, content_len)
+    notes.extend(photo_notes)
 
     ocr_by_page: dict[int, _OcrPage] = {}
     need = [i for i, t in enumerate(native) if len(t.strip()) < _NATIVE_TEXT_FLOOR]
@@ -856,10 +944,19 @@ def _extract_eml(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     from email import policy
     from email.utils import parsedate_to_datetime
 
+    notes: list[str] = []
     try:
         msg = email.message_from_bytes(raw, policy=policy.default)
-    except Exception:
-        note = "email would not parse; decoded as raw text"
+    except Exception as exc:
+        # Marked FINAL, not transient: the same bytes through the same parser
+        # reach the same wall, so a serial re-read cannot improve it. Nothing
+        # is deleted — the raw decode below carries every byte the file holds —
+        # but the structure the rest of the pipeline reads (headers, the Date
+        # anchor, the attachment list) is gone, and that is a gap the run must
+        # be able to find mechanically rather than by reading prose.
+        note = clip_message(f"{M_EML_PARSE}: decoded as raw text instead "
+                            f"({exc}); headers, the Date anchor and the "
+                            "attachment list were not recovered", 300)
         return (synthetic_pages([raw.decode("utf-8", errors="replace")], notes=(note,)),
                 [note])
     parts: list[str] = []
@@ -871,8 +968,23 @@ def _extract_eml(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     if hdr_date:
         try:
             iso = parsedate_to_datetime(hdr_date).date().isoformat()
-        except Exception:
+        except Exception as exc:
+            # The date sibling of B-3. The ISO token is the ONLY thing
+            # ``dating.detect_dates`` can anchor an email's own date on —
+            # RFC-2822 ("Tue, 16 Jul 2024 09:12:00 +0000") is not one of the
+            # patterns it reads — so a Date header that will not parse used to
+            # cost the message its date with no record at all.
+            #
+            # Deliberately NOT marked. Nothing DocIQ read is missing: the raw
+            # header is still emitted verbatim below, and what is absent is a
+            # derived convenience anchor. Marking it would put a malformed
+            # sender's header into the run's evidence-loss tally, which is a
+            # different and false claim. Disclosed, not marked.
             iso = ""
+            notes.append(clip_message(
+                f"the message's Date header {hdr_date!r} could not be parsed "
+                f"({exc}); it is emitted verbatim but this document is not "
+                "date-anchored on it", 300))
         parts.append(f"Date: {hdr_date}" + (f" ({iso})" if iso else ""))
     body = ""
     try:
@@ -881,13 +993,23 @@ def _extract_eml(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
             body = bp.get_content()
             if bp.get_content_subtype() == "html":
                 body = _strip_html(body)
-    except Exception:
+    except Exception as exc:
+        # Codex review #1, B-3. This was ``body = ""`` under a bare
+        # ``except``: a supported email whose body would not decode came back
+        # with its headers, no body, no note, no marker and a FULL status. The
+        # message text — the whole evidentiary point of an email — was deleted
+        # and the run reported success, so the walker's serial-retry registry
+        # never saw the file either.
         body = ""
+        notes.append(clip_message(
+            f"{M_EML_BODY}: the message body could not be decoded ({exc}); "
+            "this document carries its headers only", 300))
     if body and body.strip():
         parts.append("")
         parts.append(body.strip())
-    note = "email carries no page boundaries; emitted as one synthetic page"
-    return synthetic_pages(["\n".join(parts)], notes=(note,)), [note]
+    page_note = "email carries no page boundaries; emitted as one synthetic page"
+    return (synthetic_pages(["\n".join(parts)], notes=(page_note,)),
+            [page_note] + notes)
 
 
 def _extract_msg(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], list[str]]:
@@ -986,8 +1108,16 @@ def expand_eml_attachments(raw: bytes) -> ZipExpansion:
 
     try:
         msg = email.message_from_bytes(raw, policy=policy.default)
-    except Exception:
-        return ZipExpansion()
+    except Exception as exc:
+        # Codex review #1, B-3. This was a bare ``return ZipExpansion()``: the
+        # parent message was emitted with ZERO attachments, no note and no
+        # marker, so an email carrying the production itself looked like an
+        # email carrying nothing. M_ATTACH_ENUM is the transient marker the
+        # walker's retry registry keys on, which is what makes the failure
+        # re-read rather than written off.
+        return ZipExpansion((), (clip_message(
+            f"{M_ATTACH_ENUM}: the message envelope would not parse ({exc}), "
+            "so NO attachment of this email was brought in", 200),))
 
     raw_members: list[tuple[str, bytes]] = []
     notes: list[str] = []
@@ -1003,7 +1133,14 @@ def expand_eml_attachments(raw: bytes) -> ZipExpansion:
             notes.append(f"{M_ATTACH_READ}: {exc}"[:200])
             continue
         if payload is None:
-            notes.append(f"attachment '{name}' had no decodable payload; skipped")
+            # Disclosed before, but with no marker of any kind — so nothing
+            # downstream could find it mechanically and it sat outside both the
+            # retry registry and the accounting tally (Codex review #1, B-3).
+            # FINAL rather than transient: a part with no decodable payload
+            # decodes to nothing on the second attempt too.
+            notes.append(f"{M_ATTACH_SKIPPED}: attachment '{name}' had no "
+                         "decodable payload; it is named here and its bytes "
+                         "are not in the corpus")
             continue
         raw_members.append((name, payload))
 
@@ -1070,8 +1207,10 @@ def expand_msg_attachments(raw: bytes, scratch_dir: Path | None) -> ZipExpansion
                 # bytes) or an unreadable attachment kind. Disclosed, not
                 # dropped: the operator sees that content exists and was not
                 # brought in, rather than the run looking complete.
-                notes.append(f"attachment '{name}' is an embedded message or "
-                             "unsupported attachment kind; not extracted")
+                notes.append(f"{M_ATTACH_SKIPPED}: attachment '{name}' is an "
+                             "embedded message or an unsupported attachment "
+                             "kind; it is named here and its bytes are not in "
+                             "the corpus")
     except Exception as exc:
         return ZipExpansion((), (f"{M_MSG_ATTACH}: {exc}"[:200],))
     finally:

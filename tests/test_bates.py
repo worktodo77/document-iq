@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import re
+
 from dociq.contracts import document_sort_key
 from dociq.identify.bates import (
     BatesDecision,
+    BatesFormat,
     BatesZone,
     DecisionStatus,
     apply_bates,
     detect_candidates,
     document_ranges,
+    parse_pattern,
     propose_format,
     ranges_by_sort_key,
 )
@@ -186,3 +190,121 @@ def test_detection_is_stable_over_repeated_runs():
     first = propose_format((doc,))
     for _ in range(30):
         assert propose_format((doc,)) == first
+
+
+# --- B-5: the confirmed grammar is enforced, complete, and reusable --------
+
+
+def test_a_confirmed_width_rejects_an_out_of_format_locator():
+    """B-5 (i). A confirmed MNFV format allowing four or five digits must not
+    accept ``MNFV 1234567890``."""
+    train = document(
+        "prod/vol1.pdf",
+        tuple(page(i, f"text\nMNFV {n}") for i, n in enumerate(["0391", "02684"], 1)),
+    )
+    proposal = propose_format((train,))
+    assert proposal is not None
+    assert set(proposal.format.digit_widths) == {4, 5}
+    decision = BatesDecision(DecisionStatus.CONFIRMED, proposal.format)
+
+    intruder = document(
+        "prod/vol2.pdf",
+        (page(1, "text\nMNFV 1234567890"), page(2, "text\nMNFV 0392")),
+    )
+    out = apply_bates((intruder,), decision)
+    assert [p.bates for p in out[0].pages] == [None, "MNFV 0392"]
+
+
+def test_the_suffix_separator_survives_confirmation():
+    """B-5 (ii). ``MNFV 000391-CONF`` must round-trip with its hyphen."""
+    doc = document(
+        "prod/conf.pdf",
+        tuple(page(i, f"text\nMNFV {390 + i:06d}-CONF") for i in range(1, 4)),
+    )
+    proposal = propose_format((doc,))
+    assert proposal is not None
+    fmt = proposal.format
+    assert fmt.suffix == "CONF"
+    assert fmt.suffix_sep == "-"
+    assert fmt.label.endswith("-CONF")
+    rx = re.compile(fmt.pattern)
+    assert rx.match("MNFV 000391-CONF")
+    assert not rx.match("MNFV 000391CONF")
+    out = apply_bates((doc,), BatesDecision(DecisionStatus.CONFIRMED, fmt))
+    assert [p.bates for p in out[0].pages] == [
+        "MNFV 000391-CONF",
+        "MNFV 000392-CONF",
+        "MNFV 000393-CONF",
+    ]
+
+
+def test_a_persisted_pattern_reconstructs_the_complete_format():
+    """B-5 (iii). The persisted string is the whole grammar, not a lossy regex."""
+    fmt = BatesFormat(
+        prefix="MNFV",
+        separator=" ",
+        digit_widths=(4, 6),
+        suffix="CONF",
+        suffix_sep="-",
+    )
+    back = parse_pattern(fmt.pattern)
+    assert back == fmt
+    # A width span is exactly the loss the token exists to prevent: 4 and 6 are
+    # confirmed, 5 is not, and the regex half must say so on its own.
+    rx = re.compile(fmt.pattern)
+    assert rx.match("MNFV 0391-CONF") and rx.match("MNFV 000391-CONF")
+    assert not rx.match("MNFV 00391-CONF")
+    assert parse_pattern("^MNFV \\d{4,6}CONF$") is None
+
+
+def test_a_pattern_that_cannot_be_read_back_is_never_guessed_at():
+    """Fail closed is a property of :func:`parse_pattern`, not of one caller."""
+    good = BatesFormat("MNFV", " ", (6,)).pattern
+    assert parse_pattern(good) is not None
+    unreadable = (
+        None,
+        "",
+        "^MNFV \\d{6}$",                       # a bare regex, no token
+        good.replace("dociq-bates:1", "dociq-bates:2"),   # a version we cannot read
+        good.replace(";w=6", ""),              # a field removed
+        good.replace("w=6", "w=six"),          # a width that is not a number
+        good.replace("w=6", "w=0"),            # a width no stamp can have
+        good.replace(";p=MNFV", ";p=MNFV;p=OTHER"),       # a duplicated field
+        good.replace("\\d{6}", "\\d{7}"),      # halves that disagree
+        good.replace("p=MNFV", "p=OTHER"),     # halves that disagree, other way
+    )
+    for pattern in unreadable:
+        assert parse_pattern(pattern) is None, pattern
+
+
+def test_the_persisted_pattern_is_stable_over_repeated_builds():
+    doc = document(
+        "prod/conf.pdf",
+        tuple(page(i, f"text\nMNFV {390 + i:06d}-CONF") for i in range(1, 4)),
+    )
+    first = propose_format((doc,)).format.pattern
+    for _ in range(30):
+        fmt = propose_format((doc,)).format
+        assert fmt.pattern == first
+        assert parse_pattern(fmt.pattern) == fmt
+
+
+def test_two_suffix_separators_are_two_formats_not_one():
+    """The suffix separator is part of the shape, so a production stamping
+    ``-CONF`` and one stamping ``_CONF`` cannot be merged and cross-applied."""
+    doc = document(
+        "prod/mixed.pdf",
+        (
+            page(1, "text\nMNFV 000391-CONF"),
+            page(2, "text\nMNFV 000392-CONF"),
+            page(3, "text\nMNFV 000393_CONF"),
+        ),
+    )
+    proposal = propose_format((doc,))
+    assert proposal.format.suffix_sep == "-"
+    out = apply_bates((doc,), BatesDecision(DecisionStatus.CONFIRMED, proposal.format))
+    assert [p.bates for p in out[0].pages] == [
+        "MNFV 000391-CONF",
+        "MNFV 000392-CONF",
+        None,
+    ]

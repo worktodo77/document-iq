@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 
@@ -32,6 +33,7 @@ from dociq.emit.handoff import (
 )
 from dociq.emit.indexbook import (
     INDEX_COLUMNS,
+    RECONCILIATION_COLUMNS,
     build_index_rows,
     render_index_csv,
     write_index_csv,
@@ -188,6 +190,55 @@ def test_reconciliation_csv_is_written(tmp_path):
     result = assign_doc_ids(corpus(2), None)
     path = write_reconciliation_csv(reconcile(result, None), layout)
     assert path.read_text(encoding="utf-8").startswith("Category,")
+
+
+def _quarantined_report(tmp_path):
+    from dociq.docid.masterindex import load_master_index
+
+    header = (
+        '"Original Sort","Filename","File Extension","Filepath","Size (KB)"\n'
+    )
+    body = (
+        '"1","a.pdf","pdf","dir","10"\n'
+        '"1","dupe.pdf","pdf","dir","11"\n'
+        '"-3","neg.pdf","pdf","dir","12"\n'
+    )
+    src = tmp_path / "idx.csv"
+    src.write_text(header + body, encoding="utf-8", newline="\n")
+    index = load_master_index(src)
+    return reconcile(assign_doc_ids(corpus(1), index), index)
+
+
+def test_quarantined_index_rows_render_without_a_borrowed_li_file_no(tmp_path):
+    """D-1: an unusable index row must appear in the deliverable, in its own
+    category, and must not be shown carrying an LI File No it never got."""
+    layout = OutputLayout.at(tmp_path / "out")
+    layout.ensure()
+    report = _quarantined_report(tmp_path)
+    text = write_reconciliation_csv(report, layout).read_text(encoding="utf-8")
+
+    rows = list(csv.reader(text.splitlines()))
+    assert rows[0] == list(RECONCILIATION_COLUMNS)
+    bad = [r for r in rows[1:] if r[0] == "In index, unusable row"]
+    assert len(bad) == 2
+    for cells in bad:
+        assert cells[2] == ""  # LI File No: none, and none invented
+        assert cells[9]  # Detail: says why
+    assert [r[3] for r in bad] == ["dupe.pdf", "neg.pdf"]  # sheet order, stable
+    # The one properly-numbered unmatched row keeps its ordinary category.
+    assert [r[2] for r in rows[1:] if r[0] == "In index, not in folder"] == ["1"]
+    assert report.totals["index_only_unnumbered"] == 2
+
+
+def test_quarantined_reconciliation_csv_is_byte_stable(tmp_path):
+    outs = set()
+    for i in range(4):
+        layout = OutputLayout.at(tmp_path / f"r{i}")
+        layout.ensure()
+        outs.add(
+            write_reconciliation_csv(_quarantined_report(tmp_path), layout).read_bytes()
+        )
+    assert len(outs) == 1
 
 
 # --- log -------------------------------------------------------------------

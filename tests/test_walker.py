@@ -334,3 +334,73 @@ def test_a_tier2_archive_member_lands_on_the_unsupported_list(tmp_path):
     assert inside.container_order is not None
     assert all(d.status is not ProcessingStatus.UNSUPPORTED
                for d in r.documents)
+
+
+# ---------------------------------------------------------------------------
+# Codex review #1, B-3 sibling sweep: a broad catch in the WALK can delete more
+# evidence than any extractor catch — every file under the directory.
+# ---------------------------------------------------------------------------
+
+
+def test_an_unreadable_directory_is_disclosed_not_silently_skipped(tmp_path, monkeypatch):
+    """``_iter_files`` caught ``OSError`` from ``iterdir()`` and ``continue``d.
+
+    A permission-denied or locked directory therefore removed every file
+    beneath it from the inventory — not from extraction, from the inventory —
+    with no note, no warning and no line anywhere in the deliverables. That is
+    the largest silent deletion in the pipeline, and it is the same class as
+    B-3's EML catches.
+    """
+    root = tmp_path / "src"
+    (root / "readable").mkdir(parents=True)
+    (root / "locked").mkdir()
+    (root / "readable" / "a.txt").write_text("keep me", encoding="utf-8")
+    (root / "locked" / "secret.txt").write_text("must not vanish", encoding="utf-8")
+
+    from pathlib import Path as _Path
+
+    real_iterdir = _Path.iterdir
+
+    def _guarded(self):
+        if self.name == "locked":
+            raise PermissionError("access is denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(_Path, "iterdir", _guarded)
+
+    notes: list[str] = []
+    entries = walker.scan(root, recursive=True, notes=notes)
+
+    rels = [e.rel_path for e in entries]
+    assert "readable/a.txt" in rels
+    assert "locked/secret.txt" not in rels, "the fixture did not lock the folder"
+    assert notes, (
+        "an entire directory was dropped from the inventory in total silence")
+    assert any("locked" in n for n in notes), notes
+
+
+def test_an_undirectoryable_child_is_disclosed(tmp_path, monkeypatch):
+    """The second catch in the same loop: ``p.is_dir()`` raising also skipped
+    the entry outright, so a single unstattable path vanished silently."""
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "a.txt").write_text("x", encoding="utf-8")
+    (root / "weird.txt").write_text("y", encoding="utf-8")
+
+    from pathlib import Path as _Path
+
+    real_is_dir = _Path.is_dir
+
+    def _guarded(self):
+        if self.name == "weird.txt":
+            raise OSError("cannot stat")
+        return real_is_dir(self)
+
+    monkeypatch.setattr(_Path, "is_dir", _guarded)
+
+    notes: list[str] = []
+    entries = walker.scan(root, recursive=True, notes=notes)
+    assert "weird.txt" not in [e.rel_path for e in entries]
+    assert any("weird.txt" in n for n in notes), (
+        "an unstattable entry vanished from the inventory in silence: "
+        + repr(notes))
