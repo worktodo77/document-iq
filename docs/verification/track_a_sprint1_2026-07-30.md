@@ -68,9 +68,8 @@ on a pipeline that did no work. Found while spot-checking an artifact against a
 mistyped path. `build()` now raises `EmptyOutputError` unless
 `require_outputs=False`, and `determinism.prove()` records such a run as a
 failure rather than skipping it. *Fail-before:* the new test asserts the raise;
-before the guard, `build()` returned `corpus_sha256 ddb0faadea310a47…` for
-`C:\does
-ot\exist`.
+before the guard, `build()` returned `corpus_sha256 ddb0faadea310a47…` for a
+directory that did not exist.
 
 **D-A5 — PPTX extraction manufactured notes slides in the source document.**
 python-pptx's `slide.notes_slide` property *creates* a notes slide when none
