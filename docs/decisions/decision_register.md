@@ -60,11 +60,16 @@ loud and total, not by evidence from this corpus.
 is deleted and the determinism proof re-run against the emitters that ship: 30
 runs, 30 distinct `PYTHONHASHSEED` values, subprocess per run, **1 distinct
 corpus hash, 0 diffs, 0 failures**, and the harness watched going red under three
-injected-nondeterminism probes. Five defects found and closed at the seam, each
+injected-nondeterminism probes. Seven defects found and closed at the seam, each
 with a test proven red beforehand — the un-remapped `parent_doc_id`, D-04's
 renumbering check crying wolf on duplicate content, renumbering warnings inside
-the hashed log content, a re-run inheriting the previous run's residue, and a
-corpus that never exercised email-attachment expansion. Full account in
+the hashed log content, a re-run inheriting the previous run's residue, a corpus
+that never exercised email-attachment expansion, Stage 3 proposing a Bates format
+on the set D-13 designates as the negative case, and a run that skipped OCR still
+recording that it had used rapidocr. **One finding is OPEN and material:** a
+9 MB PowerPoint extracted as 35 pages on one full-corpus run and failed on
+another, so the byte-identical claim is demonstrated on the fixture corpus and
+is **not** demonstrated on the real one. Full account in
 `docs/verification/sprint1_integration_2026-07-31.md`.
 
 **A note on thread configuration, measured rather than assumed (2026-07-31).**
@@ -99,11 +104,49 @@ route for forensic matters — at this scale it is the only viable one, and the
 UI must treat direct-context capacity as an aspiration that this class of matter
 will not meet. This strengthens D-15 rather than contradicting it.
 
+**SUPERSEDED FOR ANY STATEMENT ABOUT THE DELIVERABLE (2026-07-31).** The first
+full pipeline run measured **17,252,003 pre-tokens over 50,190,410 characters**
+of its own emitted page text across all 368 documents (2.91 chars/pre-token),
+and 17,380,982 over 50,598,897 for `clean_text/` including page markers. More
+characters, 11% fewer pre-tokens — because the two figures measure **different
+text**, not because the estimator changed. The figure above came from
+`tools/calibrate_tokens.py`, which reads with **PyMuPDF `get_text()`**, skips
+whitespace-only pages, applies no normalization, runs no OCR and covers the 298
+PDFs only. On 131 identical pages, PyMuPDF yields 16.7% more pre-tokens than the
+pypdf text DocIQ actually extracts, and contract normalization removes about 5%
+more. Use the pipeline's number for the corpus DocIQ ships; the figure above
+remains valid as what the source PDFs contain under a different reader. Both
+still refute D-03's band, now on a third independent measurement. Detail in
+`docs/verification/sprint1_integration_2026-07-31.md` §5.
+
 Two knock-on notes: the density figure independently corroborates Track B's
 refutation of D-03's 3.30–3.60 chars/token band (measured 2.53 here, 3.03 on
 Track B's 40-PDF sample — both below the ruled floor), and every token figure in
 the Sprint-1 UI mockups (3.4M → 850K) is now known to be far too small and must
 not be carried into the build as if measured.
+
+## §10 restated against a completed full-corpus run (2026-07-31)
+
+The first end-to-end run of the whole D-12 corpus finished: **368 documents,
+18,521 pages, page accounting reconciling to zero discrepancy** (acceptance
+criterion 2, on real material, for the first time). Measured:
+
+| | measured |
+|---|---|
+| walk + extract (Stages 1-2) | 2,848.5 s — **99.1% of the run** |
+| everything else — Bates, Doc IDs, reconciliation, classification, all of §7 and §8, the accounting gate, the hash manifest | **25.7 s combined** |
+| same corpus with OCR disabled, from scratch, idle machine | **3,046.7 s (50.8 min)** |
+| OCR's share, over the identical first 62 documents both ways | **≈ 2.0–2.3× — OCR roughly doubles extraction, for 2.2% of the pages** |
+
+A clean from-scratch OCR-on wall clock is **not** established (the completing run
+resumed 62 documents from an interrupted first attempt); ≈100 minutes is the best
+available figure and is an upper bound. §10's "under 60 minutes" is not met and
+is not restated as a general target until a clean run exists. Two documents also
+exceeded the shipped 3,600 s per-file timeout and would have been abandoned —
+loudly, never silently — so that default is too tight for this corpus.
+
+The consequence for where effort goes is unambiguous: **optimizing anything but
+extraction is optimizing 0.9% of the run.**
 
 ## Corpus reality vs. the spec's assumption (recorded 2026-07-30)
 

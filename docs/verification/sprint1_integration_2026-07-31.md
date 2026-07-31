@@ -51,10 +51,19 @@ claim unfalsifiable. Comparison is over the output manifest.
   1 distinct corpus hash, 0 diffs, 42 checks passed, exit 0.
 - **30 runs, 30 distinct `PYTHONHASHSEED` values, subprocess per run** — result:
   **1 distinct corpus hash, 0 diffs, 0 failures**, `corpus_sha256`
-  `5544e622d46b3747b0ed9cf4bb267a796c46797226cccbf0e34f959206aacea0`.
-  (Track A's recorded hash `b587bb6a…` does not carry forward and should not be
-  compared against: it was the *stand-in's* output, and the fixture corpus has
-  since gained the email-with-attachment case.)
+  `f3e297707c0f03a55ec0792d294639924ea8fd6030a16211e678047fa6f22330`.
+  Re-run against the final tree after the last two fixes landed; an earlier
+  30-run sweep mid-integration was equally clean but is superseded, because a
+  determinism proof of a tree that no longer exists proves nothing about the one
+  that does.
+
+**A `corpus_sha256` is not portable between source folders, by design.** It
+folds in the log's content hash, which contains `source_root` — and the folder
+*is* one of the determinism contract's three inputs. Two runs over the same
+corpus at two paths therefore differ, correctly. Compare hashes within a run
+set, never across machines or across temporary fixture directories. Track A's
+recorded `b587bb6a…` does not carry forward for that reason as well as because
+it was the stand-in's output.
 
 ### Fail-before: the gate has been watched going red
 
