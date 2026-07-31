@@ -182,6 +182,27 @@ def txt_file(path: Path) -> None:
     path.write_text(payload, encoding="utf-8", newline="")
 
 
+def eml_file(path: Path) -> None:
+    """RFC-822 message. Written by hand rather than through ``email`` so the
+    bytes are pinned — a library's own Message-ID and boundary generation is
+    clock- and random-seeded."""
+    lines = [
+        "From: engineer@example.com",
+        "To: contractor@example.com",
+        "Cc: pm@example.com",
+        "Subject: Notice of Delay - Area 200",
+        "Date: Tue, 16 Jul 2024 09:30:00 +0000",
+        "Message-ID: <fixture-0001@example.com>",
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        "Please treat this as notice under clause 20.1.",
+        "The delay commenced 2024-07-16 and is ongoing.",
+        "",
+    ]
+    path.write_bytes("\r\n".join(lines).encode("utf-8"))
+
+
 def nested_zip(path: Path, inner_sources: list[Path]) -> None:
     """A ZIP holding a ZIP — exercises the depth guard and child ordering."""
     inner = io.BytesIO()
@@ -231,7 +252,8 @@ def build(out: Path | None = None) -> Path:
     xlsx(src / "06_register.xlsx")
     csv_file(src / "07_ncr_log.csv")
     txt_file(src / "08_daily_log.txt")
-    tier2_file(src / "09_legacy.doc")
+    eml_file(src / "09_notice.eml")
+    tier2_file(src / "13_legacy.doc")
     misnamed_pdf(sub / "10_misnamed.docx")
     nested_zip(src / "11_production.zip",
                [src / "07_ncr_log.csv", src / "08_daily_log.txt"])

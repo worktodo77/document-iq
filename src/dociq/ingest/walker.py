@@ -93,24 +93,35 @@ class WalkOptions:
 
 @dataclass
 class _Errors:
-    """Every failure, visible and capped. A systemic failure must be legible
-    immediately, not present as a silent failed-count at the end."""
+    """Every failure, visible and capped, in a deterministic order.
+
+    Both properties are load-bearing and neither is obvious:
+
+    * A systemic failure must be legible immediately, not present as a silent
+      failed-count at the end — hence the cap has a disclosure row.
+    * The cap is applied AFTER sorting, not as records arrive. Errors arrive in
+      thread-completion order, so capping on arrival would keep a different
+      2,000 errors on every run — and these strings land in the log's hashed
+      ``content`` section. That is a determinism bug that only shows up on a
+      corpus with more than 2,000 failures, i.e. never in a test and always in
+      a real production.
+    """
 
     items: list[dict] = field(default_factory=list)
-    dropped: int = 0
     cap: int = 2000
 
     def record(self, rel: str, msg: str) -> None:
-        if len(self.items) < self.cap:
-            self.items.append({"file": rel, "error": (msg or "unknown")[:300]})
-        else:
-            self.dropped += 1
+        self.items.append({"file": rel,
+                           "error": ex.clip_message(msg or "unknown", 300)})
 
     def as_list(self) -> list[dict]:
-        out = list(self.items)
-        if self.dropped:
-            out.append({"file": "…", "error": f"{self.dropped} further errors omitted"})
-        return out
+        ordered = sorted(self.items, key=lambda d: (d["file"], d["error"]))
+        if len(ordered) <= self.cap:
+            return ordered
+        return ordered[:self.cap] + [
+            {"file": "…",
+             "error": f"{len(ordered) - self.cap} further error(s) omitted; the "
+                      f"first {self.cap} in path order are listed"}]
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +403,7 @@ def _extract_one(entry: FileEntry, config: RunConfig,
         return [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
                         entry.sha256,
                         ex.ExtractedDoc(status=ProcessingStatus.FAILED,
-                                        error=f"read failed: {exc}"[:200]),
+                                        error=ex.clip_message(f"read failed: {exc}", 200)),
                         config=config)]
     if entry.ext == ".zip":
         return _extract_archive(entry, raw, config, opt)
@@ -415,7 +426,8 @@ def _extract_archive(entry: FileEntry, raw: bytes, config: RunConfig,
         return [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
                         entry.sha256,
                         ex.ExtractedDoc(status=ProcessingStatus.FAILED,
-                                        error=str(exc)[:300]), config=config)]
+                                        error=ex.clip_message(str(exc), 300)),
+                        config=config)]
     parent_key = entry.rel_path
     out = [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
                    entry.sha256,
@@ -541,7 +553,8 @@ def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
                                         e.sha256,
                                         ex.ExtractedDoc(
                                             status=ProcessingStatus.FAILED,
-                                            error=str(exc)[:300]), config=config)]
+                                            error=ex.clip_message(str(exc), 300)),
+                                        config=config)]
                     documents.extend(recs)
                     journal.add(e.rel_path, recs)
                     for r in recs:

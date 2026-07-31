@@ -81,10 +81,20 @@ def test_txt_normalization_reaches_the_record():
 
 
 def test_tier2_is_never_extracted():
-    got = _pages("09_legacy.doc")
+    got = _pages("13_legacy.doc")
     assert got.status is ProcessingStatus.UNSUPPORTED
     assert "Save-As" in (got.error or "")
     assert got.pages == ()
+
+
+def test_eml_headers_and_body_with_an_iso_date_token():
+    got = _pages("09_notice.eml")
+    text = got.pages[0].text
+    assert text.startswith("From: engineer@example.com")
+    assert "Subject: Notice of Delay" in text
+    assert "(2024-07-16)" in text          # the ISO token the dater anchors on
+    assert "clause 20.1" in text
+    assert got.pages[0].kind is PageKind.SYNTHETIC
 
 
 def test_unknown_extension_is_tier2_not_an_error():

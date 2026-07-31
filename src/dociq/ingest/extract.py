@@ -236,26 +236,50 @@ def _ocr_engine():
     return _OCR_ENGINE
 
 
-def _ocr_array(arr) -> tuple[str, list[float]]:
-    """OCR one image array → ``(text, per-line confidences)``.
+@dataclass(frozen=True, slots=True)
+class OcrLine:
+    """One recognized line: where it was, what it said, how sure the engine was.
 
-    The confidences are the whole point of the change: MIP 3.9 joined
-    ``line[1]`` and dropped ``line[2]``, and ``line[2]`` is what §4 Stage 2's
-    85% review threshold is measured against.
+    The box is carried even though no contract field holds it, because §4
+    Stage 3 matches Bates stamps against page *corners and footers* — that is a
+    geometry question, and Track B would otherwise have to stand up a second
+    OCR engine to ask it. Nothing here reaches disk.
+    """
+
+    box: tuple[tuple[float, float], ...]
+    text: str
+    conf: float
+
+
+def ocr_lines(arr) -> list[OcrLine]:
+    """OCR one image array into per-line results.
+
+    The confidence is the whole point of the change from MIP 3.9, which joined
+    ``line[1]`` and dropped ``line[2]`` — and ``line[2]`` is exactly what §4
+    Stage 2's 85% review threshold is measured against.
     """
     res, _ = _ocr_engine()(arr)
-    lines = res or []
-    text = " ".join(str(line[1]) for line in lines)
-    confs: list[float] = []
-    for line in lines:
+    out: list[OcrLine] = []
+    for line in res or []:
         try:
-            confs.append(float(line[2]))
+            conf = float(line[2])
         except (IndexError, TypeError, ValueError):
             # A line without a usable score is not silently perfect: score it
             # zero so it counts against the mean and lands in the low-confidence
             # tally, which is the direction that gets a human to look.
-            confs.append(0.0)
-    return text, confs
+            conf = 0.0
+        try:
+            box = tuple((float(x), float(y)) for x, y in line[0])
+        except (IndexError, TypeError, ValueError):
+            box = ()
+        out.append(OcrLine(box=box, text=str(line[1]), conf=conf))
+    return out
+
+
+def _ocr_array(arr) -> tuple[str, list[float]]:
+    """``(joined text, per-line confidences)`` — what the page model needs."""
+    lines = ocr_lines(arr)
+    return " ".join(ln.text for ln in lines), [ln.conf for ln in lines]
 
 
 @dataclass(frozen=True, slots=True)
@@ -956,6 +980,19 @@ def _ext(filename: str) -> str:
 _ABS_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\|(?<![\w.])/)[^\s\"'<>|]*")
 
 
+def clip_message(msg: str, limit: int) -> str:
+    """Truncate a message and SAY that it was truncated.
+
+    Every error string in the pipeline is length-bounded so one pathological
+    parser cannot write a megabyte into the log. A bound that removes text
+    without a mark is a silent cap, which is the thing the standing rule
+    forbids — so the mark is not decoration.
+    """
+    if msg is None or len(msg) <= limit:
+        return msg
+    return msg[:limit].rstrip() + f" […truncated at {limit} chars]"
+
+
 def sanitize_message(msg: str) -> str:
     """Strip absolute paths out of a message that will reach a record.
 
@@ -1081,7 +1118,7 @@ def extract(filename: str, raw: bytes,
             pages, notes = _retry_by_content(ext, raw, opt, exc)
         except Exception as exc2:
             return ExtractedDoc(status=ProcessingStatus.FAILED,
-                                error=sanitize_message(str(exc2))[:400])
+                                error=clip_message(sanitize_message(str(exc2)), 400))
     notes = [sanitize_message(n) for n in notes]
     # §4 Stage 2: the flag is driven by the page's MEAN confidence against the
     # run threshold. A page that failed OCR outright flags too — it is exactly

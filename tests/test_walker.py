@@ -35,7 +35,7 @@ def test_scan_is_in_contract_order_and_hashes_everything():
 def test_tiering_follows_section_3():
     tiers = {e.rel_path: e.tier for e in walker.scan(FIXTURES)}
     assert tiers["01_native_report.pdf"] == 1
-    assert tiers["09_legacy.doc"] == 2
+    assert tiers["13_legacy.doc"] == 2
 
 
 def test_unknown_extension_defaults_to_tier_2():
@@ -150,3 +150,39 @@ def test_unreadable_file_is_recorded_not_dropped(tmp_path, monkeypatch):
     r = walker.run(_cfg(tmp_path), _fast())
     doc = next(d for d in r.documents if d.rel_path == "01_native_report.pdf")
     assert doc.status is ProcessingStatus.FAILED and "read failed" in doc.error
+
+
+def test_warning_order_is_deterministic_under_concurrent_failures(tmp_path):
+    """Errors arrive in thread-completion order; the warnings they become are
+    hashed content. The order therefore has to come from the data, not from
+    the scheduler — so run the same broken corpus at several pool widths."""
+    src = tmp_path / "broken"
+    src.mkdir()
+    for i in range(40):
+        (src / f"{i:03d}_bad.pdf").write_bytes(b"not a pdf " + bytes([i]))
+
+    seen = set()
+    for workers in (1, 2, 4, 8, 16):
+        for _ in range(3):
+            cfg = RunConfig(source_root=str(src),
+                            output_root=str(tmp_path / f"out{workers}"))
+            r = walker.run(cfg, walker.WalkOptions(ocr_enabled=False,
+                                                   resume=False,
+                                                   workers=workers))
+            seen.add(tuple(r.warnings))
+    assert len(seen) == 1, f"{len(seen)} distinct warning orders across widths"
+
+
+def test_error_cap_keeps_a_deterministic_slice_and_says_what_it_dropped():
+    errs = walker._Errors(cap=3)
+    for name in ("d", "a", "c", "b", "e"):
+        errs.record(f"{name}.pdf", "boom")
+    out = errs.as_list()
+    assert [d["file"] for d in out[:3]] == ["a.pdf", "b.pdf", "c.pdf"]
+    assert "2 further error(s) omitted" in out[-1]["error"]
+
+
+def test_a_long_error_message_says_it_was_truncated():
+    errs = walker._Errors()
+    errs.record("x.pdf", "y" * 5000)
+    assert "truncated at 300 chars" in errs.as_list()[0]["error"]

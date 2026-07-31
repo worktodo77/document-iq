@@ -44,6 +44,7 @@ _EXPECTED = {
     "06_register.xlsx": (2, {PageKind.SYNTHETIC}),
     "07_ncr_log.csv": (1, {PageKind.SYNTHETIC}),
     "08_daily_log.txt": (1, {PageKind.SYNTHETIC}),
+    "09_notice.eml": (1, {PageKind.SYNTHETIC}),
 }
 
 
