@@ -78,7 +78,14 @@ from dociq.verify import accounting, manifest as mf
 from dociq.verify.tokens import TokenEstimate as MeasuredEstimate
 from dociq.verify.tokens import estimate_for_texts
 
-__all__ = ["PipelineOptions", "PipelineOutcome", "run"]
+__all__ = ["OCR_DISABLED", "PipelineOptions", "PipelineOutcome", "run"]
+
+OCR_DISABLED = "disabled"
+"""``RunConfig.ocr_engine`` for a run that read no image page.
+
+A sentinel in an existing field rather than a new one: the contract is frozen,
+and it already has the field whose job is to say which engine produced the text.
+"None of them" is an answer that field can give."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,8 +398,21 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
 
     # The config the deliverables record is the one the run actually used, which
     # includes a Bates pattern that could not be known before Stage 3 ran.
+    #
+    # It also includes whether OCR ran at all. ``WalkOptions.ocr_enabled`` is not
+    # part of :class:`RunConfig`, and RunConfig's own docstring says that
+    # anything influencing output and absent from it is a determinism bug —
+    # which this was. Measured on the real corpus: the same folder, the same
+    # (identical) RunConfig, OCR on and off, produced 400 OCR pages versus 400
+    # more EMPTY pages and a different hashed content section, while the
+    # recorded configuration claimed both runs used rapidocr 1.2.3. The engine
+    # fields are the contract's own place to say this, so the run stamps what it
+    # actually did rather than what it was configured with.
+    ocr_ran = (opts.walk or walker.WalkOptions()).ocr_enabled
     effective = replace(
         config,
+        ocr_engine=config.ocr_engine if ocr_ran else OCR_DISABLED,
+        ocr_engine_version=config.ocr_engine_version if ocr_ran else "",
         master_index=index.snapshot if index else config.master_index,
         bates_pattern=(decision.pattern() if decision else config.bates_pattern),
         profile_id=opts.profiles[0].profile_id if opts.profiles else config.profile_id,

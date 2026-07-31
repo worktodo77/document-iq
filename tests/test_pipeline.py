@@ -18,7 +18,7 @@ import json
 import pytest
 
 from dociq import pipeline
-from dociq.contracts import RunConfig
+from dociq.contracts import PageKind, RunConfig
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
 from dociq.profiles.model import OperatorStamp
@@ -263,6 +263,28 @@ def test_a_stale_clean_text_file_from_a_previous_run_cannot_survive(tmp_path):
     assert not ghost.exists()
     assert "clean_text/DIQ-999999.txt" not in second.manifest.deterministic
     assert first.manifest.corpus_sha256 == second.manifest.corpus_sha256
+
+
+def test_a_run_that_skipped_ocr_says_so_in_the_configuration_it_records(tmp_path):
+    """RunConfig must describe anything that changed the output bytes.
+
+    Its own docstring makes that the definition of a determinism bug, and
+    ``WalkOptions.ocr_enabled`` was one: measured on the real corpus, the same
+    folder with the same RunConfig produced 400 OCR pages one way and 400 more
+    EMPTY pages the other, while both runs recorded 'rapidocr 1.2.3'.
+    """
+    with_ocr = _run(tmp_path, "on", ocr=True)
+    without = _run(tmp_path, "off", ocr=False)
+
+    assert with_ocr.result.config.ocr_engine == "rapidocr"
+    assert without.result.config.ocr_engine == pipeline.OCR_DISABLED
+    assert without.result.config.ocr_engine_version == ""
+    assert with_ocr.log.content["config"] != without.log.content["config"]
+    assert with_ocr.log.content_sha256 != without.log.content_sha256
+
+    kinds = lambda o: {p.kind for d in o.result.documents for p in d.pages}
+    assert PageKind.OCR in kinds(with_ocr)
+    assert PageKind.OCR not in kinds(without)
 
 
 # --- Bates: the unstamped corpus is the normal case ------------------------
