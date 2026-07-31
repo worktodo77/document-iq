@@ -186,3 +186,17 @@ def test_a_long_error_message_says_it_was_truncated():
     errs = walker._Errors()
     errs.record("x.pdf", "y" * 5000)
     assert "truncated at 300 chars" in errs.as_list()[0]["error"]
+
+
+def test_a_tier2_archive_member_lands_on_the_unsupported_list(tmp_path):
+    """§3 puts every listed-only file on the Unsupported list. A .doc that
+    arrived inside a ZIP is still a .doc, and an index that answers "was this
+    processed?" two different ways is an index nobody can rely on."""
+    r = walker.run(_cfg(tmp_path), _fast())
+    legacy = [d for d in r.unsupported if d.ext == ".doc"]
+    assert len(legacy) == 2, [d.rel_path for d in r.unsupported]
+    inside = next(d for d in legacy if d.parent_doc_id)
+    assert inside.parent_doc_id == "11_production.zip"
+    assert inside.container_order is not None
+    assert all(d.status is not ProcessingStatus.UNSUPPORTED
+               for d in r.documents)

@@ -609,10 +609,22 @@ def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
     for item in errors.as_list():
         warnings.append(f"{item['file']}: {item['error']}")
 
+    # A Tier-2 file inside an archive is still a Tier-2 file. It arrives here
+    # in the document list because the archive produced it, but §3 puts every
+    # listed-only file on the Unsupported list, and an index with .dwg rows in
+    # its document section and .dwg rows in its unsupported section is an index
+    # that answers "was this processed?" two different ways.
+    tier2_children = [d for d in documents
+                      if d.status is ProcessingStatus.UNSUPPORTED]
+    documents = [d for d in documents
+                 if d.status is not ProcessingStatus.UNSUPPORTED]
     documents.sort(key=document_sort_key)
+    all_unsupported = sorted(list(unsupported) + tier2_children,
+                             key=document_sort_key)
     emit_progress("")
     return RunResult(config=config, documents=tuple(documents),
-                     unsupported=unsupported, warnings=tuple(warnings))
+                     unsupported=tuple(all_unsupported),
+                     warnings=tuple(warnings))
 
 
 def _clear_scratch(scratch: Path) -> None:

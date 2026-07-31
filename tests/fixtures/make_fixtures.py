@@ -256,7 +256,8 @@ def build(out: Path | None = None) -> Path:
     tier2_file(src / "13_legacy.doc")
     misnamed_pdf(sub / "10_misnamed.docx")
     nested_zip(src / "11_production.zip",
-               [src / "07_ncr_log.csv", src / "08_daily_log.txt"])
+               [src / "07_ncr_log.csv", src / "08_daily_log.txt",
+                src / "13_legacy.doc"])
     # Same bytes as 07 under a second path — the duplicate-by-hash case.
     (sub / "12_ncr_log_copy.csv").write_bytes((src / "07_ncr_log.csv").read_bytes())
     return src
