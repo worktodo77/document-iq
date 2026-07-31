@@ -68,32 +68,46 @@ already blocks `matter_data/`, `test_matters/`, `*.msg`, `*.eml`). Tests run on
 synthetic fixtures generated in-repo; acceptance runs on real sets happen
 outside the repo tree with only summary numbers quoted in docs.
 
-## 2. Sprint roadmap (3 sprints — velocity mandate; Codex at sprint ends only)
+## 2. Sprint roadmap (velocity-revised 2026-07-30, ruling D-10: 2 sprints,
+## 3 parallel tracks, 2 Codex reviews)
 
-**Sprint 1 — Ingestion core + determinism spine.**
-Vendor and adapt the extractor (per-page records, confidence capture), walker,
-Stages 1–2, clean_text + sources.json + accounting + minimal log, selftest
-harness, determinism proof (≥8 identical runs), and the D-01 OCR bake-off
-(~20 real scanned MPR pages, ground-truthed, report committed). Also the two
-branding generators (icon + logo lockup) since they're mechanical and unblock
-GUI work. Exit gate: a real mixed native/scanned PDF set reduces to a
-zero-discrepancy corpus, byte-identical on rerun; bake-off ruling folded.
+**Contract-first rule.** `pagemodel.py` (the per-page record dataclass) and the
+pipeline stage interfaces are written and frozen on day one of Sprint 1. All
+three tracks build against that contract in separate worktrees; only Track A
+implements it for real. Any contract change after freeze is a cross-track
+stop-the-line event, not a local edit.
 
-**Sprint 2 — Identification, IDs, reduction, deliverables.**
-Bates detection + confirmation flow; master-index loading + Stage 3b ID
-assignment (acceptance against the real 9,259-row Project 495 index, run
-locally); reconciliation tab; profile model + section detection + KEEP/DROP
-with per-drop logging; document_index.xlsx/csv; token-ratio calibration
-(against the real Claude tokenizer, dev-time only); run_summary.pdf. Exit
-gate: acceptance criteria 2–5 pass on seeded discrepancy fixtures + the real
-index; v1.1 §13.5 zero colliding IDs.
+**Sprint 1 — everything but final assembly (3 concurrent tracks).**
 
-**Sprint 3 — GUI, handoff, packaging, acceptance.**
-PySide6 app per D-07 (folder picker → profile → index → run → progress →
-summary with capacity gauge), profiling checklist UI, Analyze-in-Claude Paths
-A/B, PyInstaller single exe with bundled ONNX models, offline verification
-(network disabled), full MODEC end-to-end acceptance, Codex review relay,
-merge on Alex's authorization. Exit gate: acceptance criteria 1, 6–9.
+- **Track A — Ingestion spine** (load-bearing wall; deepest critic rounds):
+  vendored extractor → per-page records + OCR confidence, walker, Stages 1–2,
+  accounting, determinism proof (≥8 identical runs), selftest harness, and the
+  D-01 OCR bake-off (timeboxed; runs in parallel — routing is engine-agnostic).
+- **Track B — Identity & deliverables** (against the frozen contract + stub
+  fixtures): Bates detection + confirmation flow; master-index loading +
+  Stage 3b ID assignment with local acceptance against the real 9,259-row
+  Project 495 index; reconciliation tab; profiles (model/detect/apply) with
+  per-drop logging; clean_text/index/log/summary emitters; token-ratio
+  calibration (dev-time, against the real Claude tokenizer).
+- **Track C — GUI shell + branding**: PySide6 screens per the approved D-07
+  sketches against a mocked pipeline API; icon + logo generators (D-08/D-09).
+
+Sprint-1 exit gate: tracks integrated on the sprint branch, selftest exit 0,
+a real mixed native/scanned set reduces to a zero-discrepancy byte-identical
+corpus, acceptance criteria 2–5 pass on seeded fixtures + the real index,
+bake-off ruling folded → **Codex review #1** (whole pipeline core).
+
+**Sprint 2 — integration, packaging, acceptance.**
+Real-pipeline wiring under the GUI; profiling checklist UI live; Analyze-in-
+Claude Paths A/B; PyInstaller single exe with bundled ONNX models; offline
+verification (network disabled); full MODEC end-to-end acceptance run →
+**Codex review #2 = merge gate**, merge on Alex's authorization. Exit gate:
+acceptance criteria 1, 6–9.
+
+**Scope trims backing the cut (D-10, evidence: Project 495 index, 9,259 rows):**
+RTF demoted to Tier 2 (zero RTF files in the audited record); RAR added to the
+Tier 2 listed-only set alongside XER/MPP/DWG (9 occurrences, listed + hashed,
+never blocks).
 
 Build mechanics per standing rules: Opus subagents implement spec'd packages,
 Sonnet critics run adversarial review loops until findings dry up, class-scope
