@@ -27,3 +27,6 @@ matter_data/
 test_matters/
 *.msg
 *.eml
+
+# Generated fixture corpus — rebuilt by tests/fixtures/make_fixtures.py
+tests/fixtures/generated/

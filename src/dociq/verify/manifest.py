@@ -1,0 +1,220 @@
+"""The output hash manifest (§4 Stage 6, §7).
+
+The manifest exists to make the byte-identical claim *checkable*, and the only
+way to do that honestly is to say which files the claim covers. A manifest
+that hashes every file in the output folder would go red on the second run for
+reasons that have nothing to do with determinism — ``run_summary.pdf`` embeds
+a generation timestamp and ``document_index.xlsx``'s container format embeds a
+creation time — and a gate that goes red for a known-benign reason is a gate
+people learn to ignore.
+
+So the manifest carries two lists, both explicit:
+
+* ``deterministic`` — hashed, and asserted byte-identical across runs with the
+  same folder + profile + master index (Principle 5 as amended by D-04).
+* ``excluded`` — present in the output, deliberately outside the claim, each
+  with the reason it cannot be byte-identical.
+
+``processing_log.json`` appears in both: its ``content`` section is hashed, its
+``run`` section (timestamp, operator, host) is not. The manifest records the
+content-section hash separately so the split is visible in the artifact rather
+than only in the prose.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from ..contracts import CONTRACT_VERSION, DocIQError, canonical_json
+
+MANIFEST_NAME = "output_manifest.json"
+
+DETERMINISTIC_PATTERNS = ("clean_text/*.txt", "sources.json",
+                          "document_index.csv")
+"""Covered by the byte-identical claim, in the order the freeze doc lists them."""
+
+EXCLUDED_REASONS = {
+    "run_summary.pdf": "embeds a generation timestamp",
+    "document_index.xlsx": "the xlsx container embeds a creation timestamp",
+    MANIFEST_NAME: "the manifest cannot hash itself",
+}
+"""Deliberately outside the claim. Anything not listed here and not matched by
+:data:`DETERMINISTIC_PATTERNS` is reported as ``unclassified`` rather than
+silently assumed either way — an output nobody decided about is a finding."""
+
+LOG_NAME = "processing_log.json"
+LOG_CONTENT_KEY = "content"
+LOG_RUN_KEY = "run"
+
+
+@dataclass
+class Manifest:
+    contract_version: str = CONTRACT_VERSION
+    deterministic: dict[str, str] = field(default_factory=dict)
+    """``{relative path: sha256}`` — the claim's subject."""
+    log_content_sha256: str | None = None
+    excluded: dict[str, str] = field(default_factory=dict)
+    """``{relative path: reason it is outside the claim}``."""
+    unclassified: list[str] = field(default_factory=list)
+
+    @property
+    def corpus_sha256(self) -> str:
+        """One hash over the whole deterministic set — the number to compare
+        between two runs. Computed over the canonical JSON of the sorted
+        per-file hashes, so a file appearing or vanishing changes it too."""
+        payload = canonical_json({
+            "contract_version": self.contract_version,
+            "files": dict(sorted(self.deterministic.items())),
+            "log_content_sha256": self.log_content_sha256 or "",
+        })
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def to_jsonable(self) -> dict:
+        return {
+            "contract_version": self.contract_version,
+            "claim": ("byte-identical across runs with the same source folder, "
+                      "profile and master index — for the files under "
+                      "'deterministic' and for the '{}' section of {} only"
+                      .format(LOG_CONTENT_KEY, LOG_NAME)),
+            "corpus_sha256": self.corpus_sha256,
+            "deterministic": dict(sorted(self.deterministic.items())),
+            "log_content_sha256": self.log_content_sha256,
+            "excluded": dict(sorted(self.excluded.items())),
+            "unclassified": sorted(self.unclassified),
+        }
+
+    def render(self) -> str:
+        lines = [f"corpus hash {self.corpus_sha256[:16]}… over "
+                 f"{len(self.deterministic)} deterministic file(s)"]
+        if self.log_content_sha256:
+            lines.append(f"  {LOG_NAME}[{LOG_CONTENT_KEY}] "
+                         f"{self.log_content_sha256[:16]}…")
+        for name, why in sorted(self.excluded.items()):
+            lines.append(f"  excluded: {name} — {why}")
+        for name in sorted(self.unclassified):
+            lines.append(f"  UNCLASSIFIED: {name} — not covered by the claim "
+                         "and not declared excluded")
+        return "\n".join(lines)
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _log_content_hash(path: Path) -> str | None:
+    """Hash of the log's ``content`` section, or ``None`` if unreadable.
+
+    Hashed from the parsed structure through the contract's canonical
+    serializer rather than from the raw bytes: the claim is about the content,
+    and re-serializing through one function is what keeps this hash and the
+    log writer's own from ever disagreeing.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if LOG_CONTENT_KEY not in data:
+        return None
+    return hashlib.sha256(
+        canonical_json(data[LOG_CONTENT_KEY]).encode("utf-8")).hexdigest()
+
+
+class EmptyOutputError(DocIQError):
+    """The output root holds none of the artifacts the claim is about.
+
+    An empty manifest still produces a perfectly stable ``corpus_sha256``, so
+    two runs that produced *nothing* compare byte-identical and the determinism
+    gate goes green on an empty folder. A gate that passes when the pipeline
+    did no work is worse than no gate, so this is a hard failure rather than
+    an empty result.
+    """
+
+
+def build(output_root: Path, *, require_outputs: bool = True) -> Manifest:
+    """Hash the outputs present under ``output_root``.
+
+    Args:
+        require_outputs: raise :class:`EmptyOutputError` when nothing the claim
+            covers is present. Off only for tests that build a manifest of a
+            deliberately empty tree.
+    """
+    output_root = Path(output_root)
+    if require_outputs and not output_root.is_dir():
+        raise EmptyOutputError(f"output root does not exist: {output_root}")
+    man = Manifest()
+
+    covered: set[Path] = set()
+    for pattern in DETERMINISTIC_PATTERNS:
+        for p in sorted(output_root.glob(pattern)):
+            if p.is_file():
+                covered.add(p)
+                man.deterministic[p.relative_to(output_root).as_posix()] = \
+                    _sha256_file(p)
+
+    log = output_root / LOG_NAME
+    if log.is_file():
+        covered.add(log)
+        man.log_content_sha256 = _log_content_hash(log)
+        man.excluded[LOG_NAME] = (
+            f"the '{LOG_RUN_KEY}' section carries the run timestamp, operator "
+            f"and host; only the '{LOG_CONTENT_KEY}' section is hashed")
+
+    for p in sorted(output_root.rglob("*")):
+        if not p.is_file() or p in covered:
+            continue
+        rel = p.relative_to(output_root).as_posix()
+        if rel.startswith(".dociq/"):  # run scratch, not a deliverable
+            continue
+        if rel in EXCLUDED_REASONS:
+            man.excluded[rel] = EXCLUDED_REASONS[rel]
+        else:
+            man.unclassified.append(rel)
+
+    if require_outputs and not man.deterministic:
+        raise EmptyOutputError(
+            f"{output_root} holds none of {DETERMINISTIC_PATTERNS} — the "
+            "byte-identical claim has no subject, and comparing two empty "
+            "manifests would pass trivially")
+    return man
+
+
+def write(output_root: Path) -> Path:
+    """Build the manifest and write it. Returns the path."""
+    output_root = Path(output_root)
+    man = build(output_root)
+    path = output_root / MANIFEST_NAME
+    path.write_text(
+        json.dumps(man.to_jsonable(), indent=2, sort_keys=True,
+                   ensure_ascii=False) + "\n",
+        encoding="utf-8", newline="\n")
+    return path
+
+
+def compare(a: Manifest, b: Manifest) -> list[str]:
+    """Differences between two runs' manifests, restricted to the claim.
+
+    An empty list is the byte-identical result. The excluded set is not
+    compared: it is excluded precisely because comparing it proves nothing.
+    """
+    diffs: list[str] = []
+    if a.log_content_sha256 != b.log_content_sha256:
+        diffs.append(f"{LOG_NAME}[{LOG_CONTENT_KEY}]: "
+                     f"{a.log_content_sha256} != {b.log_content_sha256}")
+    for name in sorted(set(a.deterministic) | set(b.deterministic)):
+        ha, hb = a.deterministic.get(name), b.deterministic.get(name)
+        if ha is None:
+            diffs.append(f"{name}: missing from the first run")
+        elif hb is None:
+            diffs.append(f"{name}: missing from the second run")
+        elif ha != hb:
+            diffs.append(f"{name}: {ha[:16]}… != {hb[:16]}…")
+    for name in sorted(set(a.unclassified) ^ set(b.unclassified)):
+        diffs.append(f"{name}: unclassified output present in only one run")
+    return diffs
