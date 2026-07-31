@@ -142,6 +142,9 @@ class PipelineOutcome:
     reconciliation: ReconciliationReport
     log: LogBundle
     renumbering: tuple[RenumberWarning, ...] = ()
+    walk_notes: walker.RunNotes = field(default_factory=walker.RunNotes)
+    """Stage 1's invocation notes — serial retries, resume, cancellation.
+    Recorded in the log's ``run`` section, never in its hashed content."""
     stale_removed: tuple[str, ...] = ()
     """Deliverables of a previous run that this one replaced. Recorded in the
     log's ``run`` section, never in its hashed content."""
@@ -367,7 +370,8 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
 
     # ---- Stages 1-2 --------------------------------------------------------
     t = time.monotonic()
-    walked = walker.run(config, opts.walk)
+    walk_notes = walker.RunNotes()
+    walked = walker.run(config, opts.walk, walk_notes)
     mark("walk_extract", t)
     warnings: list[str] = list(walked.warnings)
     documents: tuple[DocumentRecord, ...] = walked.documents
@@ -435,7 +439,17 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     previous = IssuedIdLedger.read(ledger_path) if ledger_path.is_file() else None
     ledger = IssuedIdLedger.from_assignment(assignment, effective.master_index)
     renumbering = detect_renumbering(previous, ledger)
-    all_warnings = warnings + [w.message for w in renumbering]
+    # Stage 1's invocation notes travel the same road as the renumbering
+    # warnings, and for the same reason. A serial-retry disclosure, a resume
+    # note and a cancellation note are all facts about THIS invocation: two
+    # runs over byte-identical inputs can legitimately differ in them, so they
+    # are visible to the operator (here, and in the log's `run` section, and in
+    # the summary) and invisible to the hash. Putting them in `warnings` — the
+    # list that becomes hashed `content` — would make a run that needed a retry
+    # produce different bytes from a run that did not, which is the very defect
+    # the retry exists to remove.
+    all_warnings = (warnings + [w.message for w in renumbering]
+                    + walk_notes.messages())
 
     # ---- Stage 6 (measure first — the log records the numbers) -------------
     t = time.monotonic()
@@ -494,7 +508,11 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         warnings=warnings,
         stamp=stamp,
         output_hashes=_hashes_of(written, layout),
-        run_notes={"stale_outputs_removed": list(stale)},
+        run_notes={
+            "stale_outputs_removed": list(stale),
+            "load_dependent_extraction": list(walk_notes.load_dependent),
+            "invocation_notes": list(walk_notes.invocation),
+        },
     )
     write_processing_log(bundle, layout)
 
@@ -552,6 +570,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         assignment=assignment,
         reconciliation=report,
         log=bundle,
+        walk_notes=walk_notes,
         renumbering=renumbering,
         stale_removed=stale,
         bates_ranges=ranges,

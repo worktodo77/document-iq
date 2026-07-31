@@ -150,8 +150,15 @@ def test_resume_replays_the_previous_run_instead_of_re_extracting(tmp_path):
         w.add(source, docs)
     w.close(discard=False, output_root=tmp_path / "out")
 
-    second = walker.run(cfg, walker.WalkOptions(ocr_enabled=False, resume=True))
-    assert any("resumed" in w for w in second.warnings)
+    notes = walker.RunNotes()
+    second = walker.run(cfg, walker.WalkOptions(ocr_enabled=False, resume=True),
+                        notes)
+    # The resume note is an invocation note, not a hashed warning: whether an
+    # earlier run crashed is not a fact about the corpus, and keeping it in the
+    # hashed warnings made a resumed run and a fresh run over identical inputs
+    # produce different content bytes. See tests/test_load_dependent.py.
+    assert any("RESUMED RUN" in n for n in notes.invocation)
+    assert not any("resumed" in w.lower() for w in second.warnings)
     assert {d.rel_path for d in second.documents} == \
         {d.rel_path for d in first.documents}
 
@@ -188,11 +195,13 @@ def test_resume_re_extracts_a_file_that_changed_since_the_crash(tmp_path):
     (src / "a.txt").write_text("VERSION TWO, edited after the crash",
                                 encoding="utf-8")
 
-    second = walker.run(cfg, walker.WalkOptions(ocr_enabled=False, resume=True))
+    notes = walker.RunNotes()
+    second = walker.run(cfg, walker.WalkOptions(ocr_enabled=False, resume=True),
+                        notes)
     doc = second.documents[0]
     assert doc.pages[0].text == "VERSION TWO, edited after the crash"
     assert doc.sha256 == walker.sha256_file(src / "a.txt")
-    assert any("changed on disk" in w for w in second.warnings)
+    assert any("changed on disk" in n for n in notes.invocation)
 
 
 def test_resume_is_discarded_when_the_run_identity_changed(tmp_path):
@@ -245,8 +254,9 @@ def test_disk_preflight_fails_before_the_work_not_during(tmp_path, monkeypatch):
 
 
 def test_cancel_stops_the_run_and_says_so(tmp_path):
-    r = walker.run(_cfg(tmp_path), _fast(cancelled=lambda: True))
-    assert any("cancelled" in w for w in r.warnings)
+    notes = walker.RunNotes()
+    walker.run(_cfg(tmp_path), _fast(cancelled=lambda: True), notes)
+    assert any("CANCELLED" in n for n in notes.invocation)
 
 
 def test_progress_callback_reports_without_reaching_disk(tmp_path):

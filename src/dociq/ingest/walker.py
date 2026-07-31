@@ -29,7 +29,7 @@ import shutil
 import threading
 import time
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as fwait
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +57,12 @@ _DEFAULT_WORKERS = int(os.environ.get(
 _DEFAULT_FILE_TIMEOUT = float(os.environ.get("DOCIQ_FILE_TIMEOUT", "3600"))
 _DISK_HEADROOM = float(os.environ.get("DOCIQ_DISK_HEADROOM", "1.15"))
 
+_RETRY_MAX = int(os.environ.get("DOCIQ_RETRY_MAX", "500"))
+_RETRY_BUDGET_S = float(os.environ.get("DOCIQ_RETRY_BUDGET_S", "1800"))
+"""Bounds on the serial-retry pass. Both are disclosed in the run notes
+whenever they bite — a cap that quietly stops retrying would reintroduce
+exactly the silence the retry exists to remove."""
+
 _MAX_DATES_PER_DOC = 200
 """Cap on ``detected_dates``. A 900-page register can carry tens of thousands
 of dates and the index column shows a handful; the cap is disclosed as a
@@ -77,6 +83,40 @@ class FileEntry:
     size_bytes: int
     ext: str
     tier: int
+    unreadable: bool = False
+    """The file could not be opened for hashing, twice. It is still inventoried
+    (never dropped), but it is demoted to Tier 2 for a reason that has nothing
+    to do with its format, and saying "Unrecognized format" about a .pdf that
+    was merely locked is a false statement in the deliverable."""
+
+
+@dataclass
+class RunNotes:
+    """Facts about THIS invocation — never about the inputs.
+
+    Everything here is excluded from the log's hashed ``content`` by
+    construction, because every field can differ between two runs over
+    byte-identical inputs: whether a previous run crashed and left a journal,
+    whether a file lost a race under extraction load, whether the operator
+    cancelled. Putting any of it in ``content`` would make the byte-identical
+    claim false for reasons that have nothing to do with the evidence.
+
+    It is an explicit out-parameter rather than a field on
+    :class:`~dociq.contracts.RunResult` for the same reason: ``RunResult``'s
+    warnings ARE hashed, and a channel that is easy to mix up with them is a
+    channel that will be mixed up with them.
+    """
+
+    load_dependent: list[str] = field(default_factory=list)
+    """One entry per document that failed under load and was re-read serially.
+    Prominent by design — a run that needed a retry must say so."""
+
+    invocation: list[str] = field(default_factory=list)
+    """Resume, cancellation, and read-retry notes."""
+
+    def messages(self) -> list[str]:
+        """Everything, for the operator-facing warning list."""
+        return list(self.load_dependent) + list(self.invocation)
 
 
 @dataclass
@@ -215,12 +255,23 @@ def _iter_files(root: Path, *, recursive: bool,
 
 
 def scan(root: Path, *, recursive: bool = True,
-        notes: list[str] | None = None) -> list[FileEntry]:
+        notes: list[str] | None = None,
+        run_notes: RunNotes | None = None) -> list[FileEntry]:
     """Inventory every file under ``root``, hashed and tiered, in contract order.
 
     Sorting happens here rather than at emit time so every consumer of a scan
     sees the same order — including the resume path, which would otherwise
     fast-forward a different set of files on the second run.
+
+    A file that will not open is tried a second time before it is written off.
+    Backup agents, anti-virus scanners and Windows share locks all produce a
+    transient ``OSError`` on a file that is perfectly readable a moment later,
+    and the first draft demoted such a file to Tier 2 permanently — with a
+    zero hash, a ``-1`` size and, worse, the "Unrecognized format" hint, which
+    says something false about a .pdf that was merely locked. The second
+    attempt is what separates "locked for an instant" from "unreadable", and
+    it is recorded in ``run_notes`` rather than the hashed warnings because
+    which of the two runs hit the lock is not a fact about the evidence.
     """
     root = Path(root)
     entries: list[FileEntry] = []
@@ -228,18 +279,49 @@ def scan(root: Path, *, recursive: bool = True,
         if STATE_DIR in p.parts:  # our own run state is not evidence
             continue
         ext = p.suffix.lower()
-        try:
-            entries.append(FileEntry(
-                path=p, rel_path=rel_path_of(p, root), sha256=sha256_file(p),
-                size_bytes=p.stat().st_size, ext=ext, tier=tier_of(ext)))
-        except OSError:
-            # Unreadable at hash time. Recorded as a Tier-2 zero-hash entry so
-            # it still appears in the inventory: a file that cannot be opened
-            # is a finding, and dropping it here would be a silent deletion.
-            entries.append(FileEntry(path=p, rel_path=rel_path_of(p, root),
-                                     sha256="", size_bytes=-1, ext=ext, tier=2))
+        rel = rel_path_of(p, root)
+        first_error: OSError | None = None
+        for attempt in (1, 2):
+            try:
+                entries.append(FileEntry(
+                    path=p, rel_path=rel, sha256=sha256_file(p),
+                    size_bytes=p.stat().st_size, ext=ext, tier=tier_of(ext)))
+                if attempt == 2 and run_notes is not None:
+                    run_notes.invocation.append(
+                        f"TRANSIENT READ: '{rel}' could not be opened for "
+                        f"hashing on the first attempt ({first_error}) and was "
+                        "read on an immediate second attempt; it is inventoried "
+                        "normally. Nothing in the deliverables differs, but the "
+                        "source volume produced a transient error.")
+                break
+            except OSError as exc:
+                first_error = first_error or exc
+                if attempt == 2:
+                    # Unreadable at hash time, twice. Recorded as a Tier-2
+                    # zero-hash entry so it still appears in the inventory: a
+                    # file that cannot be opened is a finding, and dropping it
+                    # here would be a silent deletion.
+                    entries.append(FileEntry(
+                        path=p, rel_path=rel, sha256="", size_bytes=-1,
+                        ext=ext, tier=2, unreadable=True))
     entries.sort(key=lambda e: (e.rel_path, e.sha256))
     return entries
+
+
+def unreadable_hint(entry: FileEntry) -> str:
+    """What the Unsupported list says about ``entry``.
+
+    A file that could not be opened is not a format DocIQ does not support, and
+    conflating the two puts "Unrecognized format — inventoried and hashed only"
+    next to a .pdf whose only problem was a lock. It is also not hashed, so the
+    row cannot honestly claim to be "hashed only" either.
+    """
+    if entry.unreadable:
+        return ("Could not be opened for reading, on two attempts — it is "
+                "listed here so it is not lost, but it was NOT hashed and NOT "
+                "extracted. Check the file's permissions, its lock state, and "
+                "the source volume, then re-run.")
+    return ex.tier2_hint(entry.ext)
 
 
 def duplicate_groups(entries: list[FileEntry]) -> dict[str, list[str]]:
@@ -326,6 +408,7 @@ def _load_resume(config: RunConfig) -> dict[str, list[DocumentRecord]]:
     if not p.is_file():
         return {}
     out: dict[str, list[DocumentRecord]] = {}
+    seen_batch: dict[str, str] = {}
     try:
         with open(p, encoding="utf-8") as fh:
             header = json.loads(fh.readline() or "{}")
@@ -341,8 +424,20 @@ def _load_resume(config: RunConfig) -> dict[str, list[DocumentRecord]]:
                     # A crash mid-write truncates the last line. Everything
                     # before it is intact; stopping here is the safe read.
                     break
-                out.setdefault(rec["source_rel_path"], []).append(
-                    _doc_from_jsonable(rec["doc"]))
+                rel = rec["source_rel_path"]
+                # LAST batch wins. One source file can be journaled twice in a
+                # single run — the serial-retry pass re-journals whatever it
+                # adopted — and the first draft appended, so a replay would
+                # have handed the run BOTH the failed record and the retried
+                # one for the same file: a duplicate Doc ID and a resurrected
+                # failure, from a fix. The batch number is written by
+                # _ResumeWriter.add, which is the unit that is written
+                # atomically-enough to be a group.
+                batch = str(rec.get("batch", ""))
+                if seen_batch.get(rel) != batch:
+                    seen_batch[rel] = batch
+                    out[rel] = []
+                out[rel].append(_doc_from_jsonable(rec["doc"]))
     except (OSError, KeyError, ValueError):
         return {}
     return out
@@ -356,6 +451,13 @@ class _ResumeWriter:
                  *, append: bool = False) -> None:
         self._fh = None
         self._lock = threading.Lock()
+        self._batch = 0
+        # The batch token is namespaced per writer. A resumed run appends to
+        # the journal a previous writer started, so a bare counter would emit a
+        # "batch 1" that collides with the earlier run's "batch 1" for the same
+        # file and merge two groups that must not merge. Nothing here reaches
+        # hashed content, so a wall-clock nonce is free.
+        self._session = f"{time.time_ns():x}"
         if not enabled:
             return
         p = _resume_path(Path(config.output_root))
@@ -382,10 +484,13 @@ class _ResumeWriter:
         # measured on the 17,732-page corpus, where the loop stopped reporting
         # for tens of minutes while extraction carried on underneath it.
         with self._lock:
+            self._batch += 1
+            batch = f"{self._session}-{self._batch}"
             try:
                 for d in docs:
                     self._fh.write(json.dumps(
-                        {"source_rel_path": source_rel, "doc": to_jsonable(d)},
+                        {"source_rel_path": source_rel, "batch": batch,
+                         "doc": to_jsonable(d)},
                         sort_keys=True, ensure_ascii=False,
                         separators=(",", ":")) + "\n")
                 self._fh.flush()
@@ -546,7 +651,7 @@ def _extract_message(entry: FileEntry, raw: bytes, config: RunConfig,
         else:
             exp = ex.expand_eml_attachments(raw)
     except Exception as exc:
-        exp = ex.ZipExpansion((), (f"could not enumerate attachments: {exc}"[:200],))
+        exp = ex.ZipExpansion((), (f"{ex.M_ATTACH_ENUM}: {exc}"[:200],))
     extra_notes = exp.notes + ((f"{len(exp.members)} attachment(s) extracted "
                                 f"as child document(s)",) if exp.members else ())
     out = [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
@@ -559,19 +664,198 @@ def _extract_message(entry: FileEntry, raw: bytes, config: RunConfig,
 
 
 # ---------------------------------------------------------------------------
+# The serial retry — a load-dependent failure must not become a permanent one
+# ---------------------------------------------------------------------------
+#
+# Measured, on the real 368-document corpus: two full runs over byte-identical
+# inputs disagreed about one .pptx. Under an OCR-loaded pool it failed with a
+# malformed-XML error from the OOXML parser; with OCR off it read all 35 slides.
+# Ten isolated re-reads of that file parsed cleanly, and 72 concurrent attempts
+# across 12 rounds never reproduced it, so the mechanism is not known.
+#
+# The mechanism is also not what makes it dangerous. What makes it dangerous is
+# that a failure caused by LOAD was written into the deliverables as a property
+# of the DOCUMENT — "this file is unreadable" — and the corpus a reviewer got
+# therefore depended on how busy the machine was. Principle 1 held (the failure
+# was recorded, loudly); Principle 5 did not (two runs, one corpus, two
+# outputs).
+#
+# The remedy does not need the mechanism: nothing that failed while sixteen
+# other documents were being extracted is allowed to be written off until it
+# has been tried once more, alone. That is decidable without knowing why.
+
+_RETRY_NOTE_CAP = 5
+
+
+def _degradations(recs: Sequence[DocumentRecord]) -> list[str]:
+    """Every sign that ``recs`` read with less than the source holds.
+
+    A whole-document failure, and every note or page note carrying one of
+    :data:`dociq.ingest.extract.TRANSIENT_MARKERS`. The list is what the retry
+    triggers on and what its disclosure quotes, so it is built once.
+    """
+    out: list[str] = []
+    for r in recs:
+        if r.status is ProcessingStatus.FAILED:
+            out.append(f"{r.rel_path}: FAILED: {r.error or 'no message'}")
+        out.extend(f"{r.rel_path}: {n}" for n in r.notes
+                   if ex.has_transient_marker(n))
+        for p in r.pages:
+            out.extend(f"{r.rel_path} p.{p.page_no}: {n}" for n in p.notes
+                       if ex.has_transient_marker(n))
+    return out
+
+
+def _outcome_profile(recs: Sequence[DocumentRecord]) -> tuple[int, int, int, int]:
+    """How badly ``recs`` came out. Lower is better, and it is a total order.
+
+    Comparable so the retry's adoption rule is a comparison rather than a
+    judgement: failures first, then degradation notes, then (negated, so more
+    is better) pages and records recovered.
+    """
+    return (
+        sum(1 for r in recs if r.status is ProcessingStatus.FAILED),
+        len(_degradations(recs)),
+        -sum(r.pages_in for r in recs),
+        -len(recs),
+    )
+
+
+def _summarize(recs: Sequence[DocumentRecord]) -> str:
+    """One line describing an outcome, for the disclosure."""
+    if not recs:
+        return "no records"
+    bad = _degradations(recs)
+    head = (f"{len(recs)} record(s), {sum(r.pages_in for r in recs)} page(s), "
+            f"status {'/'.join(sorted({r.status.value for r in recs}))}")
+    if not bad:
+        return head + ", no degradation"
+    shown = bad[:_RETRY_NOTE_CAP]
+    tail = ("" if len(bad) <= _RETRY_NOTE_CAP
+            else f" (+{len(bad) - _RETRY_NOTE_CAP} more, capped at "
+                 f"{_RETRY_NOTE_CAP} for length)")
+    return head + "; " + " | ".join(ex.clip_message(b, 200) for b in shown) + tail
+
+
+def _extract_serially(entry: FileEntry, config: RunConfig,
+                      opt: ex.ExtractOptions,
+                      timeout_s: float) -> list[DocumentRecord]:
+    """Re-extract ``entry`` alone, still under a watchdog.
+
+    Alone is the point — nothing else of this run's is running — but "alone and
+    unbounded" would trade a load-dependent failure for a hang, so the retry
+    keeps the same per-file timeout the pool applies. A one-thread executor is
+    how the timeout stays enforceable: a plain call cannot be abandoned.
+
+    One honest caveat, stated rather than hidden: a worker the watchdog
+    abandoned cannot be killed in Python, so a file that timed out may still
+    have a thread running underneath this retry. "Alone" is therefore exact for
+    every ordinary failure and approximate for a timeout — which is the one
+    case whose retry outcome the disclosure already names both ways.
+    """
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dociq-retry")
+    t0 = time.monotonic()
+    try:
+        fut = pool.submit(_extract_one, entry, config, opt)
+        try:
+            return fut.result(timeout=timeout_s)
+        except Exception as exc:
+            fut.cancel()
+            waited = int(time.monotonic() - t0)
+            msg = (f"abandoned after {waited}s on the serial retry"
+                   if not str(exc) else
+                   f"serial retry failed after {waited}s: {exc}")
+            return [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
+                            entry.sha256,
+                            ex.ExtractedDoc(status=ProcessingStatus.FAILED,
+                                            error=ex.clip_message(msg, 300)),
+                            config=config)]
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _retry_degraded(produced: dict[str, list[DocumentRecord]],
+                    entries: dict[str, FileEntry], config: RunConfig,
+                    opt: ex.ExtractOptions, timeout_s: float,
+                    notes: RunNotes,
+                    journal: "_ResumeWriter | None" = None) -> None:
+    """Re-read every degraded document serially; adopt the better outcome.
+
+    ``produced`` is mutated in place. The adoption rule is deliberately not
+    "always take the retry": the retry is the deterministic reading, so it wins
+    ties and wins improvements, but a retry that came out STRICTLY WORSE is a
+    second load-dependent event and discarding the better result to satisfy a
+    rule would lose evidence. Both outcomes are named either way — the
+    disclosure is the deliverable here, not the adoption.
+    """
+    targets = sorted(rel for rel, recs in produced.items() if _degradations(recs))
+    if not targets:
+        return
+    t0 = time.monotonic()
+    for n, rel in enumerate(targets):
+        if n >= _RETRY_MAX or time.monotonic() - t0 > _RETRY_BUDGET_S:
+            notes.load_dependent.append(
+                f"RETRY BUDGET EXHAUSTED: {len(targets) - n} of {len(targets)} "
+                f"degraded document(s) were NOT re-read serially (cap "
+                f"{_RETRY_MAX} document(s) / {_RETRY_BUDGET_S:.0f}s, "
+                f"DOCIQ_RETRY_MAX / DOCIQ_RETRY_BUDGET_S). Their recorded "
+                "failures have NOT been distinguished from load-dependent "
+                "ones: " + ", ".join(targets[n:n + 20])
+                + (" …" if len(targets) - n > 20 else ""))
+            break
+        entry = entries.get(rel)
+        if entry is None:  # pragma: no cover — produced keys come from entries
+            continue
+        first = produced[rel]
+        again = _extract_serially(entry, config, opt, timeout_s)
+        p_first, p_again = _outcome_profile(first), _outcome_profile(again)
+        if p_again <= p_first:
+            produced[rel] = again
+            if journal is not None:
+                journal.add(rel, again)
+        verdict = (
+            "RESOLVED: the serial read succeeded and IS what this run recorded"
+            if p_again < p_first and not _degradations(again) else
+            "UNCHANGED: the serial read reproduced the same outcome, so this is "
+            "a property of the document, not of the load"
+            if p_again == p_first else
+            "IMPROVED: the serial read recovered more and IS what this run "
+            "recorded"
+            if p_again < p_first else
+            "NOT ADOPTED: the serial read came out WORSE than the pooled one, "
+            "so the pooled result was kept — this document was degraded on both "
+            "attempts and neither reading is trustworthy")
+        notes.load_dependent.append(
+            f"LOAD-DEPENDENT EXTRACTION CHECK — '{rel}' did not read cleanly "
+            f"inside the extraction pool and was re-read serially, alone. "
+            f"Pooled: {_summarize(first)}. Serial: {_summarize(again)}. "
+            f"{verdict}.")
+
+
+# ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
 
 
-def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
+def run(config: RunConfig, opts: WalkOptions | None = None,
+        notes: RunNotes | None = None) -> RunResult:
     """Stages 1 and 2 end to end: inventory → extraction → contract records.
 
     Returns a :class:`RunResult` whose ``documents`` are Tier-1 records in
     contract order and whose ``unsupported`` are the Tier-2 inventory, also in
-    contract order. Warnings carry everything the operator must see and the
-    §4 Stage-6 gate does not: duplicates, disk, resume, extraction failures.
+    contract order. ``RunResult.warnings`` carries everything the operator must
+    see that is a fact about the INPUTS — duplicates, disk, extraction failures
+    — because those warnings are hashed content.
+
+    ``notes`` is where facts about this INVOCATION go instead: resume,
+    cancellation, transient read errors, and the serial-retry disclosures. They
+    are just as visible (the pipeline puts them in the log's ``run`` section, in
+    ``RunResult.warnings`` at the pipeline level, and in the run summary) and
+    they are outside the hash, which is what lets a resumed run and a fresh run
+    over the same corpus produce the same bytes.
     """
     opts = opts or WalkOptions()
+    notes = notes if notes is not None else RunNotes()
     root = Path(config.source_root)
     output_root = Path(config.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -579,7 +863,8 @@ def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
 
     warnings: list[str] = []
     scan_notes: list[str] = []
-    entries = scan(root, recursive=opts.recursive, notes=scan_notes)
+    entries = scan(root, recursive=opts.recursive, notes=scan_notes,
+                   run_notes=notes)
     warnings.extend(sorted(scan_notes))
 
     dups = duplicate_groups(entries)
@@ -598,7 +883,7 @@ def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
         (DocumentRecord(doc_id="", rel_path=e.rel_path, filename=e.path.name,
                         sha256=e.sha256, size_bytes=e.size_bytes, ext=e.ext,
                         status=ProcessingStatus.UNSUPPORTED,
-                        error=ex.tier2_hint(e.ext)) for e in tier2),
+                        error=unreadable_hint(e)) for e in tier2),
         key=document_sort_key))
     for d in unsupported:
         d.validate()
@@ -612,6 +897,7 @@ def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
     documents: list[DocumentRecord] = []
     todo: list[FileEntry] = []
     n_stale = 0
+    n_degraded = 0
     for e in tier1:
         cached = replay.get(e.rel_path)
         # The journal identity check (contract/profile/OCR engine) says
@@ -626,29 +912,60 @@ def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
         # first record is always the one built from this source file itself
         # (see _extract_one / _extract_archive), so its sha256 is the
         # journal-time hash to compare against the freshly scanned one.
-        if cached and cached[0].sha256 == e.sha256:
+        #
+        # A cached record that carries a failure or a degradation marker is
+        # never replayed either. Replaying one would cement a failure that
+        # might have been load-dependent — the interrupted run is by definition
+        # the run that was under stress — and it would do so on a path where
+        # the serial retry can no longer reach it. Re-extracting costs one
+        # file; replaying costs the corpus.
+        degraded = _degradations(cached) if cached else []
+        if cached and cached[0].sha256 == e.sha256 and not degraded:
             documents.extend(cached)
         else:
-            if cached:
+            if cached and degraded:
+                n_degraded += 1
+            elif cached:
                 n_stale += 1
             todo.append(e)
     n_replayed = (len(tier1) - len(todo))
+    # Resume state is a fact about this INVOCATION — whether an earlier run
+    # crashed here — and never about the corpus. It used to be appended to the
+    # hashed warnings, which meant a resumed run and a fresh run over identical
+    # inputs produced different `content` bytes and a different corpus hash,
+    # with no bad input anywhere. Same class as the retry disclosure below;
+    # same remedy.
     if replay:
-        warnings.append(f"resumed: {n_replayed} document(s) replayed "
-                        "from the previous interrupted run")
+        notes.invocation.append(
+            f"RESUMED RUN: {n_replayed} document(s) were replayed from a "
+            "previous interrupted run's journal rather than re-extracted. "
+            "Their records were produced by that run.")
     if n_stale:
-        warnings.append(
-            f"resume: {n_stale} document(s) changed on disk since the "
-            "interrupted run and were re-extracted rather than replayed")
+        notes.invocation.append(
+            f"RESUME: {n_stale} document(s) changed on disk since the "
+            "interrupted run and were re-extracted rather than replayed.")
+    if n_degraded:
+        notes.invocation.append(
+            f"RESUME: {n_degraded} document(s) had recorded a failure or a "
+            "degraded read in the interrupted run and were re-extracted rather "
+            "than replayed, so that a load-dependent failure is not carried "
+            "forward as a permanent one.")
 
     cancelled = opts.cancelled or (lambda: False)
     t0 = time.monotonic()
     done_n = 0
+    n_failed_so_far = 0
+    # Pool results are held per source file rather than appended straight into
+    # `documents`, because the serial-retry pass has to be able to REPLACE one
+    # file's records wholesale. Appending first and patching later would mean
+    # searching a 20,000-record list for the right subset, and getting the
+    # child records of an archive right by luck.
+    produced: dict[str, list[DocumentRecord]] = {}
 
     def emit_progress(current: str) -> None:
         if opts.progress:
             opts.progress({"done": done_n, "total": len(todo), "file": current,
-                           "failed": len(errors.items),
+                           "failed": n_failed_so_far,
                            "elapsed_s": round(time.monotonic() - t0, 1)})
 
     if todo:
@@ -686,14 +1003,10 @@ def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
                                             status=ProcessingStatus.FAILED,
                                             error=ex.clip_message(str(exc), 300)),
                                         config=config)]
-                    documents.extend(recs)
+                    produced[e.rel_path] = recs
                     journal.add(e.rel_path, recs)
-                    for r in recs:
-                        if r.status is ProcessingStatus.FAILED:
-                            errors.record(r.rel_path, r.error or "")
-                        for n in r.notes:
-                            if "recovered via" in n:
-                                errors.record(r.rel_path, n)
+                    n_failed_so_far += sum(
+                        1 for r in recs if r.status is ProcessingStatus.FAILED)
                     done_n += 1
                 # Watchdog on EXECUTION time only. A future still waiting for a
                 # worker is merely queued, not stuck — ageing those out
@@ -714,9 +1027,9 @@ def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
                                                 f"{int(now - st)}s (extraction "
                                                 f"did not finish)"),
                                       config=config)
-                        documents.append(rec)
+                        produced[e.rel_path] = [rec]
                         journal.add(e.rel_path, [rec])
-                        errors.record(rec.rel_path, rec.error or "")
+                        n_failed_so_far += 1
                         done_n += 1
                 running = [(e.rel_path, st) for e, st in
                            ((e, started.get(e.rel_path)) for e in inflight.values())
@@ -732,11 +1045,37 @@ def run(config: RunConfig, opts: WalkOptions | None = None) -> RunResult:
             pool.shutdown(wait=False, cancel_futures=True)
 
     was_cancelled = cancelled()
+
+    # Every document that did not read cleanly gets one serial re-read, before
+    # anything is written off. Skipped on a cancelled run: the operator asked
+    # for it to stop, and a partial run makes no completeness claim anyway.
+    if not was_cancelled:
+        _retry_degraded(produced, {e.rel_path: e for e in todo}, config, opt,
+                        opts.file_timeout_s, notes, journal)
+
+    documents.extend(r for rel in sorted(produced) for r in produced[rel])
     journal.close(discard=not was_cancelled, output_root=output_root)
     _clear_scratch(scratch)
 
     if was_cancelled:
-        warnings.append("run cancelled by the operator; partial results only")
+        notes.invocation.append(
+            "CANCELLED: the run was cancelled by the operator; these are "
+            "partial results and no accounting claim over the corpus holds.")
+    # The error list is derived from the FINAL records — after the retry — so a
+    # failure the retry resolved leaves no trace in the hashed warnings. That
+    # is the point: the hashed content must describe the corpus, and the corpus
+    # is what the run finally read. The retry itself is disclosed in `notes`.
+    #
+    # It is derived from every record in the run, replayed ones included: a
+    # resumed run and a fresh run over the same corpus must produce the same
+    # warning list, and reading it only off the freshly-extracted records would
+    # silently drop the replayed half.
+    for r in documents:
+        if r.status is ProcessingStatus.FAILED:
+            errors.record(r.rel_path, r.error or "")
+        for n in r.notes:
+            if "recovered via" in n:
+                errors.record(r.rel_path, n)
     for item in errors.as_list():
         warnings.append(f"{item['file']}: {item['error']}")
 

@@ -98,6 +98,53 @@ UNKNOWN_HINT = "Unrecognized format — inventoried and hashed only"
 # and a scanned page's stray header text does not.
 _NATIVE_TEXT_FLOOR = 40
 
+# ---------------------------------------------------------------------------
+# Degradation markers — the one list of "this document did not read cleanly"
+# ---------------------------------------------------------------------------
+#
+# Every place in this module that swallows an exception and carries on with
+# LESS content than the source holds emits a note containing exactly one of
+# these phrases. The walker's serial-retry pass keys off them, so the phrases
+# are constants used in the f-strings rather than prose repeated by hand: a new
+# degradation path that forgets to use one is invisible to the retry, and a
+# reworded note that drifts from the matcher is the same defect a year later.
+#
+# A whole-document FAILED status is deliberately NOT in this list — it is a
+# status, not a note, and the walker tests it directly.
+
+M_OCR_PAGE = "ocr: page failed"
+M_OCR_DOC = "OCR pass failed for this document"
+M_ATTACH_ENUM = "could not enumerate attachments"
+M_MSG_ATTACH = "could not read .msg attachments"
+M_ATTACH_READ = "an attachment could not be read"
+M_ZIP_MEMBER = "archive member unreadable"
+M_ZIP_ATTACH = "attached archive unreadable"
+M_PHOTO_PROBE = "image/EXIF probe failed"
+M_SLIDE_NOTES = "slide notes could not be read"
+
+TRANSIENT_MARKERS: tuple[str, ...] = (
+    M_OCR_PAGE,
+    M_OCR_DOC,
+    M_ATTACH_ENUM,
+    M_MSG_ATTACH,
+    M_ATTACH_READ,
+    M_ZIP_MEMBER,
+    M_ZIP_ATTACH,
+    M_PHOTO_PROBE,
+    M_SLIDE_NOTES,
+)
+
+
+def has_transient_marker(text: str | None) -> bool:
+    """True when a note says this document read with less than it holds.
+
+    "Transient" is the possibility being tested, not a claim: the same phrase
+    covers a permanently corrupt page and a page that lost a race under load,
+    and telling them apart is exactly what the walker's serial retry does.
+    """
+    return bool(text) and any(m in text for m in TRANSIENT_MARKERS)
+
+
 _XLSX_MAX_ROWS = int(os.environ.get("DOCIQ_XLSX_MAX_ROWS", "50000"))
 _CSV_MAX_ROWS = int(os.environ.get("DOCIQ_CSV_MAX_ROWS", "50000"))
 _ZIP_MAX_MB = int(os.environ.get("DOCIQ_ZIP_MAX_MB", "500"))
@@ -404,8 +451,16 @@ def _exif_from_image_bytes(img: bytes) -> dict:
     return out
 
 
-def _photo_block(raw: bytes, n_pages: int, content_len: int) -> str:
-    """Marker text for an image-based PDF (a photo print-out), or ``""``.
+def _photo_block(raw: bytes, n_pages: int,
+                 content_len: int) -> tuple[str, str]:
+    """``(marker text, note)`` for an image-based PDF (a photo print-out).
+
+    The note is empty except when the probe itself failed. It used to return
+    ``""`` from a bare ``except Exception``, which meant a file whose EXIF read
+    threw — for any reason, including a transient one — silently lost its
+    ``[PHOTO]`` block and its camera date, and the run said nothing at all. A
+    swallowed exception that changes the emitted text is a Principle-1
+    violation whatever caused it.
 
     Photo test: trivial text layer plus at least one large embedded image; EXIF
     comes from the largest such image. A site photo carries its evidence where
@@ -413,7 +468,8 @@ def _photo_block(raw: bytes, n_pages: int, content_len: int) -> str:
     text is what lets Stage 1 date the document at all.
     """
     if content_len >= max(40, 8 * n_pages):
-        return ""
+        return "", ""
+    exif_note = ""
     try:
         import fitz
 
@@ -429,12 +485,14 @@ def _photo_block(raw: bytes, n_pages: int, content_len: int) -> str:
                     if biggest is None or w * h > biggest[0]:
                         biggest = (w * h, xref)
             if biggest is None:
-                return ""
+                return "", ""
             meta = {}
             try:
                 meta = _exif_from_image_bytes(doc.extract_image(biggest[1])["image"])
-            except Exception:
-                pass
+            except Exception as exc:
+                exif_note = (f"{M_PHOTO_PROBE}: the embedded image's EXIF could "
+                             f"not be read ({exc}); the camera date and GPS are "
+                             "absent from this document")[:300]
             parts = [f"[PHOTO] Image-based document ({len(doc)} page(s), "
                      f"{n_imgs} image(s))."]
             if meta.get("date"):
@@ -443,9 +501,11 @@ def _photo_block(raw: bytes, n_pages: int, content_len: int) -> str:
                 parts.append(f"GPS: {meta['gps']}.")
             parts.append("Visual content not machine-read — view the source image "
                          "for what the photo shows.")
-            return " ".join(parts)
-    except Exception:
-        return ""
+            return " ".join(parts), exif_note
+    except Exception as exc:
+        return "", (f"{M_PHOTO_PROBE}: this document was probed as an "
+                    f"image-based (photo) PDF and the probe raised ({exc}); "
+                    "no [PHOTO] block was emitted")[:300]
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +537,9 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     n = len(native)
     # Measure actual page CONTENT so an empty text layer is not masked.
     content_len = sum(len(t.strip()) for t in native)
-    photo = _photo_block(raw, n, content_len)
+    photo, photo_note = _photo_block(raw, n, content_len)
+    if photo_note:
+        notes.append(photo_note)
 
     ocr_by_page: dict[int, _OcrPage] = {}
     need = [i for i, t in enumerate(native) if len(t.strip()) < _NATIVE_TEXT_FLOOR]
@@ -490,7 +552,7 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
             try:
                 ocr_by_page = _ocr_pdf_pages(raw, need)
             except Exception as exc:
-                notes.append(f"OCR pass failed for this document: {exc}")
+                notes.append(f"{M_OCR_DOC}: {exc}")
     elif need and not opt.ocr_enabled:
         notes.append(f"{len(need)} page(s) have no usable text layer; OCR disabled")
 
@@ -504,7 +566,7 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
         if got is not None:
             if got.failed:
                 n_ocr_failed += 1
-                page_notes = ("ocr: page failed to rasterize or read",)
+                page_notes = (f"{M_OCR_PAGE} to rasterize or read",)
             elif got.text.strip():
                 text, kind, confs = got.text, PageKind.OCR, list(got.confs)
             else:
@@ -733,6 +795,7 @@ def _extract_pptx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
         raise ExtractionError(f"Could not read PowerPoint file: {exc}") from exc
 
     blocks: list[str] = []
+    notes_failures: list[str] = []
     for slide in prs.slides:
         parts: list[str] = []
         for shape in slide.shapes:
@@ -758,11 +821,19 @@ def _extract_pptx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                         note_text = ph.text_frame.text.strip()
                         if note_text:
                             parts.append(f"[notes] {note_text}")
-        except Exception:
-            pass
+        except Exception as exc:
+            # Was a bare ``pass``: a deck whose speaker notes would not read
+            # lost them with no record anywhere, so the emitted text silently
+            # differed from the source. Counted per slide and disclosed once.
+            notes_failures.append(f"slide {len(blocks) + 1}: {exc}"[:120])
         blocks.append("\n".join(parts))
     note = "PPTX slides are emitted as synthetic pages, one per slide"
-    return synthetic_pages(blocks, notes=(note,)), [note]
+    out_notes = [note]
+    if notes_failures:
+        out_notes.append(
+            f"{M_SLIDE_NOTES} on {len(notes_failures)} slide(s); their speaker "
+            f"notes are absent from this document ({notes_failures[0]})")
+    return synthetic_pages(blocks, notes=(note,)), out_notes
 
 
 _RE_HTML_TAG = re.compile(r"<[^>]+>")
@@ -923,13 +994,13 @@ def expand_eml_attachments(raw: bytes) -> ZipExpansion:
     try:
         parts = list(msg.iter_attachments())
     except Exception as exc:
-        return ZipExpansion((), (f"could not enumerate attachments: {exc}"[:200],))
+        return ZipExpansion((), (f"{M_ATTACH_ENUM}: {exc}"[:200],))
     for part in parts:
         try:
             name = part.get_filename() or f"attachment_{len(raw_members) + 1}"
             payload = part.get_payload(decode=True)
         except Exception as exc:
-            notes.append(f"an attachment could not be read: {exc}"[:200])
+            notes.append(f"{M_ATTACH_READ}: {exc}"[:200])
             continue
         if payload is None:
             notes.append(f"attachment '{name}' had no decodable payload; skipped")
@@ -942,8 +1013,8 @@ def expand_eml_attachments(raw: bytes) -> ZipExpansion:
             try:
                 inner = expand_zip(payload)
             except Exception as exc:
-                notes.append(f"attachment '{name}' is a zip that could not be "
-                             f"read: {exc}"[:200])
+                notes.append(f"{M_ZIP_ATTACH}: attachment '{name}' is a zip "
+                             f"that could not be read: {exc}"[:200])
                 continue
             notes.extend(f"{name}: {n}" for n in inner.notes)
             for m in inner.members:
@@ -990,7 +1061,7 @@ def expand_msg_attachments(raw: bytes, scratch_dir: Path | None) -> ZipExpansion
                         or f"attachment_{i + 1}")
                 data = getattr(att, "data", None)
             except Exception as exc:
-                notes.append(f"an attachment could not be read: {exc}"[:200])
+                notes.append(f"{M_ATTACH_READ}: {exc}"[:200])
                 continue
             if isinstance(data, (bytes, bytearray)):
                 raw_members.append((name, bytes(data)))
@@ -1002,7 +1073,7 @@ def expand_msg_attachments(raw: bytes, scratch_dir: Path | None) -> ZipExpansion
                 notes.append(f"attachment '{name}' is an embedded message or "
                              "unsupported attachment kind; not extracted")
     except Exception as exc:
-        return ZipExpansion((), (f"could not read .msg attachments: {exc}"[:200],))
+        return ZipExpansion((), (f"{M_MSG_ATTACH}: {exc}"[:200],))
     finally:
         if tmp:
             try:
@@ -1016,8 +1087,8 @@ def expand_msg_attachments(raw: bytes, scratch_dir: Path | None) -> ZipExpansion
             try:
                 inner = expand_zip(payload)
             except Exception as exc:
-                notes.append(f"attachment '{name}' is a zip that could not be "
-                             f"read: {exc}"[:200])
+                notes.append(f"{M_ZIP_ATTACH}: attachment '{name}' is a zip "
+                             f"that could not be read: {exc}"[:200])
                 continue
             notes.extend(f"{name}: {n}" for n in inner.notes)
             for m2 in inner.members:
@@ -1069,7 +1140,7 @@ def expand_zip(raw: bytes, depth: int = 0) -> ZipExpansion:
             try:
                 blob = zf.read(info)
             except Exception as exc:
-                notes.append(f"archive member '{info.filename}' unreadable: "
+                notes.append(f"{M_ZIP_MEMBER}: '{info.filename}': "
                              f"{str(exc)[:120]}")
                 continue
             total += len(blob)
@@ -1264,7 +1335,7 @@ def extract(filename: str, raw: bytes,
     # It is still disclosed, as a page note and a document note.
     flagged = any(
         (p.ocr_conf is not None and p.ocr_conf < opt.conf_threshold)
-        or any(n.startswith("ocr: page failed") for n in p.notes)
+        or any(n.startswith(M_OCR_PAGE) for n in p.notes)
         for p in pages
     )
     status = (ProcessingStatus.PARTIAL_OCR_FLAGGED if flagged
