@@ -20,6 +20,8 @@ from __future__ import annotations
 import csv
 import datetime
 import io
+import shutil
+import time
 import zipfile
 from pathlib import Path
 
@@ -284,9 +286,47 @@ def misnamed_pdf(path: Path) -> None:
 
 
 def build(out: Path | None = None) -> Path:
-    """(Re)generate the corpus and return its root."""
+    """(Re)generate the corpus and return its root.
+
+    Concurrency-safe, and it has to be. Two pytest sessions in one worktree
+    both import ``conftest``, and an unguarded rebuild rewrites files a
+    concurrent session is mid-read of — which changes extracted bytes and so
+    changes the content hash, failing the determinism tests intermittently
+    while the product is correct. That reads as a determinism defect, which is
+    the most expensive kind of false alarm this project can raise.
+
+    The guard is a directory-creation lock (atomic on Windows and POSIX) plus a
+    completion marker, so the second session waits and then reuses the corpus
+    rather than rebuilding it.
+    """
     out = Path(out) if out is not None else OUT
     src = out / "matter"
+    lock = out / ".build.lock"
+    done = out / ".build.complete"
+    out.mkdir(parents=True, exist_ok=True)
+
+    for _ in range(600):  # ~60s; the build itself takes a few seconds
+        if done.exists():
+            return src
+        try:
+            lock.mkdir()
+            break
+        except FileExistsError:
+            time.sleep(0.1)
+    else:
+        # Never block a test run on a lock left behind by a killed session.
+        shutil.rmtree(lock, ignore_errors=True)
+        lock.mkdir(exist_ok=True)
+
+    try:
+        _build_corpus(src)
+        done.write_text("ok", encoding="utf-8")
+    finally:
+        shutil.rmtree(lock, ignore_errors=True)
+    return src
+
+
+def _build_corpus(src: Path) -> Path:
     sub = src / "attachments"
     sub.mkdir(parents=True, exist_ok=True)
 
