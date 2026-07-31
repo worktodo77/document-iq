@@ -440,7 +440,7 @@ exist — which is how an operator learns to click through the prompt.
 | 4 | Bates ≥99% on stamped sets | **NOT ATTEMPTED** — needs the MNFV production (D-13), not this corpus. What this run *did* establish is the negative half: after the fix above, the unstamped record correctly yields no proposal and no error |
 | 5 | reconciliation categorizes seeded discrepancies; no colliding IDs | **PARTIAL** — the three categories and the LI/DIQ split are proven end to end through the pipeline on the fixture corpus (`test_pipeline.py`), and Track B audited the real 9,259-row index separately. Not re-run against the real index here |
 | 6 | runs fully offline | **PASS** — the self-test performs a cold OCR engine construction with `socket.socket` replaced by a raiser |
-| 7 | **byte-identical outputs on repeat runs** | **PASS** — 30 runs, 30 distinct seeds, 1 corpus hash, against the real emitters, with the gate watched going red under three injected-nondeterminism probes |
+| 7 | **byte-identical outputs on repeat runs** | **PASS on the fixture corpus AND on the real one** — 30 runs / 30 seeds on the fixtures, with the gate watched going red under three injected-nondeterminism probes; and **two full from-scratch OCR-enabled runs over the real 368-document, 18,556-page record produced one `corpus_sha256` (`bdb7d498…`), one log `content_sha256` (`5601badd…`), 370/370 deliverable files byte-identical, 372/372 adjacent files byte-identical, 0 unclassified**. See §6a |
 | 8 | handoff packages | **PARTIAL** — `upload_package/` with its README, `sources.json` and `document_index.csv` is built on every run and asserted present on the real corpus; the §8 Path-B layout check passes. Acceptance by an actual Claude Project is not testable offline |
 | 9 | OCR bake-off decides D-01 | **OUT OF SCOPE** — Tesseract is absent and was correctly not installed |
 
@@ -462,39 +462,148 @@ exists to say which engine produced the text, and "none" is an answer it can
 give, so the pipeline stamps `ocr_engine="disabled"` and clears the version when
 no OCR ran. *Fail-before:* the new test is red without it.
 
-### OPEN — one document extracted differently on two runs of the same corpus
+### CLOSED — one document extracted differently on two runs of the same corpus
 
-**Not fixed, and it is the most serious thing on this page.**
+**Was the most serious thing on this page. It is now fixed, and the fix was
+exercised by the very run that proves criterion 7.**
+
+#### What was observed
 
 `CER-1-433.pptx` (9.3 MB, 35 slides) came out of the OCR-on run as a **FAILED
 record with 0 pages** — "Namespace prefix xmlns for a on sldLayout is not
 defined, line 2, column 238" — and out of the OCR-off run as a **`full` record
 with 35 pages**. Same file, same bytes, same pipeline.
 
-What was ruled out:
+Ruled out, and still ruled out: a damaged file (10/10 clean parses in
+isolation); the OCR setting itself; and concurrent office-XML parsing at the
+`python-pptx` level (72 concurrent attempts on the target across 12 rounds of 16
+workers, over all 17 corpus `.pptx` and 40 `.docx` — **0 failures**). Reducing
+the worker count is not the remedy: it made throughput ~6x worse and treats the
+symptom.
 
-- **A damaged file.** Extracted 10 times in isolation, alternating
-  `ocr_enabled`: 10/10 `full`, 35 pages, no error.
-- **The OCR setting.** It is a `.pptx`; it succeeded and failed on both
-  settings across the various runs, and the isolated probe covers both.
-- **Concurrent office-XML parsing**, the obvious suspect — python-pptx and
-  python-docx share one module-level lxml parser and lxml parsers are not
-  thread-safe. Probed with 16 threads over 24 pptx and 18 docx parses: **0
-  failures in 42 attempts.** The hypothesis is not confirmed and the fix that
-  would follow from it is therefore not applied. A lock added on the strength of
-  an unreproduced fault is a change nobody can justify or later remove.
+#### Why the mechanism stopped being the question
 
-What is known: the failing run was the one carrying 173 OS threads and 3.5 GB
-RSS, and the error is namespace-shaped, which is what a corrupted parse looks
-like. That is a lead, not a diagnosis.
+A failure caused by LOAD was written into the deliverables as a property of the
+EVIDENCE — "this document is unreadable" — so the corpus a reviewer receives
+depended on how busy the machine was when it was built. Principle 1 held: the
+failure was recorded, loudly, and 35 pages were never silently dropped.
+Principle 5 did not: two runs over identical inputs produced different outputs.
 
-**The consequences, stated exactly.** Principle 1 held — the document was
-recorded as FAILED with an actionable message, and 35 pages were never silently
-dropped. But two runs over the same folder disagreed about one document, so
-**the byte-identical claim is demonstrated on the fixture corpus and is NOT
-demonstrated on the real one.** No claim to the contrary should be made until
-this is understood. It is the first thing to chase in Sprint 2, and the cheapest
-next step is to run the corpus twice more and see how often it recurs.
+The remedy for that is decidable without the mechanism. **Nothing that did not
+read cleanly inside the extraction pool is written off until it has been re-read
+once, serially, alone** — still under the per-file watchdog, so a hang is not
+traded for a race. The serial reading wins ties and improvements; a retry that
+comes out strictly worse is disclosed and discarded rather than allowed to lose
+evidence. Both outcomes are named either way.
+
+#### Where the disclosure lives, and why it has to live there
+
+In `processing_log.json`'s **`run`** section, as `load_dependent_extraction`,
+beside the timestamp, the operator, `output_root`, the stale-output list and the
+D-04 renumbering warnings. **Never in the hashed `content`.**
+
+The reasoning is the subtle part, and it is the same argument the `run` /
+`content` split was built on. A run that needed a retry and a run that did not
+are, by construction, two runs whose invocations differed and whose *evidence*
+did not. Recording the retry inside `content` would make those two runs produce
+different bytes — so the disclosure defending the byte-identical claim would be
+the thing that breaks it. The same reasoning moved the resume and cancellation
+notes out of the hashed warnings, where they had been sitting: a matter reduced
+in one pass and the same matter reduced after a crash were producing different
+`content` bytes with no difference in the evidence anywhere.
+
+It is not hidden by being un-hashed. It is rendered **first** in
+`RunResult.warnings` — the run summary shows four warnings and folds the rest
+into a count, so appending it would have satisfied the letter of "recorded" and
+none of the point — it is in the log's `run` section, and the operator sees it
+on screen.
+
+#### The class, enumerated — every member, including the ones already correct
+
+| # | site | before | now |
+|---|---|---|---|
+| 1 | extraction failure inside the pool (`extract()` → FAILED) | permanent | **re-read serially** |
+| 2 | `_extract_one` read error (`OSError` on the source) | permanent | **re-read serially** |
+| 3 | archive that would not open (`expand_zip` raised) | permanent | **re-read serially** |
+| 4 | **watchdog timeout** | permanent — *and* it wrote elapsed seconds into `DocumentRecord.error`, which is hashed content | **re-read serially**; the record now says only that the limit was reached, and the elapsed time goes to the run notes |
+| 5 | OCR **page** failure | quiet: empty page, document merely flagged | **marker → re-read serially** |
+| 6 | whole-document OCR pass failure | quiet note | **marker → re-read serially** |
+| 7 | ZIP **member** that would not read | quiet note, member dropped | **marker → re-read serially** |
+| 8 | EML/MSG attachment list that would not enumerate | quiet note, attachments absent | **marker → re-read serially** |
+| 9 | an attachment that would not decode | quiet note | **marker → re-read serially** |
+| 10 | `[PHOTO]` EXIF probe | **bare `except: return ""`** — the block and the camera date vanished with no record at all | discloses, and **marker → re-read serially** |
+| 11 | PPTX speaker notes | **bare `except: pass`** — notes vanished with no record at all | discloses, and **marker → re-read serially** |
+| 12 | hash-time read error in `scan()` | file demoted to Tier 2 permanently, zero hash, `-1` size, and labelled "Unrecognized format" | **second attempt after 100 ms**; if it still will not open it is inventoried with an honest message that says it was not hashed |
+| 13 | **resume** replaying a recorded failure | cemented it — and put it beyond the retry's reach forever | a cached record carrying a failure or a degradation marker is **re-extracted, never replayed** |
+| 14 | **resume journal** holding two batches for one file | both replayed → duplicate document, resurrected failure | batch-tokened; **last batch wins** |
+| 15 | resume / cancellation notes | in the hashed warnings | in the `run` section |
+| 16 | disk preflight | — | **already correct**: it aborts the whole run loudly and records no per-document outcome |
+| 17 | `_Errors` cap ordering | — | **already correct**: capped after sorting, not on arrival |
+
+Members 5–11 work off one registry of marker constants
+(`extract.TRANSIENT_MARKERS`), used in the f-strings at the emission sites, so a
+reworded note cannot silently drift out of the retry's sight. A test asserts
+every constant in the registry matches.
+
+Both retry bounds are disclosed whenever they bite: `DOCIQ_RETRY_MAX` (500
+documents) and `DOCIQ_RETRY_BUDGET_S` (1800 s).
+
+#### The fix was exercised, on real material, on both proof runs
+
+Neither criterion-7 run reproduced the `.pptx` fault. **Both hit a different
+member of the same class**, and the retry absorbed it identically on both:
+
+> `CER-1-145.pdf` (54 MB, 222 scanned pages) **exceeded the 3600 s per-file
+> watchdog inside the pool on both runs** — at 3604 s on run A and 3602 s on run
+> B — and was re-read serially, alone, where it completed with **222 pages**.
+
+Without the retry, both runs would have recorded that document FAILED with zero
+pages and the corpus would have lost 222 pages of a monthly progress report.
+Without the wall-clock fix, the two runs would have recorded `abandoned after
+3604s` and `abandoned after 3602s` — **different hashed content, and criterion 7
+would have failed on a two-second difference in machine load.** Both defects
+landed on the same document, on the same pair of runs.
+
+#### Honest residue
+
+* The `.pptx` mechanism is **still not identified**. It has now been observed
+  once in three OCR-enabled full runs and never in a targeted probe. No
+  speculative fix has been applied, and none should be: a lock or a parser
+  change added on the strength of an unreproduced fault is a change nobody can
+  justify keeping, or later justify removing.
+* The retry makes a *load-dependent* failure survivable. It does not make a
+  *deterministic* failure disappear — `CER-1-345.docx` failed in the pool and
+  failed again alone, on both runs, and is correctly still recorded FAILED.
+* A watchdog-abandoned worker cannot be killed in Python, so for member 4
+  specifically the serial re-read may overlap a thread from the abandoned
+  attempt. "Alone" is exact for every other member and approximate for that one.
+
+## 6a. Acceptance criterion 7 on the real corpus
+
+| | |
+|---|---|
+| runs | **2**, both full, both from scratch, both **OCR-enabled** — the shipping configuration. The earlier disagreeing pair had OCR on for one and off for the other, so it could never have settled the claim even had the hashes matched |
+| source | the real 368-document Petrobras/MODEC record; byte-identical inputs, identical settings, pinned operator stamp, separate fresh output roots |
+| wall clock | 4 844 s and 4 780 s |
+| documents / pages | 368 / 18 556 on both; 7 unsupported; 1 failed (the genuinely damaged `.docx`) |
+| `corpus_sha256` | `bdb7d49848d9dde119dc04d5eb8ae835b06500a399a64466d0bd0bccb37e17e3` — **identical** |
+| log `content_sha256` | `5601badd7242033f5888fa18a7c10900f10be083e7e11160c220bf02173b3a1b` — **identical** |
+| per-file, inside the claim | **370 files, 0 differing** |
+| per-file, adjacent | **372 files, 0 differing** |
+| unclassified outputs | 0 |
+
+The per-file comparison is not redundant with the hash. A matching
+`corpus_sha256` computed twice by the same code proves less than the two
+directories agreeing file by file, and the second check is what rules out the
+manifest itself being the only thing that agrees.
+
+**What this does and does not license.** Two runs are not thirty. What is now
+supported on real material is that the corpus, reduced twice at ~80 minutes a
+run, came out byte-identical — including through a real load-dependent failure
+that occurred on both runs and was absorbed. Thirty repeats of an 18 556-page
+corpus remains unaffordable; the 30-run, 30-seed proof stays on the fixture
+corpus, and the two are complementary rather than interchangeable.
+
 
 ## 7. What is still NOT proven
 
@@ -504,13 +613,17 @@ next step is to run the corpus twice more and see how often it recurs.
 2. **Acceptance criterion 4 (Bates ≥99%) is not closed here.** It needs a run
    against the MNFV production (D-13), not this corpus — the Petrobras record is
    the *negative* case and correctly yields no stamps at all.
-3. **Determinism is proven on the synthetic fixture corpus, and is now known
-   NOT to hold unconditionally on the real one** — see the open `CER-1-433.pptx`
-   finding above. Thirty repeats of an 18,521-page corpus is not affordable in
-   this sprint, and the fixture corpus does exercise OCR, mixed native/scanned
-   routing, nested ZIP expansion, email-attachment expansion, content-sniff
-   recovery and a blank page. It does not exercise a 9 MB PowerPoint under
-   memory pressure, which is exactly where the one observed divergence sits.
+3. **Determinism is proven 30 ways on the fixture corpus and 2 ways on the real
+   one** — see §6a. What is NOT proven is that two runs are as strong as
+   thirty. The one real divergence ever observed (`CER-1-433.pptx`) has been
+   made survivable rather than understood: the retry absorbs it, and a run that
+   needs the retry says so, but the mechanism is still unidentified and could
+   in principle produce a *deterministic-looking* wrong reading that the retry
+   would not catch — a serial re-read that failed the same way twice is
+   recorded FAILED, which is correct, and a serial re-read that succeeded
+   differently both times is not something any observation so far suggests.
+   Thirty repeats of an 18,556-page corpus at ~80 minutes each remains
+   unaffordable in this sprint.
 4. **`.msg` remains vendored-but-unexercised** — no library in the dependency
    set writes one, and a real one is client data. Unchanged from Track A's §6.
 5. **The GUI still runs on the mock pipeline.** `gui/pipeline.get_pipeline()` is
