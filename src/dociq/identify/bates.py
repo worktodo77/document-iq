@@ -581,6 +581,44 @@ class BatesRange:
         return self.pages_with_bates > 0 and self.pages_without_bates == 0
 
 
+def _confirmed_token_re(fmt: BatesFormat) -> re.Pattern[str]:
+    """A regex matching EXACTLY the confirmed format as a standalone token.
+
+    Built from the same fields as :attr:`BatesFormat.pattern` — one grammar,
+    two renderings — so the token search can never accept something the
+    confirmed pattern would reject. The delimiters are "not an alphanumeric",
+    which is what stops ``iiCON001483`` matching inside ``XiiCON0014837``.
+    """
+    widths = fmt.widths
+    digits = (
+        f"\\d{{{widths[0]}}}"
+        if len(widths) == 1
+        else "(?:" + "|".join(f"\\d{{{w}}}" for w in widths) + ")"
+    )
+    parts = [re.escape(fmt.prefix), re.escape(fmt.separator), digits]
+    if fmt.suffix:
+        parts.append(re.escape(fmt.suffix_sep))
+        parts.append(re.escape(fmt.suffix))
+    return re.compile(r"(?<![A-Za-z0-9])(" + "".join(parts) + r")(?![A-Za-z0-9])")
+
+
+def _embedded_stamp(text: str, zone: BatesZone,
+                    token_re: re.Pattern[str]) -> str | None:
+    """The confirmed stamp found inside a longer zone line, or ``None``.
+
+    ``None`` when the zone holds no match **and** when it holds two different
+    ones: a page whose footer OCR'd into two candidate locators is a page
+    DocIQ cannot locate, and picking one would be a guess wearing a locator's
+    clothes.
+    """
+    found: set[str] = set()
+    for _, line in zone.slice_lines(text):
+        found.update(m.group(1) for m in token_re.finditer(line))
+        if len(found) > 1:
+            return None
+    return next(iter(found)) if len(found) == 1 else None
+
+
 def apply_bates(
     documents: Sequence[DocumentRecord],
     decision: BatesDecision | None,
@@ -598,6 +636,25 @@ def apply_bates(
     cosmetic: a format confirmed for four or five digits used to accept
     ``MNFV 1234567890``, and a locator that is not in the production is worse
     than no locator, because the record it points at does not exist.
+
+    **Two passes, and the second one is why (criterion-4 acceptance run,
+    2026-08-01).** The whole-line anchor is right for *detection*, where the
+    grammar is open-ended and an unanchored match would read a date, a dollar
+    figure or a paragraph number as a Bates number. It is too strict for
+    *application*, where the format is already confirmed and known exactly. On
+    the MNFV production, OCR'd pages fold the burned-in stamp into a longer
+    line — a signature block that ends ``... in iiCON003961``, a page whose
+    text came back as ``untij isfiyed iiCON003944`` — and the stamp is right
+    there, correct, and rejected because it does not occupy the line alone.
+    Measured on the acceptance sample: **every one of these was an OCR page**,
+    and no native-text page needed the second pass.
+
+    So a page that no zone line claims outright is searched for the confirmed
+    format as a *standalone token*, delimited so it cannot match inside a
+    longer alphanumeric run. This cannot widen what is accepted: it looks for
+    exactly the string the operator confirmed, at exactly the confirmed widths.
+    A page with two different stamps in its zone is left UNSTAMPED rather than
+    guessed at — an ambiguous locator is the failure §4 rates worse than none.
     """
     if decision is None or not decision.applies:
         return tuple(sorted(documents, key=document_sort_key))
@@ -605,6 +662,7 @@ def apply_bates(
     fmt = decision.format
     target = fmt.key()
     z = zone or BatesZone()
+    token_re = _confirmed_token_re(fmt)
 
     out: list[DocumentRecord] = []
     for doc in sorted(documents, key=document_sort_key):
@@ -621,6 +679,8 @@ def apply_bates(
                 ):
                     stamp = line
                     break
+            if stamp is None:
+                stamp = _embedded_stamp(page.text, z, token_re)
             if stamp is not None and page.bates != stamp:
                 pages.append(page.evolve(bates=stamp))
                 changed = True

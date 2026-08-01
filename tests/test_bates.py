@@ -402,3 +402,110 @@ def test_widening_the_case_class_did_not_open_the_page_number_hole():
     for line in ("page 12", "Page 3 of 8", "Exhibit 4", "2024", "1,234.56",
                  "Rev 3", "revised 2024-01-01", "$12,500.00"):
         assert _parse_line(line) is None, line
+
+
+# ---------------------------------------------------------------------------
+# The confirmed stamp folded into a longer OCR line
+# ---------------------------------------------------------------------------
+#
+# From the criterion-4 acceptance run: on OCR'd pages the production's burned-in
+# stamp lands inside a longer line, correct and complete, and the whole-line
+# anchor rejected it. 72 of 648 sampled pages were missed and every one was an
+# OCR page. Detection stays anchored (an open grammar unanchored reads dates and
+# dollar figures as Bates numbers); APPLICATION of an already-confirmed format
+# does not need to be.
+
+
+def _confirmed(prefix="iiCON", sep="", widths=(6,), suffix=None, suffix_sep=""):
+    fmt = BatesFormat(prefix=prefix, separator=sep, digit_widths=widths,
+                      suffix=suffix, suffix_sep=suffix_sep)
+    return BatesDecision(DecisionStatus.CONFIRMED, fmt)
+
+
+def test_a_confirmed_stamp_inside_a_longer_ocr_line_is_applied():
+    """The two real shapes, verbatim in form from the acceptance run."""
+    doc = document("prod/ocr.pdf", (
+        page(1, "body\nuntij isfiyed iiCON003944"),
+        page(2, "body\niicon Ryan McAllister Project Manager "
+                "ryan@example.com 76 S. Sierra Madre Street in iiCON003961"),
+    ))
+    out = apply_bates((doc,), _confirmed())
+    assert [p.bates for p in out[0].pages] == ["iiCON003944", "iiCON003961"]
+
+
+def test_the_embedded_search_records_the_STAMP_not_the_whole_line():
+    doc = document("prod/ocr.pdf",
+                   (page(1, "body\nsome noise iiCON003944 more noise"),))
+    out = apply_bates((doc,), _confirmed())
+    assert out[0].pages[0].bates == "iiCON003944"
+
+
+def test_the_embedded_search_cannot_match_inside_a_longer_run():
+    """`iiCON001483` must not be found inside `XiiCON0014837`."""
+    doc = document("prod/ocr.pdf", (
+        page(1, "body\ngarbage XiiCON0014837 garbage"),
+        page(2, "body\ngarbage iiCON0014831 garbage"),
+    ))
+    out = apply_bates((doc,), _confirmed())
+    assert [p.bates for p in out[0].pages] == [None, None]
+
+
+def test_two_different_confirmed_stamps_in_one_zone_leave_the_page_unstamped():
+    """An ambiguous locator is worse than none (§4). Not a guess, a refusal."""
+    doc = document("prod/ocr.pdf",
+                   (page(1, "body\nfooter iiCON003944 and iiCON003945"),))
+    out = apply_bates((doc,), _confirmed())
+    assert out[0].pages[0].bates is None
+
+
+def test_the_same_stamp_twice_in_one_zone_is_not_ambiguous():
+    doc = document("prod/ocr.pdf",
+                   (page(1, "header iiCON003944\nbody\nfooter iiCON003944"),))
+    out = apply_bates((doc,), _confirmed())
+    assert out[0].pages[0].bates == "iiCON003944"
+
+
+def test_the_embedded_search_honours_the_confirmed_WIDTH():
+    """It is the confirmed format that is searched for, not a looser one."""
+    doc = document("prod/ocr.pdf", (
+        page(1, "body\nnoise iiCON1234567890 noise"),   # 10 digits, not 6
+        page(2, "body\nnoise iiCON003944 noise"),       # 6 digits, confirmed
+    ))
+    out = apply_bates((doc,), _confirmed(widths=(6,)))
+    assert [p.bates for p in out[0].pages] == [None, "iiCON003944"]
+
+
+def test_the_embedded_search_honours_the_confirmed_SUFFIX():
+    doc = document("prod/ocr.pdf", (
+        page(1, "body\nnoise MNFV 000391 noise"),        # no -CONF
+        page(2, "body\nnoise MNFV 000392-CONF noise"),
+    ))
+    out = apply_bates((doc,), _confirmed(prefix="MNFV", sep=" ", widths=(6,),
+                                         suffix="CONF", suffix_sep="-"))
+    assert [p.bates for p in out[0].pages] == [None, "MNFV 000392-CONF"]
+
+
+def test_the_embedded_search_is_confined_to_the_ZONE():
+    """A number in the middle of the page is not a footer stamp."""
+    body = "\n".join(["header"] * 3 + ["mid-page iiCON003944 mid-page"]
+                     + ["filler"] * 8 + ["footer"] * 4)
+    doc = document("prod/ocr.pdf", (page(1, body),))
+    out = apply_bates((doc,), _confirmed())
+    assert out[0].pages[0].bates is None
+
+
+def test_the_embedded_search_does_not_fire_without_a_confirmed_decision():
+    doc = document("prod/ocr.pdf",
+                   (page(1, "body\nnoise iiCON003944 noise"),))
+    for decision in (None,
+                     BatesDecision(DecisionStatus.PENDING),
+                     BatesDecision(DecisionStatus.REJECTED)):
+        out = apply_bates((doc,), decision)
+        assert out[0].pages[0].bates is None
+
+
+def test_the_anchored_path_still_wins_and_still_records_the_line():
+    """No regression: a zone line that IS the stamp behaves exactly as before."""
+    doc = document("prod/native.pdf", (page(1, "body\niiCON003944"),))
+    out = apply_bates((doc,), _confirmed())
+    assert out[0].pages[0].bates == "iiCON003944"

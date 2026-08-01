@@ -287,6 +287,15 @@ class AccuracyReport:
     seconds: float = 0.0
     proposal: str = ""
     notes: list[str] = field(default_factory=list)
+    by_kind: dict = field(default_factory=dict)
+    """``{page kind: [compared, correct]}``.
+
+    The headline percentage over a mixed corpus averages two different things.
+    A page with a text layer and a page DocIQ had to OCR are not the same
+    measurement: on the second, Bates accuracy is bounded by OCR quality, which
+    D-19 characterised at mean page confidence 0.8628. Reporting one number
+    hides which half a shortfall is in, and the whole point of criterion 4 is
+    to know that."""
 
     @property
     def accuracy_pct(self) -> float:
@@ -303,6 +312,9 @@ class AccuracyReport:
             f"    MISSED (no stamp detected where one exists): {len(self.missed)}",
             f"    FALSE POSITIVE  : {len(self.false_positive)}",
         ]
+        for kind, (n, ok) in sorted(self.by_kind.items()):
+            lines.append(f"    by page kind — {kind:9s}: {ok}/{n} "
+                         f"({100.0 * ok / n if n else 0:.3f}%)")
         lines += [f"    note: {n}" for n in self.notes]
         for label, rows in (("wrong", self.wrong[:10]),
                             ("missed", self.missed[:10]),
@@ -336,56 +348,88 @@ def _document_from_pdf(path: Path, rel: str) -> DocumentRecord | None:
         ext=".pdf", pages=tuple(pages), notes=tuple(notes))
 
 
+PROPOSAL_DOCS = 20
+"""How many documents the format proposal is derived from.
+
+TWO PASSES, AND THE REASON IS MEMORY, NOT ELEGANCE. The first version of this
+function extracted every sampled document and held them all, then proposed and
+compared. On the real corpus that reached **4+ GB of resident memory and the
+process was killed before it printed a single accuracy figure** — three times.
+A run that dies is not a bound, it is an absence of one.
+
+So: pass 1 extracts a small prefix of the sample and proposes a format from it;
+pass 2 streams the whole sample one document at a time, applies the confirmed
+format, records per-page outcomes, and drops the document. Memory is bounded by
+the largest single document rather than by the sample.
+
+The cost is real and is stated rather than buried: the proposal sees
+``PROPOSAL_DOCS`` documents, not the whole sample. That is also what a live run
+would do if the operator confirmed early, and the number of documents the
+proposal was derived from is printed with the result.
+"""
+
+
 def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],
                      label: str) -> AccuracyReport:
     """``pairs`` is ``(pdf path, rel name, ground-truth Bates per page)``."""
     rep = AccuracyReport(label)
     t0 = time.perf_counter()
-    docs: list[DocumentRecord] = []
-    truth: dict[str, list[str]] = {}
-    for path, rel, gt in pairs:
-        doc = _document_from_pdf(path, rel)
-        if doc is None:
-            continue
-        if len(doc.pages) != len(gt):
-            rep.notes.append(
-                f"{rel}: DocIQ read {len(doc.pages)} page(s), the ground truth "
-                f"names {len(gt)} — pages are compared positionally up to the "
-                f"shorter of the two and the remainder is counted as missed")
-        docs.append(doc)
-        truth[rel] = gt
-    rep.documents = len(docs)
 
-    proposal = B.propose_format(docs)
+    # --- pass 1: propose from a bounded prefix ------------------------------
+    head: list[DocumentRecord] = []
+    for path, rel, _gt in pairs[:PROPOSAL_DOCS]:
+        doc = _document_from_pdf(path, rel)
+        if doc is not None:
+            head.append(doc)
+    proposal = B.propose_format(head) if head else None
     decision = None
     if proposal is not None:
-        rep.proposal = (f"{proposal.format.label} — {proposal.pages_matched} of "
-                        f"{proposal.pages_scanned} page(s), best document "
-                        f"coverage {proposal.best_document_coverage_pct}%")
+        rep.proposal = (f"{proposal.format.label} — proposed from "
+                        f"{len(head)} document(s): {proposal.pages_matched} of "
+                        f"{proposal.pages_scanned} page(s) matched, best "
+                        f"document coverage {proposal.best_document_coverage_pct}%")
         decision = B.BatesDecision(status=B.DecisionStatus.CONFIRMED,
                                    format=proposal.format,
                                    decided_by="acceptance-run",
                                    decided_at="2026-08-01T00:00:00Z")
-    stamped = B.apply_bates(docs, decision)
+    else:
+        rep.proposal = f"(none proposed from the first {len(head)} document(s))"
+    del head
 
-    for doc in stamped:
-        gt = truth.get(doc.rel_path, [])
-        n = max(len(gt), len(doc.pages))
+    # --- pass 2: stream the whole sample ------------------------------------
+    for path, rel, gt in pairs:
+        doc = _document_from_pdf(path, rel)
+        if doc is None:
+            continue
+        rep.documents += 1
+        if len(doc.pages) != len(gt):
+            rep.notes.append(
+                f"{rel}: DocIQ read {len(doc.pages)} page(s), the ground truth "
+                f"names {len(gt)} — compared positionally up to the shorter of "
+                f"the two; the remainder counts as missed")
+        stamped = B.apply_bates((doc,), decision)[0]
+        n = max(len(gt), len(stamped.pages))
         for i in range(n):
             expected = gt[i] if i < len(gt) else None
-            got = doc.pages[i].bates if i < len(doc.pages) else None
+            got = stamped.pages[i].bates if i < len(stamped.pages) else None
             page_no = i + 1
             if expected is None and got is None:
                 continue
             rep.pages_compared += 1
+            kind = (stamped.pages[i].kind.value if i < len(stamped.pages)
+                    else "absent")
+            slot = rep.by_kind.setdefault(kind, [0, 0])
+            slot[0] += 1
             if expected is None:
-                rep.false_positive.append((doc.rel_path, page_no, got or ""))
+                rep.false_positive.append((rel, page_no, got or ""))
             elif got is None:
-                rep.missed.append((doc.rel_path, page_no, expected))
+                rep.missed.append((rel, page_no, expected))
             elif got.strip() == expected.strip():
                 rep.correct += 1
+                slot[1] += 1
             else:
-                rep.wrong.append((doc.rel_path, page_no, expected, got))
+                rep.wrong.append((rel, page_no, expected, got))
+        del doc, stamped
     rep.seconds = time.perf_counter() - t0
     return rep
 
@@ -404,22 +448,57 @@ def negative_control(root: Path, limit: int) -> AccuracyReport:
     rep = AccuracyReport("negative control — unstamped corpus")
     pdfs = sorted(root.rglob("*.pdf"))[:limit]
     t0 = time.perf_counter()
-    docs = []
+
+    # Same memory discipline as measure_accuracy, and here it is unavoidable:
+    # this corpus is 2.6 GB of PDFs and holding every extracted document killed
+    # the process before it reported. `propose_format` needs a corpus view, so
+    # the DOCUMENTS are streamed and only their *candidates* are kept — the
+    # tiny records detection actually reasons over.
+    all_candidates: list[B.BatesCandidate] = []
+    pages_by_key: dict[tuple, int] = {}
     for p in pdfs:
         d = _document_from_pdf(p, p.name)
-        if d is not None:
-            docs.append(d)
-    rep.documents = len(docs)
-    rep.pages_compared = sum(len(d.pages) for d in docs)
-    proposal = B.propose_format(docs)
-    if proposal is None:
-        rep.proposal = "(none proposed — correct)"
+        if d is None:
+            continue
+        rep.documents += 1
+        rep.pages_compared += len(d.pages)
+        from dociq.contracts import document_sort_key
+
+        pages_by_key[document_sort_key(d)] = len(d.pages)
+        all_candidates.extend(B.detect_candidates((d,)))
+        del d
+
+    # Re-apply propose_format's own thresholds to the streamed candidates. The
+    # arithmetic is repeated rather than the function reused because the
+    # function takes documents; the THRESHOLDS are read from the module so they
+    # cannot drift apart from the shipped ones.
+    from collections import Counter as _Counter
+
+    by_shape: dict[tuple, list] = {}
+    for c in all_candidates:
+        by_shape.setdefault(c.format_key, []).append(c)
+    proposed = None
+    if by_shape:
+        ranked = sorted(by_shape.items(),
+                        key=lambda kv: (-len(kv[1]), -len(kv[0][0]), kv[0]))
+        key, best = ranked[0]
+        matched = _Counter(c.sort_key for c in best)
+        best_pct = max((round(100 * n / pages_by_key[k])
+                        for k, n in matched.items() if pages_by_key.get(k)),
+                       default=0)
+        if len(best) >= 2 and best_pct >= B.MIN_DOCUMENT_COVERAGE_PCT:
+            proposed = (key, len(best), best_pct)
+
+    if proposed is None:
+        rep.proposal = (f"(none proposed — CORRECT; {len(all_candidates)} "
+                        f"stamp-shaped line(s) seen, none clearing the "
+                        f"{B.MIN_DOCUMENT_COVERAGE_PCT}% per-document bar)")
         rep.correct = rep.pages_compared
     else:
-        rep.proposal = (f"PROPOSED {proposal.format.label} on an unstamped set — "
-                        f"{proposal.pages_matched} page(s), best document "
-                        f"coverage {proposal.best_document_coverage_pct}%")
-        rep.false_positive.append((str(root), 0, proposal.format.label))
+        key, n, pct = proposed
+        rep.proposal = (f"PROPOSED prefix={key[0]!r} on an UNSTAMPED set — "
+                        f"{n} page(s), best document coverage {pct}%")
+        rep.false_positive.append((str(root), 0, str(key)))
     rep.seconds = time.perf_counter() - t0
     return rep
 
