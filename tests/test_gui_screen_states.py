@@ -265,8 +265,13 @@ GRID: tuple[tuple[str, str, object], ...] = tuple(
 SCREENS = ("setup", "progress", "summary", "detail", "checklist", "handoff")
 
 
-def test_every_button_kind_has_a_disabled_appearance() -> None:
-    """Class fix. Only ``#primary`` had a ``:disabled`` rule, so a refused
+def test_every_button_kind_has_a_disabled_appearance(app) -> None:
+    """Takes ``app`` because ``build_theme()`` resolves fonts, and resolving a
+    font without a QApplication is an ACCESS VIOLATION, not an exception — it
+    took the whole suite down between ``test_extract`` and this file with no
+    traceback and a bare exit code, while passing when this file was run alone.
+
+    Class fix. Only ``#primary`` had a ``:disabled`` rule, so a refused
     secondary or link action rendered identically to a live one — full-strength
     label, crisp border. The reason for the refusal is always stated beside it,
     but a control that looks pressable invites the press before the reason is
