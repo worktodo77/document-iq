@@ -48,6 +48,7 @@ import hashlib
 import io
 import os
 import re
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -269,15 +270,24 @@ _MODEL_FILES = (
 def ocr_model_dir() -> Path:
     """Directory holding the bundled ONNX models.
 
-    ``DOCIQ_OCR_MODEL_DIR`` overrides it, which is how the PyInstaller build
-    will point at the models unpacked beside the exe. The default is the
-    installed package's own ``models/`` directory — the wheel ships them, so a
-    correct install already has every byte the OCR path needs and nothing is
-    ever fetched.
+    ``DOCIQ_OCR_MODEL_DIR`` overrides it, which is how an operator points a run
+    at models held somewhere else. The default is the installed package's own
+    ``models/`` directory — the wheel ships them, so a correct install already
+    has every byte the OCR path needs and nothing is ever fetched.
+
+    **Frozen builds resolve it from the bundle, not from ``__file__``.** In a
+    PyInstaller build ``rapidocr_onnxruntime.__file__`` names a path inside the
+    PYZ archive that does not exist on disk; the models are real files unpacked
+    under ``sys._MEIPASS``. The frozen branch is explicit rather than relying on
+    the two happening to coincide, because if they ever stop coinciding the
+    failure is "OCR unavailable" on a client machine and nowhere else.
     """
     override = os.environ.get("DOCIQ_OCR_MODEL_DIR")
     if override:
         return Path(override)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "rapidocr_onnxruntime" / "models"
     import rapidocr_onnxruntime
 
     return Path(rapidocr_onnxruntime.__file__).parent / "models"
