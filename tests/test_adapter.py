@@ -163,6 +163,34 @@ def test_the_preview_counts_what_the_run_will_count():
     assert sum(exts.values()) == preview.file_count
 
 
+def test_the_preview_ignores_docis_own_run_state(tmp_path):
+    """FAIL-BEFORE: the preview walked the folder without the run's
+    ``STATE_DIR`` filter, so an operator who puts the output folder inside the
+    matter folder — which the setup screen permits — saw a previous run's
+    journal and staging files counted as documents.
+
+    Found by reading :func:`dociq.ingest.walker.scan` against the preview, not
+    by a failing test; the predicate is now shared so the two cannot drift.
+    """
+    from dociq.ingest import walker
+
+    source = tmp_path / "matter"
+    (source / "sub").mkdir(parents=True)
+    (source / "a.pdf").write_bytes(b"%PDF-1.4\n")
+    (source / "sub" / "b.docx").write_bytes(b"PK\x03\x04")
+    state = source / "out" / walker.STATE_DIR / "staging" / "clean_text"
+    state.mkdir(parents=True)
+    (state / "LI-00001.txt").write_text("previous run\n", encoding="utf-8")
+    (source / "out" / walker.STATE_DIR / "resume.jsonl").write_text(
+        "{}\n", encoding="utf-8")
+
+    preview = adapter.RealPipeline().preview_folder(str(source))
+    assert preview.file_count == 2, dict(preview.by_extension)
+    assert ".txt" not in dict(preview.by_extension)
+    assert preview.file_count == len(
+        [e for e in walker.scan(source)]), "the preview and the run disagree"
+
+
 def test_a_folder_that_is_not_there_previews_as_nothing(tmp_path):
     preview = adapter.RealPipeline().preview_folder(str(tmp_path / "nope"))
     assert preview == type(preview)(0, 0)

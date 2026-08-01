@@ -412,8 +412,25 @@ def list_files(root: Path, *, recursive: bool = True) -> list[Path]:
     The run itself uses :func:`scan`, which records them and BLOCKS — a preview
     that under-counts is a wrong estimate, while a run that under-counts is a
     false completeness claim, and the two deserve different treatment.
+
+    DocIQ's own run state is excluded by :func:`is_run_state`, exactly as
+    :func:`scan` excludes it. That is not hypothetical tidiness: an operator who
+    puts the output folder inside the matter folder — which the setup screen
+    permits and which is an obvious thing to do — otherwise gets a preview that
+    counts a previous run's journal and staging files as documents.
     """
-    return _iter_files(root, recursive=recursive)
+    return [p for p in _iter_files(root, recursive=recursive)
+            if not is_run_state(p)]
+
+
+def is_run_state(path: Path) -> bool:
+    """Whether a path is DocIQ's own scratch rather than evidence.
+
+    One predicate, used by the inventory and by the preview both. Two copies of
+    this test would eventually disagree, and the disagreement would show up as a
+    file count on screen that the run then contradicts.
+    """
+    return STATE_DIR in path.parts
 
 
 def scan(root: Path, *, recursive: bool = True,
@@ -445,7 +462,7 @@ def scan(root: Path, *, recursive: bool = True,
     entries: list[FileEntry] = []
     for p in _iter_files(root, recursive=recursive, notes=notes,
                          failures=failures):
-        if STATE_DIR in p.parts:  # our own run state is not evidence
+        if is_run_state(p):  # our own run state is not evidence
             continue
         ext = p.suffix.lower()
         rel = rel_path_of(p, root)
