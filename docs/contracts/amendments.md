@@ -616,7 +616,7 @@ terminal status, the profile-driven determinism claim and the contract's token
 fields from Sprint 1's supported scope. Nothing in this register relies on those
 reductions.
 
-Two further defects in this package were **not raised by the authoritative
+Three further defects in this package were **not raised by the authoritative
 verdict**. They were found by the fix package and fixed under fix-don't-defer;
 they should not be attributed to Codex:
 
