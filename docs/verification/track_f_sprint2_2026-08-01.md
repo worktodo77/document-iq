@@ -14,13 +14,15 @@ measurement it says so, in the same sentence as the claim.
 |---|---|
 | F-1 packaging (D-22) | **done and verified on the artifact** — one folder, one zip, both executables launched, self-test green from inside the exe |
 | F-2 offline proof (criterion 6) | **substantially done, one gap** — zero outbound attempts proven in-process and corroborated at OS level; a genuinely adapter-disabled run is **not** executed (see §3.4) |
-| F-3 Bates acceptance (criterion 4) | **run, and it found a defect that would have shipped** — see §4 |
+| F-3 Bates acceptance (criterion 4) | **run. Criterion 4 is MET on native-text pages (100.000% / 568 pages, authoritative ground truth) and NOT met on OCR'd pages (31.250% / 80). Zero wrong, zero false positives.** Two defects found and fixed on the way — see §4 |
 | F-4 criterion 1 | not attempted, per instruction |
 
-**Two product defects were found by doing this work and both are fixed:**
-Bates detection scored **0%** on a real Bates-stamped production, and the
-**packaged build silently did not OCR**. Neither was visible from the source
-tree, and neither produced a warning at runtime.
+**Three product defects were found by doing this work and all three are fixed:**
+Bates detection scored **0%** on a real Bates-stamped production; the
+**packaged build silently did not OCR**; and a confirmed Bates format was
+rejected whenever OCR folded the stamp into a longer line. None was visible
+from the source tree, and none produced a warning at runtime — each one failed
+by looking exactly like the ordinary, healthy case.
 
 ---
 
@@ -183,7 +185,7 @@ than a hole. It returns empty.
 | whole pipeline run in a **subprocess**, reporting loaded modules | 0 attempts, **0 fetch clients** |
 | **models deleted**, engine constructed under the guard | raises `ExtractionError` naming the file and saying DocIQ never downloads; **0 attempts**; model identity degrades to `models-unavailable` |
 | **packaged** `DocumentIQ-cli.exe --offline-probe` | **0 attempts** across 17 documents / 25 pages / 3 OCR pages, cold engine construction inside the guard |
-| **OS-level**, packaged process observed for 40.7 s / 20 samples | **0 TCP endpoints, 0 UDP endpoints ever owned by the process** |
+| **OS-level**, packaged process observed for 40.7 s over 20 samples (`Get-NetTCPConnection`/`Get-NetUDPEndpoint` by owning PID) | **0 TCP endpoints, 0 UDP endpoints ever owned by the process** |
 
 **Fail-before, watched.** With attempt recording disabled — i.e. the Sprint-1
 blocking-only behaviour restored — **10 of the 17 tests then present went red**,
@@ -337,11 +339,103 @@ page-number hole (page numbers, dates, money and revision marks still reject).
 **Fail-before, watched:** with the uppercase-only regex restored, 7 of the new
 tests go red.
 
-### 4.5 Page-level accuracy after the fix
+### 4.5 DEFECT — a confirmed format rejected because OCR folded it into a line
 
-<!-- ACCURACY_RESULTS -->
+The first page-level run after the case fix scored **576/648 (88.889%)** with
+**72 misses, and every single one was an OCR page.** Each was inspected rather
+than counted. Three causes:
 
-### 4.6 Known limit, not fixed here, reported instead
+1. **the stamp shares its line with other text** — a signature block ending
+   `... in iiCON003961`, a page whose OCR came back `untij isfiyed iiCON003944`.
+   The stamp is present, complete and correct; the whole-line anchor rejects it.
+2. **rapidocr dropped a character** — `iCON003947` for `iiCON003947`.
+3. **rapidocr did not read the footer at all**, mostly on photographs.
+
+Cause 1 is DocIQ's to fix and was fixed. The whole-line anchor is right for
+**detection**, where the grammar is open-ended and an unanchored match reads a
+date or a dollar figure as a Bates number. It is too strict for **application**
+of a format the operator has already confirmed exactly. `apply_bates` now falls
+back to searching the zone for the confirmed format as a standalone token, built
+from the same fields as `BatesFormat.pattern` so it can never accept what the
+pattern would reject, delimited so it cannot match inside a longer run, and
+**refusing** — leaving the page unstamped — when the zone holds two *different*
+stamps.
+
+Measured, same seed and same sample: **576 → 593 correct, 72 → 55 missed**, zero
+wrong and zero false positives before and after. Causes 2 and 3 are rapidocr,
+not DocIQ, and are what the OCR-page rate below is measuring.
+
+**Fail-before, watched:** 5 of the 10 new tests go red with the fallback removed.
+
+### 4.6 Page-level accuracy after both fixes
+
+**Method, stated with the figure as D-23 requires.** DocIQ's own extractor
+(`ingest.extract._extract_pdf`, OCR enabled) over a seeded stratified sample of
+the `iiCON` production; `propose_format` on the first 20 documents, the
+operator's confirmation simulated, `apply_bates` over every sampled document,
+each page compared to the **load file's** authoritative Bates for that page.
+
+| | measured |
+|---|---|
+| documents sampled | **150 of 2,107 eligible** (seed 20240529) |
+| skipped for exceeding `--max-mb 15` | **31 documents, each listed by name and page count** |
+| pages compared | **648** |
+| format proposed | `iiCON000001`, from 20 documents, 143/150 pages, best document coverage **100%** |
+| **exactly correct** | **593 (91.512%)** |
+| **WRONG number** | **0** |
+| **FALSE POSITIVE** | **0** |
+| missed (no stamp detected where one exists) | 55 |
+
+**Decomposed by page kind, which is the number that actually informs:**
+
+| page kind | correct | rate |
+|---|---|---|
+| **native** (the page had a text layer) | **568 / 568** | **100.000%** |
+| **ocr** (DocIQ had to read the image) | 25 / 80 | 31.250% |
+
+### The ≥99% figure, stated with its method and its scope
+
+**Criterion 4 is MET on pages that yield text — 100.000% over 568 pages against
+authoritative, non-OCR ground truth, with zero wrong numbers.** It is **NOT
+met** on pages DocIQ must OCR: 31.250% over 80 pages.
+
+The failure direction is the one §4 requires throughout: **zero wrong, zero
+false positives, every shortfall a MISS.** A missed page has no Bates in the
+index and `BatesRange.pages_without_bates` counts it; no page anywhere in this
+run carries a locator that is not in the production.
+
+**What the OCR residue actually is.** Each of the 55 was inspected. Three
+causes, in descending frequency: rapidocr did not read the footer stamp at all;
+it read it and dropped a character (`iCON003947` for `iiCON003947`); or the page
+is a photograph whose stamp the engine could not resolve. This is **rapidocr's
+reading of a small footer stamp**, not detector logic — and D-19 already records,
+on the record, that rapidocr ships "chosen on in-house familiarity and ONNX
+bundling convenience, never benchmarked against an alternative on this corpus."
+This measurement is the first concrete cost of that. It belongs in the D-19
+conversation, not in a Bates fix.
+
+**The bound is disclosed, never silent.** The 31 skipped documents are printed
+with names and page counts; the sample is printed as a fraction of the eligible
+set; the proposal's 20-document prefix is printed. Nothing was capped quietly.
+
+### The negative control — the widening's cost, measured
+
+Widening the letter class to `[A-Za-z]` makes more footer text stamp-shaped, so
+the false-positive risk had to be measured rather than argued. Re-run over the
+**whole** Petrobras corpus (D-13's designated negative case) **after** the fix:
+
+| | measured |
+|---|---|
+| documents / pages | **298 / 17,732** |
+| stamp-shaped lines seen | 305 |
+| **format proposed** | **NONE — correct** |
+| **false positives** | **0** |
+
+305 candidate lines in 17,732 pages, and not one clears the 50% per-document
+coverage bar. The widening cost **zero** false positives on the real unstamped
+corpus.
+
+### 4.7 Known limit, not fixed here, reported instead
 
 `propose_format` returns **one** format per corpus. The `MNFV` combined set
 demonstrably carries three renderings of the same production numbering, so any
@@ -367,7 +461,41 @@ without a format change.
 
 ## 5. Test suite
 
-<!-- SUITE_RESULTS -->
+**661 tests, 8 consecutive full runs, all 8 exit 0, zero failures.**
+Run sequentially rather than in parallel — see the note below — and every run
+produced byte-identical output.
+
+```
+PYTHONPATH=src .venv/Scripts/python -m pytest -q -p no:cacheprovider   x8
+run 1..8 exit=0
+```
+
+Plus, separately:
+
+| gate | result |
+|---|---|
+| `python -m dociq.selftest --runs 8` (source tree) | see note below |
+| `DocumentIQ-cli.exe --selftest --runs 8` (**the shipped artifact**) | **PASSED — 70 checks**, determinism byte-identical over 8 varied hash seeds, 1 distinct corpus hash, executed *inside the frozen exe* |
+
+**A note on how these were run, because it is a real finding.** The first
+attempts ran the suite, both Bates acceptance runs and the frozen self-test
+concurrently. Processes were killed mid-run — the Bates tool reached **4+ GB
+resident** because it held every extracted document — and three runs died
+without printing a figure. That is not a flaky test; it is an unbounded tool
+and a saturated machine, and both are now fixed: the acceptance tool streams
+one document at a time, and everything long-running is run sequentially. **The
+source-tree `dociq.selftest` run was one of the casualties (killed, exit 137)
+and was not re-run to completion** — the packaged `--selftest` covers the same
+70 checks on the artifact that actually ships, which is the stronger of the two,
+but the source-tree invocation is honestly *not* re-proven in this session.
+
+**Fail-befores watched go RED in this session, not assumed:**
+
+| fix | what went red without it |
+|---|---|
+| counting network guard | **10 of 17** offline tests, incl. the swallowed-attempt case |
+| mixed-case Bates prefix | **7** of the new Bates tests |
+| confirmed-format token fallback | **5** of the 10 new Bates tests |
 
 ---
 
@@ -379,7 +507,7 @@ without a format change.
 3. **`pip install pyinstaller==6.20.0`** — §2.5. Needs authorization.
 4. **`opencv-python` should be uninstalled** from the venv — §2.6. Needs
    authorization.
-5. **Multi-format Bates** — §4.6. Needs a ruling, and it touches shared types.
+5. **Multi-format Bates** — §4.7. Needs a ruling, and it touches shared types.
 6. **The page-level accuracy sample is bounded**, and both bounds are printed
    with what they dropped: documents over `--max-mb` are listed by name and page
    count, and the sampled subset is stated as a fraction of the eligible set.
