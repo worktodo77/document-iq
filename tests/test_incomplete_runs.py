@@ -27,6 +27,7 @@ import pytest
 
 from dociq import pipeline
 from dociq.contracts import ContractViolation, RunConfig
+from dociq.emit import paths as emit_paths
 from dociq.emit.paths import OutputLayout
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
@@ -231,25 +232,36 @@ def test_blocked_result_sets_the_notes_and_the_contract_from_one_value():
     [TerminalStatus.BLOCKED, TerminalStatus.CANCELLED],
 )
 def test_the_purge_refuses_any_run_that_did_not_complete(tmp_path, status):
-    """The second, independent defence.
+    """The second and third independent defences.
 
     The pipeline returns before Stage 5 on an aborted run, so this raise is
     unreachable from the shipped path. It exists because the ordering is the
-    kind of thing a refactor moves: the function that does the deleting takes a
-    proof of completion as a required argument and checks it, so destroying a
-    prior corpus cannot be reached by rearranging call order.
+    kind of thing a refactor moves: the function that decides what gets deleted
+    takes a proof of completion as a required argument and checks it, so
+    destroying a prior corpus cannot be reached by rearranging call order.
+
+    Sprint 2 moved the deletion itself into the staging swap
+    (:func:`dociq.emit.paths.commit_staging`), so the guarded function is now the
+    ENUMERATOR — and the swap adds a third defence of its own: it deletes
+    nothing without a readiness marker, and only a run that reached the end of
+    Stage 6 writes one.
     """
     layout = OutputLayout.at(tmp_path).ensure()
     victim = layout.index_csv
     victim.write_text("Doc ID\n", encoding="utf-8", newline="")
 
     with pytest.raises(ContractViolation):
-        pipeline._purge_stale_deliverables(
+        pipeline._stale_deliverables(
             layout, RunTermination(status, "stopped"))
-    assert victim.exists(), "the refused purge deleted a file anyway"
+    assert victim.exists(), "the refused enumeration deleted a file anyway"
 
-    removed = pipeline._purge_stale_deliverables(layout, COMPLETED)
-    assert "document_index.csv" in removed
+    # Third defence: no marker, no deletion — whatever else has happened.
+    assert emit_paths.commit_staging(layout) == ()
+    assert victim.exists(), "the swap deleted a file with no readiness marker"
+
+    listed = pipeline._stale_deliverables(layout, COMPLETED)
+    assert "document_index.csv" in listed
+    assert victim.exists(), "enumerating must not delete"
 
 
 # ---------------------------------------------------------------------------
