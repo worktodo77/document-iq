@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -738,6 +739,21 @@ class DetailScreen(QWidget):
                                          Rule(self._theme))
 
 
+DISPOSITION_WORDS = ("DROP", "KEEP", "AUTOMATIC")
+"""Every value :meth:`ChecklistRow.disposition_word` can return.
+
+Enumerated so the column that holds them can be sized from the widest one. A
+test asserts this tuple is exhaustive — otherwise adding a fourth word would
+reintroduce the clipping this exists to prevent, silently.
+"""
+
+
+def _disposition_column_width(theme: Theme) -> int:
+    metrics = QFontMetrics(theme.label(9))
+    return max(metrics.horizontalAdvance(word)
+               for word in DISPOSITION_WORDS) + UNIT * 2
+
+
 class ProfileChecklistScreen(QWidget):
     """§6 step 2/3 — what this profile KEEPs and DROPs, before a run commits.
 
@@ -875,7 +891,12 @@ class ProfileChecklistScreen(QWidget):
         # colored tick is a blank.
         mark = QLabel(row.disposition_word())
         mark.setFont(self._theme.label(9))
-        mark.setFixedWidth(UNIT * 8)
+        # Sized from the WIDEST word this column can ever hold, not from a
+        # guessed multiple of the grid unit: a hand-picked 64 px clipped
+        # "AUTOMATIC" to "AUTOMAT", which is a truncation the screen performed
+        # and did not say it had performed. The column still aligns across
+        # rows because every row is measured against the same maximum.
+        mark.setFixedWidth(_disposition_column_width(self._theme))
         mark.setStyleSheet(
             f"color: {self._theme.palette.accent if row.expert_drop else self._theme.palette.ink_muted};"
         )

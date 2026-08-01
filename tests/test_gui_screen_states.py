@@ -454,6 +454,29 @@ def test_a_projected_checklist_figure_says_so_beside_the_figure(window) -> None:
         assert row.scale() in _all_text(window.checklist)
 
 
+def test_no_disposition_word_is_silently_clipped(window) -> None:
+    """A hand-picked column width clipped "AUTOMATIC" to "AUTOMAT" — a
+    truncation the screen performed and did not say it had performed. The
+    column is now sized from the widest word it can ever hold, and this asserts
+    the enumeration of those words is exhaustive."""
+    from PySide6.QtGui import QFontMetrics
+
+    from dociq.gui.screens import DISPOSITION_WORDS, _disposition_column_width
+    from dociq.gui.theme import build_theme
+
+    seen = set()
+    for state in ("complete", "keeps-everything", "two-rules"):
+        _drive_checklist(window, state)
+        seen |= {r.disposition_word() for r in window.checklist._view.rows}
+    assert seen and seen <= set(DISPOSITION_WORDS)
+
+    theme = build_theme()
+    metrics = QFontMetrics(theme.label(9))
+    width = _disposition_column_width(theme)
+    for word in DISPOSITION_WORDS:
+        assert metrics.horizontalAdvance(word) <= width, word
+
+
 def test_the_checklist_has_exactly_one_forward_action(window) -> None:
     window.show_profile_checklist(MockPipeline().profiles()[0])
     primaries = [b for b in window.checklist.findChildren(QPushButton)
@@ -710,6 +733,22 @@ def test_a_full_scope_package_says_it_is_the_whole_record(window) -> None:
     _drive_handoff(window, "all")
     statement = window.handoff._view.scope_statement()
     assert "ALL" in statement and "SUBSET" not in statement
+    assert statement in _all_text(window.handoff)
+
+
+def test_a_full_scope_package_still_declares_the_listed_only_files(window):
+    """§5's unsupported inventory can never be in a Path A package. A package
+    that called itself the complete production while those files existed would
+    be making D-20's forbidden claim in the one file a reader trusts to know
+    better."""
+    _drive_handoff(window, "all")
+    view = window.handoff._view
+    assert view.unsupported == len(_outcome().result.unsupported) > 0
+    statement = view.scope_statement()
+    assert f"{view.unsupported:,} further file" in statement
+    assert "NOT in this package" in statement
+    assert "document_index.csv" in statement
+    assert "complete production" not in statement
     assert statement in _all_text(window.handoff)
 
 

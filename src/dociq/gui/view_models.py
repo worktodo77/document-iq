@@ -775,18 +775,34 @@ class PackageScope:
                     if self.doc_types else "documents of no selected type")
         return "every document in the matter"
 
-    def statement(self, selected: int, total: int, matter: str = "") -> str:
+    def statement(self, selected: int, total: int, matter: str = "",
+                  unsupported: int = 0) -> str:
         """The block written into the package itself (§8 Path A README).
 
         Authored here because it is *wording over already-selected data*, and
         placed in the package because a scope that lives only on the screen the
         operator saw is not a scope anyone downstream can check.
+
+        ``unsupported`` is the §5 listed-only inventory — files DocIQ hashed and
+        indexed but whose text it did not extract. They can never be in a Path A
+        package, so a package that called itself "the complete production" while
+        they existed would be making the exact claim D-20 exists to prevent, in
+        the one file a reader would trust to know better.
         """
         head = f"SCOPE OF THIS PACKAGE{(' — ' + matter) if matter else ''}"
+        listed = (
+            f"\n  {unsupported:,} further file{'' if unsupported == 1 else 's'} "
+            "in this matter were inventoried and hashed but their text was not "
+            "extracted (unsupported formats, §5). They are NOT in this package; "
+            "each has a row in document_index.csv with the status Unsupported."
+            if unsupported else ""
+        )
         if not self.is_subset and selected == total:
             body = (
-                f"This package covers ALL {total:,} documents of the matter "
-                "record. It is the complete production as DocIQ processed it."
+                f"This package covers ALL {total:,} documents whose text DocIQ "
+                "extracted from the matter record."
+                + (listed or " It is the complete production as DocIQ "
+                             "processed it.")
             )
         else:
             body = (
@@ -827,6 +843,10 @@ class HandoffView:
     output_root: str
     published: bool
     documents: tuple[HandoffDocument, ...]
+    unsupported: int = 0
+    """§5 listed-only files: inventoried and hashed, text not extracted. They
+    can never be in a Path A package, so the package must say they exist."""
+
     scope: PackageScope = PackageScope()
     matter_name: str = ""
     package_available: bool = False
@@ -881,7 +901,7 @@ class HandoffView:
 
     def scope_statement(self) -> str:
         return self.scope.statement(len(self.selected()), len(self.documents),
-                                    self.matter_name)
+                                    self.matter_name, self.unsupported)
 
     def scope_caution(self) -> str:
         """What the operator must understand before they press the button.
@@ -931,6 +951,7 @@ def build_handoff(outcome: RunOutcome, scope: PackageScope = PackageScope(),
             )
             for doc in outcome.result.documents
         ),
+        unsupported=len(outcome.result.unsupported),
         scope=scope,
         # PureWindowsPath, not Path: §10 makes this a Windows-only product, and
         # under a POSIX test runner ``Path(r"D:\m\out").name`` is the whole
