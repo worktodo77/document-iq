@@ -9,6 +9,7 @@ passes and this one catches.
 
 from __future__ import annotations
 
+import os
 import socket
 import ssl
 import sys
@@ -254,3 +255,59 @@ def _fixtures_dir():
     from pathlib import Path
 
     return Path(__file__).resolve().parent / "fixtures"
+
+
+# ---------------------------------------------------------------------------
+# The model-fetch class, closed by DEMONSTRATION rather than by grep
+# ---------------------------------------------------------------------------
+
+
+def test_absent_models_fail_loudly_and_never_reach_for_a_download():
+    """Take the weights away and watch what the code does.
+
+    This is the direct proof that the vendored ``enable_os_trust()`` download
+    path is closed. Grepping for it shows it is not in the source; it does not
+    show what happens when the models are genuinely missing, which is the only
+    state in which a fetch would ever have fired. So the model directory is
+    pointed at an empty folder and the OCR path is driven under the network
+    guard:
+
+      * ``ocr_models_present()`` must be False and say which file and how to fix
+      * engine construction must raise ``ExtractionError``, not download
+      * the guard must record ZERO attempts — nothing tried to go and get them
+    """
+    import tempfile
+
+    from dociq.contracts import ExtractionError
+    from dociq.ingest import extract as ex
+
+    empty = tempfile.mkdtemp(prefix="dociq-no-models-")
+    saved_env = os.environ.get("DOCIQ_OCR_MODEL_DIR")
+    saved_engine = ex._OCR_ENGINE
+    os.environ["DOCIQ_OCR_MODEL_DIR"] = empty
+    ex._OCR_ENGINE = None
+    try:
+        ok, msg = ex.ocr_models_present()
+        assert not ok
+        assert "never downloads" in msg, (
+            "the failure message must say plainly that DocIQ does not fetch — "
+            "an operator reading it decides what to do next")
+        assert ".onnx" in msg and empty in msg, msg
+        assert ex.ocr_available() is False
+
+        with offline.no_network() as guard:
+            with pytest.raises(ExtractionError):
+                ex._ocr_engine()
+        assert guard.clean, (
+            "something tried to reach the network when the models were "
+            "missing:\n" + guard.render())
+
+        # And the model IDENTITY degrades to an explicit value rather than an
+        # empty string that would compare equal to a run that had no OCR.
+        assert "models-unavailable" in ex.ocr_model_id()
+    finally:
+        ex._OCR_ENGINE = saved_engine
+        if saved_env is None:
+            os.environ.pop("DOCIQ_OCR_MODEL_DIR", None)
+        else:
+            os.environ["DOCIQ_OCR_MODEL_DIR"] = saved_env
