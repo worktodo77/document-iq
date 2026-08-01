@@ -40,7 +40,7 @@ in no pipeline module (that test still passes, unchanged).
 
 | check | result |
 |---|---|
-| full suite | **8 consecutive runs, 0 failures** (see §2.4 for counts) |
+| full suite | **8 consecutive runs, 0 failures** |
 | `tests/test_adapter.py` + `tests/test_emit_atomicity.py` | **30 consecutive runs, 0 failures** — the 30 is because these touch temp directories, hashing, ordering and a thread pool |
 | `python -m dociq.selftest` | **3 runs, exit 0, 66 checks** each, including its own 8-run × 30-seed determinism harness |
 | `tests/test_import_graph.py` | passing, unchanged |
@@ -96,6 +96,10 @@ metadata operations on ~40 files. **Not measured on the real corpus** — see §
 
 ## 3. Defects found and fixed in this package
 
+Seven. Five were found by a test that asserted the behaviour; two (#5 and #7)
+by reading one function against another, which is the half that no green suite
+would ever have surfaced.
+
 1. **The roll-forward disclosure was silent in the commonest case.** The "a
    previous run's swap was completed for you" note keyed on the list of files the
    recovery *removed*, which is empty for a first run into an empty folder — the
@@ -135,6 +139,31 @@ metadata operations on ~40 files. **Not measured on the real corpus** — see §
    writes one. `tests/test_incomplete_runs.py` asserts all three.
 
 ---
+
+7. **A run could eat its own output, and this one is the largest of the seven.**
+   `scan()` skipped only `.dociq/`, so a matter whose output folder sits inside
+   its source folder walked the *previous* run's deliverables as evidence.
+   **Measured, not hypothesized:** a one-document matter run twice into
+   `<source>/out` inventoried 1 document the first time and **6** the second —
+   `a.txt` plus `out/clean_text/DIQ-000001.txt`, `out/document_index.csv` and
+   three files of `out/upload_package/` — with a different corpus hash and every
+   re-run compounding it. The page count, the token figures, the index and
+   `clean_text/` all then describe a corpus that is partly DocIQ's own output.
+   The setup screen permits the arrangement and it is a natural one.
+
+   Fixed as a fourth walker preflight that **blocks**: nothing scanned, nothing
+   written, nothing deleted, and a message naming both remedies. Blocking rather
+   than quietly excluding the output folder is deliberate and is the one judgment
+   call here worth a ruling — excluding is friendlier and may be the right final
+   answer, but it decides what a corpus *is*, and it would change the corpus hash
+   of any matter already arranged this way silently, with no bad input anywhere.
+   Failing closed is the reversible choice. All three overlapping arrangements
+   are refused (output inside source, the same folder, source inside output — the
+   last because the swap removes deliverables by name and could delete an
+   operator's own `document_index.csv`), paths are compared by
+   `os.path.realpath` rather than as strings, and the fail-before was watched red
+   on all four cases. The AST enumeration in `tests/test_incomplete_runs.py`
+   caught the new early return and was updated from 4 returns to 5.
 
 ## 4. Judgment calls made against the brief, with reasoning
 

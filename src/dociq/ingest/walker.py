@@ -423,6 +423,40 @@ def list_files(root: Path, *, recursive: bool = True) -> list[Path]:
             if not is_run_state(p)]
 
 
+def _root_overlap(source: Path, output: Path) -> str:
+    """Why these two roots may not be used together, or ``""``.
+
+    Resolved with ``os.path.realpath`` on both sides rather than compared as
+    strings: on Windows the same folder reaches DocIQ as ``C:\\m``, ``c:\\m\\``,
+    a mapped drive letter, a UNC path and a junction, and a string comparison
+    calls four of those five a different folder.
+    """
+    try:
+        src = Path(os.path.realpath(source))
+        out = Path(os.path.realpath(output))
+    except OSError:  # pragma: no cover — realpath does not raise for a string
+        return ""
+    if src == out:
+        relationship = "the same folder as"
+    elif out.is_relative_to(src):
+        relationship = "inside"
+    elif src.is_relative_to(out):
+        relationship = "a parent of"
+    else:
+        return ""
+    return (
+        f"The output folder is {relationship} the source folder "
+        f"(source: {source}; output: {output}). DocIQ will not run this way, "
+        "because the second run over such a matter would read the FIRST run's "
+        "deliverables as evidence — its clean_text files, its document index "
+        "and its upload package would be inventoried as documents, and the page "
+        "count, the token estimate and the index would all describe a corpus "
+        "that is partly DocIQ's own output. Nothing was scanned and nothing was "
+        "written. Choose an output folder outside the matter folder, or point "
+        "the source at the sub-folder that holds only the documents."
+    )
+
+
 def is_run_state(path: Path) -> bool:
     """Whether a path is DocIQ's own scratch rather than evidence.
 
@@ -1112,7 +1146,7 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
         return notes.termination.stamp(
             RunResult(config=config, warnings=(reason,) + extra))
 
-    # Preflight 1 of 3 (Codex B-1). A source root that is not there produces an
+    # Preflight 1 of 4 (Codex B-1). A source root that is not there produces an
     # empty scan, which used to look exactly like a folder containing nothing:
     # the run went green, and — because the pipeline purges before it emits —
     # the previous complete reduction of that matter was deleted and replaced
@@ -1125,11 +1159,35 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
             "available. Nothing was scanned; check the path and re-run.")
         return blocked_result(blocked)
 
+    # Preflight 2 of 4. MEASURED, not hypothesized: a one-document matter run
+    # twice with the output folder inside the source folder inventoried 1
+    # document the first time and SIX the second — `a.txt` plus the first run's
+    # `clean_text/DIQ-000001.txt`, its `document_index.csv` and three files of
+    # its `upload_package/`. The page count, the token estimate, the index and
+    # `clean_text/` all then describe a corpus that is partly DocIQ's own output,
+    # and every re-run compounds it. Only `.dociq/` was ever excluded, because it
+    # is scratch; the DELIVERABLES were not, because until now nothing said they
+    # could be sitting under the source root.
+    #
+    # It blocks rather than quietly excluding the output folder. Excluding is the
+    # friendlier behaviour and may well be the right final answer, but it decides
+    # what a corpus IS — it would change the corpus hash of any matter already
+    # arranged this way, silently, with no bad input anywhere. That is a ruling,
+    # not a bug fix, so the run fails closed and names both remedies.
+    #
+    # The reverse nesting is refused for the same reason and a second one: the
+    # staging swap removes the previous run's deliverables by name, so a source
+    # folder underneath the output root could have an operator's own
+    # `document_index.csv` deleted by a re-run.
+    overlap = _root_overlap(root, output_root)
+    if overlap:
+        return blocked_result(overlap)
+
     entries = scan(root, recursive=opts.recursive, notes=scan_notes,
                    run_notes=notes, failures=scan_failures)
     warnings.extend(sorted(scan_notes))
 
-    # Preflight 2 of 3 (Codex review #1 round 2, F-2). A directory that would
+    # Preflight 3 of 4 (Codex review #1 round 2, F-2). A directory that would
     # not list is not a degradation this run can disclose and carry on past.
     #
     # DocIQ's product is a completeness claim over a folder, and a subtree it
@@ -1159,7 +1217,7 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
         warnings.append(f"duplicate content (sha256 {h[:12]}…): "
                         + ", ".join(paths))
 
-    # Preflight 3 of 3. Same class as the two checks above: the run never
+    # Preflight 4 of 4. Same class as the three checks above: the run never
     # starts, so it has nothing to publish and nothing it may replace.
     disk = preflight_disk(entries, output_root)
     if disk:
