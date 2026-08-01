@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from dociq.branding.palette import BRAND_DIR
 from dociq.gui.theme import HAIRLINE, UNIT, Theme
+from dociq.gui.view_models import CAPACITY_LABEL, CAPACITY_SOURCE
 
 LOCKUP_PNG = BRAND_DIR / "li_dociq_lockup.png"
 ICON_ICO = BRAND_DIR / "li_dociq_icon.ico"
@@ -485,16 +486,26 @@ class ReductionWaterfall(QWidget):
             if lever.locked:
                 continue
             ghost = 0.0
+            # An ``estimated`` lever is PROJECTED, not counted. The mark rides
+            # in the delta column beside the figure itself, not in a tooltip:
+            # this used to be rendered on automatic rows only, so an expert
+            # lever whose saving was a projection stood in the same column, in
+            # the same type, as a counted one — the exact claim
+            # ``ReductionLever.estimated`` exists to prevent.
+            projected = ", projected" if lever.estimated else ""
             if lever.engaged:
                 running -= lever.tokens
-                delta = f"−{compact_tokens(lever.tokens)}  dropped"
+                delta = f"−{compact_tokens(lever.tokens)}  dropped{projected}"
                 hint = (f"{lever.pages:,} pages are being left out. "
                         "Click to keep them.")
             else:
                 ghost = lever.tokens / full
-                delta = f"{compact_tokens(lever.tokens)}  kept"
+                delta = f"{compact_tokens(lever.tokens)}  kept{projected}"
                 hint = (f"{lever.pages:,} pages are being kept. Click to leave "
                         f"them out and save {compact_tokens(lever.tokens)} tokens.")
+            if lever.estimated:
+                hint += (" This saving is projected from the profile's rules, "
+                         "not counted from pages this run produced.")
             rows.append(WaterfallRow(
                 WaterfallRow.EXPERT, lever.key, lever.label, running / full,
                 delta, self._theme, ghost=ghost, engaged=lever.engaged, hint=hint,
@@ -520,17 +531,21 @@ class ReductionWaterfall(QWidget):
             compact_tokens(max(0, running)), self._theme,
             hint="The reduced corpus, as it stands with these choices.",
         ))
-        # "unconfirmed" is on the row, not only in its tooltip: the capacity is
-        # the line every other bar is judged against, and an unverified
-        # reference presented as a fact would put every comparison above it in
-        # doubt without saying so.
+        # D-21: a NAMED, SOURCED reference line — never a budget and never a
+        # target. The name is on the row and "reference, not a target" is in
+        # the delta column beside the figure, because the row sits at the foot
+        # of a stack of shrinking bars and that arrangement alone reads as a
+        # goal line unless the row says otherwise. Its source travels with it
+        # in the tooltip and in the sentence under the headline.
         rows.append(WaterfallRow(
-            WaterfallRow.CAPACITY, "capacity", "Direct-context capacity",
+            WaterfallRow.CAPACITY, "capacity", CAPACITY_LABEL,
             plan.capacity / full,
-            f"{compact_tokens(plan.capacity)}  unconfirmed", self._theme,
-            hint=("How much a Claude Project holds without falling back to "
-                  "retrieval. This figure has not been confirmed against "
-                  "Anthropic's published limits."),
+            f"{compact_tokens(plan.capacity)}  reference, not a target",
+            self._theme,
+            hint=(f"{CAPACITY_LABEL} — {CAPACITY_SOURCE}. Getting under this "
+                  "line is not the objective: on a full matter record the "
+                  "corpus stays above it, and Expert Assist reads the matter "
+                  "folder from disk where the line does not apply."),
         ))
 
         for row in rows:

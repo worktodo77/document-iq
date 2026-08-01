@@ -177,6 +177,17 @@ def stylesheet(theme: Theme) -> str:
         border-color: {p.accent};
         color: {p.accent};
     }}
+    /* A disabled control must LOOK disabled. Only #primary had a disabled
+       rule, so a refused secondary action — "Build the upload package" when
+       the pipeline offers no package builder — rendered identically to a live
+       one: crisp border, full-strength navy label. The reason is stated beside
+       it, but a control that looks pressable invites the press before the
+       reason is read. */
+    QPushButton#secondary:disabled {{
+        color: {p.hairline_strong};
+        border-color: {p.hairline};
+        background: {p.tint};
+    }}
 
     QPushButton#link {{
         background: transparent;
@@ -185,6 +196,7 @@ def stylesheet(theme: Theme) -> str:
         text-align: left;
         padding: 0px;
     }}
+    QPushButton#link:disabled {{ color: {p.hairline_strong}; }}
 
     QLineEdit {{
         background: {p.ground};
