@@ -379,28 +379,100 @@ def test_an_unreadable_directory_is_disclosed_not_silently_skipped(tmp_path, mon
     assert any("locked" in n for n in notes), notes
 
 
-def test_an_undirectoryable_child_is_disclosed(tmp_path, monkeypatch):
-    """The second catch in the same loop: ``p.is_dir()`` raising also skipped
-    the entry outright, so a single unstattable path vanished silently."""
+def _unstattable(monkeypatch, name: str) -> None:
+    """Make one entry behave exactly as an unstattable path does.
+
+    Two patches, and both are faithful rather than convenient:
+
+    * ``os.stat`` raises, which is what the filesystem does and what the
+      classification now calls directly;
+    * ``Path.is_dir()`` and ``Path.is_file()`` answer ``False``, which is what
+      *pathlib documents itself as doing* when the underlying ``stat`` fails.
+
+    The second is the entire mechanism of round-2 F-3, and it is why the loss
+    was silent: the failure never surfaced as an exception anyone could catch,
+    it surfaced as a confident wrong answer. Patching only ``os.stat`` would
+    model the fixed code and not the defect, and the fail-before would be red
+    for the wrong reason.
+    """
+    import os as _os
+    from pathlib import Path as _Path
+
+    real_stat = _os.stat
+    real_is_dir, real_is_file = _Path.is_dir, _Path.is_file
+
+    def _guarded(path, *a, **kw):
+        if str(path).endswith(name):
+            raise PermissionError("cannot stat")
+        return real_stat(path, *a, **kw)
+
+    def _no_dir(self):
+        return False if self.name == name else real_is_dir(self)
+
+    def _no_file(self):
+        return False if self.name == name else real_is_file(self)
+
+    monkeypatch.setattr(_os, "stat", _guarded)
+    monkeypatch.setattr(_Path, "is_dir", _no_dir)
+    monkeypatch.setattr(_Path, "is_file", _no_file)
+
+
+@pytest.mark.parametrize("recursive", [True, False])
+def test_an_entry_that_cannot_be_examined_is_inventoried_not_dropped(
+    tmp_path, monkeypatch, recursive
+):
+    """Round-2 F-3, and it is parametrized over the mode on purpose.
+
+    The recursive branch grew a disclosure in round 1 and the
+    ``recursive=False`` branch — a separate one-liner,
+    ``[p for p in root.glob("*") if p.is_file()]`` — did not, because nothing
+    in it could reach the disclosure. ``Path.is_file()`` swallows the
+    ``OSError`` a failed ``stat`` raises and answers ``False``, so an entry
+    that could not be examined left the inventory before ``scan`` could make
+    the unreadable Tier-2 record: no warning, no index row, no accounting
+    representation of a file that is sitting right there.
+
+    The fix is one traversal for both modes, so this test asserts the property
+    of both. Running it against only the branch the finding named would leave
+    the class exactly as open as it was.
+    """
     root = tmp_path / "src"
     root.mkdir()
     (root / "a.txt").write_text("x", encoding="utf-8")
     (root / "weird.txt").write_text("y", encoding="utf-8")
 
-    from pathlib import Path as _Path
-
-    real_is_dir = _Path.is_dir
-
-    def _guarded(self):
-        if self.name == "weird.txt":
-            raise OSError("cannot stat")
-        return real_is_dir(self)
-
-    monkeypatch.setattr(_Path, "is_dir", _guarded)
+    _unstattable(monkeypatch, "weird.txt")
 
     notes: list[str] = []
-    entries = walker.scan(root, recursive=True, notes=notes)
-    assert "weird.txt" not in [e.rel_path for e in entries]
+    entries = walker.scan(root, recursive=recursive, notes=notes)
+
+    rels = [e.rel_path for e in entries]
+    assert "a.txt" in rels
+    assert "weird.txt" in rels, (
+        "an unexaminable entry was dropped from the inventory before it could "
+        "become an unreadable record: " + repr(rels))
     assert any("weird.txt" in n for n in notes), (
-        "an unstattable entry vanished from the inventory in silence: "
-        + repr(notes))
+        "the entry was kept but not disclosed: " + repr(notes))
+
+
+def test_both_walk_modes_share_one_classification_path(tmp_path, monkeypatch):
+    """The class assertion behind F-3, stated as a property rather than a case.
+
+    Over a flat folder the two modes must produce the SAME inventory, for every
+    entry, including the pathological ones. When they were two pieces of code
+    they could not: every correction landed on one of them, and the divergence
+    was only ever discovered by someone auditing the other.
+    """
+    root = tmp_path / "src"
+    root.mkdir()
+    for name in ("a.txt", "b.pdf", "weird.txt", "c.dwg"):
+        (root / name).write_text("content of " + name, encoding="utf-8")
+
+    _unstattable(monkeypatch, "weird.txt")
+
+    def inventory(recursive: bool):
+        notes: list[str] = []
+        entries = walker.scan(root, recursive=recursive, notes=notes)
+        return [(e.rel_path, e.tier, e.unreadable) for e in entries], sorted(notes)
+
+    assert inventory(True) == inventory(False)

@@ -147,26 +147,15 @@ def test_a_first_ever_blocked_run_writes_no_deliverable_at_all(tmp_path, monkeyp
     assert blocked.published is False
 
 
-def test_every_early_return_in_the_walk_is_enumerated_here():
-    """The class, not the three instances.
+def _walk_run_returns() -> list[ast.Return]:
+    """Every ``return`` belonging to ``walker.run`` itself.
 
-    ``walker.run`` itself may return in exactly three places: two preflights
-    and the cancellation-aware normal return. Each early return must set
-    ``notes.termination`` before it returns, because a return that forgets to
-    would fail OPEN — the pipeline would treat an aborted walk as a complete one
-    and publish over a good corpus, which is the whole finding.
-
-    Asserted from the source rather than by behaviour, because behaviour can
-    only cover the paths someone thought to exercise. A fourth return added
-    later fails this test and lands the author here.
+    Its nested helpers (``timed``, ``emit_progress``, ``blocked_result``)
+    return to the loop or to a caller inside ``run``, not to the pipeline.
     """
-    src = Path(walker.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(src)
+    tree = ast.parse(Path(walker.__file__).read_text(encoding="utf-8"))
     fn = next(n for n in tree.body
               if isinstance(n, ast.FunctionDef) and n.name == "run")
-
-    # Returns of ``run`` itself. Its nested helpers (``timed``,
-    # ``emit_progress``) return to the loop, not to the pipeline.
     nested = {
         id(r)
         for n in ast.walk(fn)
@@ -174,24 +163,67 @@ def test_every_early_return_in_the_walk_is_enumerated_here():
         for r in ast.walk(n)
         if isinstance(r, ast.Return)
     }
-    returns = [n for n in ast.walk(fn)
-               if isinstance(n, ast.Return) and id(n) not in nested]
-    assert len(returns) == 3, (
-        f"walker.run has {len(returns)} return statements; this test knows "
-        "about 3 (two preflights and the normal return). A new one must set "
-        "notes.termination or the pipeline will publish an aborted run.")
+    return [n for n in ast.walk(fn)
+            if isinstance(n, ast.Return) and id(n) not in nested]
 
-    assignments = {
-        n.lineno for n in ast.walk(fn)
-        if isinstance(n, ast.Assign)
-        and any(isinstance(t, ast.Attribute) and t.attr == "termination"
-                for t in n.targets)
-    }
-    early = sorted(r.lineno for r in returns)[:-1]
-    for lineno in early:
-        assert any(lineno - 12 < a < lineno for a in assignments), (
-            f"the early return at walker.py:{lineno} does not set "
-            "notes.termination immediately before returning")
+
+def test_every_return_in_the_walk_carries_a_stamped_terminal_status():
+    """The class, not the instances — restated for round-2 F-1.
+
+    The earlier version of this test asserted that each early return set
+    ``notes.termination`` nearby, and every early return did. It still missed
+    the finding, because setting the out-parameter and stamping the
+    :class:`~dociq.contracts.RunResult` are two different acts and only the
+    first was checked: the walk reported ``blocked`` in ``RunNotes`` and
+    ``completed`` in the machine contract, from the same return statement.
+
+    So the invariant is now the stronger one. Every value ``walker.run``
+    returns must come out of a termination's :meth:`~dociq.runstate.
+    RunTermination.stamp` — either directly, or via the ``blocked_result``
+    helper that does nothing else. A return that constructs a bare
+    ``RunResult`` fails here and lands the author on this docstring, because
+    the contract's COMPLETED default means such a return fails OPEN and
+    silently.
+
+    Asserted from the source, because behaviour can only cover the paths
+    someone thought to exercise — which is precisely how round 1 shipped this.
+    """
+    returns = _walk_run_returns()
+    assert len(returns) == 4, (
+        f"walker.run has {len(returns)} return statements; this test knows "
+        "about 4 (three preflights and the normal return).")
+
+    for r in returns:
+        call = r.value
+        assert isinstance(call, ast.Call), (
+            f"walker.py:{r.lineno} does not return a call")
+        fname = call.func
+        stamped = (
+            # notes.termination.stamp(RunResult(...))
+            (isinstance(fname, ast.Attribute) and fname.attr == "stamp")
+            # blocked_result(...) — which stamps, and does nothing else
+            or (isinstance(fname, ast.Name) and fname.id == "blocked_result")
+        )
+        assert stamped, (
+            f"walker.py:{r.lineno} returns a RunResult that was not stamped "
+            "with a terminal status. It will take the contract's COMPLETED "
+            "default and tell a consumer the opposite of the outcome.")
+
+
+def test_blocked_result_sets_the_notes_and_the_contract_from_one_value():
+    """The helper the guard above trusts. If it stopped setting either half,
+    every early return would quietly go back to disagreeing with itself."""
+    src = Path(walker.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == "run")
+    helper = next(n for n in ast.walk(fn)
+                  if isinstance(n, ast.FunctionDef) and n.name == "blocked_result")
+    body = ast.dump(helper)
+    assert "attr='termination'" in body, (
+        "blocked_result no longer sets notes.termination")
+    assert "attr='stamp'" in body, (
+        "blocked_result no longer stamps the RunResult")
 
 
 @pytest.mark.parametrize(
@@ -258,6 +290,171 @@ def test_the_terminal_status_is_in_the_machine_readable_result_of_every_run(tmp_
     # invocation, and hashing it would make an interrupted run and a clean one
     # differ inside the byte-identical claim.
     assert "terminal_status" not in json.dumps(log["content"])
+
+
+# ---------------------------------------------------------------------------
+# Round-2 F-1 — the machine contract must not contradict the outcome
+# ---------------------------------------------------------------------------
+
+
+def test_there_is_exactly_one_terminal_status_enumeration():
+    """Round-2 F-1, first half.
+
+    Amendment A-06 added :class:`dociq.contracts.TerminalStatus` while
+    :mod:`dociq.runstate` still declared a value-identical one, so the walk
+    carried one class and :class:`~dociq.contracts.RunResult` declared the
+    other. Two enumerations spelled the same way compare ``==`` on their string
+    values and ``is`` never — a consumer writing the identity check the typed
+    status exists to enable gets ``False`` about two statuses that are the same
+    status. Amendment A-07 leaves one definition.
+    """
+    from dociq import contracts, runstate
+
+    assert runstate.TerminalStatus is contracts.TerminalStatus
+    assert (
+        len({id(m) for m in contracts.TerminalStatus}
+            | {id(m) for m in runstate.TerminalStatus}) == 3
+    )
+
+
+@pytest.mark.parametrize("case", ["completed", "missing-root", "cancelled",
+                                  "blocked-disk", "unlistable-root"])
+def test_the_contract_status_agrees_with_the_outcome_on_every_run(
+    tmp_path, monkeypatch, case
+):
+    """Round-2 F-1, second half — and it is the assertion round 1 missed.
+
+    The predecessor of this test checked ``PipelineOutcome.termination`` and
+    the processing log, both of which were right, and never checked
+    ``PipelineOutcome.result.terminal_status``, which was wrong on all three
+    abort paths. Codex's probe: ``RunNotes termination = blocked`` beside
+    ``RunResult terminal_status = completed``. A consumer holding the machine
+    contract — which is the object the contract freeze exists to make
+    trustworthy — was told the opposite of the outcome wrapper.
+
+    Every ending is exercised, the completed one included. A test that only
+    looks at the failure modes cannot notice the day the *good* path stops
+    agreeing with itself.
+    """
+    out = tmp_path / "matter"
+    if case == "completed":
+        outcome = _run(out)
+        expected = TerminalStatus.COMPLETED
+    elif case == "missing-root":
+        outcome = _run(out, source=tmp_path / "not-a-folder")
+        expected = TerminalStatus.BLOCKED
+    elif case == "cancelled":
+        outcome = _run(out, cancelled=lambda: True)
+        expected = TerminalStatus.CANCELLED
+    elif case == "blocked-disk":
+        _blocked_by_disk(monkeypatch)
+        outcome = _run(out)
+        expected = TerminalStatus.BLOCKED
+    else:
+        _unlistable(monkeypatch, tmp_path / "corpus")
+        outcome = _run(out, source=tmp_path / "corpus")
+        expected = TerminalStatus.BLOCKED
+
+    assert outcome.termination.status is expected
+    assert outcome.result.terminal_status is expected, (
+        "the machine-readable RunResult disagrees with the outcome wrapper "
+        "about how the run ended")
+    assert outcome.result.terminal_status_reason == outcome.termination.reason
+    assert outcome.result.terminal_status.complete is (
+        expected is TerminalStatus.COMPLETED)
+
+
+# ---------------------------------------------------------------------------
+# Round-2 F-2 — an inventory that could not be enumerated cannot publish
+# ---------------------------------------------------------------------------
+
+
+def _unlistable(monkeypatch, root: Path, *, only: str | None = None) -> Path:
+    """A corpus at ``root`` where one directory refuses to list.
+
+    ``only=None`` breaks the root itself (nothing is inventoried); ``only="sub"``
+    breaks one subtree, so the walk returns a partial inventory — the case a
+    warning used to be considered sufficient for.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "top.txt").write_text("top level", encoding="utf-8")
+    sub = root / "sub"
+    sub.mkdir(exist_ok=True)
+    (sub / "buried.txt").write_text("under the broken folder", encoding="utf-8")
+
+    target = root if only is None else root / only
+    real = Path.iterdir
+
+    def refuse(self):
+        if self == target or str(self) == str(target):
+            raise PermissionError(f"listing denied: {self}")
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+    return root
+
+
+def test_a_root_that_cannot_be_listed_blocks_the_run(tmp_path, monkeypatch):
+    """Codex's probe verbatim: ``termination = completed, documents = 0`` with
+    a warning attached. A warning does not make an incomplete corpus safe to
+    publish, and this one published an EMPTY set over a complete one."""
+    out = tmp_path / "matter"
+    good = _run(out)
+    assert good.published
+    before = _fingerprint(out)
+    assert before
+
+    corpus = _unlistable(monkeypatch, tmp_path / "corpus")
+    blocked = _run(out, source=corpus)
+
+    assert blocked.termination.status is TerminalStatus.BLOCKED
+    assert blocked.published is False
+    assert blocked.ok is False
+    assert not blocked.result.documents
+    assert _fingerprint(out) == before, (
+        "an un-enumerable folder replaced a complete prior corpus")
+    assert any("could not be fully inventoried" in w
+               for w in blocked.result.warnings)
+
+
+def test_a_subtree_that_cannot_be_listed_blocks_the_run(tmp_path, monkeypatch):
+    """The partial case, which is the more dangerous of the two.
+
+    The root lists, one folder under it does not, and the walk comes back with
+    real documents — so every downstream check passes, the accounting balances
+    against itself, and the deliverables assert completeness over a corpus that
+    is short by an unknown amount.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    before = _fingerprint(out)
+
+    corpus = _unlistable(monkeypatch, tmp_path / "corpus", only="sub")
+    blocked = _run(out, source=corpus)
+
+    assert blocked.termination.status is TerminalStatus.BLOCKED
+    assert blocked.published is False
+    assert _fingerprint(out) == before
+
+
+def test_a_folder_that_is_empty_but_readable_is_a_completed_run(tmp_path):
+    """The boundary Codex made load-bearing, asserted so the F-2 fix cannot
+    over-reach into it.
+
+    "Successfully enumerated and contains no files" is a legitimate empty
+    completed run, and it MAY replace prior deliverables. Only a folder DocIQ
+    could not read is blocked. Without this test the safe fix for F-2 is to
+    refuse every empty result, which would break the honest empty matter.
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    outcome = _run(tmp_path / "matter", source=empty)
+
+    assert outcome.termination.status is TerminalStatus.COMPLETED
+    assert outcome.result.terminal_status is TerminalStatus.COMPLETED
+    assert outcome.published is True
+    assert outcome.result.documents == ()
+    assert outcome.layout.processing_log.is_file()
 
 
 def test_the_status_reaches_the_operator_facing_warning_list_first(tmp_path, monkeypatch):

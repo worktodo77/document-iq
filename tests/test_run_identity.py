@@ -84,7 +84,7 @@ def test_the_limits_match_the_values_the_modules_actually_hold(outcome):
     assert limits.zip_max_members == caps["zip_max_members"]
     assert limits.zip_max_depth == caps["zip_max_depth"]
     assert limits.retry_max == walker._RETRY_MAX
-    assert limits.retry_budget_s == round(walker._RETRY_BUDGET_S)
+    assert limits.retry_budget_ms == round(walker._RETRY_BUDGET_S * 1000)
 
 
 def test_a_run_with_ocr_off_records_no_model_identity(outcome):
@@ -108,8 +108,8 @@ def test_ocr_on_records_the_model_identity(tmp_path, monkeypatch):
 def _limits(**kw) -> EffectiveLimits:
     base = dict(
         xlsx_max_rows=50000, csv_max_rows=50000, zip_max_mb=500,
-        zip_max_members=2000, zip_max_depth=3, file_timeout_s=3600,
-        retry_max=500, retry_budget_s=1800, recurse=True,
+        zip_max_members=2000, zip_max_depth=3, file_timeout_ms=3_600_000,
+        retry_max=500, retry_budget_ms=1_800_000, recurse=True,
         ocr_model_id="engine 1.0; models deadbeef", workers=8,
     )
     base.update(kw)
@@ -128,9 +128,9 @@ def _config(**kw) -> RunConfig:
         ("zip_max_mb", 1),
         ("zip_max_members", 1),
         ("zip_max_depth", 1),
-        ("file_timeout_s", 30),
+        ("file_timeout_ms", 30),
         ("retry_max", 1),
-        ("retry_budget_s", 1),
+        ("retry_budget_ms", 1),
         ("recurse", False),
         ("ocr_model_id", "engine 1.0; models 0000"),
     ],
@@ -258,3 +258,225 @@ def test_pool_width_does_not_change_the_output_bytes(tmp_path):
     content = {r.log.content_sha256 for r in runs}
     assert len(corpus) == 1, f"pool width changed the corpus hash: {corpus}"
     assert len(content) == 1, f"pool width changed the log content: {content}"
+
+
+# ---------------------------------------------------------------------------
+# Round-2 F-4 — resume must key on the identity that validates what it replays
+# ---------------------------------------------------------------------------
+
+
+def test_the_resume_key_is_the_run_identity_not_a_hand_picked_subset():
+    """Round-2 F-4a, at the unit.
+
+    ``_resume_identity`` named seven fields by hand, and the list went stale
+    the day amendment A-04 added ``RunConfig.limits``. Codex's probe: two
+    configs differing in timeout and recursion produced the identical resume
+    identity, so a record cached under one set of limits was eligible for
+    replay under another — and the manifest then honestly hashed the settings
+    the documents were *not* produced under.
+
+    Asserted as a projection identity rather than field-by-field: the point of
+    the fix is that a field added to ``RunConfig`` tomorrow is covered without
+    anyone remembering this function exists.
+    """
+    a = RunConfig(source_root="s", output_root="o", limits=_limits())
+    for field, value in (
+        ("file_timeout_ms", 30_000),
+        ("retry_budget_ms", 1_000),
+        ("recurse", False),
+        ("ocr_model_id", "engine 1.0; models 0000"),
+        ("xlsx_max_rows", 10),
+        ("zip_max_depth", 1),
+    ):
+        b = dataclasses.replace(a, limits=_limits(**{field: value}))
+        assert walker._resume_identity(a) != walker._resume_identity(b), (
+            f"a journal written under a different {field} would be replayed "
+            "into this run and hashed as if it belonged here")
+
+
+def test_the_resume_key_moves_with_every_identity_field_of_the_config():
+    """The class, enumerated. Every hashed field of ``RunConfig`` — present and
+    future — must move the resume key, and every excluded one must not."""
+    base = RunConfig(source_root="s", output_root="o", limits=_limits())
+    for f in dataclasses.fields(RunConfig):
+        if f.name == "limits":
+            continue  # covered field-by-field above
+        current = getattr(base, f.name)
+        if isinstance(current, bool):
+            other = not current
+        elif isinstance(current, int):
+            other = current + 1
+        elif isinstance(current, str):
+            other = current + "-x"
+        elif current is None:
+            other = "something"
+        else:
+            continue
+        moved = dataclasses.replace(base, **{f.name: other})
+        assert walker._resume_identity(base) != walker._resume_identity(moved), (
+            f"RunConfig.{f.name} changes output bytes but not the resume key")
+
+    # And the one deliberate exclusion holds on this path too: resuming on a
+    # different pool width must still work, because pool width must not change
+    # output. A resume key stricter than the identity would be a different bug.
+    wide = dataclasses.replace(base, limits=_limits(workers=1))
+    assert walker._resume_identity(base) == walker._resume_identity(wide)
+
+
+def test_a_journal_written_under_different_limits_is_refused(tmp_path):
+    """The same finding end to end, through the file the pipeline actually
+    reads. A unit-level identity mismatch is only interesting if
+    ``_load_resume`` acts on it."""
+    from dociq.contracts import DocumentRecord
+
+    cfg = RunConfig(
+        source_root=str(FIXTURES),
+        output_root=str(tmp_path / "out"),
+        ocr_engine_version=ex.ocr_engine_version(),
+        limits=walker.effective_limits(walker.WalkOptions(ocr_enabled=False)),
+    )
+    # A journal written and left behind — which is the state resume exists for.
+    # A run that COMPLETES discards its journal, so running one here would
+    # leave nothing to replay and the test would pass vacuously.
+    journal = walker._ResumeWriter(cfg, True)
+    journal.add("a.txt", [DocumentRecord(
+        doc_id="", rel_path="a.txt", filename="a.txt", sha256="0" * 64,
+        size_bytes=1, ext=".txt")])
+    journal.close(discard=False, output_root=tmp_path / "out")
+
+    assert walker._load_resume(cfg), "the fixture wrote no replayable journal"
+
+    ocr_off_elsewhere = dataclasses.replace(
+        cfg, limits=dataclasses.replace(cfg.limits, ocr_model_id="other-engine"))
+    assert walker._load_resume(ocr_off_elsewhere) == {}, (
+        "a journal produced by different OCR model bytes was replayed")
+
+    capped = dataclasses.replace(
+        cfg, limits=dataclasses.replace(cfg.limits, xlsx_max_rows=5))
+    assert walker._load_resume(capped) == {}, (
+        "a journal produced under different content caps was replayed")
+
+
+def test_the_pipeline_hands_the_walk_the_configuration_it_will_record(tmp_path):
+    """Round-2 F-4a's other half.
+
+    The identity fix is worth nothing if the walk is still handed the caller's
+    original config: the journal would be keyed on a configuration with no
+    limits, no resolved OCR engine and no master-index snapshot, while the
+    deliverables record the completed one. So this asserts the two are the same
+    object's worth of information — everything except the Bates pattern, which
+    is Stage 3's output and cannot exist before Stage 1.
+    """
+    seen: dict[str, RunConfig] = {}
+    real = walker.run
+
+    def spy(config, opts=None, notes=None):
+        seen["walk"] = config
+        return real(config, opts, notes)
+
+    import dociq.pipeline as pl
+
+    original = pl.walker.run
+    pl.walker.run = spy
+    try:
+        outcome = _run(tmp_path)
+    finally:
+        pl.walker.run = original
+
+    walked = seen["walk"]
+    recorded = outcome.result.config
+    assert walked.limits is not None, "the walk ran with no effective limits"
+    assert walked.limits == recorded.limits
+    assert walked.ocr_engine == recorded.ocr_engine
+    assert walked.ocr_engine_version == recorded.ocr_engine_version
+    assert walked.master_index == recorded.master_index
+
+    # Two deliberate carve-outs, and only two. `bates_pattern` is Stage 3's
+    # output. `profile_id`/`profile_version` resolve the profile LIBRARY, which
+    # Stage 4 resolves per document — see the test below for why the walk must
+    # NOT be told about it.
+    def _comparable(cfg):
+        return dataclasses.replace(
+            cfg, bates_pattern=None, profile_id=None, profile_version=None)
+
+    assert _comparable(walked) == _comparable(recorded), (
+        "the walk ran under a different configuration than the run recorded")
+
+
+def test_the_walk_does_not_stamp_a_profile_onto_documents_it_did_not_claim(tmp_path):
+    """Why ``profile_id`` stays OUT of the pre-walk configuration.
+
+    ``walker._record`` stamps the walk config's profile onto every
+    ``DocumentRecord``, and Stage 4 overwrites that stamp only on documents a
+    profile actually CLAIMED — an unclaimed document keeps what it arrived
+    with. Resolving ``PipelineOptions.profiles[0]`` into the pre-walk config
+    (the obvious tidy-up while fixing F-4a, and one this package started to
+    make) would therefore label every unclaimed document with a profile that
+    did not match it: a false statement in the document index and in hashed
+    content both.
+
+    "What the run was configured with" and "what matched this document" are two
+    different facts, and only Stage 4 knows the second.
+    """
+    from dociq.profiles.model import FormatProfile
+
+    never_matches = FormatProfile(
+        profile_id="mpr-monthly",
+        version="1.0",
+        display_name="Monthly progress report",
+        header_patterns=("THIS STRING APPEARS IN NO FIXTURE WHATSOEVER",),
+    )
+    cfg = RunConfig(
+        source_root=str(FIXTURES),
+        output_root=str(tmp_path / "out"),
+        ocr_engine_version=ex.ocr_engine_version(),
+    )
+    outcome = pipeline.run(cfg, pipeline.PipelineOptions(
+        walk=walker.WalkOptions(ocr_enabled=False, resume=False),
+        profiles=(never_matches,),
+        stamp=STAMP,
+    ))
+
+    claimed = [d.rel_path for d in outcome.result.documents
+               if d.profile_id == "mpr-monthly"]
+    assert not claimed, (
+        "documents no profile matched were stamped with the profile anyway: "
+        + repr(claimed[:5]))
+    # The run configuration still records the library that was supplied — that
+    # IS true of the run, and it is where the fact belongs.
+    assert outcome.result.config.profile_id == "mpr-monthly"
+
+
+@pytest.mark.parametrize("a,b", [(1.1, 1.4), (0.5, 0.9), (3599.4, 3599.6)])
+def test_deadlines_that_differ_are_recorded_differently(a, b):
+    """Round-2 F-4b. ``round(seconds)`` collapsed 1.1 s and 1.4 s onto the same
+    identity while abandoning different files — a determinism collision inside
+    the field A-04 added to close one. Integer milliseconds keep the capability
+    and remove the collision (amendment A-08)."""
+    la = walker.effective_limits(walker.WalkOptions(file_timeout_s=a))
+    lb = walker.effective_limits(walker.WalkOptions(file_timeout_s=b))
+    assert la.file_timeout_ms != lb.file_timeout_ms, (
+        f"{a}s and {b}s recorded the same deadline")
+    assert la != lb
+    assert content_hash(RunConfig(source_root="s", output_root="o", limits=la)) \
+        != content_hash(RunConfig(source_root="s", output_root="o", limits=lb))
+    assert walker._resume_identity(
+        RunConfig(source_root="s", output_root="o", limits=la)
+    ) != walker._resume_identity(
+        RunConfig(source_root="s", output_root="o", limits=lb)
+    )
+
+
+def test_every_deadline_limit_is_an_exactly_represented_integer():
+    """The class: no float, and no lossy unit, may reach an identity field.
+    Enumerated over the dataclass so a future deadline field is covered."""
+    limits = walker.effective_limits(walker.WalkOptions(file_timeout_s=1.1))
+    for f in dataclasses.fields(EffectiveLimits):
+        value = getattr(limits, f.name)
+        assert not isinstance(value, float), (
+            f"EffectiveLimits.{f.name} is a float; Principle 5 bars floats "
+            "from identity fields")
+        if "timeout" in f.name or "budget" in f.name:
+            assert f.name.endswith("_ms"), (
+                f"EffectiveLimits.{f.name} is a deadline recorded in a unit "
+                "coarser than the value it records (amendment A-08)")

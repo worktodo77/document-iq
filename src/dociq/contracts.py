@@ -23,7 +23,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-CONTRACT_VERSION = "1.5.0"
+CONTRACT_VERSION = "1.6.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -62,6 +62,45 @@ them. Excluding would let a cancelled partial set and a complete set hash
 identically — which is precisely the confusion B-1 is about. A run's
 completeness is a property of the evidence it produced, not metadata about the
 invocation.
+
+1.6.0 — amendments A-07, A-08 and A-09, from Codex review #1 round 2.
+
+*A-07 (from round-2 F-1).* :class:`TerminalStatus` is now the **only**
+definition of that enumeration. :mod:`dociq.runstate` defined a second, value-
+identical class, and the walk carried one type while :class:`RunResult` declared
+the other; ``runstate`` now imports this one. Two enumerations spelled the same
+way are two things a consumer can be handed, and an ``is`` comparison across the
+seam silently answers ``False``.
+
+``terminal_status_reason`` moves into :data:`_IDENTITY_EXCLUDED`, adopting the
+reviewer's advisory. The enum still hashes, so a cancelled partial set and a
+complete set still cannot share an identity — the distinction is established by
+the typed status, and it does not need the prose. Leaving the free-form sentence
+in the hash would mean a wording edit to an operator message changes the
+identity of runs already produced, which is the failure ``ratio_low`` /
+``ratio_high`` are excluded for.
+
+*A-08 (from round-2 F-4b).* ``EffectiveLimits.file_timeout_s`` and
+``retry_budget_s`` are renamed ``file_timeout_ms`` / ``retry_budget_ms`` and now
+carry integer **milliseconds**. Both are sourced from float-valued deadlines and
+were rounded to whole seconds, so 1.1 s and 1.4 s recorded the identical
+identity while abandoning different files — a determinism-identity collision
+inside the field added to close one. Milliseconds keep the capability (the
+deadlines stay float-precise where they are enforced) and remove the collision;
+Principle 5's bar on floats in identity fields is honored because the recorded
+value is an exact integer.
+
+This is a **renaming** amendment, not an additive one: a consumer reading
+``limits.file_timeout_s`` breaks loudly rather than silently reading a second
+field. That is deliberate under the freeze procedure — the semantics changed,
+so the name had to.
+
+*A-09 (from round-2 F-5).* No type change. ``structural_tokens`` and
+``token_ceiling``, added by 1.4.0, are now actually populated by the pipeline's
+projection; they had stayed at their "not measured" defaults while the same run
+wrote both numbers into the processing log. Recorded here because the machine
+contract's agreement with the log is a contract property, not an implementation
+detail.
 """
 
 
@@ -122,13 +161,29 @@ class TerminalStatus(str, enum.Enum):
     accounting, reported success, and replaced a complete prior output set.
     Measured on the fixture corpus: 34 of 44 files destroyed, 10 overwritten,
     ``ok=True``.
+
+    **This is the only definition** (amendment A-07). :mod:`dociq.runstate`
+    re-exports it and no longer declares its own.
     """
 
     COMPLETED = "completed"
     BLOCKED = "blocked"
-    """Rejected before the walk — disk preflight, or a source root that is not
-    reachable. Distinct from a source folder that exists and is empty, which is
-    a legitimate completed run."""
+    """The run never established a corpus it could publish.
+
+    Three ways in: the disk preflight refused, the source root was not
+    reachable, or — added by A-07 — the **inventory could not be enumerated**,
+    because ``iterdir()`` failed on the root or on a subtree.
+
+    That third one is the subtle one, and it is the round-2 F-2 finding.
+    DocIQ's claim over a folder is a completeness claim, and a directory it
+    could not list is a directory whose contents it has not established. A
+    warning does not repair that: the run would go on to publish an inventory
+    it knows to be short by an unknown amount, over the top of a previous
+    complete one.
+
+    Distinct from a source folder that was **successfully enumerated** and
+    contains no files, which is a legitimate completed run and may replace
+    prior deliverables. "Successfully enumerated" is the whole boundary."""
 
     CANCELLED = "cancelled"
     """Stopped part-way by the operator; documents gathered so far are real but
@@ -397,9 +452,25 @@ class EffectiveLimits:
     zip_max_mb: int
     zip_max_members: int
     zip_max_depth: int
-    file_timeout_s: int
+
+    file_timeout_ms: int
+    """The per-file watchdog deadline, in **integer milliseconds** (A-08).
+
+    Milliseconds rather than seconds because the setting it records
+    (``DOCIQ_FILE_TIMEOUT``, ``WalkOptions.file_timeout_s``) is a float used as
+    a float-valued deadline. Rounding it to whole seconds made 1.1 s and 1.4 s
+    record the same identity while abandoning different files — a determinism
+    collision inside the field whose entire purpose is to close one. A float
+    here is barred by Principle 5, and rejecting fractional values would have
+    removed a capability the watchdog uses, so the unit changed instead."""
+
     retry_max: int
-    retry_budget_s: int
+
+    retry_budget_ms: int
+    """The serial-retry wall-clock budget, in **integer milliseconds** (A-08).
+    Same argument as :attr:`file_timeout_ms`; ``DOCIQ_RETRY_BUDGET_S`` is a
+    float."""
+
     recurse: bool
 
     ocr_model_id: str = ""
@@ -645,7 +716,7 @@ class ExtractionError(DocIQError):
 # ---------------------------------------------------------------------------
 
 _IDENTITY_EXCLUDED: frozenset[str] = frozenset(
-    {"ocr_conf", "ratio_low", "ratio_high", "workers"}
+    {"ocr_conf", "ratio_low", "ratio_high", "workers", "terminal_status_reason"}
 )
 """Fields excluded from identity hashing.
 
@@ -657,6 +728,12 @@ fields."
 ``ratio_low``/``ratio_high`` (A-01) join it for the same reason: the token
 band is an estimate about the text, not a property of it, and re-ruling D-03
 must not invalidate the identity of runs already produced.
+
+``terminal_status_reason`` (A-07) is excluded on the same principle in a
+different key: it is free-form operator prose, and :attr:`RunResult.
+terminal_status` — which IS hashed — already establishes the only distinction
+that matters to identity. Rewording an error sentence must not change the hash
+of runs already produced.
 
 Note this is matched by field *name* across every contract dataclass, so a
 field named ``ocr_conf`` on a future type is excluded automatically. That is

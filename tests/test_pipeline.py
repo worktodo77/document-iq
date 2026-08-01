@@ -18,7 +18,7 @@ import json
 import pytest
 
 from dociq import pipeline
-from dociq.contracts import PageKind, RunConfig
+from dociq.contracts import Disposition, PageKind, RunConfig
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
 from dociq.profiles.model import OperatorStamp
@@ -123,6 +123,60 @@ def test_token_estimates_are_populated_and_carry_their_provenance(outcome):
     assert "Measured (before reduction)" in r.tokens_before.provenance
     assert "ASSUMPTION A1" in r.tokens_before.provenance
     assert "pre-tokens" in r.tokens_before.provenance
+
+
+def test_the_replacement_token_fields_are_actually_populated(outcome):
+    """Round-2 F-5.
+
+    Amendment 1.4.0 withdrew ``floor_tokens`` and added ``structural_tokens``
+    and ``token_ceiling`` to replace it. The projection was never updated, so
+    both stayed at their "not measured" default of 0 while the very same run
+    wrote both numbers into the processing log and the summary PDF. Codex's
+    probe, on text with five pre-tokens and 20 UTF-8 bytes:
+    ``structural_tokens=0, token_ceiling=0``.
+
+    That is worse than the fields' absence. A consumer holding the machine
+    contract and a consumer reading the log were told different things about
+    one run, and the contract — the artifact the freeze exists to make
+    trustworthy — was the one that was wrong.
+    """
+    from dociq.verify.tokens import estimate_for_texts
+
+    r = outcome.result
+    for label, contract_side, pages in (
+        ("before", r.tokens_before,
+         [p for d in r.documents for p in d.pages]),
+        ("after", r.tokens_after,
+         [p for d in r.documents for p in d.pages
+          if p.disposition is Disposition.KEEP]),
+    ):
+        measured = estimate_for_texts(p.text for p in pages)
+        assert contract_side.structural_tokens == measured.profile.pretokens > 0, (
+            f"{label}: the contract reports no measured structure for text the "
+            "run measured")
+        assert contract_side.token_ceiling == measured.profile.token_ceiling > 0
+        # The one sound bound must actually bound the thing it claims to.
+        assert contract_side.token_ceiling >= measured.high
+        assert contract_side.chars <= contract_side.token_ceiling
+
+
+def test_the_machine_contract_and_the_processing_log_report_one_set_of_numbers(
+    outcome,
+):
+    """The disagreement F-5 is really about, asserted across the seam.
+
+    Two artifacts of one run, each carrying the token figures, each written by
+    a different code path. If they can differ, one of them is telling an expert
+    something untrue about the corpus he is about to rely on.
+    """
+    import json
+
+    log = json.loads(outcome.layout.processing_log.read_text(encoding="utf-8"))
+    block = log["content"]["token_estimate"]
+    after = outcome.result.tokens_after
+    assert block["chars"] == after.chars
+    assert block["pretokens"] == after.structural_tokens
+    assert block["token_ceiling"] == after.token_ceiling
 
 
 def test_ratio_refuted_is_the_pipelines_own_verdict_not_a_consumers_guess(outcome):

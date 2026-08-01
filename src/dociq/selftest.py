@@ -40,7 +40,7 @@ import tempfile
 from pathlib import Path
 
 from . import pipeline
-from .contracts import PageKind, RunConfig
+from .contracts import PageKind, RunConfig, TerminalStatus
 from .ingest import extract as ex
 from .ingest import walker
 from .ingest.pagemodel import normalize
@@ -285,8 +285,23 @@ def main(argv: list[str] | None = None) -> int:
                    "cancellation is a fact about the invocation")
         chk.expect(outcome.published and outcome.termination.complete,
                    "the run published because it completed, and says so")
+        # Round-2 F-1. The two checks above are the ones that already existed,
+        # and they are exactly the ones that missed the finding: the log and
+        # the outcome wrapper were right while the MACHINE CONTRACT — the
+        # object a consumer across the seam actually holds — took the
+        # COMPLETED default on every abort path. So the gate now asserts the
+        # contract field itself, and asserts it AGREES with the wrapper rather
+        # than merely holding a plausible value of its own.
+        chk.expect(result.terminal_status is outcome.termination.status
+                   and result.terminal_status_reason == outcome.termination.reason,
+                   "the machine-readable RunResult agrees with the outcome "
+                   "about how the run ended (round-2 F-1)",
+                   result.terminal_status.value)
+        from .runstate import TerminalStatus as _RunstateStatus
+        chk.expect(_RunstateStatus is TerminalStatus,
+                   "there is exactly one TerminalStatus enumeration (A-07)")
 
-        print("\nAmended contract fields (A-01..A-06)")
+        print("\nAmended contract fields (A-01..A-09)")
         before, after = result.tokens_before, result.tokens_after
         chk.expect(before is not None and after is not None,
                    "RunResult carries the before/after token estimates")
@@ -303,6 +318,25 @@ def main(argv: list[str] | None = None) -> int:
             # must travel with the figure instead.
             chk.expect(before.floor_tokens == 0,
                        "no hard token floor is claimed (finding B-6)")
+            # Round-2 F-5. The withdrawn field staying 0 was only half of
+            # A-05(a); the two fields that replace it must actually carry the
+            # measurement, or the machine contract reads "not measured" for
+            # text this same run measured and wrote into the log below.
+            chk.expect(before.structural_tokens > 0 and before.token_ceiling > 0,
+                       "the replacement token fields are populated, not left "
+                       "at their not-measured defaults (round-2 F-5)",
+                       f"{before.structural_tokens} pre-token(s), ceiling "
+                       f"{before.token_ceiling}")
+            chk.expect(before.token_ceiling >= before.chars,
+                       "the asserted ceiling bounds the text it describes "
+                       "(tokens <= UTF-8 bytes)")
+            chk.expect(
+                log_doc["content"]["token_estimate"]["pretokens"]
+                == after.structural_tokens
+                and log_doc["content"]["token_estimate"]["token_ceiling"]
+                == after.token_ceiling,
+                "the machine contract and the processing log report ONE set of "
+                "token figures")
             chk.expect(all(a in before.provenance
                            for a in ("ASSUMPTION A1", "ASSUMPTION A2",
                                      "ASSUMPTION A3")),
@@ -311,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
                        "the provenance names the method this run used")
         limits = result.config.limits
         chk.expect(limits is not None and limits.zip_max_depth > 0
-                   and limits.retry_max > 0 and limits.file_timeout_s > 0,
+                   and limits.retry_max > 0 and limits.file_timeout_ms > 0,
                    "the run identity records its effective limits (A-04)",
                    f"zip depth {limits.zip_max_depth if limits else '-'}, "
                    f"retry max {limits.retry_max if limits else '-'}")

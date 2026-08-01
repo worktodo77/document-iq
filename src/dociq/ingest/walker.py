@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import threading
 import time
 import unicodedata
@@ -186,11 +187,15 @@ def effective_limits(
         zip_max_mb=caps["zip_max_mb"],
         zip_max_members=caps["zip_max_members"],
         zip_max_depth=caps["zip_max_depth"],
-        # Rounded, not truncated: a sub-second timeout truncating to 0 would
-        # record "no timeout" for a run that timed out on every file.
-        file_timeout_s=round(opts.file_timeout_s),
+        # MILLISECONDS, and integer (amendment A-08, round-2 F-4b). These were
+        # ``round(seconds)``, so 1.1 s and 1.4 s recorded the identical
+        # identity while abandoning different files — a determinism collision
+        # inside the field added to close one. Rounded rather than truncated
+        # for the original reason: a sub-unit timeout truncating to 0 would
+        # record "no timeout" for a run that timed out on everything.
+        file_timeout_ms=round(opts.file_timeout_s * 1000),
         retry_max=_RETRY_MAX,
-        retry_budget_s=round(_RETRY_BUDGET_S),
+        retry_budget_ms=round(_RETRY_BUDGET_S * 1000),
         recurse=opts.recursive,
         ocr_model_id=ex.ocr_model_id() if ocr_on else "",
         workers=opts.workers,
@@ -278,7 +283,8 @@ def tier_of(ext: str) -> int:
 
 
 def _iter_files(root: Path, *, recursive: bool,
-                notes: list[str] | None = None) -> list[Path]:
+                notes: list[str] | None = None,
+                failures: list[str] | None = None) -> list[Path]:
     """Every file under ``root``, guarded against a symlink/junction cycle.
 
     ``Path.rglob`` alone will happily walk into a directory that loops back to
@@ -298,10 +304,27 @@ def _iter_files(root: Path, *, recursive: bool,
     Windows-native way productions get mapped in). ``os.path.realpath()``
     resolves both kinds, so cycle detection tracks each directory's resolved
     real path instead.
+
+    **One traversal for both modes** (Codex review #1 round 2, F-3). The
+    non-recursive mode used to be a separate one-liner —
+    ``[p for p in root.glob("*") if p.is_file()]`` — and that is a silent-loss
+    path, because ``Path.is_file()`` swallows the ``OSError`` a failed ``stat``
+    raises and answers ``False``. An entry that could not be examined therefore
+    left the inventory before :func:`scan` could make it an unreadable Tier-2
+    record, and the recursive branch's disclosure was never reached: same
+    folder, ``recursive=False``, no warning, no index row, no accounting
+    representation. The two modes now differ in exactly one statement — whether
+    a directory is pushed onto the stack — so no future correction can land on
+    one of them only.
+
+    ``failures`` is the **enumeration**-failure channel, and it is not the same
+    thing as ``notes`` (round-2 F-2). A directory that would not list is not a
+    degradation to disclose and continue past: DocIQ has not established what
+    is under it, so it has no completeness claim to make over the folder, and
+    :func:`run` turns a non-empty ``failures`` into a BLOCKED, non-publishable
+    run. An entry that cannot be *stat'd* is a different case and stays in
+    ``notes`` — it is one known path, and it is inventoried rather than lost.
     """
-    if not recursive:
-        return [p for p in sorted(root.glob("*"), key=lambda q: q.as_posix())
-                if p.is_file()]
     files: list[Path] = []
     seen_real = {os.path.realpath(root)}
     stack = [root]
@@ -317,27 +340,47 @@ def _iter_files(root: Path, *, recursive: bool,
             # deliverable. It is the largest silent deletion in the pipeline,
             # and it is invisible precisely because the missing files never
             # became records that something downstream could miss.
+            #
+            # Round 2 (F-2): a warning was not enough. The run went on to
+            # publish, which meant an inventory known to be short by an unknown
+            # amount replaced a previous complete one — the same destruction
+            # B-1 is about, reached by a different door. It is recorded in
+            # ``failures`` as well, and ``failures`` blocks the run.
+            msg = (
+                f"a folder could not be listed and NOTHING inside it was "
+                f"inventoried: '{rel_path_of(current, root)}' ({exc}). "
+                "Check the folder's permissions and re-run; the documents "
+                "under it are absent from this run entirely.")
             if notes is not None:
-                notes.append(
-                    f"a folder could not be listed and NOTHING inside it was "
-                    f"inventoried: '{rel_path_of(current, root)}' ({exc}). "
-                    "Check the folder's permissions and re-run; the documents "
-                    "under it are absent from this run entirely.")
+                notes.append(msg)
+            if failures is not None:
+                failures.append(msg)
             continue
         for p in children:
             try:
-                is_dir = p.is_dir()
+                is_dir = stat.S_ISDIR(os.stat(p).st_mode)
             except OSError as exc:
-                # Same class, one entry rather than a subtree: a path that
-                # cannot be stat'd was skipped outright, so it appeared in no
-                # list at all — not even the Unsupported one, which is where an
-                # unreadable-but-present file belongs.
+                # ``os.stat`` rather than ``Path.is_dir()`` precisely so this
+                # branch is REACHABLE: ``is_dir()`` swallows the error and
+                # answers False, which routed an unexaminable entry down the
+                # file path in one mode and off the end of the world in the
+                # other.
+                #
+                # The entry is kept, not skipped. ``scan`` will try to hash it,
+                # fail twice, and inventory it as an unreadable Tier-2 record —
+                # which is where a present-but-unreadable file belongs, and is
+                # what the earlier draft's ``continue`` denied it. A path that
+                # cannot be examined is a finding, and a finding is a row.
                 if notes is not None:
                     notes.append(
-                        f"an entry could not be examined and is absent from "
-                        f"this run: '{rel_path_of(p, root)}' ({exc})")
+                        f"an entry could not be examined and is inventoried as "
+                        f"unreadable rather than dropped: "
+                        f"'{rel_path_of(p, root)}' ({exc})")
+                files.append(p)
                 continue
             if is_dir:
+                if not recursive:
+                    continue
                 real = os.path.realpath(p)
                 if real in seen_real:
                     if notes is not None:
@@ -350,12 +393,14 @@ def _iter_files(root: Path, *, recursive: bool,
                 stack.append(p)
             else:
                 files.append(p)
+    files.sort(key=lambda q: q.as_posix())
     return files
 
 
 def scan(root: Path, *, recursive: bool = True,
         notes: list[str] | None = None,
-        run_notes: RunNotes | None = None) -> list[FileEntry]:
+        run_notes: RunNotes | None = None,
+        failures: list[str] | None = None) -> list[FileEntry]:
     """Inventory every file under ``root``, hashed and tiered, in contract order.
 
     Sorting happens here rather than at emit time so every consumer of a scan
@@ -371,10 +416,16 @@ def scan(root: Path, *, recursive: bool = True,
     attempt is what separates "locked for an instant" from "unreadable", and
     it is recorded in ``run_notes`` rather than the hashed warnings because
     which of the two runs hit the lock is not a fact about the evidence.
+
+    ``failures`` is passed straight through to :func:`_iter_files` and collects
+    the directories whose enumeration failed. A caller that ignores it gets a
+    best-effort inventory and no completeness claim; :func:`run` does not
+    ignore it (round-2 F-2).
     """
     root = Path(root)
     entries: list[FileEntry] = []
-    for p in _iter_files(root, recursive=recursive, notes=notes):
+    for p in _iter_files(root, recursive=recursive, notes=notes,
+                         failures=failures):
         if STATE_DIR in p.parts:  # our own run state is not evidence
             continue
         ext = p.suffix.lower()
@@ -471,18 +522,36 @@ def _resume_path(output_root: Path) -> Path:
 def _resume_identity(config: RunConfig) -> str:
     """What a resume file must match before its records may be replayed.
 
-    Everything that changes output bytes is in here. A resume file written by a
-    different profile or a different OCR engine would replay text this run
-    would not have produced — silently, and with this run's identity on it.
+    **The run's own identity projection, not a hand-picked subset of it**
+    (Codex review #1 round 2, F-4a). This used to name seven fields, and the
+    list went stale the moment amendment A-04 added ``RunConfig.limits``: a
+    record cached with OCR disabled, with different OCR model bytes, or under
+    different XLSX/CSV/ZIP caps satisfied it and was replayed under a run whose
+    manifest then honestly hashed the *new* settings. The documents were not
+    produced under the configuration the deliverable claims. Neither "OCR
+    disabled" nor a successfully truncated spreadsheet is a degradation, so
+    nothing else in the resume path stopped those records either.
+
+    Deriving it from :func:`~dociq.contracts.to_jsonable` with
+    ``for_identity=True`` makes the resume key and the manifest's identity the
+    same function of the same object, by construction. A future field added to
+    :class:`RunConfig` is covered on the day it is added, which is precisely
+    what a hand-picked list cannot promise.
+
+    Two consequences worth naming. ``workers`` is in ``_IDENTITY_EXCLUDED``, so
+    resuming on a differently-sized pool still works — pool width must not
+    change output, and if it ever does that is a defect to fix rather than a
+    reason to re-extract. And the key is now *stricter* than it was: a changed
+    master-index snapshot refuses the journal. That costs re-extraction, which
+    is the cheap side of this trade.
+
+    The caller must hand this the **effective** configuration — the one
+    carrying ``limits`` and the actual OCR engine — before the walk, not the
+    caller's original. :mod:`dociq.pipeline` builds it pre-walk for that reason.
     """
     return canonical_json({
         "contract": CONTRACT_VERSION,
-        "source_root": config.source_root,
-        "profile_id": config.profile_id or "",
-        "profile_version": config.profile_version or "",
-        "ocr_engine": config.ocr_engine,
-        "ocr_engine_version": config.ocr_engine_version,
-        "ocr_conf_threshold_pct": config.ocr_conf_threshold_pct,
+        "config": to_jsonable(config, for_identity=True),
     })
 
 
@@ -992,8 +1061,22 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
 
     warnings: list[str] = []
     scan_notes: list[str] = []
+    scan_failures: list[str] = []
 
-    # Preflight 1 of 2 (Codex B-1). A source root that is not there produces an
+    def blocked_result(reason: str, *extra: str) -> RunResult:
+        """Record a BLOCKED termination and return the matching result.
+
+        Every abort leaves through here (round-2 F-1). The two contract fields
+        and ``RunNotes.termination`` are set from ONE value, so the machine
+        result cannot say ``completed`` while the outcome wrapper says
+        ``blocked`` — which is exactly what three separate early returns
+        produced when each was free to fill in only the half it remembered.
+        """
+        notes.termination = RunTermination(TerminalStatus.BLOCKED, reason)
+        return notes.termination.stamp(
+            RunResult(config=config, warnings=(reason,) + extra))
+
+    # Preflight 1 of 3 (Codex B-1). A source root that is not there produces an
     # empty scan, which used to look exactly like a folder containing nothing:
     # the run went green, and — because the pipeline purges before it emits —
     # the previous complete reduction of that matter was deleted and replaced
@@ -1004,24 +1087,47 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
             f"The source folder could not be read: {config.source_root}. It is "
             "not a directory, or the drive or network share it lives on is not "
             "available. Nothing was scanned; check the path and re-run.")
-        notes.termination = RunTermination(TerminalStatus.BLOCKED, blocked)
-        return RunResult(config=config, warnings=(blocked,))
+        return blocked_result(blocked)
 
     entries = scan(root, recursive=opts.recursive, notes=scan_notes,
-                   run_notes=notes)
+                   run_notes=notes, failures=scan_failures)
     warnings.extend(sorted(scan_notes))
+
+    # Preflight 2 of 3 (Codex review #1 round 2, F-2). A directory that would
+    # not list is not a degradation this run can disclose and carry on past.
+    #
+    # DocIQ's product is a completeness claim over a folder, and a subtree it
+    # could not enumerate is a subtree whose contents it has not established —
+    # not "some files were skipped", but "an unknown number of unknown files".
+    # The previous draft appended a warning and returned what it had, so a
+    # permission error on the root produced a COMPLETED run with zero
+    # documents that then purged and replaced a complete prior reduction. A
+    # warning does not make an incomplete corpus safe to publish.
+    #
+    # The boundary matters and is deliberate: a directory that WAS successfully
+    # enumerated and holds no files records no failure here, so an empty folder
+    # remains a legitimate completed run that may replace prior deliverables.
+    # "Successfully enumerated" is the whole distinction.
+    if scan_failures:
+        return blocked_result(
+            f"The folder could not be fully inventoried: "
+            f"{len(scan_failures)} folder(s) could not be listed, so DocIQ has "
+            "NOT established what this matter contains. No deliverables were "
+            "written and the previous run's outputs were left exactly as they "
+            "were. Fix the folder permissions or reconnect the share, then "
+            "re-run.",
+            *sorted(scan_failures))
 
     dups = duplicate_groups(entries)
     for h, paths in dups.items():
         warnings.append(f"duplicate content (sha256 {h[:12]}…): "
                         + ", ".join(paths))
 
-    # Preflight 2 of 2. Same class as the source-root check above: the run
-    # never starts, so it has nothing to publish and nothing it may replace.
+    # Preflight 3 of 3. Same class as the two checks above: the run never
+    # starts, so it has nothing to publish and nothing it may replace.
     disk = preflight_disk(entries, output_root)
     if disk:
-        notes.termination = RunTermination(TerminalStatus.BLOCKED, disk)
-        return RunResult(config=config, warnings=(disk,))
+        return blocked_result(disk)
 
     tier1 = [e for e in entries if e.tier == 1]
     tier2 = [e for e in entries if e.tier == 2]
@@ -1248,9 +1354,17 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
     n_failed_so_far = sum(1 for d in documents
                           if d.status is ProcessingStatus.FAILED)
     emit_progress("")
-    return RunResult(config=config, documents=tuple(documents),
-                     unsupported=tuple(all_unsupported),
-                     warnings=tuple(warnings))
+    # Stamped, not defaulted — and this is the site Codex's F-1 probe did NOT
+    # reach, found by enumerating the class rather than the repro. The two
+    # blocked returns above are the ones a missing-root probe exercises; THIS
+    # one is the CANCELLED path, where the walk sets `notes.termination` at the
+    # bottom of the loop and then built a result that took the COMPLETED
+    # default anyway. A cancelled run's machine contract claimed a complete
+    # corpus, from the same defect, on the path that actually carries documents.
+    return notes.termination.stamp(
+        RunResult(config=config, documents=tuple(documents),
+                  unsupported=tuple(all_unsupported),
+                  warnings=tuple(warnings)))
 
 
 def _clear_scratch(scratch: Path) -> None:

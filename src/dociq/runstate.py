@@ -12,13 +12,19 @@ The consequence is not a status-display bug. A blocked run purges the previous
 run's deliverables and writes an empty set over them, so a failed disk check
 destroys the last good reduction of a matter. That is provenance loss.
 
-This module is the fix's vocabulary: one enumeration and one small record,
-carried beside the contract rather than inside it. It deliberately does not
-live in :mod:`dociq.contracts` — that module is frozen, and widening it is a
-stop-the-line event across three tracks (see ``docs/contracts/amendments.md``
-A-05, which proposes exactly that as the eventual home). Nothing here imports a
-third-party library or another DocIQ package, so the GUI may depend on it under
-the freeze's Track-C import rule.
+This module is the fix's vocabulary: one small record and the operator-facing
+prose that goes with it.
+
+The enumeration used to be declared here as well, on the reasoning that
+:mod:`dociq.contracts` was frozen. Amendment A-06 then added a value-identical
+:class:`~dociq.contracts.TerminalStatus` to the contract, and nothing
+reconciled the two — the walk carried this module's class while
+:class:`~dociq.contracts.RunResult` declared the contract's, so an ``is``
+comparison across that seam answered ``False`` about two statuses that were the
+same status (Codex review #1 round 2, F-1). Amendment A-07 settles it: the
+contract's is the only definition and this module re-exports it. Importing
+:mod:`dociq.contracts` costs the GUI nothing — the contract has no third-party
+dependency, which is the property Track C's import rule is actually about.
 
 Two properties do all the work:
 
@@ -31,8 +37,9 @@ Two properties do all the work:
 
 from __future__ import annotations
 
-import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+from .contracts import RunResult, TerminalStatus
 
 __all__ = [
     "TerminalStatus",
@@ -53,24 +60,6 @@ last COMPLETE run's audit trail, untouched."""
 
 STATUS_FILENAME = "run_status.json"
 """The machine-readable record of an aborted run, inside :data:`INCOMPLETE_DIR`."""
-
-
-class TerminalStatus(str, enum.Enum):
-    """How a run finished. The values reach disk (``processing_log.json``'s
-    ``run`` section, ``incomplete_run/run_status.json``), so renaming one is a
-    consumer-visible change."""
-
-    COMPLETED = "completed"
-    """The walk covered every file the scan found. The only status under which
-    deliverables may be published."""
-
-    BLOCKED = "blocked"
-    """A preflight refused to start: the source folder is not there, or the
-    output volume cannot hold the result. No file was extracted."""
-
-    CANCELLED = "cancelled"
-    """The operator stopped the run. Whatever was extracted is partial by
-    definition and makes no completeness claim over the corpus."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +95,28 @@ class RunTermination:
             f"run's outputs in this folder were left exactly as they were. "
             f"{self.reason}"
         ).strip()
+
+    def stamp(self, result: RunResult) -> RunResult:
+        """Return ``result`` carrying THIS termination in its contract fields.
+
+        The one way a :class:`~dociq.contracts.RunResult` is allowed to acquire
+        a terminal status, and the reason F-1 cannot come back. Amendment A-06
+        added ``terminal_status`` with a COMPLETED default so the change would
+        be additive, and every abort path then took the default: the outcome
+        wrapper said ``blocked`` while the machine contract in the same object
+        said ``completed``, which is worse than the field's absence. Defaulting
+        made the change safe to land and made forgetting it silent.
+
+        A method rather than two keyword arguments at each site because the two
+        fields must agree with each other and with :class:`RunNotes`; one call
+        cannot set half of them, and one call cannot set them from a different
+        termination than the one the pipeline is about to act on.
+        """
+        return replace(
+            result,
+            terminal_status=self.status,
+            terminal_status_reason=self.reason,
+        )
 
     def as_jsonable(self) -> dict[str, object]:
         return {

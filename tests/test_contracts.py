@@ -346,7 +346,7 @@ def test_changing_the_ocr_threshold_changes_the_run_identity():
 
 def test_contract_version_is_the_frozen_one():
     # Bumping this is the amendment procedure's final step, not its first.
-    assert CONTRACT_VERSION == "1.5.0"
+    assert CONTRACT_VERSION == "1.6.0"
 
 
 def test_a_run_result_describes_a_completed_run_by_default():
@@ -450,8 +450,8 @@ def test_a_nonsensical_ratio_band_is_rejected_at_construction(lo: float, hi: flo
 def limits(**kw: object) -> EffectiveLimits:
     base = dict(
         xlsx_max_rows=50000, csv_max_rows=50000, zip_max_mb=500,
-        zip_max_members=2000, zip_max_depth=3, file_timeout_s=3600,
-        retry_max=500, retry_budget_s=1800, recurse=True,
+        zip_max_members=2000, zip_max_depth=3, file_timeout_ms=3_600_000,
+        retry_max=500, retry_budget_ms=1_800_000, recurse=True,
         ocr_model_id="rapidocr-onnxruntime 1.2.3/abcd", workers=14,
     )
     base.update(kw)
@@ -461,7 +461,7 @@ def limits(**kw: object) -> EffectiveLimits:
 @pytest.mark.parametrize(
     "field",
     ["xlsx_max_rows", "csv_max_rows", "zip_max_mb", "zip_max_members",
-     "zip_max_depth", "file_timeout_s", "retry_max", "retry_budget_s",
+     "zip_max_depth", "file_timeout_ms", "retry_max", "retry_budget_ms",
      "recurse", "ocr_model_id"],
 )
 def test_every_output_affecting_limit_changes_the_run_identity(field: str):

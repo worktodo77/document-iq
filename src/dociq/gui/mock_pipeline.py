@@ -50,6 +50,7 @@ from dociq.gui.pipeline import (
     TokenEstimate,
     config_from,
 )
+from dociq.runstate import RunTermination, TerminalStatus
 
 # ---------------------------------------------------------------------------
 # THE FIXTURE. Every illustrative number in the Sprint-1 shell is here and
@@ -521,11 +522,29 @@ class MockPipeline:
                 ),
             )
 
-        result = RunResult(
-            config=config,
-            documents=tuple(documents),
-            unsupported=tuple(unsupported),
-            warnings=(),
+        # Stamped, not defaulted (Codex review #1 round 2, F-1 sibling sweep).
+        # Both loops above ``break`` on ``should_cancel()``, and this result
+        # then took the contract's COMPLETED default — so the demo backend
+        # handed Track C's GUI a partial corpus labeled complete, which is the
+        # exact confusion the typed status exists to remove. The mock is what
+        # the GUI is developed against, so a mock that models the failure
+        # incorrectly teaches the consumer to trust the wrong field.
+        termination = (
+            RunTermination(
+                TerminalStatus.CANCELLED,
+                f"The demonstration run was stopped after {len(documents)} of "
+                f"{len(_CORPUS)} document(s) had been read.",
+            )
+            if should_cancel()
+            else RunTermination()
+        )
+        result = termination.stamp(
+            RunResult(
+                config=config,
+                documents=tuple(documents),
+                unsupported=tuple(unsupported),
+                warnings=(),
+            )
         )
 
         chars_before = sum(len(p.text) for d in documents for p in d.pages)

@@ -147,9 +147,16 @@ and in the warning naming the parent that was not scanned.
 Byte-identical across runs with the same **run identity** — folder, profile,
 master index, and (contract v1.3.0, amendment A-04, from Codex review #1
 finding B-2) `RunConfig.limits`: the XLSX/CSV/ZIP caps, ZIP depth, per-file
-timeout, retry bounds, recursion flag and OCR model identity. Thread-pool
-width is recorded and deliberately excluded. `output_manifest.json` states the
-full identity in its `claim_identity` field:
+timeout, retry bounds, recursion flag and OCR model identity — the timeout and
+retry budget in exact integer **milliseconds** since v1.6.0 (A-08), because
+rounding two different float deadlines to the same whole second was a collision
+inside the field that exists to prevent one.
+
+The run's **terminal status** is hashed with the result (v1.5.0, A-06), so a
+cancelled partial set and a complete set cannot share an identity. Thread-pool
+width and the free-form `terminal_status_reason` (v1.6.0, A-07) are recorded
+and deliberately excluded. `output_manifest.json` states the full identity in
+its `claim_identity` field:
 
 - `clean_text/*.txt`
 - `sources.json`

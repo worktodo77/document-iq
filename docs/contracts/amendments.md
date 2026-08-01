@@ -346,3 +346,157 @@ the pipeline publishes nothing — and the first entry of `RunResult.warnings` i
 the disclosure. That is a mitigation, not the field Codex asked for. When this
 amendment lands, `runstate.TerminalStatus` becomes a re-export and the change is
 a one-line read in each of the sites above.
+
+---
+
+## A-07 — two `TerminalStatus` enumerations, and neither abort path filled the field in
+
+**Raised by:** the round-2 fix package, 2026-08-01, from Codex review #1 round 2
+finding **F-1**, against contract **v1.5.0**
+**Affects:** `TerminalStatus`, `RunResult.terminal_status_reason`,
+`_IDENTITY_EXCLUDED`; `runstate`, the walk, `pipeline._abort`, the GUI mock
+**Severity:** MINOR
+**Status:** **APPLIED — contract v1.6.0.**
+
+### The case
+
+A-06 landed `TerminalStatus` and `RunResult.terminal_status` in the contract
+while `runstate.py` still declared a value-identical enumeration of its own, and
+nothing reconciled them. The walk carried `runstate`'s type; `RunResult`
+declared the contract's. Two enumerations spelled the same way compare `==` on
+their string values and `is` never, so the identity check the typed status
+exists to enable answered `False` about two statuses that are the same status.
+
+The deeper half is that A-06 defaulted the field to `COMPLETED` so the change
+would be additive — and *every* abort path then took the default. Codex's probe
+on a missing source root:
+
+```text
+RunNotes termination = blocked
+RunResult terminal_status = completed
+RunResult terminal_status_reason = ''
+```
+
+A consumer holding the machine contract was told the opposite of the outcome
+wrapper, the log beside it and the `run_status.json` under it. The round-1 test
+asserted `PipelineOutcome.termination` and the log — both of which were right —
+and therefore could not see it.
+
+**Sibling enumeration.** Six `RunResult` construction sites exist. Three were
+wrong (`walker.run`'s two blocked preflights and `pipeline._abort`); a fourth,
+`walker.run`'s normal return, was wrong on the **cancelled** path and was not
+covered by Codex's probe; a fifth, `gui/mock_pipeline`, was wrong on its own
+cancel path and is what Track C develops against. Only `pipeline.run`'s final
+result was right, and only because it is unreachable except when complete.
+
+### What was applied
+
+`contracts.TerminalStatus` is the only definition and `runstate` imports it.
+Every returned `RunResult` is stamped by `RunTermination.stamp()`, which sets
+both fields from one value, so no site can set half of them or set them from a
+different termination than the pipeline is about to act on.
+
+`terminal_status_reason` joins `_IDENTITY_EXCLUDED`, adopting the reviewer's
+advisory. The enum still hashes, so a cancelled partial set and a complete set
+still cannot share an identity — the distinction is carried by the typed status
+and does not need the prose. Leaving the free-form sentence in the hash would
+mean rewording an operator message changes the identity of runs already
+produced, which is exactly why `ratio_low`/`ratio_high` are excluded.
+
+`TerminalStatus.BLOCKED`'s docstring is widened to name the third way in: an
+inventory that could not be enumerated (F-2, below).
+
+---
+
+## A-08 — `EffectiveLimits` recorded float deadlines at whole-second resolution
+
+**Raised by:** the round-2 fix package, 2026-08-01, from Codex review #1 round 2
+finding **F-4b**, against contract **v1.5.0**
+**Affects:** `EffectiveLimits.file_timeout_s` → `file_timeout_ms`,
+`retry_budget_s` → `retry_budget_ms`
+**Severity:** MINOR, but **renaming rather than additive** — see below
+**Status:** **APPLIED — contract v1.6.0.**
+
+### The case
+
+A-04 added `EffectiveLimits` precisely so that a setting able to change output
+evidence could not sit outside the hashed configuration. Two of its fields then
+reintroduced the same defect at finer grain. `WalkOptions.file_timeout_s` and
+`DOCIQ_RETRY_BUDGET_S` are floats used as float-valued deadlines, and
+`effective_limits` recorded `round(seconds)`. Codex's probe:
+
+```text
+recorded file_timeout_s = 1 / 1
+effective limits equal = True
+```
+
+A 1.1 s limit and a 1.4 s limit abandon different files and present the same
+identity. That is a determinism-identity collision inside the field added to
+close one.
+
+### Why milliseconds rather than rejecting fractional values
+
+Rejecting fractions was the alternative and would have removed a capability the
+watchdog uses — a sub-second per-file limit is legitimate, and the acceptance
+harness sets one. Milliseconds keep it and remove the collision, and the
+recorded value is still an exact integer, so Principle 5's bar on floats in
+identity fields is honored.
+
+### Why the fields were renamed, not reinterpreted
+
+The semantics changed, so the name had to. A consumer reading
+`limits.file_timeout_s` now breaks loudly instead of silently reading a number
+in the wrong unit — 3600 seconds versus 3,600,000 milliseconds is a
+thousand-fold error that no type checker would catch and no test outside this
+repository would see. Under the freeze procedure a loud break is the correct
+outcome for a semantic change; a silent one is not.
+
+---
+
+## A-09 — 1.4.0's replacement token fields were never populated
+
+**Raised by:** the round-2 fix package, 2026-08-01, from Codex review #1 round 2
+finding **F-5**, against contract **v1.5.0**
+**Affects:** no type change — `TokenEstimate.structural_tokens` and
+`token_ceiling`, and `pipeline._to_contract_estimate`
+**Severity:** DOCUMENTATION + implementation
+**Status:** **APPLIED — recorded at contract v1.6.0.**
+
+### The case
+
+A-05(a) withdrew `floor_tokens` and added `structural_tokens` and
+`token_ceiling` to replace it. The projection correctly set the withdrawn field
+to 0 and never set the two replacements, so both stayed at their "not measured"
+defaults while the same run wrote both numbers into the processing log and the
+summary PDF. Codex's probe, on text with five pre-tokens and 20 UTF-8 bytes:
+
+```text
+MeasuredEstimate: pretokens=5, utf8_bytes=20
+contract TokenEstimate: structural_tokens=0, token_ceiling=0
+```
+
+That is worse than the fields' absence. A consumer holding the machine contract
+and a consumer reading the log were told different things about one run, and the
+contract — the artifact the freeze exists to make trustworthy — was the wrong
+one. A GUI adapter reading `structural_tokens` would have rendered a measured
+corpus as unmeasured.
+
+### What was applied
+
+`_to_contract_estimate` populates both from `est.profile`. It is recorded here
+rather than left as an implementation fix because the machine contract's
+agreement with the log is a property of the contract, not of the pipeline: the
+next projection added has to satisfy it too.
+
+---
+
+## Round-2 finding F-2 — recorded here for the contract-side note only
+
+F-2 (an inventory enumeration failure must make the run non-publishable) and F-3
+(the non-recursive walk dropped unstattable entries) are implementation
+findings and needed no new type. Their contract-visible consequence is the
+widened `TerminalStatus.BLOCKED` docstring under A-07: a folder DocIQ could not
+list is now a blocked run, while a folder that was **successfully enumerated**
+and holds no files remains a legitimate empty completed run that may replace
+prior deliverables. That boundary is the reviewer's, it is load-bearing, and
+`tests/test_incomplete_runs.py` asserts both sides of it.

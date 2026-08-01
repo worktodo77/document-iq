@@ -229,6 +229,21 @@ def _to_contract_estimate(est: MeasuredEstimate, label: str) -> TokenEstimate:
         ratio_low=est.basis.low_x100 / 100,
         ratio_high=est.basis.high_x100 / 100,
         floor_tokens=0,
+        # A-05(a)'s replacement fields, POPULATED (round-2 F-5). 1.4.0 added
+        # them and the projection never set them, so both stayed at their "not
+        # measured" defaults while the very same run wrote both numbers into
+        # the processing log and the summary PDF. The machine contract read
+        # zero for text that had been measured — a consumer holding the
+        # contract and a consumer reading the log were told different things
+        # about one run, and the contract was the one that was wrong.
+        #
+        # These are the two the withdrawn ``floor_tokens`` is replaced BY, and
+        # each says exactly what it is: ``structural_tokens`` is the measured
+        # pre-token count, a characterization under the stated assumptions and
+        # a bound in neither direction; ``token_ceiling`` is the one
+        # tokenizer-independent bound DocIQ asserts.
+        structural_tokens=est.profile.pretokens,
+        token_ceiling=est.profile.token_ceiling,
         ratio_refuted=est.ratio_refuted,
         provenance=est.provenance_text(label),
     )
@@ -517,11 +532,17 @@ def _abort(
     documents = walked.documents
     warnings = list(walk_notes.messages()) + list(walked.warnings)
 
-    result = RunResult(
-        config=config,
-        documents=documents,
-        unsupported=walked.unsupported,
-        warnings=tuple(warnings),
+    # Stamped from the SAME termination the outcome carries (round-2 F-1).
+    # This construction site took the contract's COMPLETED default, so an
+    # aborted run handed a consumer a machine result that contradicted the
+    # wrapper around it, the log beside it and the run_status.json under it.
+    result = walk_notes.termination.stamp(
+        RunResult(
+            config=config,
+            documents=documents,
+            unsupported=walked.unsupported,
+            warnings=tuple(warnings),
+        )
     )
 
     # The correctness gate fails as well as publication being withheld. Codex
@@ -661,10 +682,70 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     if index is None and opts.master_index_path:
         index = load_master_index(opts.master_index_path)
 
+    # ---- The effective configuration, built BEFORE the walk ----------------
+    #
+    # Codex review #1 round 2, F-4a. This used to be assembled *after* the walk
+    # returned, and the walk was handed the caller's original ``config``. The
+    # walk is where the resume journal is written and matched, so the journal
+    # was keyed on a configuration that did not yet know its own limits, its
+    # own OCR engine, or its master index — while the deliverables recorded the
+    # completed one. A record cached with OCR disabled, or under different
+    # caps, or read by different OCR model bytes, satisfied that key and was
+    # replayed into a run whose manifest then honestly hashed the *new*
+    # settings. The documents were not produced under the configuration the
+    # deliverable claims they were.
+    #
+    # Everything knowable before Stage 1 is therefore fixed before Stage 1.
+    # ``bates_pattern`` is the sole exception and cannot be otherwise — it is
+    # Stage 3's output — and it is sound to leave out: Bates is applied to
+    # already-extracted pages, so it cannot change what the walk produced or
+    # what a replayed record would have been.
+    ocr_ran = (opts.walk or walker.WalkOptions()).ocr_enabled
+    walk_config = replace(
+        config,
+        # ``WalkOptions.ocr_enabled`` is not part of RunConfig, and RunConfig's
+        # own docstring says anything influencing output and absent from it is
+        # a determinism bug — which this was. Measured on the real corpus: the
+        # same folder, the same (identical) RunConfig, OCR on and off, produced
+        # 400 OCR pages versus 400 more EMPTY pages and a different hashed
+        # content section, while the recorded configuration claimed both runs
+        # used rapidocr 1.2.3. The engine fields are the contract's own place
+        # to say this, so the run stamps what it actually did rather than what
+        # it was configured with.
+        #
+        # The same argument extends to everything A-04 added (finding B-2): the
+        # XLSX/CSV/ZIP caps, the ZIP depth, the per-file timeout, the retry
+        # bounds, whether the walk recursed, and the bytes of the OCR model.
+        # They are captured from the modules that own them, so the recorded
+        # identity is what the run used rather than a restatement that can go
+        # stale.
+        limits=walker.effective_limits(opts.walk, ocr_enabled=ocr_ran),
+        ocr_engine=config.ocr_engine if ocr_ran else OCR_DISABLED,
+        ocr_engine_version=config.ocr_engine_version if ocr_ran else "",
+        master_index=index.snapshot if index else config.master_index,
+    )
+    # ``profile_id`` / ``profile_version`` are DELIBERATELY not resolved from
+    # ``opts.profiles`` here, and the reason is worth recording because the
+    # obvious tidy-up is wrong.
+    #
+    # :func:`walker._record` stamps whatever the walk config carries onto every
+    # DocumentRecord, and Stage 4 (:func:`~dociq.profiles.apply.apply_profiles`)
+    # overwrites that stamp only on documents a profile actually CLAIMED — an
+    # unclaimed document keeps what it arrived with. Resolving the library's
+    # first profile into the walk config would therefore label every unclaimed
+    # document with a profile that did not match it, which is a false statement
+    # in the index and in hashed content both.
+    #
+    # It costs nothing on the resume key. A replayed walk record is
+    # profile-independent in its text, the stamp it carries is
+    # ``config.profile_id`` — which the resume key does cover — and Stage 4
+    # re-runs over replayed records exactly as it does over fresh ones. The
+    # emitted profile is the same either way.
+
     # ---- Stages 1-2 --------------------------------------------------------
     t = time.monotonic()
     walk_notes = walker.RunNotes()
-    walked = walker.run(config, opts.walk, walk_notes)
+    walked = walker.run(walk_config, opts.walk, walk_notes)
     mark("walk_extract", t)
 
     # Codex B-1. A blocked or cancelled walk stops HERE, before Stage 3 and
@@ -674,7 +755,10 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # none of them can be the place a future edit reintroduces it.
     if not walk_notes.termination.publishable:
         return _abort(
-            config=config,
+            # The effective configuration, not the caller's — an aborted run
+            # must record the settings it was going to run under, or its
+            # diagnostic log describes a different run than the one that failed.
+            config=walk_config,
             walked=walked,
             walk_notes=walk_notes,
             layout=layout,
@@ -748,33 +832,13 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     warnings.extend(applied.warnings)
     mark("classify", t)
 
-    # The config the deliverables record is the one the run actually used, which
-    # includes a Bates pattern that could not be known before Stage 3 ran.
-    #
-    # It also includes whether OCR ran at all. ``WalkOptions.ocr_enabled`` is not
-    # part of :class:`RunConfig`, and RunConfig's own docstring says that
-    # anything influencing output and absent from it is a determinism bug —
-    # which this was. Measured on the real corpus: the same folder, the same
-    # (identical) RunConfig, OCR on and off, produced 400 OCR pages versus 400
-    # more EMPTY pages and a different hashed content section, while the
-    # recorded configuration claimed both runs used rapidocr 1.2.3. The engine
-    # fields are the contract's own place to say this, so the run stamps what it
-    # actually did rather than what it was configured with.
-    #
-    # The same argument extends to everything A-04 added (Codex review #1
-    # finding B-2): the XLSX/CSV/ZIP caps, the ZIP depth, the per-file timeout,
-    # the retry bounds, whether the walk recursed, and the bytes of the OCR
-    # model. Each can change the emitted evidence, and each sat outside the
-    # hashed configuration until now. They are captured from the modules that
-    # own them, so the recorded identity is what the run used rather than a
-    # restatement that can go stale.
-    ocr_ran = (opts.walk or walker.WalkOptions()).ocr_enabled
+    # The config the deliverables record is the one the walk actually ran
+    # under, plus the one thing that could not be known before Stage 3: the
+    # confirmed Bates pattern. Everything else was fixed before Stage 1 (F-4a,
+    # above), which is what makes the resume key and this identity the same
+    # configuration rather than two configurations that usually agree.
     effective = replace(
-        config,
-        limits=walker.effective_limits(opts.walk, ocr_enabled=ocr_ran),
-        ocr_engine=config.ocr_engine if ocr_ran else OCR_DISABLED,
-        ocr_engine_version=config.ocr_engine_version if ocr_ran else "",
-        master_index=index.snapshot if index else config.master_index,
+        walk_config,
         # Only a decision that was actually APPLIED is persisted. Recording the
         # pattern of a pending or rejected decision would make the next run
         # load it as a confirmation — the operator's "not yet" silently
@@ -785,6 +849,12 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             if decision is not None and decision.applies
             else (None if decision is not None else config.bates_pattern)
         ),
+        # The profile LIBRARY this run was driven by. Resolved here rather than
+        # into `walk_config` on purpose — see the note at the pre-walk block:
+        # stamping it onto records at walk time would label documents no
+        # profile claimed. What the run was configured with, and what matched a
+        # given document, are two different facts and only Stage 4 knows the
+        # second.
         profile_id=opts.profiles[0].profile_id if opts.profiles else config.profile_id,
         profile_version=(
             opts.profiles[0].version if opts.profiles else config.profile_version
@@ -833,16 +903,22 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     )
     mark("tokens", t)
 
-    result = RunResult(
-        config=effective,
-        documents=documents,
-        unsupported=unsupported,
-        warnings=tuple(all_warnings),
-        tokens_before=_to_contract_estimate(before, "before reduction"),
-        tokens_after=_to_contract_estimate(after, "after reduction"),
-        reconciliation=(
-            _to_contract_reconciliation(report) if index is not None else None
-        ),
+    # Stamped rather than left to the COMPLETED default, even though this line
+    # is only reachable for a complete run. The default is what made the three
+    # abort sites wrong silently; a construction site that states its status is
+    # one a future early return cannot quietly join.
+    result = walk_notes.termination.stamp(
+        RunResult(
+            config=effective,
+            documents=documents,
+            unsupported=unsupported,
+            warnings=tuple(all_warnings),
+            tokens_before=_to_contract_estimate(before, "before reduction"),
+            tokens_after=_to_contract_estimate(after, "after reduction"),
+            reconciliation=(
+                _to_contract_reconciliation(report) if index is not None else None
+            ),
+        )
     )
 
     # ---- Stage 5 -----------------------------------------------------------
