@@ -24,6 +24,7 @@ from dociq.contracts import (
     PageKind,
     PageRecord,
     ProcessingStatus,
+    ProfileSnapshot,
     TerminalStatus,
     ReconciliationReport,
     ReconciliationRow,
@@ -33,6 +34,7 @@ from dociq.contracts import (
     canonical_json,
     content_hash,
     document_sort_key,
+    run_identity,
     to_jsonable,
 )
 
@@ -363,16 +365,53 @@ def test_an_aborted_run_is_not_complete(status: TerminalStatus):
     assert not status.complete
 
 
-def test_completeness_changes_the_run_identity():
-    # Deliberately hashed. Excluding it would let a cancelled partial set and a
-    # complete set hash identically — exactly the confusion B-1 is about.
+def test_completeness_is_carried_but_NOT_part_of_the_corpus_identity():
+    """Reversed at 1.6.0 by amendment A-07, and the reversal is the point.
+
+    1.5.0 hashed the terminal status on the reasoning that a cancelled partial
+    set and a complete set must not hash identically. Codex's round-2 second
+    opinion (B-R2-1) showed the premise does not hold: an incomplete run
+    publishes no corpus and no corpus manifest, so the two can never be
+    compared — the previous completed manifest simply survives. Hashing an
+    invocation property into a corpus identity makes the byte-identical claim
+    describe something other than the bytes it covers, and makes rewording an
+    operator sentence change the identity of runs already produced.
+
+    What must NOT be given up is that the status is carried at all; that is the
+    other half of B-R2-1, and ``test_incomplete_runs.py`` asserts the pipeline
+    actually sets it on every path.
+    """
     cfg = RunConfig(source_root="s", output_root="o")
     done = RunResult(config=cfg)
     stopped = dataclasses.replace(
         done, terminal_status=TerminalStatus.CANCELLED,
         terminal_status_reason="operator stopped the run",
     )
-    assert content_hash(done) != content_hash(stopped)
+    assert content_hash(done) == content_hash(stopped), (
+        "termination is a property of the invocation, not of a corpus that was "
+        "never published")
+    # Carried, though — excluding it from identity must not mean dropping it.
+    assert stopped.terminal_status is TerminalStatus.CANCELLED
+    assert stopped.terminal_status_reason == "operator stopped the run"
+
+
+def test_the_destination_is_not_part_of_the_run_identity():
+    """Amendment A-08, from B-R2-2's internal inconsistency.
+
+    Three parts of one system described the identity differently: this
+    projection hashed ``output_root``, the manifest's claim named the output
+    folder, and both the processing log and the acceptance harness treated the
+    destination as irrelevant — the harness runs the same corpus to two
+    different folders and requires one identity. Where a run's results are
+    written is not an input that changes them.
+    """
+    a = RunConfig(source_root="s", output_root="/matters/alpha/out")
+    b = RunConfig(source_root="s", output_root="/somewhere/else")
+    assert content_hash(a) == content_hash(b)
+    assert run_identity(a) == run_identity(b)
+    # And the source folder, which IS an input, still moves it.
+    assert run_identity(a) != run_identity(
+        dataclasses.replace(a, source_root="other"))
 
 
 def test_the_withdrawn_token_floor_is_reserved_and_says_so():

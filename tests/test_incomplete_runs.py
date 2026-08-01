@@ -279,16 +279,29 @@ def test_an_aborted_run_records_itself_where_it_cannot_collide(tmp_path, monkeyp
 
 
 def test_the_terminal_status_is_in_the_machine_readable_result_of_every_run(tmp_path):
+    """Codex round 2 named this test by name, and it deserved it.
+
+    It asserted ``PipelineOutcome.termination`` and the log — both of which were
+    already right — and never ``PipelineOutcome.result.terminal_status``, which
+    was wrong on every abort path. A test whose name promises "the machine-
+    readable result" has to look at the machine-readable result.
+    """
     completed = _run(tmp_path / "done")
     assert completed.termination == COMPLETED
     assert completed.termination.status is TerminalStatus.COMPLETED
+
+    # The assertion the name promised, which was missing.
+    assert completed.result.terminal_status is TerminalStatus.COMPLETED
+    assert completed.result.terminal_status_reason == ""
+
     log = json.loads(
         completed.layout.processing_log.read_text(encoding="utf-8"))
     assert log["run"]["terminal_status"] == "completed"
     assert log["run"]["published"] is True
-    # In `run`, never in `content`: a cancellation is a fact about the
-    # invocation, and hashing it would make an interrupted run and a clean one
-    # differ inside the byte-identical claim.
+    # In `run`, never in `content`. A cancellation is a fact about the
+    # invocation; hashing it would make an interrupted run and a clean one
+    # differ inside a byte-identical claim about the CORPUS — and an incomplete
+    # run publishes no corpus for a completed one to collide with (A-07).
     assert "terminal_status" not in json.dumps(log["content"])
 
 

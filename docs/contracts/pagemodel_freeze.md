@@ -148,15 +148,32 @@ Byte-identical across runs with the same **run identity** — folder, profile,
 master index, and (contract v1.3.0, amendment A-04, from Codex review #1
 finding B-2) `RunConfig.limits`: the XLSX/CSV/ZIP caps, ZIP depth, per-file
 timeout, retry bounds, recursion flag and OCR model identity — the timeout and
-retry budget in exact integer **milliseconds** since v1.6.0 (A-08), because
+retry budget in exact integer **milliseconds** since v1.6.0 (A-09), because
 rounding two different float deadlines to the same whole second was a collision
 inside the field that exists to prevent one.
 
-The run's **terminal status** is hashed with the result (v1.5.0, A-06), so a
-cancelled partial set and a complete set cannot share an identity. Thread-pool
-width and the free-form `terminal_status_reason` (v1.6.0, A-07) are recorded
-and deliberately excluded. `output_manifest.json` states the full identity in
-its `claim_identity` field:
+"Profile" means the **ordered tuple of profile snapshots** since v1.6.0 (A-08,
+from round-2 finding B-R2-2), each carrying `profile_id`, `version` and
+`profile_hash`. Naming only the first profile's id and version was not naming
+the input: Stage 4 claims a document with the first profile whose header
+patterns match, so every profile's content and their precedence order decide
+which pages drop. Measured before the fix — editing a second profile's rule
+without bumping its version, and separately swapping two profiles' order —
+each moved the corpus hash and left the recorded identity byte-identical.
+
+**Deliberately excluded**, each for a stated reason: thread-pool width (it must
+not change output); the **output folder** (v1.6.0, A-08 — it is the destination,
+not an input, and the acceptance harness proves one identity across two
+destinations); and the run's **terminal status and reason** (v1.6.0, A-07,
+reversing v1.5.0 — an incomplete run publishes no corpus and no manifest, so
+termination cannot collide with a completed corpus identity; the previous
+completed manifest survives instead).
+
+There is exactly one projection, `dociq.contracts.run_identity()`, and its value
+is persisted as `run_identity_sha256` in both `output_manifest.json` and the
+processing log's hashed content, so "which hash is the run identity" has one
+answer on disk. `output_manifest.json` states the full identity in its
+`claim_identity` field:
 
 - `clean_text/*.txt`
 - `sources.json`

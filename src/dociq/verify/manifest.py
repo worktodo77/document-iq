@@ -44,7 +44,13 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..contracts import CONTRACT_VERSION, DocIQError, canonical_json
+from ..contracts import (
+    CONTRACT_VERSION,
+    DocIQError,
+    RunConfig,
+    canonical_json,
+    run_identity,
+)
 from ..runstate import INCOMPLETE_DIR
 
 MANIFEST_NAME = "output_manifest.json"
@@ -97,23 +103,28 @@ CLAIM = (
 )
 
 IDENTITY_NOTE = (
-    "The run identity is the hashed projection of RunConfig: source folder, "
-    "output folder, profile id and version, master-index snapshot "
-    "(filename, sha256, row count), OCR confidence threshold, OCR engine and "
-    "engine version, confirmed Bates pattern, and RunConfig.limits — the "
+    "The run identity is dociq.contracts.run_identity(RunConfig) — the single "
+    "authoritative projection — and its value for this run is recorded below "
+    "as run_identity_sha256. It covers: the SOURCE folder; the ORDERED tuple "
+    "of profile snapshots (profile id, version and profile_hash for every "
+    "profile, in precedence order); the master-index snapshot (filename, "
+    "sha256, row count); the OCR confidence threshold, the OCR engine and "
+    "engine version; the confirmed Bates pattern; and RunConfig.limits — the "
     "XLSX/CSV row caps, the ZIP size/member/depth caps, the per-file timeout "
-    "and retry budget (both in exact integer MILLISECONDS, contract amendment "
-    "A-08), the retry maximum, whether the walk recursed, and the OCR "
-    "model identity (package version plus a hash of the model files). "
-    "The run's terminal status is hashed with the result, so a cancelled "
-    "partial set and a complete set cannot share an identity; the free-form "
-    "terminal_status_reason is EXCLUDED (A-07), because rewording an operator "
-    "message must not change the identity of runs already produced. "
-    "Thread-pool width is recorded in limits.workers and deliberately EXCLUDED "
-    "from the hash: pool width must not change output, and treating it as an "
-    "input would hide a determinism defect rather than expose one. Run "
-    "timestamp, operator and host are outside the hash by design, so a rerun at "
-    "a different time still proves byte-identical content."
+    "and retry budget (exact integer MILLISECONDS, contract amendment A-09), "
+    "the retry maximum, whether the walk recursed, and the OCR model identity "
+    "(package version plus a hash of the model files). "
+    "Deliberately EXCLUDED, each for a stated reason. The OUTPUT folder "
+    "(A-08): it is the destination evidence is written to, not an input that "
+    "changes it, and the acceptance harness proves one identity across two "
+    "different destinations. Thread-pool width (limits.workers): pool width "
+    "must not change output, and absorbing it would hide a determinism defect "
+    "rather than expose one. The run's terminal status and its reason (A-07): "
+    "termination is a property of an invocation, and an incomplete run "
+    "publishes no corpus and no manifest, so it cannot collide with a "
+    "completed corpus — the previous completed manifest survives instead. Run "
+    "timestamp, operator and host, so a rerun at a different time still proves "
+    "byte-identical content."
 )
 """What the claim actually covers, named in full.
 
@@ -121,7 +132,16 @@ Codex review #1 finding B-2: the claim used to name "the same source folder,
 profile and master index", while caps, timeouts, retry bounds and the OCR model
 bytes could all change the evidence from outside it. A claim that does not name
 its own identity is not checkable, which is the one thing this manifest exists
-to be."""
+to be.
+
+Round 2, finding B-R2-2, found the repaired claim still wrong in two ways, and
+both are corrected above. It named "profile id and version", which is not the
+input Stage 4 uses — every profile's content and their precedence order decide
+which pages drop. And it named the output folder as part of the identity while
+the log and the acceptance harness both treated the destination as irrelevant;
+three parts of one system cannot describe the identity differently. The note now
+describes exactly what :func:`~dociq.contracts.run_identity` hashes, and the
+value itself is persisted beside it so there is nothing left to infer."""
 
 
 @dataclass
@@ -135,6 +155,16 @@ class Manifest:
     excluded: dict[str, str] = field(default_factory=dict)
     """``{relative path: reason it is outside the claim}``."""
     unclassified: list[str] = field(default_factory=list)
+
+    run_identity_sha256: str | None = None
+    """:func:`dociq.contracts.run_identity` for the run that wrote this
+    manifest (amendment A-08, from finding B-R2-2).
+
+    Persisted so the identity the claim names is a value on disk rather than a
+    description a reader has to reconstruct — and so two runs can be compared
+    on it directly. ``None`` only when a manifest is built by scanning a folder
+    with no run in hand, which is how the verify tooling reads an existing
+    output set."""
 
     @property
     def corpus_sha256(self) -> str:
@@ -153,6 +183,7 @@ class Manifest:
             "contract_version": self.contract_version,
             "claim": CLAIM,
             "claim_identity": IDENTITY_NOTE,
+            "run_identity_sha256": self.run_identity_sha256,
             "corpus_sha256": self.corpus_sha256,
             "deterministic": dict(sorted(self.deterministic.items())),
             "adjacent": dict(sorted(self.adjacent.items())),
@@ -224,18 +255,27 @@ class EmptyOutputError(DocIQError):
     """
 
 
-def build(output_root: Path, *, require_outputs: bool = True) -> Manifest:
+def build(output_root: Path, *, require_outputs: bool = True,
+          config: "RunConfig | None" = None) -> Manifest:
     """Hash the outputs present under ``output_root``.
 
     Args:
         require_outputs: raise :class:`EmptyOutputError` when nothing the claim
             covers is present. Off only for tests that build a manifest of a
             deliberately empty tree.
+        config: the run's effective configuration, so the manifest can persist
+            :func:`~dociq.contracts.run_identity` beside the claim that names
+            it (amendment A-08, finding B-R2-2). Optional because this function
+            is also used to read an existing output set off disk, where there
+            is no run in hand — and a manifest built that way honestly records
+            ``None`` rather than inventing an identity.
     """
     output_root = Path(output_root)
     if require_outputs and not output_root.is_dir():
         raise EmptyOutputError(f"output root does not exist: {output_root}")
-    man = Manifest()
+    man = Manifest(
+        run_identity_sha256=run_identity(config) if config is not None else None
+    )
 
     covered: set[Path] = set()
     for pattern in DETERMINISTIC_PATTERNS:

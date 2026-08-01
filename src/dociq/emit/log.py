@@ -36,6 +36,7 @@ from dociq.contracts import (
     canonical_json,
     content_hash,
     document_sort_key,
+    run_identity,
     to_jsonable,
 )
 from dociq.docid.assign import AssignmentResult
@@ -290,6 +291,18 @@ def build_log(
     flagged = [e for doc in docs for e in _flagged_pages(doc, config.ocr_conf_threshold_pct)]
 
     content: dict[str, Any] = {
+        # The ONE run identity, in the hashed section (amendment A-08, from
+        # Codex review #1 round 2 finding B-R2-2). Four things used to claim to
+        # be the run identity and disagree: RunConfig's hash included the
+        # output folder, the manifest's claim_identity said it counted, this
+        # section deliberately left it out, and the acceptance harness ran to
+        # two destinations and demanded one identity. Nothing was persisted, so
+        # there was no value to point at.
+        #
+        # It is hashed content rather than a `run` note because it is a fact
+        # about the INPUTS: two runs over the same inputs must agree on it, and
+        # a run whose profile set or caps changed must not.
+        "run_identity_sha256": run_identity(config),
         "config": {
             "source_root": config.source_root,
             "profile_id": config.profile_id,

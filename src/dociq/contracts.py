@@ -57,30 +57,73 @@ Principle 5 bars from identity. It is recorded unhashed.
 gained ``terminal_status`` and ``terminal_status_reason``, defaulted to
 COMPLETED so the change is additive.
 
-Deliberately **hashed**, against the raising package's suggestion to exclude
-them. Excluding would let a cancelled partial set and a complete set hash
-identically — which is precisely the confusion B-1 is about. A run's
-completeness is a property of the evidence it produced, not metadata about the
-invocation.
+Hashed as landed — **reversed at 1.6.0 by A-07**, see below. The reasoning
+recorded here ("a cancelled partial set and a complete set must not hash
+identically") assumed the two sets could ever be compared. They cannot: an
+incomplete run publishes no corpus and no manifest.
 
-1.6.0 — amendments A-07, A-08 and A-09, from Codex review #1 round 2.
+1.6.0 — amendments A-07, A-08, A-09 and A-10, from Codex review #1 round 2
+(findings B-R2-1, B-R2-2, B-R2-3).
 
-*A-07 (from round-2 F-1).* :class:`TerminalStatus` is now the **only**
-definition of that enumeration. :mod:`dociq.runstate` defined a second, value-
-identical class, and the walk carried one type while :class:`RunResult` declared
-the other; ``runstate`` now imports this one. Two enumerations spelled the same
-way are two things a consumer can be handed, and an ``is`` comparison across the
-seam silently answers ``False``.
+*A-07 (from B-R2-1).* Two changes, and they pull in opposite directions on
+purpose.
 
-``terminal_status_reason`` moves into :data:`_IDENTITY_EXCLUDED`, adopting the
-reviewer's advisory. The enum still hashes, so a cancelled partial set and a
-complete set still cannot share an identity — the distinction is established by
-the typed status, and it does not need the prose. Leaving the free-form sentence
-in the hash would mean a wording edit to an operator message changes the
-identity of runs already produced, which is the failure ``ratio_low`` /
-``ratio_high`` are excluded for.
+First, :class:`TerminalStatus` is now the **only** definition of that
+enumeration. :mod:`dociq.runstate` declared a second, value-identical class, so
+the walk carried one type while :class:`RunResult` declared the other; an ``is``
+comparison across that seam answered ``False`` about two statuses that were the
+same status. ``runstate`` re-exports this one. Every returned ``RunResult`` now
+actually carries the status and reason of the run that produced it — the
+1.5.0 default meant every abort path silently reported COMPLETED, which is the
+defect B-R2-1 is about.
 
-*A-08 (from round-2 F-4b).* ``EffectiveLimits.file_timeout_s`` and
+Second, **both terminal fields move into** :data:`_IDENTITY_EXCLUDED`,
+reversing 1.5.0's decision. Codex's second opinion is adopted, and it is right:
+termination is a property of an *invocation*, not of a corpus, and an
+incomplete run publishes no corpus and no corpus manifest — so it cannot
+collide with a completed corpus hash. The previous completed manifest simply
+survives. Calling invocation termination part of a corpus identity for a corpus
+that was never published makes the determinism claim describe something other
+than the bytes it covers. If the failed attempt ever needs a verifiable
+identity of its own, that is a separate attempt identity over the
+``incomplete_run/`` audit record, not a term in this one.
+
+*A-08 (from B-R2-2).* :class:`RunConfig` gains
+``profiles: tuple[ProfileSnapshot, ...]`` — the **ordered** set of profile
+snapshots, in precedence order, each carrying ``profile_id``, ``version`` and
+``profile_hash``.
+
+The configuration recorded only ``opts.profiles[0].profile_id`` and its
+version, and that is not the input the run actually used.
+:func:`~dociq.profiles.apply.apply_profiles` applies the FIRST profile whose
+header patterns claim a document, so both the content of every profile and
+their precedence order change which pages drop — and therefore ``clean_text``,
+the index, the sources map and the corpus hash. Measured, with no attacker
+model needed: editing a second profile's rule without bumping its version, and
+separately swapping two profiles' precedence with no content change at all,
+each left the run identity byte-identical while the corpus hash moved.
+
+Snapshots rather than the profiles themselves, for the same reason
+:class:`MasterIndexSnapshot` exists: the identity needs an immutable
+fingerprint of the input, not the input. ``profile_hash`` is
+:attr:`~dociq.profiles.model.FormatProfile.profile_hash`, which already exists
+and which the processing log already writes into hashed content — the fact that
+profile *content* is evidence-affecting was established; it was just missing
+from the projection the manifest calls the run identity. Hashing the content
+also removes the reliance on version immutability, which nothing enforces.
+
+*A-08 also removes* ``output_root`` from the identity projection. Three
+statements were in conflict: ``RunConfig`` hashed the destination, the
+manifest's ``claim_identity`` said the output folder was part of the run
+identity, and both :mod:`dociq.emit.log` and the criterion-7 harness treated it
+as irrelevant — the harness deliberately runs to two different destinations and
+requires one identity. The destination is where evidence is written, not an
+input that changes it, so it leaves the projection and the manifest's
+description is corrected to match. :func:`run_identity` is the single
+authoritative projection, and it is persisted, so "which hash is the run
+identity" has one answer on disk.
+
+*A-09 (from round-2, ours).* ``EffectiveLimits.file_timeout_s`` and
 ``retry_budget_s`` are renamed ``file_timeout_ms`` / ``retry_budget_ms`` and now
 carry integer **milliseconds**. Both are sourced from float-valued deadlines and
 were rounded to whole seconds, so 1.1 s and 1.4 s recorded the identical
@@ -95,12 +138,15 @@ This is a **renaming** amendment, not an additive one: a consumer reading
 field. That is deliberate under the freeze procedure — the semantics changed,
 so the name had to.
 
-*A-09 (from round-2 F-5).* No type change. ``structural_tokens`` and
+*A-10 (from B-R2-3).* No type change. ``structural_tokens`` and
 ``token_ceiling``, added by 1.4.0, are now actually populated by the pipeline's
 projection; they had stayed at their "not measured" defaults while the same run
 wrote both numbers into the processing log. Recorded here because the machine
 contract's agreement with the log is a contract property, not an implementation
-detail.
+detail — and because the consequence is not cosmetic. When ``ratio_refuted`` is
+true the contract says the ruled band was NOT the method used, yet a consumer
+holding only :attr:`RunResult.tokens_before` received zeros and could fall back
+to the ruled ratio, displaying a number the pipeline expressly disclaims.
 """
 
 
@@ -428,6 +474,31 @@ class MasterIndexSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ProfileSnapshot:
+    """Immutable fingerprint of one format profile, for the run identity
+    (amendment A-08, from Codex review #1 round 2 finding B-R2-2).
+
+    A snapshot rather than the profile itself, for exactly the reason
+    :class:`MasterIndexSnapshot` is a snapshot: the identity needs a fixed
+    fingerprint of what went in, not a live object that can be edited
+    afterwards.
+
+    ``version`` alone would not do. Nothing enforces that an edited profile
+    gets a new version, so a rule can change under a version that did not —
+    measured on the fixture corpus, that moved two pages from KEEP to DROP and
+    left the recorded identity byte-identical. ``profile_hash`` covers the
+    content whether or not anyone remembered the version.
+    """
+
+    profile_id: str
+    version: str
+    profile_hash: str
+    """:attr:`dociq.profiles.model.FormatProfile.profile_hash` — the content
+    hash, including the operator stamp, because a profile re-saved by a
+    different expert is a different ruling."""
+
+
+@dataclass(frozen=True, slots=True)
 class EffectiveLimits:
     """Every environment-controlled setting that can change output evidence
     (amendment A-04, from Codex review #1 finding B-2).
@@ -497,8 +568,21 @@ class RunConfig:
     """
 
     source_root: str
+
     output_root: str
+    """Where the deliverables are written. **Recorded but NOT hashed** — see
+    :data:`_IDENTITY_EXCLUDED` (amendment A-08).
+
+    The destination is where evidence is put, not an input that changes it, and
+    treating it as identity made three parts of the system contradict each
+    other: this projection hashed it, the manifest's claim named it, and both
+    the processing log and the criterion-7 harness ignored it — the harness
+    runs to two different destinations precisely to prove one identity."""
+
     profile_id: str | None = None
+    """The profile the run was DRIVEN by, for display and for the per-document
+    stamp. Not sufficient as identity on its own — see :attr:`profiles`."""
+
     profile_version: str | None = None
     master_index: MasterIndexSnapshot | None = None
     ocr_conf_threshold_pct: int = 85
@@ -521,6 +605,26 @@ class RunConfig:
     ``None`` only for constructions that never reach a real run — the pipeline
     must always populate it, and the manifest names it as part of the identity
     the byte-identical claim covers."""
+
+    profiles: tuple[ProfileSnapshot, ...] = ()
+    """Every profile the run was given, **in precedence order** (A-08).
+
+    ``profile_id``/``profile_version`` above name only the first one, and that
+    is not the input the run used. Stage 4 applies the FIRST profile whose
+    header patterns claim a document, so *every* profile's content and the
+    order they are tried in decide which pages drop — and therefore decide
+    ``clean_text``, the index, the sources map and the corpus hash.
+
+    Two measured counterexamples, neither needing an attacker model:
+
+    * edit a *second* profile's rule and do not bump its version — the recorded
+      identity did not move, the corpus hash did (2 pages KEEP → DROP);
+    * swap two profiles' precedence with no content change anywhere — same
+      result.
+
+    A tuple, because order is part of the input. Empty for an unprofiled run,
+    which is the ordinary case (§4 Stage 4: a document no profile claims passes
+    through whole)."""
 
     @property
     def ocr_conf_threshold(self) -> float:
@@ -716,7 +820,15 @@ class ExtractionError(DocIQError):
 # ---------------------------------------------------------------------------
 
 _IDENTITY_EXCLUDED: frozenset[str] = frozenset(
-    {"ocr_conf", "ratio_low", "ratio_high", "workers", "terminal_status_reason"}
+    {
+        "ocr_conf",
+        "ratio_low",
+        "ratio_high",
+        "workers",
+        "output_root",
+        "terminal_status",
+        "terminal_status_reason",
+    }
 )
 """Fields excluded from identity hashing.
 
@@ -729,11 +841,22 @@ fields."
 band is an estimate about the text, not a property of it, and re-ruling D-03
 must not invalidate the identity of runs already produced.
 
-``terminal_status_reason`` (A-07) is excluded on the same principle in a
-different key: it is free-form operator prose, and :attr:`RunResult.
-terminal_status` — which IS hashed — already establishes the only distinction
-that matters to identity. Rewording an error sentence must not change the hash
-of runs already produced.
+``terminal_status`` and ``terminal_status_reason`` (A-07) are excluded on a
+different ground, and 1.5.0 got this wrong in the other direction. Termination
+is a property of an INVOCATION, not of a corpus. An incomplete run publishes no
+corpus and no corpus manifest, so it cannot collide with a completed corpus
+hash — the previous completed manifest survives untouched, which is the whole
+point of the publication guard. Hashing termination into a corpus identity
+would make the byte-identical claim describe something other than the bytes it
+covers, and would make rewording an operator sentence change the identity of
+runs already produced. The typed status is still carried on every
+:class:`RunResult` and still written to the log and the incomplete-run record;
+it is simply not a term in the identity of a corpus that was never published.
+
+``output_root`` (A-08) is the destination, not an input. Hashing it made the
+manifest's stated identity disagree with what the pipeline and the acceptance
+harness actually compare — the harness runs the same corpus to two different
+folders and requires one identity, which is the correct semantics.
 
 Note this is matched by field *name* across every contract dataclass, so a
 field named ``ocr_conf`` on a future type is excluded automatically. That is
@@ -799,6 +922,28 @@ def content_hash(obj: object) -> str:
     ).hexdigest()
 
 
+def run_identity(config: RunConfig) -> str:
+    """**The** run identity — one projection, named once (amendment A-08).
+
+    Codex review #1 round 2, B-R2-2, found four things claiming to be the run
+    identity and disagreeing: ``content_hash(RunConfig)`` hashed the output
+    folder, the manifest's ``claim_identity`` said the output folder counted,
+    :mod:`dociq.emit.log` deliberately left it out of hashed content, and the
+    acceptance harness ran to two different folders and demanded one identity.
+    No single value was persisted, so there was nothing to point at and say
+    "this is what the claim covers."
+
+    This is that value. It is written into ``output_manifest.json`` and into
+    the log's hashed content, so a consumer comparing two runs compares one
+    number that both artifacts agree on, and a future edit that changes what is
+    hashed changes it visibly rather than silently.
+
+    A thin wrapper over :func:`content_hash` on purpose: a second hashing rule
+    here would be exactly the drift this function exists to end.
+    """
+    return content_hash(config)
+
+
 # ---------------------------------------------------------------------------
 # Canonical ordering
 # ---------------------------------------------------------------------------
@@ -829,6 +974,7 @@ __all__ = [
     "ReconciliationReport",
     "EffectiveLimits",
     "MasterIndexSnapshot",
+    "ProfileSnapshot",
     "RunConfig",
     "RunResult",
     "DocIQError",
@@ -837,5 +983,6 @@ __all__ = [
     "to_jsonable",
     "canonical_json",
     "content_hash",
+    "run_identity",
     "document_sort_key",
 ]

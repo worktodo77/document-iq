@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import json
 import shutil
 import socket
@@ -40,12 +41,20 @@ import tempfile
 from pathlib import Path
 
 from . import pipeline
-from .contracts import PageKind, RunConfig, TerminalStatus
+from .contracts import (
+    PageKind,
+    ProfileSnapshot,
+    RunConfig,
+    TerminalStatus,
+    content_hash,
+    run_identity,
+)
 from .ingest import extract as ex
 from .ingest import walker
 from .ingest.pagemodel import normalize
 from .profiles.model import OperatorStamp
 from .verify import determinism
+from .verify import manifest as mf
 
 MARKER_FRAGMENT = "===== PAGE"
 
@@ -300,6 +309,39 @@ def main(argv: list[str] | None = None) -> int:
         from .runstate import TerminalStatus as _RunstateStatus
         chk.expect(_RunstateStatus is TerminalStatus,
                    "there is exactly one TerminalStatus enumeration (A-07)")
+        # A-07 reverses 1.5.0: termination is a property of the INVOCATION, and
+        # an incomplete run publishes no corpus to collide with. It must be
+        # carried and must NOT be hashed — both halves, because getting either
+        # one alone is how this arrived here twice.
+        stopped = dataclasses.replace(
+            result, terminal_status=TerminalStatus.CANCELLED,
+            terminal_status_reason="probe")
+        chk.expect(content_hash(stopped) == content_hash(result),
+                   "termination is NOT part of the corpus identity (A-07, "
+                   "reversing 1.5.0)")
+
+        print("\nRun identity — one projection, persisted (A-08)")
+        manifest_doc = json.loads(
+            (lay.root / mf.MANIFEST_NAME).read_text(encoding="utf-8"))
+        ident = run_identity(result.config)
+        chk.expect(manifest_doc.get("run_identity_sha256") == ident
+                   and log_doc["content"].get("run_identity_sha256") == ident,
+                   "the manifest and the log persist ONE run identity (A-08)",
+                   ident[:16] + "…")
+        chk.expect(
+            run_identity(result.config)
+            == run_identity(dataclasses.replace(
+                result.config, output_root="/somewhere/entirely/else")),
+            "the DESTINATION is not part of the run identity (A-08)")
+        chk.expect(
+            run_identity(result.config)
+            != run_identity(dataclasses.replace(
+                result.config,
+                profiles=(ProfileSnapshot("p", "1.0", "0" * 64),))),
+            "the ordered profile set IS part of the run identity (A-08)")
+        chk.expect(result.config.profiles == (),
+                   "an unprofiled run records an empty profile set, not a "
+                   "fabricated one")
 
         print("\nAmended contract fields (A-01..A-09)")
         before, after = result.tokens_before, result.tokens_after

@@ -39,11 +39,13 @@ from dociq.contracts import (
     IdRegime,
     PageKind,
     ProcessingStatus,
+    ProfileSnapshot,
     ReconciliationRow,
     RunConfig,
     RunResult,
     TokenEstimate,
     document_sort_key,
+    run_identity,
 )
 from dociq.contracts import ReconciliationReport as ContractReconciliation
 from dociq.docid.assign import AssignmentResult, assign_doc_ids
@@ -723,6 +725,26 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         ocr_engine=config.ocr_engine if ocr_ran else OCR_DISABLED,
         ocr_engine_version=config.ocr_engine_version if ocr_ran else "",
         master_index=index.snapshot if index else config.master_index,
+        # The ORDERED profile set, by content (amendment A-08, from Codex
+        # review #1 round 2 finding B-R2-2). Recording only
+        # ``opts.profiles[0].profile_id`` and its version was not recording the
+        # input the run used: Stage 4 applies the first profile whose header
+        # patterns claim a document, so every profile's rules AND the order
+        # they are tried in decide which pages drop.
+        #
+        # Measured on the fixture corpus, both without any attacker model:
+        # editing a second profile's rule without bumping its version moved 2
+        # pages KEEP → DROP and changed the corpus hash while the recorded
+        # identity stayed byte-identical; swapping two profiles' precedence
+        # with no content change did the same.
+        #
+        # Built here rather than at the `effective` block below because the
+        # resume key is derived from the walk config, and a journal written
+        # under one profile library must not be replayed under another.
+        profiles=tuple(
+            ProfileSnapshot(p.profile_id, p.version, p.profile_hash)
+            for p in opts.profiles
+        ),
     )
     # ``profile_id`` / ``profile_version`` are DELIBERATELY not resolved from
     # ``opts.profiles`` here, and the reason is worth recording because the
@@ -1032,7 +1054,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # ---- Stage 6 (the gates) ----------------------------------------------
     t = time.monotonic()
     report_acc = accounting.check(result)
-    man = mf.build(layout.root)
+    man = mf.build(layout.root, config=effective)
     mf.write(layout.root, man)
     mark("verify", t)
 

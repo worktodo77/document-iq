@@ -21,7 +21,12 @@ import json
 import pytest
 
 from dociq import pipeline
-from dociq.contracts import EffectiveLimits, RunConfig, content_hash
+from dociq.contracts import (
+    EffectiveLimits,
+    RunConfig,
+    content_hash,
+    run_identity,
+)
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
 from dociq.profiles.model import OperatorStamp
@@ -168,6 +173,18 @@ def test_the_manifest_claim_names_the_full_identity_it_covers(outcome):
         assert named in identity, named
     assert "EXCLUDED" in identity and "workers" in identity
 
+    # B-R2-2. The claim has to describe what is ACTUALLY hashed, and the two
+    # things it previously got wrong are asserted by name.
+    assert "ORDERED" in identity and "profile_hash" in identity, (
+        "the claim still describes the identity as profile id and version, "
+        "which is not the input Stage 4 uses")
+    assert "OUTPUT folder" in identity, (
+        "the claim does not say the destination is excluded, so it still "
+        "disagrees with the log and the acceptance harness")
+    assert "run_identity_sha256" in identity, (
+        "the claim does not point at the persisted value that settles which "
+        "projection is authoritative")
+
 
 def test_the_processing_log_hashes_the_limits_and_reports_pool_width(outcome):
     data = json.loads(
@@ -297,10 +314,20 @@ def test_the_resume_key_is_the_run_identity_not_a_hand_picked_subset():
 def test_the_resume_key_moves_with_every_identity_field_of_the_config():
     """The class, enumerated. Every hashed field of ``RunConfig`` — present and
     future — must move the resume key, and every excluded one must not."""
+    from dociq.contracts import _IDENTITY_EXCLUDED
+
     base = RunConfig(source_root="s", output_root="o", limits=_limits())
     for f in dataclasses.fields(RunConfig):
-        if f.name == "limits":
-            continue  # covered field-by-field above
+        if f.name in ("limits", "profiles"):
+            continue  # each covered field-by-field elsewhere in this file
+        if f.name in _IDENTITY_EXCLUDED:
+            # `output_root` (A-08). The destination is not an input, and the
+            # acceptance harness runs to two of them expecting one identity.
+            assert walker._resume_identity(base) == walker._resume_identity(
+                dataclasses.replace(base, **{f.name: "somewhere-else"})), (
+                f"RunConfig.{f.name} is excluded from identity but still moves "
+                "the resume key")
+            continue
         current = getattr(base, f.name)
         if isinstance(current, bool):
             other = not current
@@ -480,3 +507,169 @@ def test_every_deadline_limit_is_an_exactly_represented_integer():
             assert f.name.endswith("_ms"), (
                 f"EffectiveLimits.{f.name} is a deadline recorded in a unit "
                 "coarser than the value it records (amendment A-08)")
+
+
+# ---------------------------------------------------------------------------
+# B-R2-2 — the ordered profile set IS the input, and the identity must say so
+# ---------------------------------------------------------------------------
+
+
+def _profile(pid: str, version: str, *, header: str = "", drop: str | None = None):
+    from dociq.contracts import Disposition
+    from dociq.profiles.model import FormatProfile, SectionRule
+
+    rules = ()
+    if drop is not None:
+        rules = (SectionRule(rule_id=f"{pid}-drop", pattern=drop,
+                             disposition=Disposition.DROP, label="dropped",
+                             notes="test fixture; approved by the test"),)
+    return FormatProfile(
+        profile_id=pid, version=version, display_name=pid,
+        header_patterns=(header,) if header else (),
+        section_rules=rules)
+
+
+def _profiled_run(tmp_path, name, profiles):
+    cfg = RunConfig(
+        source_root=str(FIXTURES),
+        output_root=str(tmp_path / name),
+        ocr_engine_version=ex.ocr_engine_version(),
+    )
+    return pipeline.run(cfg, pipeline.PipelineOptions(
+        walk=walker.WalkOptions(ocr_enabled=False, resume=False),
+        profiles=tuple(profiles), stamp=STAMP,
+        write_workbook=False, write_summary_pdf=False, write_package=False))
+
+
+def test_editing_a_later_profile_without_a_version_bump_moves_the_identity(
+    tmp_path,
+):
+    """Codex round-2 B-R2-2's counterexample, verbatim and end to end.
+
+    Keep profile 1's id and version unchanged, alter profile 2's rule, run the
+    same corpus. Before A-08 the recorded identity was byte-identical while the
+    corpus hash moved and pages went KEEP to DROP: the manifest asserted "same
+    run identity" over evidence that was not the same.
+
+    No attacker model is needed, and that matters — nothing enforces that an
+    edited profile gets a new version, so this is the ordinary way a profile
+    library drifts between runs.
+    """
+    p1 = _profile("p1", "1.0", header="NO SUCH HEADER ANYWHERE")
+    p2_before = _profile("p2", "2.0", drop="MATCHES NOTHING AT ALL")
+    p2_after = _profile("p2", "2.0", drop=r"Daily")
+
+    a = _profiled_run(tmp_path, "a", [p1, p2_before])
+    b = _profiled_run(tmp_path, "b", [p1, p2_after])
+
+    assert a.result.config.profile_id == b.result.config.profile_id == "p1"
+    assert a.result.config.profile_version == b.result.config.profile_version
+    assert a.manifest.corpus_sha256 != b.manifest.corpus_sha256, (
+        "the fixture did not actually change the evidence")
+    assert a.result.pages_dropped != b.result.pages_dropped
+
+    assert run_identity(a.result.config) != run_identity(b.result.config), (
+        "a profile edit that changed the emitted evidence left the run "
+        "identity unchanged — the determinism claim would assert sameness the "
+        "bytes do not support")
+    assert a.manifest.run_identity_sha256 != b.manifest.run_identity_sha256
+
+
+def test_swapping_profile_precedence_moves_the_identity(tmp_path):
+    """The order half of B-R2-2, with every profile's CONTENT untouched.
+
+    ``apply_profiles`` claims a document with the FIRST profile whose header
+    patterns match, so precedence alone decides which rules a document is
+    subject to. The first profile is held fixed here, because the old config
+    recorded only ``profiles[0]`` and would otherwise appear to notice.
+    """
+    fixed = _profile("p0", "1.0", header="NO SUCH HEADER ANYWHERE")
+    x = _profile("px", "1.0", drop=r"Daily")
+    y = _profile("py", "1.0", drop=r"NOTICE")
+
+    c = _profiled_run(tmp_path, "c", [fixed, x, y])
+    d = _profiled_run(tmp_path, "d", [fixed, y, x])
+
+    assert c.result.config.profile_id == d.result.config.profile_id == "p0"
+    assert c.manifest.corpus_sha256 != d.manifest.corpus_sha256, (
+        "the fixture did not actually change the evidence")
+    assert run_identity(c.result.config) != run_identity(d.result.config), (
+        "precedence order changed which pages dropped but not the identity")
+
+    # And the recorded snapshots are the ordered set, not a set.
+    assert [s.profile_id for s in c.result.config.profiles] == ["p0", "px", "py"]
+    assert [s.profile_id for s in d.result.config.profiles] == ["p0", "py", "px"]
+
+
+def test_every_profile_in_the_library_is_snapshotted_by_content(tmp_path):
+    """The class: not just the first, and not just by name.
+
+    Enumerated over the whole library so a future change that records only some
+    of them fails here.
+    """
+    profiles = [
+        _profile("p0", "1.0", header="NO SUCH HEADER ANYWHERE"),
+        _profile("p1", "1.1", drop=r"Daily"),
+        _profile("p2", "2.5", drop=r"NOTICE"),
+    ]
+    outcome = _profiled_run(tmp_path, "lib", profiles)
+    snaps = outcome.result.config.profiles
+
+    assert len(snaps) == len(profiles), "the library was not recorded in full"
+    for snap, prof in zip(snaps, profiles):
+        assert snap.profile_id == prof.profile_id
+        assert snap.version == prof.version
+        assert snap.profile_hash == prof.profile_hash, (
+            "the snapshot records a name, not the content that decides drops")
+        assert len(snap.profile_hash) == 64
+
+
+def test_an_unprofiled_run_records_an_empty_profile_set(outcome):
+    """The ordinary case (section 4 Stage 4) stays honest: no profiles, not a
+    fabricated one."""
+    assert outcome.result.config.profiles == ()
+
+
+# ---------------------------------------------------------------------------
+# B-R2-2 — one persisted, authoritative run identity
+# ---------------------------------------------------------------------------
+
+
+def test_the_manifest_persists_the_identity_its_claim_describes(outcome):
+    """No durable ``run_identity_sha256`` existed, so "which projection is the
+    run identity" had no answer on disk — and four parts of the system gave
+    different ones."""
+    data = json.loads(
+        (outcome.layout.root / mf.MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    persisted = data["run_identity_sha256"]
+    assert persisted and len(persisted) == 64
+    assert persisted == run_identity(outcome.result.config)
+    assert persisted == outcome.manifest.run_identity_sha256
+
+
+def test_the_log_and_the_manifest_agree_on_the_run_identity(outcome):
+    """Two artifacts, one number. If they can disagree, neither is authority."""
+    log = json.loads(outcome.layout.processing_log.read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (outcome.layout.root / mf.MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    assert log["content"]["run_identity_sha256"] == manifest["run_identity_sha256"]
+
+
+def test_the_identity_survives_a_change_of_destination(tmp_path):
+    """The mismatch B-R2-2 names, asserted as behavior.
+
+    ``RunConfig`` hashing included ``output_root``, the manifest's claim said
+    the output folder was part of the identity, and the criterion-7 harness
+    ran the same corpus to two different folders and required one identity.
+    Those cannot all be true. The destination is where evidence is written.
+    """
+    a = _run(tmp_path, "dest-a")
+    b = _run(tmp_path, "dest-b")
+    assert a.result.config.output_root != b.result.config.output_root
+    assert run_identity(a.result.config) == run_identity(b.result.config)
+    assert a.manifest.run_identity_sha256 == b.manifest.run_identity_sha256
+    assert a.manifest.corpus_sha256 == b.manifest.corpus_sha256
+    assert a.log.content_sha256 == b.log.content_sha256, (
+        "the hashed log content differed between two destinations")
