@@ -174,7 +174,7 @@ Audit performed 2026-07-30 — see [mip39_ingestion_audit_2026-07-30.md](../reus
 6. Runs fully offline (verified with network disabled).
 7. Byte-identical outputs on repeat runs with identical inputs, profile, and master index (D-04 determinism contract).
 8. Handoff: Path A produces a package accepted by a Claude Project without file-type or size rejections, and Path B's folder structure is consumed by Expert Assist evidence-mining with no manual rearrangement.
-9. OCR bake-off (D-01) performed on ~20 representative scanned MPR pages with hand-checked ground truth; engine choice confirmed or swapped on that evidence.
+9. ~~OCR bake-off (D-01) performed on ~20 representative scanned MPR pages with hand-checked ground truth; engine choice confirmed or swapped on that evidence.~~ **CANCELLED by D-19 (Alex, 2026-07-31).** Tesseract is written off; rapidocr is the engine unconditionally. The Sprint-1 artifact is a rapidocr *characterization* on 20 real scanned MPR pages (mean page confidence 0.8628; 3 of 17 pages below the 85% threshold; 5.74 s/page), not a comparison. This criterion is closed as cancelled — **not** as met.
 
 ## 14. Open Decisions
 

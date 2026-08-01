@@ -1,0 +1,1109 @@
+"""Stages 1 to 6, end to end — the seam between Track A's spine and Track B's
+deliverables.
+
+Before this module the two halves only met in a test. Track A's spine stopped at
+:class:`~dociq.contracts.RunResult` and proved determinism against a provisional
+stand-in emitter; Track B's emit layer was exercised from stub records. Both
+halves were green and the join between them was not covered by anything.
+
+There is exactly one orchestration here, and everything runs through it: the
+self-test, the determinism harness and the GUI adapter. A second orchestration
+would be a second definition of what a run *is*, and the two would drift — which
+is the same argument the contract makes for having one serializer.
+
+Stage order is §4's, and it is not negotiable:
+
+1-2  walk, extract, normalize            :mod:`dociq.ingest.walker`
+3    Bates detection                     :mod:`dociq.identify.bates`
+3b   Doc ID assignment + reconciliation  :mod:`dociq.docid`
+4    section KEEP/DROP                   :mod:`dociq.profiles.apply`
+5    emit                                :mod:`dociq.emit`
+6    verify: accounting, manifest, tokens :mod:`dociq.verify`
+
+Stage 3 runs before 3b because a Bates range is one of Stage 3b's match keys,
+and Stage 4 runs after 3b because a drop-log entry is written against a Doc ID.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Sequence
+
+from dociq.contracts import (
+    ContractViolation,
+    Disposition,
+    DocumentRecord,
+    IdRegime,
+    PageKind,
+    ProcessingStatus,
+    ProfileSnapshot,
+    ReconciliationRow,
+    RunConfig,
+    RunResult,
+    TokenEstimate,
+    document_sort_key,
+    run_identity,
+)
+from dociq.contracts import ReconciliationReport as ContractReconciliation
+from dociq.docid.assign import AssignmentResult, assign_doc_ids
+from dociq.docid.masterindex import MasterIndex, load_master_index
+from dociq.docid.reconcile import (
+    IssuedIdLedger,
+    ReconciliationReport,
+    RenumberWarning,
+    detect_renumbering,
+    reconcile,
+)
+from dociq.emit.cleantext import write_clean_text, write_sources_json
+from dociq.emit.handoff import build_upload_package
+from dociq.emit.indexbook import (
+    build_index_rows,
+    write_index_csv,
+    write_index_xlsx,
+    write_reconciliation_csv,
+)
+from dociq.emit.log import LogBundle, build_log, write_processing_log
+from dociq.emit.paths import OutputLayout
+from dociq.emit.summary import build_summary_data, write_run_summary
+from dociq.identify.bates import (
+    BatesDecision,
+    BatesPatternError,
+    BatesRange,
+    DecisionStatus,
+    apply_bates,
+    document_ranges,
+    parse_pattern,
+    propose_format,
+    ranges_by_sort_key,
+)
+from dociq.ingest import extract as ex
+from dociq.ingest import walker
+from dociq.profiles.apply import apply_profiles
+from dociq.profiles.model import FormatProfile, OperatorStamp, operator_stamp, write_matter_copy
+from dociq.runstate import (
+    COMPLETED,
+    INCOMPLETE_DIR,
+    STATUS_FILENAME,
+    RunTermination,
+)
+from dociq.verify import accounting, manifest as mf
+from dociq.verify.tokens import TokenEstimate as MeasuredEstimate
+from dociq.verify.tokens import estimate_for_texts
+
+__all__ = ["OCR_DISABLED", "PipelineOptions", "PipelineOutcome", "run"]
+
+OCR_DISABLED = "disabled"
+"""``RunConfig.ocr_engine`` for a run that read no image page.
+
+A sentinel in an existing field rather than a new one: the contract is frozen,
+and it already has the field whose job is to say which engine produced the text.
+"None of them" is an answer that field can give."""
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineOptions:
+    """Everything a run needs that is not already part of the run identity.
+
+    :class:`~dociq.contracts.RunConfig` carries what can change output bytes.
+    This carries what cannot: which walker settings to use, who is running it,
+    and which of the human-facing artifacts to produce.
+    """
+
+    walk: walker.WalkOptions | None = None
+    matter_name: str = ""
+    master_index: MasterIndex | None = None
+    master_index_path: str | None = None
+    profiles: tuple[FormatProfile, ...] = ()
+    bates_decision: BatesDecision | None = None
+    auto_confirm_bates: bool = False
+    """Accept the detected Bates format without asking.
+
+    §4 Stage 3 says the format is confirmed with the operator on first
+    detection, and the GUI will do exactly that. This exists for the headless
+    paths — the acceptance harness and the self-test — which have no operator to
+    ask. It is recorded in the run's warnings whenever it fires, because a
+    machine-confirmed pattern and an expert-confirmed one are not the same
+    evidentiary object."""
+
+    stamp: OperatorStamp | None = None
+    previous_ledger: str | Path | None = None
+    """Ledger of a previous run, for the D-04 renumbering check. Defaults to
+    whatever ``doc_ids_issued.json`` is already sitting in the output root —
+    which is the re-run case D-04 (b) is actually about."""
+
+    write_workbook: bool = True
+    write_summary_pdf: bool = True
+    write_package: bool = True
+    """The three artifacts that need a third-party writer (openpyxl, reportlab)
+    or a file copy. Off for harness runs that only care about the claim's four
+    artifacts; on for anything an operator will see."""
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineOutcome:
+    """One completed run: the contract result, the deliverables, the proofs."""
+
+    result: RunResult
+    """The §4 Stage-6 result, with Doc IDs assigned, dispositions applied, and
+    ``tokens_before`` / ``tokens_after`` / ``reconciliation`` populated."""
+
+    layout: OutputLayout
+    accounting: accounting.AccountingReport
+    manifest: mf.Manifest
+    assignment: AssignmentResult
+    reconciliation: ReconciliationReport
+    log: LogBundle
+    renumbering: tuple[RenumberWarning, ...] = ()
+    walk_notes: walker.RunNotes = field(default_factory=walker.RunNotes)
+    """Stage 1's invocation notes — serial retries, resume, cancellation.
+    Recorded in the log's ``run`` section, never in its hashed content."""
+    stale_removed: tuple[str, ...] = ()
+    """Deliverables of a previous run that this one replaced. Recorded in the
+    log's ``run`` section, never in its hashed content."""
+    bates_ranges: dict[tuple[str, str, int], BatesRange] = field(default_factory=dict)
+    timings_s: tuple[tuple[str, float], ...] = ()
+    """Per-stage wall clock, in stage order. Reporting only — it never reaches
+    a hashed artifact, because a run that took longer is not a different run."""
+
+    termination: RunTermination = COMPLETED
+    """How the run ENDED (Codex B-1). ``COMPLETED`` is the only value under
+    which anything was written."""
+
+    published: bool = True
+    """Whether this run wrote the §7 deliverables.
+
+    False for every non-complete termination, and the reason
+    :attr:`incomplete_dir` exists. Recorded rather than re-derived so a
+    consumer never has to know the publication rule."""
+
+    incomplete_dir: Path | None = None
+    """Where an aborted run recorded itself — ``<output>/incomplete_run/``.
+    ``None`` for a completed run."""
+
+    @property
+    def ok(self) -> bool:
+        """The run produced a complete, self-consistent, published output set.
+
+        ``termination.complete`` is FIRST and is not redundant with the two
+        gates after it (Codex B-1). Accounting is an identity over whatever set
+        it is handed, and zero equals zero: an empty blocked run and a partial
+        cancelled run both satisfy it. So does an empty manifest's
+        ``unclassified``. Without this term, an aborted run reported ``ok``.
+        """
+        return (
+            self.termination.complete
+            and self.accounting.ok
+            and not self.manifest.unclassified
+        )
+
+    def timing(self, stage: str) -> float:
+        return dict(self.timings_s).get(stage, 0.0)
+
+
+def _to_contract_estimate(est: MeasuredEstimate, label: str) -> TokenEstimate:
+    """Project the measured estimate onto the frozen contract type.
+
+    ``provenance`` comes from :meth:`MeasuredEstimate.provenance_text`, which is
+    the one place a token figure's account of itself is written. It used to be
+    assembled here as well, and the two accounts drifted — Codex review #1
+    finding B-6 caught the run summary asserting a calibrated ratio for runs
+    that used no such thing.
+
+    ``floor_tokens`` is deliberately left at 0, its "not measured" value. The
+    contract defines it as a *hard lower bound* on the true token count, and
+    DocIQ has no such bound to offer: the pre-token count that used to be put
+    here is a characterization under stated assumptions, not a floor (finding
+    B-6, and the ``verify.tokens`` module docstring). Shipping the pre-token
+    count in a field the contract calls a hard bound would put the withdrawn
+    claim straight back into the machine-readable result. The measured pre-token
+    count is not lost — it travels in ``provenance`` and in the processing log's
+    ``token_estimate`` block, where it is labeled for what it is. See
+    ``docs/contracts/amendments.md`` A-05 for the proposed contract-side repair.
+
+    ``ratio_refuted`` is copied from the estimator's own test result. The
+    contract says a consumer must never infer it, and the only way to keep that
+    true is for the producer to be the one place it is decided."""
+    return TokenEstimate(
+        chars=est.profile.chars,
+        ratio_low=est.basis.low_x100 / 100,
+        ratio_high=est.basis.high_x100 / 100,
+        floor_tokens=0,
+        # A-05(a)'s replacement fields, POPULATED (round-2 F-5). 1.4.0 added
+        # them and the projection never set them, so both stayed at their "not
+        # measured" defaults while the very same run wrote both numbers into
+        # the processing log and the summary PDF. The machine contract read
+        # zero for text that had been measured — a consumer holding the
+        # contract and a consumer reading the log were told different things
+        # about one run, and the contract was the one that was wrong.
+        #
+        # These are the two the withdrawn ``floor_tokens`` is replaced BY, and
+        # each says exactly what it is: ``structural_tokens`` is the measured
+        # pre-token count, a characterization under the stated assumptions and
+        # a bound in neither direction; ``token_ceiling`` is the one
+        # tokenizer-independent bound DocIQ asserts.
+        structural_tokens=est.profile.pretokens,
+        token_ceiling=est.profile.token_ceiling,
+        ratio_refuted=est.ratio_refuted,
+        provenance=est.provenance_text(label),
+    )
+
+
+def _to_contract_reconciliation(
+    report: ReconciliationReport,
+) -> ContractReconciliation:
+    """Project the §5 report onto the contract's A-02 type.
+
+    The two are not redundant. :mod:`dociq.docid.reconcile`'s report is the
+    working structure the workbook is built from; the contract's is the narrow
+    projection a consumer across the seam is allowed to see, and it is what
+    ``RunResult.reconciliation`` carries so the GUI never has to import
+    ``docid``.
+    """
+    rows: list[ReconciliationRow] = []
+    for pair in report.matched:
+        for d in pair.discrepancies:
+            rows.append(
+                ReconciliationRow(
+                    category="field-mismatch",
+                    doc_id=pair.doc_id,
+                    filename=pair.rel_path.rsplit("/", 1)[-1],
+                    detail=(
+                        f"{d.field}: folder {d.folder_value!r} vs index "
+                        f"{d.index_value!r}"
+                        + (f" — {d.detail}" if d.detail else "")
+                    ),
+                )
+            )
+    for entry in report.folder_only:
+        rows.append(
+            ReconciliationRow(
+                category="folder-only",
+                doc_id=entry.doc_id,
+                filename=entry.filename,
+                detail=entry.reason,
+            )
+        )
+    for entry in report.index_only:
+        # A quarantined row (Codex review #1, D-1) has no Original Sort, so it
+        # has no LI File No to render. The old f-string produced "LI File No
+        # (index row 2) at dir" — an empty identifier laid out exactly like a
+        # real one, which is worse than saying nothing. Its own reason sentence
+        # already names the row and why it carries no number.
+        rows.append(
+            ReconciliationRow(
+                category="index-only",
+                doc_id="",
+                filename=entry.filename or f"(index row {entry.index_row_number})",
+                detail=(
+                    entry.reason
+                    if entry.quarantined
+                    else f"LI File No {entry.li_file_no} (index row "
+                         f"{entry.index_row_number}) at {entry.filepath}"
+                ),
+            )
+        )
+    return ContractReconciliation(matched=len(report.matched), rows=tuple(rows))
+
+
+def _stored_pattern(
+    config: RunConfig, options: PipelineOptions, warnings: list[str]
+) -> tuple[str, str] | None:
+    """The confirmed pattern this matter already carries, as ``(pattern,
+    source)``, or ``None`` when the matter carries none.
+
+    Two places can hold one: the run's own configuration and a format profile.
+    The run configuration wins, because it is the record of what this matter
+    was last run with, while a profile's pattern is the recurring format's
+    default. A disagreement between them is not silently resolved — the loser
+    is named in the warnings, because "the profile's format was not used" is
+    exactly the kind of fact an operator finds out too late.
+    """
+    from_profiles = [
+        (p.bates_pattern, f"profile {p.profile_id} v{p.version}")
+        for p in options.profiles
+        if p.bates_pattern
+    ]
+    if config.bates_pattern:
+        for pattern, source in from_profiles:
+            if pattern != config.bates_pattern:
+                warnings.append(
+                    f"Two different confirmed Bates formats are stored for this "
+                    f"matter: the run configuration's, which was used, and "
+                    f"{source}'s, which was NOT. Re-confirm the format if the "
+                    "profile is the current one."
+                )
+        return config.bates_pattern, "the run configuration"
+    if from_profiles:
+        return from_profiles[0][0], from_profiles[0][1]
+    return None
+
+
+def _bates_decision(
+    documents: Sequence[DocumentRecord],
+    options: PipelineOptions,
+    config: RunConfig,
+    stamp: OperatorStamp,
+    warnings: list[str],
+) -> BatesDecision | None:
+    """Stage 3's decision, or ``None`` for an unstamped set.
+
+    An unstamped set is the ordinary case (§4 Stage 3, D-13) and produces no
+    warning at all: no stored pattern, no proposal, no decision, nothing
+    written, nothing said.
+
+    With no new operator decision, a *stored* confirmation is loaded and
+    applied — that is what "confirmed once per document set, then applied
+    automatically" means, and recording the old pattern in the run
+    configuration without deserializing it was not that. A stored pattern that
+    cannot be reconstructed into a complete format stops the run
+    (:class:`BatesPatternError`) rather than falling through to detection or to
+    the unstamped path: silently re-detecting would discard the operator's
+    ruling, and silently ignoring it would leave locators unenforced.
+    """
+    if options.bates_decision is not None:
+        return options.bates_decision
+    stored = _stored_pattern(config, options, warnings)
+    if stored is not None:
+        pattern, source = stored
+        fmt = parse_pattern(pattern)
+        if fmt is None:
+            raise BatesPatternError(
+                f"The Bates format confirmed for this matter cannot be read "
+                f"back. {source} carries bates_pattern={pattern!r}, which is "
+                "not a complete DocIQ Bates pattern — it does not carry the "
+                "'(?#dociq-bates:1;...)' token that records the prefix, "
+                "separator, allowed digit widths, suffix separator and suffix. "
+                "DocIQ will not run on a confirmed format it cannot enforce, "
+                "because a partly enforced format writes locators that are not "
+                "in the production. Re-confirm the Bates format for this "
+                "document set (Stage 3), or clear bates_pattern to run the "
+                "matter as unstamped."
+            )
+        warnings.append(
+            f"Bates format {fmt.label} was applied from the confirmation "
+            f"already stored in {source}; §4 Stage 3's confirmation happened in "
+            "an earlier run, not this one."
+        )
+        return BatesDecision(
+            DecisionStatus.CONFIRMED,
+            fmt,
+            f"stored confirmation ({source})",
+            None,
+        )
+    proposal = propose_format(documents)
+    if proposal is None:
+        return None
+    if not options.auto_confirm_bates:
+        warnings.append(
+            f"Bates format {proposal.format.label} was detected on "
+            f"{proposal.coverage_pct}% of pages and is NOT applied: §4 Stage 3 "
+            "requires the operator to confirm the format on first detection, and "
+            "this run had no operator to ask."
+        )
+        return BatesDecision(DecisionStatus.PENDING, proposal.format, "", "")
+    warnings.append(
+        f"Bates format {proposal.format.label} was confirmed AUTOMATICALLY "
+        f"({proposal.coverage_pct}% page coverage), not by an expert: this run "
+        "was headless. §4 Stage 3's confirmation step did not happen."
+    )
+    return BatesDecision(
+        DecisionStatus.CONFIRMED, proposal.format, "auto-confirmed", stamp.saved_at
+    )
+
+
+def _hashes_of(written: Sequence[Path], layout: OutputLayout) -> dict[str, str]:
+    """Hashes of the artifacts THIS run wrote, before the log.
+
+    Written into the log's hashed content so the audit trail carries the
+    fingerprint of the deliverables it describes and can be checked against
+    ``output_manifest.json`` without trusting either one alone. The log itself is
+    absent by construction — it cannot contain its own hash.
+
+    Hashed from an explicit list rather than by globbing the output root. A glob
+    would pick up anything the *previous* run left behind, so re-running a matter
+    into its own folder would produce a different hashed content section from a
+    first run over the same inputs — a determinism break with no bad input
+    anywhere, which is the hardest kind to diagnose.
+    """
+    root = layout.root
+    return {
+        p.relative_to(root).as_posix(): mf.sha256_file(p)
+        for p in sorted(set(written))
+        if p.is_file()
+    }
+
+
+_STALE_PATTERNS = (
+    "clean_text/*.txt",
+    "sources.json",
+    "document_index.csv",
+    "document_index.xlsx",
+    "reconciliation.csv",
+    "processing_log.json",
+    "run_summary.pdf",
+    mf.MANIFEST_NAME,
+    "profile/*.yaml",
+    f"{INCOMPLETE_DIR}/*",
+)
+"""Deliverables a re-run replaces. ``upload_package/`` is absent because
+:func:`~dociq.emit.handoff.build_upload_package` already rebuilds it from
+scratch, and ``doc_ids_issued.json`` is absent because it is this run's *input*
+to the D-04 renumbering check — deleting it would silence the one warning the
+re-run case exists to produce.
+
+``incomplete_run/*`` IS purged: once a complete run has written this folder, the
+record of an earlier aborted attempt describes a state the folder is no longer
+in, and leaving it would put a "RUN BLOCKED" artifact beside a good output set."""
+
+
+def _purge_stale_deliverables(
+    layout: OutputLayout, termination: RunTermination
+) -> tuple[str, ...]:
+    """Remove the previous run's deliverables from the destination.
+
+    Re-running a matter means replacing its outputs, and a leftover
+    ``clean_text/LI-06881.txt`` from a run against an older master index is
+    worse than a missing one: it sits in the folder Expert Assist reads, under
+    an identifier this run gave to a different document.
+
+    ``termination`` is a REQUIRED argument, and it is checked here rather than
+    only at the call site (Codex B-1). Destroying a complete prior corpus
+    because a preflight check failed is the worst outcome this pipeline can
+    produce, so the guard is a property of the function that does the deleting:
+    the only way to call it is to hand it a proof that the run completed, and
+    the proof is validated. :func:`run` also returns before Stage 5 on any
+    non-complete termination, so the ordering and the argument are two
+    independent defences and the raise below is unreachable from the shipped
+    path.
+
+    Nothing is deleted silently — the list goes into the log's ``run`` section,
+    which is outside the hashed content precisely because a first run and a
+    re-run must not differ inside it.
+    """
+    if not termination.publishable:
+        raise ContractViolation(
+            "refusing to remove a previous run's deliverables for a run that "
+            f"ended {termination.status.value}: {termination.reason}"
+        )
+    removed: list[str] = []
+    for pattern in _STALE_PATTERNS:
+        for path in sorted(layout.root.glob(pattern)):
+            if path.is_file():
+                removed.append(path.relative_to(layout.root).as_posix())
+                path.unlink()
+    return tuple(removed)
+
+
+def _abort(
+    *,
+    config: RunConfig,
+    walked: RunResult,
+    walk_notes: walker.RunNotes,
+    layout: OutputLayout,
+    stamp: OperatorStamp,
+    opts: PipelineOptions,
+    timings: list[tuple[str, float]],
+) -> PipelineOutcome:
+    """End a run that did not complete, WITHOUT publishing anything.
+
+    Codex review #1, finding B-1. Everything Stage 5 would do is skipped: no
+    purge, no ``clean_text/``, no index, no ``sources.json``, no
+    ``processing_log.json``, no ``run_summary.pdf``, no ``output_manifest.json``
+    and no issued-ID ledger. Whatever the last COMPLETE run left in this folder
+    is exactly as it was, which is the point of the finding.
+
+    The run is not silent, though — an aborted run that leaves no trace is its
+    own audit failure. It records itself under ``incomplete_run/``:
+
+    * ``run_status.json`` — the typed terminal status, machine-readable;
+    * ``processing_log.json`` — the ordinary log structure over whatever was
+      read, so the diagnostic tooling that reads a log can read this one;
+    * ``run_summary.pdf`` — the same one-page summary an operator is used to,
+      carrying the status banner.
+
+    They live in a sub-directory rather than beside the deliverables so that no
+    name an incomplete run writes can collide with a name a complete run wrote.
+    A subsequent complete run purges the directory (``_STALE_PATTERNS``), and
+    the manifest classifies it as excluded so it can never make a later, good
+    run report an unclassified output.
+    """
+    termination = walk_notes.termination
+    documents = walked.documents
+    warnings = list(walk_notes.messages()) + list(walked.warnings)
+
+    # Stamped from the SAME termination the outcome carries (round-2 F-1).
+    # This construction site took the contract's COMPLETED default, so an
+    # aborted run handed a consumer a machine result that contradicted the
+    # wrapper around it, the log beside it and the run_status.json under it.
+    result = walk_notes.termination.stamp(
+        RunResult(
+            config=config,
+            documents=documents,
+            unsupported=walked.unsupported,
+            warnings=tuple(warnings),
+        )
+    )
+
+    # The correctness gate fails as well as publication being withheld. Codex
+    # offered these as alternatives; doing both means a consumer that only reads
+    # `accounting.ok` — the property `PipelineOutcome.ok` used to be derived
+    # from on its own — still cannot mistake this for a good run.
+    report_acc = accounting.check(result)
+    report_acc.discrepancies.insert(
+        0,
+        accounting.Discrepancy(
+            "<run>",
+            f"run-{termination.status.value}",
+            termination.reason
+            or f"the run ended {termination.status.value} and published nothing",
+        ),
+    )
+
+    quarantine = OutputLayout(layout.root / INCOMPLETE_DIR)
+    quarantine.root.mkdir(parents=True, exist_ok=True)
+
+    before = estimate_for_texts(p.text for d in documents for p in d.pages)
+    after = estimate_for_texts(
+        p.text
+        for d in documents
+        for p in d.pages
+        if p.disposition is Disposition.KEEP
+    )
+
+    bundle = build_log(
+        config,
+        documents,
+        unsupported=walked.unsupported,
+        token_estimate=after,
+        warnings=list(walked.warnings),
+        stamp=stamp,
+        run_notes={
+            **termination.as_jsonable(),
+            "published": False,
+            "deliverables_note": (
+                "This run wrote NO deliverables. The files in the parent folder, "
+                "if any, belong to the last run that completed."
+            ),
+            "load_dependent_extraction": list(walk_notes.load_dependent),
+            "invocation_notes": list(walk_notes.invocation),
+        },
+    )
+    write_processing_log(bundle, quarantine)
+
+    (quarantine.root / STATUS_FILENAME).write_text(
+        json.dumps(
+            {
+                **termination.as_jsonable(),
+                "headline": termination.headline(),
+                "generated_at": stamp.saved_at,
+                "operator": stamp.username,
+                "source_root": config.source_root,
+                "output_root": config.output_root,
+                "documents_read": len(documents),
+                "unsupported_inventoried": len(walked.unsupported),
+                "pages_read": result.pages_in,
+                "warnings": warnings,
+            },
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    if opts.write_summary_pdf:
+        write_run_summary(
+            build_summary_data(
+                matter_name=opts.matter_name,
+                source_root=config.source_root,
+                output_root=config.output_root,
+                generated_at=stamp.saved_at,
+                operator=stamp.username,
+                documents=documents,
+                unsupported=walked.unsupported,
+                tokens_before=before,
+                tokens_after=after,
+                ocr_threshold_pct=config.ocr_conf_threshold_pct,
+                id_regime=config.id_regime.value,
+                bates_note="",
+                warnings=tuple(warnings),
+                termination=termination,
+            ),
+            quarantine,
+        )
+
+    return PipelineOutcome(
+        result=result,
+        layout=layout,
+        accounting=report_acc,
+        manifest=mf.Manifest(),
+        assignment=AssignmentResult(
+            documents=documents,
+            regime=IdRegime.NATIVE,
+            assignments=(),
+            alignment=None,
+            matched_rows=(),
+            unmatched_row_count=0,
+            warnings=(f"no identifier was issued: the run ended "
+                      f"{termination.status.value}",),
+        ),
+        reconciliation=ReconciliationReport(
+            matched=(),
+            folder_only=(),
+            index_only=(),
+            snapshot=None,
+            root_prefix=None,
+            warnings=(f"reconciliation was not run: the run ended "
+                      f"{termination.status.value}",),
+        ),
+        log=bundle,
+        walk_notes=walk_notes,
+        termination=termination,
+        published=False,
+        incomplete_dir=quarantine.root,
+        timings_s=tuple(timings),
+    )
+
+
+def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOutcome:
+    """Run §4's six stages over ``config.source_root`` and write §7's outputs."""
+    opts = options or PipelineOptions()
+    stamp = opts.stamp or operator_stamp()
+    layout = OutputLayout.at(config.output_root).ensure()
+    timings: list[tuple[str, float]] = []
+
+    def mark(stage: str, t0: float) -> None:
+        timings.append((stage, round(time.monotonic() - t0, 3)))
+
+    index = opts.master_index
+    if index is None and opts.master_index_path:
+        index = load_master_index(opts.master_index_path)
+
+    # ---- The effective configuration, built BEFORE the walk ----------------
+    #
+    # Codex review #1 round 2, F-4a. This used to be assembled *after* the walk
+    # returned, and the walk was handed the caller's original ``config``. The
+    # walk is where the resume journal is written and matched, so the journal
+    # was keyed on a configuration that did not yet know its own limits, its
+    # own OCR engine, or its master index — while the deliverables recorded the
+    # completed one. A record cached with OCR disabled, or under different
+    # caps, or read by different OCR model bytes, satisfied that key and was
+    # replayed into a run whose manifest then honestly hashed the *new*
+    # settings. The documents were not produced under the configuration the
+    # deliverable claims they were.
+    #
+    # Everything knowable before Stage 1 is therefore fixed before Stage 1.
+    # ``bates_pattern`` is the sole exception and cannot be otherwise — it is
+    # Stage 3's output — and it is sound to leave out: Bates is applied to
+    # already-extracted pages, so it cannot change what the walk produced or
+    # what a replayed record would have been.
+    ocr_ran = (opts.walk or walker.WalkOptions()).ocr_enabled
+    walk_config = replace(
+        config,
+        # ``WalkOptions.ocr_enabled`` is not part of RunConfig, and RunConfig's
+        # own docstring says anything influencing output and absent from it is
+        # a determinism bug — which this was. Measured on the real corpus: the
+        # same folder, the same (identical) RunConfig, OCR on and off, produced
+        # 400 OCR pages versus 400 more EMPTY pages and a different hashed
+        # content section, while the recorded configuration claimed both runs
+        # used rapidocr 1.2.3. The engine fields are the contract's own place
+        # to say this, so the run stamps what it actually did rather than what
+        # it was configured with.
+        #
+        # The same argument extends to everything A-04 added (finding B-2): the
+        # XLSX/CSV/ZIP caps, the ZIP depth, the per-file timeout, the retry
+        # bounds, whether the walk recursed, and the bytes of the OCR model.
+        # They are captured from the modules that own them, so the recorded
+        # identity is what the run used rather than a restatement that can go
+        # stale.
+        limits=walker.effective_limits(opts.walk, ocr_enabled=ocr_ran),
+        ocr_engine=config.ocr_engine if ocr_ran else OCR_DISABLED,
+        ocr_engine_version=config.ocr_engine_version if ocr_ran else "",
+        master_index=index.snapshot if index else config.master_index,
+        # The ORDERED profile set, by content (amendment A-08, from Codex
+        # review #1 round 2 finding B-R2-2). Recording only
+        # ``opts.profiles[0].profile_id`` and its version was not recording the
+        # input the run used: Stage 4 applies the first profile whose header
+        # patterns claim a document, so every profile's rules AND the order
+        # they are tried in decide which pages drop.
+        #
+        # Measured on the fixture corpus, both without any attacker model:
+        # editing a second profile's rule without bumping its version moved 2
+        # pages KEEP → DROP and changed the corpus hash while the recorded
+        # identity stayed byte-identical; swapping two profiles' precedence
+        # with no content change did the same.
+        #
+        # Built here rather than at the `effective` block below because the
+        # resume key is derived from the walk config, and a journal written
+        # under one profile library must not be replayed under another.
+        profiles=tuple(
+            ProfileSnapshot(p.profile_id, p.version, p.profile_hash)
+            for p in opts.profiles
+        ),
+    )
+    # ``profile_id`` / ``profile_version`` are DELIBERATELY not resolved from
+    # ``opts.profiles`` here, and the reason is worth recording because the
+    # obvious tidy-up is wrong.
+    #
+    # :func:`walker._record` stamps whatever the walk config carries onto every
+    # DocumentRecord, and Stage 4 (:func:`~dociq.profiles.apply.apply_profiles`)
+    # overwrites that stamp only on documents a profile actually CLAIMED — an
+    # unclaimed document keeps what it arrived with. Resolving the library's
+    # first profile into the walk config would therefore label every unclaimed
+    # document with a profile that did not match it, which is a false statement
+    # in the index and in hashed content both.
+    #
+    # It costs nothing on the resume key. A replayed walk record is
+    # profile-independent in its text, the stamp it carries is
+    # ``config.profile_id`` — which the resume key does cover — and Stage 4
+    # re-runs over replayed records exactly as it does over fresh ones. The
+    # emitted profile is the same either way.
+
+    # ---- Stages 1-2 --------------------------------------------------------
+    t = time.monotonic()
+    walk_notes = walker.RunNotes()
+    walked = walker.run(walk_config, opts.walk, walk_notes)
+    mark("walk_extract", t)
+
+    # Codex B-1. A blocked or cancelled walk stops HERE, before Stage 3 and
+    # therefore long before Stage 5's purge. Every later stage — assignment,
+    # the purge, emission, accounting, the manifest — is unreachable for a run
+    # that did not complete, so none of them needs to know about the case, and
+    # none of them can be the place a future edit reintroduces it.
+    if not walk_notes.termination.publishable:
+        return _abort(
+            # The effective configuration, not the caller's — an aborted run
+            # must record the settings it was going to run under, or its
+            # diagnostic log describes a different run than the one that failed.
+            config=walk_config,
+            walked=walked,
+            walk_notes=walk_notes,
+            layout=layout,
+            stamp=stamp,
+            opts=opts,
+            timings=timings,
+        )
+
+    warnings: list[str] = list(walked.warnings)
+    documents: tuple[DocumentRecord, ...] = walked.documents
+
+    # ---- Stage 3 -----------------------------------------------------------
+    t = time.monotonic()
+    decision = _bates_decision(documents, opts, config, stamp, warnings)
+    documents = apply_bates(documents, decision)
+    ranges = document_ranges(documents)
+    mark("bates", t)
+
+    # ---- Stage 3b ----------------------------------------------------------
+    #
+    # ONE INVENTORY, not two (Codex review #1, finding B-7). Stage 3b used to
+    # see only the extracted documents, so a Tier-2 file kept an empty Doc ID
+    # and never reached ``build_index_rows`` — yet §5 lists ``Unsupported`` as a
+    # required Processing status *of the document index*, and the GUI tells the
+    # operator unsupported files are recorded there. On the real corpus the
+    # seven legacy ``.doc`` files were counted in the log and the summary and
+    # were absent from the first-class deliverable.
+    #
+    # They are assigned together rather than in a second pass because that is
+    # what makes acceptance criterion 5 hold by construction: one
+    # :class:`~dociq.docid.ids.DocIdMinter` sees every identifier this run
+    # issues, so LI and DIQ cannot collide with each other or with themselves.
+    # Two passes would mean two minters and two DIQ counters, and the second
+    # pass would have to be told which numbers the first had already used —
+    # exactly the bookkeeping the minter exists to remove.
+    #
+    # A Tier-2 file with a master-index row now MATCHES it and takes its LI
+    # identifier, which is also the right answer for reconciliation: the file is
+    # in the folder and in the index, and reporting it as index-only was a false
+    # gap. Container children that were Tier-2 (a .dwg inside a .zip) pick up a
+    # parent-derived identifier for the first time.
+    t = time.monotonic()
+    inventory = tuple(documents) + tuple(walked.unsupported)
+    assignment = assign_doc_ids(
+        inventory, index, bates_ranges=ranges_by_sort_key(ranges)
+    )
+    # Split back on status, which is the exact discriminator: the walker has
+    # already moved every UNSUPPORTED record — including Tier-2 archive members
+    # — onto its unsupported list, so no record can be on the wrong side here.
+    documents = tuple(
+        d for d in assignment.documents
+        if d.status is not ProcessingStatus.UNSUPPORTED
+    )
+    unsupported = tuple(
+        d for d in assignment.documents
+        if d.status is ProcessingStatus.UNSUPPORTED
+    )
+    if len(documents) + len(unsupported) != len(inventory):
+        raise ContractViolation(  # pragma: no cover — guards a refactor
+            f"Stage 3b lost inventory: {len(inventory)} in, "
+            f"{len(documents)} documents + {len(unsupported)} unsupported out"
+        )
+    warnings.extend(assignment.warnings)
+    report = reconcile(assignment, index, bates_ranges=ranges)
+    mark("assign_reconcile", t)
+
+    # ---- Stage 4 -----------------------------------------------------------
+    t = time.monotonic()
+    applied = apply_profiles(documents, opts.profiles)
+    documents = applied.documents
+    warnings.extend(applied.warnings)
+    mark("classify", t)
+
+    # The config the deliverables record is the one the walk actually ran
+    # under, plus the one thing that could not be known before Stage 3: the
+    # confirmed Bates pattern. Everything else was fixed before Stage 1 (F-4a,
+    # above), which is what makes the resume key and this identity the same
+    # configuration rather than two configurations that usually agree.
+    effective = replace(
+        walk_config,
+        # Only a decision that was actually APPLIED is persisted. Recording the
+        # pattern of a pending or rejected decision would make the next run
+        # load it as a confirmation — the operator's "not yet" silently
+        # promoted to "yes" by a re-run — and an explicit rejection has to be
+        # able to clear a stored pattern, or it could never be undone.
+        bates_pattern=(
+            decision.pattern()
+            if decision is not None and decision.applies
+            else (None if decision is not None else config.bates_pattern)
+        ),
+        # The profile LIBRARY this run was driven by. Resolved here rather than
+        # into `walk_config` on purpose — see the note at the pre-walk block:
+        # stamping it onto records at walk time would label documents no
+        # profile claimed. What the run was configured with, and what matched a
+        # given document, are two different facts and only Stage 4 knows the
+        # second.
+        profile_id=opts.profiles[0].profile_id if opts.profiles else config.profile_id,
+        profile_version=(
+            opts.profiles[0].version if opts.profiles else config.profile_version
+        ),
+    )
+
+    # D-04 (b): the renumbering check runs BEFORE the result is assembled, not
+    # in the emit block where the ledger is written. Its warnings have to reach
+    # `RunResult.warnings` as well as the log — an operator reading the summary
+    # screen and an auditor reading the log must not be told different things
+    # about whether identifiers moved.
+    #
+    # They are kept OUT of the list handed to the log's hashed content, and go
+    # into its `run` section instead: the comparison is against a ledger the
+    # destination folder happens to hold, and the destination is not one of the
+    # determinism contract's inputs.
+    ledger_path = Path(opts.previous_ledger) if opts.previous_ledger else layout.issued_ids
+    previous = IssuedIdLedger.read(ledger_path) if ledger_path.is_file() else None
+    ledger = IssuedIdLedger.from_assignment(assignment, effective.master_index)
+    renumbering = detect_renumbering(previous, ledger)
+    # Stage 1's invocation notes travel the same road as the renumbering
+    # warnings, and for the same reason. A serial-retry disclosure, a resume
+    # note and a cancellation note are all facts about THIS invocation: two
+    # runs over byte-identical inputs can legitimately differ in them, so they
+    # are visible to the operator (here, and in the log's `run` section, and in
+    # the summary) and invisible to the hash. Putting them in `warnings` — the
+    # list that becomes hashed `content` — would make a run that needed a retry
+    # produce different bytes from a run that did not, which is the very defect
+    # the retry exists to remove.
+    #
+    # They go FIRST, not last. The run summary renders the first four warnings
+    # and folds the rest into a count, so appending a "this document failed
+    # under load and was re-read" disclosure to the end of a list of 300 would
+    # satisfy the letter of "recorded" and none of the point.
+    all_warnings = (walk_notes.messages() + warnings
+                    + [w.message for w in renumbering])
+
+    # ---- Stage 6 (measure first — the log records the numbers) -------------
+    t = time.monotonic()
+    before = estimate_for_texts(p.text for d in documents for p in d.pages)
+    after = estimate_for_texts(
+        p.text
+        for d in documents
+        for p in d.pages
+        if p.disposition is Disposition.KEEP
+    )
+    mark("tokens", t)
+
+    # Stamped rather than left to the COMPLETED default, even though this line
+    # is only reachable for a complete run. The default is what made the three
+    # abort sites wrong silently; a construction site that states its status is
+    # one a future early return cannot quietly join.
+    result = walk_notes.termination.stamp(
+        RunResult(
+            config=effective,
+            documents=documents,
+            unsupported=unsupported,
+            warnings=tuple(all_warnings),
+            tokens_before=_to_contract_estimate(before, "before reduction"),
+            tokens_after=_to_contract_estimate(after, "after reduction"),
+            reconciliation=(
+                _to_contract_reconciliation(report) if index is not None else None
+            ),
+        )
+    )
+
+    # ---- Stage 5 -----------------------------------------------------------
+    t = time.monotonic()
+    stale = _purge_stale_deliverables(layout, walk_notes.termination)
+    written: list[Path] = []
+    # Clean text is for EXTRACTED documents only. An unsupported file has no
+    # text to write and must not appear in ``sources.json``, which is the map
+    # Expert Assist reads to find a document's content — a Doc ID pointing at a
+    # file that was never read would be worse than its absence. It appears in
+    # the index instead, which is the inventory (B-7).
+    text_result = write_clean_text(documents, layout)
+    written.extend(layout.root / rel for _, rel in text_result.sources)
+    written.append(write_sources_json(text_result, layout))
+    rows = build_index_rows(documents + unsupported, bates_ranges=ranges)
+    written.append(write_index_csv(rows, layout))
+    if index is not None:
+        written.append(write_reconciliation_csv(report, layout))
+    for profile in opts.profiles:
+        written.append(write_matter_copy(profile, layout.root))
+
+    # The ledger is read above, before this line overwrites it: comparing a run
+    # against the ledger it just wrote would report that nothing was renumbered,
+    # every time, forever.
+    written.append(ledger.write(layout.issued_ids))
+
+    bundle = build_log(
+        effective,
+        documents,
+        unsupported=unsupported,
+        assignment=assignment,
+        reconciliation=report if index is not None else None,
+        renumbering=renumbering,
+        drops=applied.drops,
+        profiles=opts.profiles,
+        bates_decision=decision,
+        bates_ranges=ranges,
+        token_estimate=after,
+        warnings=warnings,
+        stamp=stamp,
+        output_hashes=_hashes_of(written, layout),
+        run_notes={
+            # The terminal status is recorded on EVERY run, not only on the
+            # ones that end badly (Codex B-1). A consumer must be able to ask
+            # "did this run complete?" of any log it is handed and get an
+            # answer, rather than inferring completion from the absence of a
+            # field. It sits in `run`, not in `content`: a cancellation is a
+            # fact about this invocation, and hashing it would make an
+            # interrupted run and a clean one differ inside the byte-identical
+            # claim.
+            **walk_notes.termination.as_jsonable(),
+            # Recorded, never hashed. Pool widths must not change output; if one
+            # ever does, that is a determinism defect to fix rather than a value
+            # to absorb into the identity (A-04's note on
+            # ``EffectiveLimits.workers``). The disk-headroom multiplier gates
+            # whether the run starts rather than what a completed run emits, and
+            # it is a float, which Principle 5 bars from identity fields — see
+            # ``docs/contracts/amendments.md`` A-05(b) for the disposition.
+            "pool": {
+                "workers": effective.limits.workers if effective.limits else None,
+                "ocr_page_workers": ex._OCR_PAGE_WORKERS,
+                "disk_headroom_x100": round(walker._DISK_HEADROOM * 100),
+            },
+            "stale_outputs_removed": list(stale),
+            "load_dependent_extraction": list(walk_notes.load_dependent),
+            "invocation_notes": list(walk_notes.invocation),
+        },
+    )
+    write_processing_log(bundle, layout)
+
+    if opts.write_workbook:
+        write_index_xlsx(
+            rows,
+            layout,
+            report if index is not None else None,
+            matter_name=opts.matter_name,
+        )
+    if opts.write_summary_pdf:
+        write_run_summary(
+            build_summary_data(
+                matter_name=opts.matter_name,
+                source_root=effective.source_root,
+                output_root=effective.output_root,
+                generated_at=stamp.saved_at,
+                operator=stamp.username,
+                documents=documents,
+                unsupported=unsupported,
+                tokens_before=before,
+                tokens_after=after,
+                ocr_threshold_pct=effective.ocr_conf_threshold_pct,
+                id_regime=effective.id_regime.value,
+                master_index=index.snapshot.filename if index else None,
+                bates_note=_bates_note(decision, ranges),
+                warnings=tuple(all_warnings),
+                termination=walk_notes.termination,
+            ),
+            layout,
+        )
+    if opts.write_package:
+        build_upload_package(
+            layout,
+            matter_name=opts.matter_name,
+            document_count=len(documents),
+            page_count=result.pages_in,
+            estimate=after,
+            has_bates=any(r.pages_with_bates for r in ranges.values()),
+            id_regime=effective.id_regime.value,
+        )
+    mark("emit", t)
+
+    # ---- Stage 6 (the gates) ----------------------------------------------
+    t = time.monotonic()
+    report_acc = accounting.check(result)
+    man = mf.build(layout.root, config=effective)
+    mf.write(layout.root, man)
+    mark("verify", t)
+
+    return PipelineOutcome(
+        result=result,
+        layout=layout,
+        accounting=report_acc,
+        manifest=man,
+        assignment=assignment,
+        reconciliation=report,
+        log=bundle,
+        walk_notes=walk_notes,
+        renumbering=renumbering,
+        stale_removed=stale,
+        bates_ranges=ranges,
+        timings_s=tuple(timings),
+        termination=walk_notes.termination,
+        published=True,
+    )
+
+
+def _bates_note(
+    decision: BatesDecision | None,
+    ranges: dict[tuple[str, str, int], BatesRange],
+) -> str:
+    stamped = sum(r.pages_with_bates for r in ranges.values())
+    if decision is None:
+        return "No Bates stamps detected — absence is normal (§4 Stage 3)."
+    if not decision.applies:
+        return (
+            "A Bates format was detected but not applied: the operator has not "
+            "confirmed it (§4 Stage 3)."
+        )
+    return f"{decision.pattern()} — {stamped} page(s) stamped."
+
+
+def ocr_page_count(result: RunResult) -> int:
+    """Pages the OCR engine read. Used by the §10 restatement, which has to
+    separate OCR cost from extraction cost rather than quoting one number."""
+    return sum(
+        1
+        for d in result.documents
+        for p in d.pages
+        if p.kind is PageKind.OCR
+    )
+
+
+def corpus_sort_check(result: RunResult) -> bool:
+    """Documents are in canonical order. Cheap, and it catches an emitter that
+    sorted its own way."""
+    ordered = sorted(result.documents, key=document_sort_key)
+    return list(result.documents) == ordered

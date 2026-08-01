@@ -1,0 +1,638 @@
+# Contract amendment register
+
+Cases where `src/dociq/contracts.py` v1.0.0 cannot express something a track
+must produce or display, raised under the stop-the-line rule in
+`pagemodel_freeze.md`. Each entry states the concrete case and why a local
+workaround would be wrong.
+
+---
+
+## A-01 — `RunResult` cannot carry the token estimate
+
+**Raised by:** Track C (GUI shell), 2026-07-30
+**Affects:** `RunResult`; Stage 6 (verify), the emit layer, the summary screen
+**Proposed severity:** MINOR (additive field with a safe default)
+
+### The case
+
+The token estimate is the product's headline number. §7 requires the emit layer
+to write "token estimate before/after" into `run_summary.pdf`; §9 requires the
+summary screen to show it as the oversized headline plus the D-07 capacity
+gauge; §4 Stage 6 lists "token count estimate" as part of the post-run
+self-check. D-03 fixes how it is computed: characters ÷ a ratio calibrated
+against the real Claude tokenizer, displayed as a conservative range.
+
+`RunResult` carries `config`, `documents`, `unsupported` and `warnings`. There
+is nowhere to put the estimate, the ratios it used, or the character counts it
+was derived from.
+
+### Why a local workaround would be wrong
+
+The GUI *could* sum `len(page.text)` and divide. That would put a second
+estimator in the product, in a widget, disagreeing with the pipeline's estimator
+the first time either changes — and the two numbers would then appear in the
+same matter folder, one on screen and one in `run_summary.pdf`. It also breaks
+the freeze's Track-C rule: the GUI holds no pipeline logic.
+
+`warnings: tuple[str, ...]` could carry the number as prose. Parsing a number
+back out of a display string is a worse coupling than the field it avoids.
+
+### Proposed shape (for the central amendment, not applied here)
+
+```python
+@dataclass(frozen=True, slots=True)
+class TokenEstimate:
+    chars: int
+    ratio_low: float      # reporting-only, like ocr_conf: excluded from identity
+    ratio_high: float
+
+# on RunResult, both defaulted to None so the change is additive:
+tokens_before: TokenEstimate | None = None
+tokens_after: TokenEstimate | None = None
+```
+
+`ratio_low`/`ratio_high` are floats, so they must join `_IDENTITY_EXCLUDED` —
+`to_jsonable(for_identity=True)` raises on any float it meets, which is exactly
+the guard that would otherwise catch this late. `chars` is an int and can stay
+in identity.
+
+### What Track C did in the meantime
+
+Nothing was added to the contract and nothing is computed in a widget. The GUI's
+pipeline seam (`src/dociq/gui/pipeline.py`) defines a presentation record
+`TokenEstimate` that the *adapter* supplies alongside the `RunResult`; the mock
+fills it, and Sprint 2's real adapter must source it from Stage 6 rather than
+recompute it. When this amendment lands, the seam's record becomes a thin read
+of the contract field and the GUI does not change.
+
+---
+
+## A-02 — `RunResult` cannot carry the master-index reconciliation
+
+**Raised by:** Track C (GUI shell), 2026-07-30
+**Affects:** `RunResult`; §5 reconciliation, the index workbook's reconciliation
+tab, the summary screen's flag chips
+**Proposed severity:** MINOR (additive field with a safe default)
+
+### The case
+
+§5 makes the reconciliation a first-class deliverable with three categories —
+in both (with field discrepancies flagged), folder-not-index, index-not-folder —
+written as a tab of the index workbook. §9 requires "reconciliation mismatches"
+to be one of the summary screen's flagged items, with click-through to detail.
+
+`RunResult` has no field for it. `DocumentRecord.li_file_no` records the *result*
+of a successful match on one document, which is not the same information: it
+cannot express an index row with no file at all, and it cannot express a field
+disagreement between a matched pair.
+
+### Why a local workaround would be wrong
+
+Reconstructing the categories in the GUI would require the GUI to hold the
+master index and re-implement the §5 match rules (filepath+filename primary,
+SHA-256 secondary, Bates when present) — pipeline logic, in a widget, in a track
+that is forbidden from importing `identify/` or `docid/`. Two implementations of
+the match rule would eventually disagree, and the one the client sees in the
+workbook and the one on screen would be the two that disagree.
+
+### Proposed shape
+
+```python
+@dataclass(frozen=True, slots=True)
+class ReconciliationRow:
+    category: str      # "folder-only" | "index-only" | "field-mismatch"
+    doc_id: str
+    filename: str
+    detail: str
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationReport:
+    matched: int
+    rows: tuple[ReconciliationRow, ...] = ()
+
+# on RunResult:
+reconciliation: ReconciliationReport | None = None   # None = no index supplied
+```
+
+All-string/int fields, so identity hashing is unaffected.
+
+### What Track C did in the meantime
+
+Same as A-01: the shape above lives as a presentation record in the GUI's
+pipeline seam and is supplied by the adapter, not computed by the GUI. The mock
+fills it; Sprint 2's adapter must read it from the pipeline.
+
+---
+
+**Status of A-01 and A-02:** ACCEPTED by the coordinator 2026-07-30, being
+applied centrally as contract **v1.1.0** (additive, safe defaults), with two
+additions to the proposed shape — `TokenEstimate.floor_tokens` and
+`TokenEstimate.provenance`. Track C's seam records have been reshaped to match,
+so the rebase turns them into a thin read of `RunResult.tokens_before` /
+`tokens_after` / `reconciliation`. Track C did not modify `contracts.py`.
+
+---
+
+## A-03 — nowhere to carry "the configured ratio was refuted"
+
+**Raised by:** Track C (GUI shell), 2026-07-30, on the v1.1.0 shape
+**Affects:** `TokenEstimate`
+**Proposed severity:** MINOR (additive field with a safe default)
+
+### The case
+
+The coordinator's instruction is explicit: *"when `ratio_refuted` is set (Track
+B's `verify/tokens.py` sets it when the text's own structure contradicts the
+ruled band), the screen must say so plainly."* The announced v1.1.0
+`TokenEstimate` carries `floor_tokens` and `provenance` but no such flag.
+
+The distinction is not cosmetic. Three states have to be told apart on screen:
+
+| state | what the screen must say |
+|---|---|
+| estimated from a ratio that holds | "estimated — <provenance>" |
+| counted, a hard floor | "a floor, not an estimate — <provenance>" |
+| counted, **and the configured ratio is impossible on this text** | "…; the configured ratio did not fit this text, so it was not used" |
+
+The third is the one that matters most, because it is the case the real corpus
+is in: 2.53 chars per pre-token against a ruled band of 3.3–3.6.
+
+### Why a local workaround would be wrong
+
+The GUI could infer it — compare `chars / floor_tokens` against `ratio_low` and
+decide for itself. That puts the refutation *test* in a widget, where it would
+sit alongside Track B's implementation of the same test in `verify/tokens.py`
+and eventually disagree with it. Which value the screen shows and which the
+`processing_log` records would then depend on which code ran.
+
+Parsing it back out of the `provenance` string is worse: it makes a prose field
+load-bearing, so rewording a sentence changes what the screen asserts.
+
+### Proposed shape
+
+```python
+ratio_refuted: bool = False   # on TokenEstimate, defaulted False
+```
+
+Boolean, so identity hashing is unaffected.
+
+### What Track C did in the meantime
+
+The seam's `TokenEstimate` carries the flag explicitly and the mock sets it from
+a measurement of its own text. **Nothing in the GUI decides refutation.** If the
+field is declined, the GUI needs a defined provenance vocabulary instead — but
+it must not be left to a widget either way.
+
+---
+
+**Standing note:** the real adapter cannot be written honestly until A-01 and
+A-02 land, because it would have nowhere to read these values from.
+
+---
+
+> **Numbering note.** Two fix packages ran concurrently and both claimed
+> A-05. The token-proxy/limits pair keeps A-05; the run-status amendment
+> is renumbered A-06. Both are APPLIED — see `contracts.py` 1.4.0 and
+> 1.5.0. A-05(b) is dispositioned NOT NEEDED, with the reasoning recorded
+> in the 1.4.0 version note.
+
+## A-05 — two gaps found while closing Codex review #1 findings B-2 and B-6
+
+**Raised by:** the B-2/B-6 fix package, 2026-07-31, against contract **v1.3.0**
+**Affects:** `TokenEstimate.floor_tokens` (documentation), `EffectiveLimits`
+**Proposed severity:** MINOR for the first, DISPOSITION-ONLY for the second
+**Status:** RAISED, not applied. `contracts.py` was not modified by this package.
+
+### (a) `TokenEstimate.floor_tokens` documents a claim that has been withdrawn
+
+The field's docstring says:
+
+> Hard lower bound on the true token count, from the text's pre-token count: a
+> byte-level BPE tokenizer cannot merge across a pre-token boundary, so it can
+> never emit fewer tokens than this.
+
+Codex review #1 finding B-6 established that this is not true, and the finding
+is accepted. A byte-level BPE cannot merge across **its own** pre-token
+boundaries; DocIQ's `PRETOKEN_RE` invents boundaries of its own — it splits
+digit runs every three digits — and a real tokenizer with coarser
+pre-tokenization merges straight across them and emits *fewer* tokens than DocIQ
+counts pre-tokens. On material that is 13% digits the effect is material, not
+nominal.
+
+**What this package did instead of editing the frozen file.** The pipeline now
+sets `floor_tokens=0` — its "not measured" value — because the pre-token count
+cannot honestly be shipped in a field the contract defines as a hard bound. The
+measurement itself is not lost: it travels in `TokenEstimate.provenance`, and
+the processing log's `token_estimate` block records `pretokens`, `utf8_bytes`,
+`token_ceiling`, the method used, and the three assumptions, each labeled for
+what it is.
+
+**Proposed contract-side repair (v1.4.0, additive):**
+
+```python
+structural_tokens: int = 0   # tokens implied by measured pre-token structure
+                             # under stated assumptions; NOT a bound
+token_ceiling: int = 0       # tokens <= UTF-8 bytes; sound for any byte-level
+                             # tokenizer, and the only bound DocIQ asserts
+```
+
+and a docstring correction on `floor_tokens` marking it reserved/unused until
+a real tokenizer measurement exists to fill it. Until then a consumer reading
+`floor_tokens == 0` correctly learns "no bound was established", which is the
+true state of the world.
+
+### (b) `EffectiveLimits` has no field for the disk-headroom multiplier
+
+A-04 captured the environment-controlled settings that can change output
+evidence. `DOCIQ_DISK_HEADROOM` (`walker._DISK_HEADROOM`, default 1.15) is
+environment-controlled and has no field.
+
+**Disposition taken, and the reasoning, so a reviewer can overrule it.** It is
+not recorded in the identity, on two grounds:
+
+1. It gates whether the run *starts* — the preflight either blocks the run or
+   lets it proceed — rather than what a completed run emits. Two completed runs
+   with different headroom multipliers over the same inputs produce the same
+   bytes. (The blocked case is Codex finding B-1's subject, not B-2's: a blocked
+   run must acquire a terminal status, not a different content hash.)
+2. It is a float, and Principle 5 bars floats from identity fields. Encoding it
+   as hundredths would be possible, but see (1).
+
+It **is** recorded, as `run.pool.disk_headroom_x100` in the processing log's
+unhashed `run` section, alongside the two pool widths (`workers`,
+`ocr_page_workers`) which are excluded from identity on the separate ground that
+pool width must not change output — and `tests/test_run_identity.py`
+`test_pool_width_does_not_change_the_output_bytes` measures that claim rather
+than assuming it.
+
+If a reviewer judges (1) wrong, the repair is a `disk_headroom_x100: int` field
+on `EffectiveLimits` and a one-line change in `walker.effective_limits`.
+
+---
+
+## A-06 — `RunResult` cannot say whether the run COMPLETED
+
+**Raised by:** the B-1 fix branch (`fix/codex-r1-a`), 2026-07-31, from Codex
+review #1 finding B-1
+**Affects:** `RunResult`; Stage 1 (walk), the pipeline's publication decision,
+the log, the run summary, the GUI seam
+**Proposed severity:** MINOR (additive field with a safe default)
+**Status:** **APPLIED — contract v1.5.0**, then substantially revised by A-07 at
+v1.6.0.
+
+> **Register correction (D-R2-1, Codex review #1 round 2).** This entry read
+> "RAISED — stop-the-line, not applied", said `contracts.py` was not modified,
+> and described the `runstate.TerminalStatus` re-export as future work. All
+> three statements were stale: the amendment landed centrally as 1.5.0 while
+> this text still described the branch that raised it. Codex correctly read the
+> staleness as editorial evidence of the unfinished integration underneath it —
+> the fields existed and nothing populated them, and the predicted re-export
+> never happened. Both are now done; see A-07.
+>
+> The lesson is procedural, not cosmetic: an amendment's status here is the
+> only place a reader can check whether a contract change was *wired through*
+> rather than merely declared, so leaving it stale hides exactly the failure it
+> would have caught.
+
+### The case
+
+Codex finding B-1 requires "a typed terminal status that prevents normal
+publication, or [that] make[s] the correctness gates fail while preserving the
+last complete deliverables", and states that the status "must also be visible in
+the machine-readable run result, manifest, log, PDF, and GUI."
+
+`RunResult` carries `config`, `documents`, `unsupported`, `warnings`,
+`tokens_before`, `tokens_after` and `reconciliation`. None of them can express
+*how the run ended*. The two failure modes are indistinguishable from a good
+run by inspection of the type:
+
+- a blocked run returns `RunResult(config=..., warnings=(message,))` — an empty
+  document set, which is what an empty folder also produces;
+- a cancelled run returns the partial document set, which is what a small
+  matter also produces.
+
+### Why a local workaround would be wrong
+
+`warnings: tuple[str, ...]` can carry the sentence, and on this branch it does —
+the disclosure goes in first. But a consumer deciding whether to trust a run
+would then have to match a prefix against a display string, which is exactly the
+coupling A-01 and A-03 were raised to avoid, and rewording a sentence would
+change what a consumer asserts.
+
+Inferring it is worse: "zero documents means blocked" is false for an empty
+folder, and "fewer documents than files scanned" is false for a corpus of
+unreadable files.
+
+### Proposed shape
+
+```python
+# in contracts.py, mirroring src/dociq/runstate.py:
+class TerminalStatus(str, enum.Enum):
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+
+# on RunResult, defaulted so the change is additive:
+terminal_status: TerminalStatus = TerminalStatus.COMPLETED
+terminal_status_reason: str = ""
+```
+
+An enum with a string value and a string, so identity hashing is unaffected in
+kind — but see the note below: it must join `_IDENTITY_EXCLUDED`. Two runs over
+byte-identical inputs can legitimately differ in it (the operator cancelled one
+of them), so hashing it would make the byte-identical claim false for a reason
+that has nothing to do with the evidence. That is the same argument
+`walker.RunNotes` already makes for the retry and resume disclosures.
+
+### What this branch did in the meantime
+
+`src/dociq/runstate.py` — a small non-contract module, importable by the GUI
+under the freeze's Track-C rule — defines `TerminalStatus` and
+`RunTermination`. `walker.RunNotes` carries it (it is a fact about the
+invocation, which is precisely what `RunNotes` is for), `PipelineOutcome`
+exposes it as `termination` / `published`, and it is rendered in
+`processing_log.json`'s `run` section, in `run_summary.pdf`, in the GUI seam's
+`RunOutcome` and in `SummaryView.status_banner()`.
+
+**`RunResult` itself still cannot say it.** In practice a consumer holding only
+a `RunResult` from an aborted run holds one that was never written to disk —
+the pipeline publishes nothing — and the first entry of `RunResult.warnings` is
+the disclosure. That is a mitigation, not the field Codex asked for. When this
+amendment lands, `runstate.TerminalStatus` becomes a re-export and the change is
+a one-line read in each of the sites above.
+
+---
+
+## A-07 — one `TerminalStatus`, actually populated, and NOT in the corpus identity
+
+**Raised by:** the round-2 fix package, 2026-08-01, from Codex review #1 round 2
+finding **B-R2-1**, against contract **v1.5.0**
+**Affects:** `TerminalStatus`, `RunResult.terminal_status`,
+`RunResult.terminal_status_reason`, `_IDENTITY_EXCLUDED`; `runstate`, the walk,
+`pipeline._abort`, the GUI mock, the manifest's identity note
+**Severity:** MINOR
+**Status:** **APPLIED — contract v1.6.0.**
+
+### The case
+
+A-06 landed the typed status in the contract and nothing connected it to the
+shipping path. `runstate.py` still declared a second, value-identical
+`TerminalStatus`; the walk carried that one while `RunResult` declared the
+contract's, so an `is` comparison across the seam answered `False` about two
+statuses that were the same status. And because A-06 defaulted the field to
+`COMPLETED` to keep the change additive, **every abort path took the default**.
+Codex's probe on a missing source root:
+
+```text
+RunNotes termination      = blocked
+RunResult terminal_status = completed
+RunResult terminal_status_reason = ''
+```
+
+The machine-readable result contained two answers to one question and the
+amended contract's answer was the wrong one on every abort path.
+
+The regression test could not see it: it asserted `PipelineOutcome.termination`
+and the log — both correct — and never `PipelineOutcome.result.terminal_status`.
+`tests/test_contracts.py` proved only that two *hand-constructed* `RunResult`
+objects hash differently, never that the pipeline constructs the non-complete
+one.
+
+**Sibling enumeration.** Six `RunResult` construction sites. Three were wrong
+(the walk's two blocked preflights and `pipeline._abort`); a fourth — the walk's
+normal return — was wrong on the **cancelled** path, which Codex's blocked probe
+does not reach and which is the path that actually carries documents; a fifth,
+`gui/mock_pipeline`, was wrong on its own cancel path and is what Track C
+develops against. Only `pipeline.run`'s final result was right, and only because
+it is unreachable except when complete.
+
+### What was applied
+
+`contracts.TerminalStatus` is the only definition; `runstate` re-exports it —
+which is precisely the change A-06's own register entry predicted and which
+never happened (see D-R2-1). Every returned `RunResult` is stamped by
+`RunTermination.stamp()`, which sets both fields from one value, so no site can
+set half of them or set them from a termination other than the one the pipeline
+is about to act on.
+
+### The hashing decision is REVERSED
+
+1.5.0 hashed the terminal status against the raising package's advice. **Codex's
+second opinion is adopted and 1.5.0's reasoning is withdrawn.** Both fields move
+into `_IDENTITY_EXCLUDED`.
+
+The 1.5.0 argument was that a cancelled partial set and a complete set must not
+hash identically. That assumes the two can be compared, and they cannot: an
+incomplete run publishes no corpus and no corpus manifest, so there is no
+cancelled corpus hash for a completed one to collide with — the previous
+completed manifest simply survives, which is the entire point of the publication
+guard that B-1 produced. Calling invocation termination part of a *corpus*
+identity for a corpus that was never published makes the byte-identical claim
+describe something other than the bytes it covers, and makes rewording an
+operator sentence change the identity of runs already produced.
+
+If a failed attempt ever needs a verifiable identity of its own, that is a
+separate **attempt** identity over the `incomplete_run/` audit record. It is not
+a term in this one.
+
+---
+
+## A-08 — the run identity omits the ordered profile set, and four things claim to be the identity
+
+**Raised by:** the round-2 fix package, 2026-08-01, from Codex review #1 round 2
+finding **B-R2-2**, against contract **v1.5.0**
+**Affects:** new `ProfileSnapshot`; `RunConfig.profiles`; `output_root` moved to
+`_IDENTITY_EXCLUDED`; new `run_identity()`; `emit.log` hashed content;
+`verify.manifest` `IDENTITY_NOTE` and the persisted `run_identity_sha256`
+**Severity:** MINOR (additive field plus one exclusion)
+**Status:** **APPLIED — contract v1.6.0.** This is the largest of the three
+round-2 findings.
+
+### The case, measured
+
+`PipelineOptions.profiles` is an **ordered** sequence and
+`apply_profiles` claims each document with the FIRST profile whose header
+patterns match. So every profile's content and their precedence order decide
+which pages drop — and therefore decide `clean_text`, the index, the sources
+map, the log's hashed content and the corpus hash.
+
+The effective configuration recorded only:
+
+```text
+profile_id      = opts.profiles[0].profile_id
+profile_version = opts.profiles[0].version
+```
+
+Not the ordered set, not any profile's content, not the precedence that resolves
+multiple claimants. Two counterexamples, both reproduced on the fixture corpus
+before the fix, neither needing an attacker model:
+
+| change | run identity | corpus hash |
+|---|---|---|
+| profile 2's DROP rule edited, version NOT bumped | unchanged | **moved** (2 pages KEEP → DROP) |
+| profiles 2 and 3 swapped, no content change at all | unchanged | **moved** |
+
+Nothing enforces version immutability, so the first of those is simply how a
+profile library drifts between runs.
+
+`FormatProfile.profile_hash` already existed and `emit.log.build_log` already
+wrote each profile and its hash into hashed log content — profile content was
+already treated as evidence-affecting. It was just missing from the projection
+the manifest calls the run identity.
+
+### The second half: four identities, none persisted
+
+`content_hash(RunConfig)` hashed `output_root`; the manifest's `claim_identity`
+said the output folder was part of the run identity; `emit.log` deliberately
+excluded it from hashed content; and the criterion-7 harness runs the same
+corpus to **two different destinations** and requires one identity. Those cannot
+all be true, and no durable value was persisted to say which projection was
+authoritative.
+
+### What was applied
+
+```python
+@dataclass(frozen=True, slots=True)
+class ProfileSnapshot:
+    profile_id: str
+    version: str
+    profile_hash: str          # FormatProfile.profile_hash — the content
+
+# on RunConfig, defaulted to () so the change is additive:
+profiles: tuple[ProfileSnapshot, ...] = ()
+```
+
+Snapshots rather than the profiles themselves, for the same reason
+`MasterIndexSnapshot` is a snapshot: the identity needs an immutable fingerprint
+of the input, not a live object that can be edited afterwards. Hashing the
+content also removes the reliance on a version bump nobody enforces.
+
+`output_root` joins `_IDENTITY_EXCLUDED`: the destination is where evidence is
+written, not an input that changes it. `run_identity(config)` is now the single
+authoritative projection, it is written into `output_manifest.json` as
+`run_identity_sha256` **and** into the log's hashed content, and `IDENTITY_NOTE`
+is rewritten to describe exactly what it hashes and exactly what it excludes,
+each with its reason.
+
+The profile snapshots are built **before** the walk, with the rest of the
+effective configuration, so the resume journal is keyed on them too — a journal
+written under one profile library is not replayed under another.
+
+---
+
+## A-09 — `EffectiveLimits` recorded float deadlines at whole-second resolution
+
+**Raised by:** the round-2 fix package, 2026-08-01. **Ours, not Codex's** — the
+authoritative round-2 verdict does not raise it; we found it while closing A-08
+and fixed it under the standing fix-don't-defer rule.
+**Affects:** `EffectiveLimits.file_timeout_s` → `file_timeout_ms`,
+`retry_budget_s` → `retry_budget_ms`
+**Severity:** MINOR, but **renaming rather than additive** — see below
+**Status:** **APPLIED — contract v1.6.0.**
+
+### The case
+
+A-04 added `EffectiveLimits` precisely so a setting able to change output
+evidence could not sit outside the hashed configuration. Two of its fields then
+reintroduced the same defect at finer grain. `WalkOptions.file_timeout_s` and
+`DOCIQ_RETRY_BUDGET_S` are floats used as float-valued deadlines, and
+`effective_limits` recorded `round(seconds)`:
+
+```text
+file_timeout_s = 1.1 → recorded 1
+file_timeout_s = 1.4 → recorded 1
+effective limits equal = True
+```
+
+Those two deadlines abandon different files under the watchdog while presenting
+the same identity — a determinism-identity collision inside the field added to
+close one.
+
+### Why milliseconds rather than rejecting fractional values
+
+Rejecting fractions would have removed a capability that is used: a sub-second
+per-file limit is legitimate and the acceptance harness sets one. Milliseconds
+keep it and remove the collision, and the recorded value is still an exact
+integer, so Principle 5's bar on floats in identity fields is honored.
+
+### Why the fields were renamed rather than reinterpreted
+
+The semantics changed, so the name had to. A consumer reading
+`limits.file_timeout_s` now breaks loudly instead of silently reading a number
+in the wrong unit — 3,600 versus 3,600,000 is a thousand-fold error no type
+checker catches. Under the freeze procedure a loud break is the correct outcome
+for a semantic change.
+
+---
+
+## A-10 — 1.4.0's replacement token fields were never populated
+
+**Raised by:** the round-2 fix package, 2026-08-01, from Codex review #1 round 2
+finding **B-R2-3**, against contract **v1.5.0**
+**Affects:** no type change — `TokenEstimate.structural_tokens` and
+`token_ceiling`, and `pipeline._to_contract_estimate`
+**Severity:** DOCUMENTATION + implementation
+**Status:** **APPLIED — recorded at contract v1.6.0.**
+
+### The case
+
+A-05(a) withdrew `floor_tokens` and added `structural_tokens` and
+`token_ceiling` to replace it. The projection correctly set the withdrawn field
+to 0 and never set the two replacements, so both stayed at their "not measured"
+default while the same run wrote both numbers into the processing log and the
+summary PDF:
+
+```text
+MeasuredEstimate:       pretokens=5, utf8_bytes=20
+contract TokenEstimate: structural_tokens=0, token_ceiling=0
+```
+
+This is the same central-amendment wiring failure as A-07 — a field declared in
+the contract and never connected to the pipeline.
+
+**The consequence is not cosmetic**, and Codex names it precisely. When
+`ratio_refuted` is true the contract says the ruled band was *not* the method
+used; a consumer holding only `RunResult.tokens_before` then receives no
+structural figure and no ceiling, and a GUI adapter can fall back to the ruled
+ratio and display a number the pipeline expressly disclaims. The log and the PDF
+stayed honest; the machine-readable projection did not.
+
+### What was applied
+
+`_to_contract_estimate` populates both from `est.profile`. Recorded here rather
+than left as an implementation fix because the machine contract's agreement with
+the log is a property of the contract: the next projection added has to satisfy
+it too, and the self-test now asserts the two artifacts report one set of
+figures.
+
+---
+
+## Round-2 findings fixed rather than descoped, and two that are ours
+
+The authoritative round-2 verdict prescribes **descope** for all three of its
+findings under the no-round-3 rule. We fixed all three instead, which is
+strictly stronger — the descope conditions would have removed `RunResult`'s
+terminal status, the profile-driven determinism claim and the contract's token
+fields from Sprint 1's supported scope. Nothing in this register relies on those
+reductions.
+
+Three further defects in this package were **not raised by the authoritative
+verdict**. They were found by the fix package and fixed under fix-don't-defer;
+they should not be attributed to Codex:
+
+* **A-09**, above — float deadlines rounded to whole seconds.
+* **The inventory-enumeration and non-recursive-walk defects** (no contract
+  change, so no amendment number). An `iterdir()` failure on the root or a
+  subtree left the run COMPLETED with a partial or empty inventory, and the
+  `recursive=False` branch dropped entries that could not be `stat`'d because
+  `Path.is_file()` answers `False` rather than raising. Both are silent-evidence
+  loss of the class B-1 and B-3 are about. Their only contract-visible
+  consequence is the widened `TerminalStatus.BLOCKED` docstring: a folder DocIQ
+  could not list is now a blocked run, while a folder that was **successfully
+  enumerated** and holds no files remains a legitimate empty completed run that
+  may replace prior deliverables. That boundary is Codex's, it is load-bearing,
+  and `tests/test_incomplete_runs.py` asserts both sides of it.
+* **The resume key** omitted `RunConfig.limits`, so a record cached under
+  different caps, a different OCR model or with OCR disabled could be replayed
+  into a run whose manifest then hashed the new settings. It now uses the same
+  identity projection that validates the evidence it replays.

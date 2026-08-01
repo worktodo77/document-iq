@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dociq"
+version = "0.1.0.dev0"
+description = "LI Document IQ — a deterministic document-corpus reducer for AI-assisted forensic analysis"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Long International, Inc." }]
+
+# The COMPLETE dependency set, declared explicitly.
+#
+# The §11 reuse audit found that the MIP 3.9 pyproject omits several libraries
+# its code actually imports (python-pptx, extract-msg, xlrd, opencv, numpy,
+# Pillow) because they sit behind try/except ImportError at the call sites. A
+# naive dependency on that package does not pull them in. DocIQ vendors the
+# extractor and declares everything it touches — including the libraries that
+# are only reachable through an optional import path. Nothing here is optional:
+# a single-file offline exe cannot degrade to "that format needs a pip install".
+#
+# Versions are lower-bounded at what Sprint 1 was built and proven against
+# (venv resolved 2026-07-30, Python 3.14.5) and upper-bounded at the next major
+# so a transitive resolution cannot silently swap a parser.
+dependencies = [
+    # PDF — pypdf for the native text layer, PyMuPDF for rasterization
+    "pypdf>=6.14.2,<7",
+    "pymupdf>=1.28.0,<2",
+    # OCR — ONNX-based so the models bundle cleanly into a single exe (D-01)
+    "rapidocr-onnxruntime>=1.2.3,<2",
+    "onnxruntime>=1.28.0,<2",
+    # Headless: the GUI build must not pull opencv's Qt bindings, which would
+    # collide with PySide6's inside PyInstaller.
+    "opencv-python-headless>=5.0.0,<6",
+    "numpy>=2.5.1,<3",
+    "pillow>=12.3.0,<13",
+    # Office formats
+    "python-docx>=1.2.0,<2",
+    "openpyxl>=3.1.5,<4",
+    "xlrd>=2.0.2,<3",          # legacy .xls only
+    "python-pptx>=1.0.2,<2",
+    # Email
+    "extract-msg>=0.56.0,<1",
+    # Deliverables
+    "reportlab>=5.0.0,<6",     # run_summary.pdf
+    "PyYAML>=6.0.3,<7",        # format profiles
+    # GUI
+    "PySide6>=6.11.1,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1.1,<10",
+]
+
+[project.scripts]
+dociq = "dociq.gui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: takes more than a few seconds (determinism repetition, OCR)",
+    "corpus: requires a real client corpus outside the repo; skipped by default",
+]

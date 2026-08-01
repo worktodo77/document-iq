@@ -1,0 +1,17 @@
+# Determinism: the byte-identical contract (Principle 5) specifies LF newlines
+# for everything hashed or persisted. If git rewrote text fixtures to CRLF on
+# checkout, a fixture-driven determinism proof would pass on this machine and
+# fail on a clean clone — the worst way for it to fail, because CI would be the
+# thing that looks broken.
+* text=auto eol=lf
+
+# Binary — never touch these
+*.png binary
+*.ico binary
+*.pdf binary
+*.xlsx binary
+*.xls binary
+*.docx binary
+*.pptx binary
+*.zip binary
+*.onnx binary

@@ -18,6 +18,206 @@ Status: D-01 through D-06 RULED 2026-07-30; D-07 OPEN.
 
 | D-10 | Roadmap velocity revision | **2 sprints, 3 parallel tracks, 2 Codex reviews** (adopts the p6-kernel endgame pattern). Contract-first: `pagemodel.py` frozen day one; Tracks A (ingestion spine), B (identity + deliverables), C (GUI shell + branding) build concurrently in worktrees; Codex #1 at pipeline-core integration, Codex #2 = merge gate. Scope trims on Project 495 evidence: RTF → Tier 2 (zero occurrences), RAR → Tier 2 listed-only (9 occurrences). Determinism proof, page-accounting gate, and Track-A critic depth explicitly NOT compressed. | 2026-07-30 |
 
+| D-11 | Build environment / dependency location | **Dedicated venv at `document-iq\.venv`** — the full declared set (pypdf, pymupdf, rapidocr-onnxruntime, onnxruntime, opencv-python-headless, python-docx, openpyxl, extract-msg, python-pptx, xlrd, reportlab, PySide6, PyYAML, numpy, Pillow, pytest) installed there, not into system Python and not shared with the mip39 venv. Closes the reuse audit's §5 undeclared-dependency gap and keeps DocIQ decoupled from the mip39 repo's environment. Verified 2026-07-30: all 15 imports green on Python 3.14.5; `onnxruntime==1.28.0` publishes cp314 wheels, so there is no interpreter-version wall. | 2026-07-30 |
+| D-12 | OCR bake-off corpus (D-01 / acceptance criterion 9) | **The real MODEC/Petrobras MPR corpus**, supplied by Alex mid-session at `Desktop\Petrobras\Petrobras\Project FIles`. Supersedes the interim "MNFV now, re-run on MODEC later" ruling taken minutes earlier when no MODEC set could be found — that two-cycle path is cancelled, the bake-off is **not** provisional, and D-01 is ruled at the end of Sprint 1 as originally planned. Corpus: 2.6 GB, 298 PDF / 53 DOCX / 17 PPTX / 7 DOC; 17,732 PDF pages, 461 scanned (2.6%), 21 mixed native+scanned PDFs, 0 fully-scanned. The ~20 bake-off pages are sampled from the scanned pages of `CER-1-145.pdf` (175 scanned of 222) and `CER-1-113.pdf` (91 of 228). Client data — never committed; only summary numbers quoted. | 2026-07-30 |
+| D-13 | Bates acceptance corpus (acceptance criterion 4) | **The MNFV initial-disclosure production** (`Desktop\Files for Claude\20240529`) — genuinely Bates-stamped and image-only (e.g. `MNFV 0391 - 0696`, 306 pp; `MNFV 02684 - 02705`, 22 pp), so it is the only local set that can exercise the ≥99% Bates-accuracy criterion. A footer-zone probe over all 298 Petrobras PDFs found **no Bates stamps**, confirming §4 Stage 3's "absence is normal, not an error" against a real corpus — so the Petrobras set doubles as the negative case (Bates detection must return `None` throughout without flagging an error). Client data — never committed. | 2026-07-30 |
+
+| D-14 | Token capacity headline design (refines D-07's "capacity gauge") | **Concept B — the reduction waterfall, with clickable rows.** BEFORE → AFTER headline over a stack of shrinking bars, one per reduction lever, with capacity as a fixed dashed reference row. **The rows are the section picker**, not a readout — clicking a lever toggles KEEP/DROP and the waterfall re-flows live, so the picture and the next action are the same object. Expert-approved drops render as interactive accent rows; the tool's own automatic savings (duplicate removal, page furniture) render as a locked muted row and are **never merged into the same number** — the profile system exists to keep "the expert approved this omission" distinct from "the tool did this mechanically". Concepts A (paired rails), C (capacity units) and D (log ruler) were shown and not selected; C remains the strongest option if an explain-to-a-third-party view is ever wanted. | 2026-07-30 |
+| D-15 | Over-capacity is the expected state, not an error | On the real corpus (17,732 pages) the record does **not** fit direct context even fully reduced. The UI must therefore design the over-capacity case **first**, with no alarm treatment and no blocked action: state the shortfall factor plainly and pair it with the §8 Path B escape route (Expert Assist / Cowork reads the matter folder from disk, where the container limit does not apply). A dead end here is a design bug. | 2026-07-30 |
+| D-16 | Action-button wording and screen sequencing | Alex judged the first sketch "not user friendly or intuitive": "Run" names a mechanism rather than an outcome, and the peer button "Review what gets dropped" read as a prerequisite step. Rulings: the primary button names the **outcome** ("Build the reduced corpus") with scope + time estimate beside it; there is **exactly one forward action per screen**; "Review what gets dropped" is removed as a button because reviewing drops is the whole economizing step, now carried by the D-14 waterfall itself. | 2026-07-30 |
+
+## Open question — does local-folder reading dissolve the capacity problem? (raised by Alex 2026-07-30)
+
+Partly, and the residue matters. Pointing Claude at a local matter folder removes the **container** limits — upload ceiling, project-knowledge cap, and the direct-context-vs-retrieval distinction. It does **not** remove the context window: 17,732 pages cannot occupy one turn, so the constraint changes shape from "does it fit in a box" to "how many turns, and how much drift, before the agent has seen what matters." Reduction still pays on that path, in turns and cost rather than in admission.
+
+Consequence for the product's positioning, flagged: §7 and D-03 make the token estimate *the headline feature*, yet on the recommended route (Path B) it is the metric that binds least. DocIQ's durable value on that path is evidentiary rather than dimensional — original-pagination markers, Bates, the index, zero-discrepancy accounting, byte-identical reruns.
+
+**RULED 2026-07-30 (D-17): keep the GUI as previously decided.** Three summary-screen treatments were drawn and compared — evidentiary lead with tokens demoted, a split headline, and the ruled token lead with an audit panel below. Alex ruled to **stick with the previous decisions**: §7 and D-03 are **not** amended, the token before/after remains the summary headline, and the evidentiary claims (page accounting, omission attribution, run fingerprint, index reconciliation, review flags) stay as a supporting panel. The evidentiary-lead proposal is **declined, not deferred** — do not re-open it in Sprint 2 without a new instruction. D-07, D-14, D-15 and D-16 all stand unchanged; Track C's brief already reflects them and required no correction.
+
+| D-18 | §7 page-marker format — keep or compact | **KEEP §7's format unchanged.** Alex ruled "measure it properly first"; the measurement settles it against changing. Full-corpus measurement (all 298 PDFs / 17,732 pages, via Track B's pre-token proxy): markers are **0.5% of the corpus without Bates, 1.2% with**. Compaction buys almost nothing — `[p1234]` and `===== PAGE 1234 =====` both yield **5 pre-tokens**, because pre-token count tracks the number of symbol runs, not string length; only the Bates variant compacts at all (13 → 10). A two-repo change against DocIQ *and* Expert Assist's parser to recover ~0.5% is not worth it. **Correction on the record:** the initial estimate that framed markers as the single largest economization lever used a chars÷3.5 approximation and was wrong in framing — the absolute figure (~230K pre-tokens for the Bates form) held, but the share did not. Character compaction does not imply token savings. | 2026-07-30 |
+
+| D-19 | Tesseract / the D-01 bake-off | **Written off — rapidocr is the engine, full stop (Alex, 2026-07-31).** D-01's conditional swap and acceptance criterion 9's comparison are both **cancelled, not deferred**: there is no pending Tesseract evaluation, and no future sprint owes one. Tesseract was never installed (installing it needed authorization that was not given, and the build correctly refused to install it unilaterally), so the Sprint-1 bake-off is a **rapidocr characterization** rather than a comparison — and that is now its final form. Measured on 20 real scanned MPR pages from D-12's corpus: mean page confidence **0.8628**, 3 of 17 pages below the 85% review threshold, 37% of *lines* below it, **5.74 s/page**; 3 zero-character pages verified genuinely blank (uniform white, no embedded images) rather than misses. `docs/bakeoff/ocr_bakeoff_2026-07-30.md` stands as the methodology artifact D-01 asked for, retitled to what it is. **Consequence to state plainly rather than bury: §3 and §10's amended wording already name rapidocr, so nothing in the build changes — but the tool now ships an OCR engine chosen on in-house familiarity and ONNX bundling convenience, never benchmarked against an alternative on this corpus. If OCR quality is ever challenged, that is the honest answer, and "Tesseract is the industry-recognizable name for law-firm IT review" (the original argument for the bake-off) remains unaddressed.** | 2026-07-31 |
+
+## Sprint-1 verification log
+
+**Track B master-index robustness (2026-07-30).** The Track B critic found a
+High-severity defect: a negative `Original Sort` value loaded cleanly into a
+`MasterIndexRow` but violated `DocId`'s `base >= 0` requirement at assignment
+time, raising an unhandled `ContractViolation` that named neither the offending
+row nor the file — taking down identifier assignment for *every* document in the
+corpus, not just the bad row. Fixed at `5eb1f7a` (negative sort treated as "no
+usable value": skipped with a warning, row reconciles as index-only), with a
+regression test confirmed to go red on `a78f1b5`.
+
+The critic could not test this against the real index, correctly refusing to
+touch client data. Audited separately: the real Project 495 index is **clean** —
+9,259 rows, a perfect 1..9,259 sequence, zero non-numeric, zero negative, zero
+duplicate values. So the builder's "9,698 IDs, 0 collisions" claim is genuine,
+but it passed *because the file happened to be clean*, not because the code was
+robust to a dirty one. Recorded because it is a textbook instance of "the corpus
+doesn't exercise it selects nothing": the fix is warranted by the failure being
+loud and total, not by evidence from this corpus.
+
+**Sprint-1 integration (2026-07-31).** The stand-in emitter `verify/probe_emit.py`
+is deleted and the determinism proof re-run against the emitters that ship: 30
+runs, 30 distinct `PYTHONHASHSEED` values, subprocess per run, **1 distinct
+corpus hash, 0 diffs, 0 failures**, and the harness watched going red under three
+injected-nondeterminism probes. Seven defects found and closed at the seam, each
+with a test proven red beforehand — the un-remapped `parent_doc_id`, D-04's
+renumbering check crying wolf on duplicate content, renumbering warnings inside
+the hashed log content, a re-run inheriting the previous run's residue, a corpus
+that never exercised email-attachment expansion, Stage 3 proposing a Bates format
+on the set D-13 designates as the negative case, and a run that skipped OCR still
+recording that it had used rapidocr. **One finding is OPEN and material:** a
+9 MB PowerPoint extracted as 35 pages on one full-corpus run and failed on
+another, so the byte-identical claim is demonstrated on the fixture corpus and
+is **not** demonstrated on the real one. Full account in
+`docs/verification/sprint1_integration_2026-07-31.md`.
+
+**A note on thread configuration, measured rather than assumed (2026-07-31).**
+Track A recorded thread oversubscription as an unquantified hypothesis. It was
+partly tested during the full-corpus run: the shipped defaults put **173 OS
+threads** on a 32-core box at **~12.5 cores busy**. Reducing to 4 document
+workers and 6 OCR page workers made throughput *worse* — 142 threads at **~2
+cores busy** — so the naive "pin the threads" remedy is refuted for this
+workload, and the run was returned to the defaults. What limits throughput here
+is not yet identified; it is a Sprint-2 performance question, and the one thing
+now established is that fewer workers is not the answer.
+
+## Measured corpus token load (full corpus, 2026-07-30)
+
+> **CORRECTED 2026-07-31 (Codex review #1, finding B-6).** This section
+> originally called the pre-token count a *hard lower bound* on token count for
+> any byte-level BPE tokenizer, and treated it as refuting D-03. **Both claims
+> were overstated and are withdrawn.** The correction is at the foot of this
+> section; the measurements themselves are unchanged and still stand.
+
+Measured over **all 298 PDFs / 17,732 pages** of the real MODEC/Petrobras MPR
+corpus using Track B's pre-token proxy (`verify/tokens.measure`):
+
+| quantity | measured |
+|---|---|
+| characters | 49,031,833 |
+| **pre-tokens (DocIQ's own split — see the correction below)** | **19,388,495** |
+| density | 2.53 chars/pre-token |
+| per page | 2,765 chars / 1,093 pre-tokens |
+
+**This is ~6× the requirements' 3.4M assumption (§1) and ~97× the 200K
+direct-context working figure.** The consequence is strategic and should not be
+softened: **no combination of reductions brings this record into direct
+context.** A 90% reduction still leaves ~2M tokens, 10× over. Path B (Claude
+reading the matter folder from disk) is therefore not merely the *recommended*
+route for forensic matters — at this scale it is the only viable one, and the
+UI must treat direct-context capacity as an aspiration that this class of matter
+will not meet. This strengthens D-15 rather than contradicting it.
+
+**SUPERSEDED FOR ANY STATEMENT ABOUT THE DELIVERABLE (2026-07-31).** The first
+full pipeline run measured **17,252,003 pre-tokens over 50,190,410 characters**
+of its own emitted page text across all 368 documents (2.91 chars/pre-token),
+and 17,380,982 over 50,598,897 for `clean_text/` including page markers. More
+characters, 11% fewer pre-tokens — because the two figures measure **different
+text**, not because the estimator changed. The figure above came from
+`tools/calibrate_tokens.py`, which reads with **PyMuPDF `get_text()`**, skips
+whitespace-only pages, applies no normalization, runs no OCR and covers the 298
+PDFs only. On 131 identical pages, PyMuPDF yields 16.7% more pre-tokens than the
+pypdf text DocIQ actually extracts, and contract normalization removes about 5%
+more. Use the pipeline's number for the corpus DocIQ ships; the figure above
+remains valid as what the source PDFs contain under a different reader. Detail
+in `docs/verification/sprint1_integration_2026-07-31.md` §5.
+
+Every token figure in the Sprint-1 UI mockups (3.4M → 850K) remains known to be
+far too small and must not be carried into the build as if measured.
+
+### CORRECTION — the "19.4M token floor" and the D-03 refutation (2026-07-31)
+
+Codex review #1 finding B-6 is accepted in full. Two things this section
+asserted are not supported by the evidence:
+
+**1. There is no 19,388,495-token floor.** The argument was that a byte-level
+BPE tokenizer cannot merge across a pre-token boundary, so it cannot emit fewer
+tokens than the text has pre-tokens. That holds for a tokenizer's **own**
+pre-tokenization. It does not hold for boundaries DocIQ's approximate regex
+invented: `PRETOKEN_RE` splits digit runs every three digits, and a real
+tokenizer that keeps longer digit runs together merges straight across those
+splits and emits fewer tokens than DocIQ counted pre-tokens. The corpus is
+**13% digits**, so this is where the material actually is, not a corner case.
+
+19,388,495 is a **pre-token count under DocIQ's own split** — a characterization
+of the text's structure, not a bound on any tokenizer's output.
+
+**The one bound that does survive** is the ceiling: `tokens <= UTF-8 bytes`,
+because a byte-level vocabulary always contains single-byte fallbacks. That
+holds for any such tokenizer and DocIQ still asserts it.
+
+**2. D-03 is NOT established as refuted, and its status returns to RULED.** With
+the assumed allowance for coarser pre-tokenization (0.70–1.60 tokens per DocIQ
+pre-token, both assumed and both stated in `verify/tokens.ASSUMPTIONS`), 2.53
+chars/pre-token implies roughly **1.58–3.61 chars/token** — which *overlaps*
+D-03's ruled 3.30–3.60 band. At the coarse end the corpus lands near 3.5
+chars/token, inside the band. The same arithmetic on the 40-PDF sample (3.03)
+and on the pipeline's own emitted text (2.91) also overlaps.
+
+What survives, and is worth keeping: this material is far denser than ordinary
+prose (4.4–4.5 chars/pre-token), so D-03's band sits at the **coarse end** of
+what the structure allows rather than in the middle of it, and a figure built on
+the band should be read as an optimistic member of a wide range. That is a
+characterization, not a refutation.
+
+**3. The strategic conclusion is unchanged and does not depend on the withdrawn
+claims.** Even at the top of the ruled band (3.60 chars/token) the corpus is
+~13.6M tokens, ~68× the 200K direct-context working figure; a 90% reduction
+still leaves ~1.4M, ~7× over. **No combination of reductions brings this record
+into direct context.** Path B (Claude reading the matter folder from disk)
+remains the only viable route at this scale, and D-15 stands.
+
+**4. What is needed to settle it.** Someone with network access must count real
+Claude tokens on a sample of this material. Until then every DocIQ token figure
+is an estimate under stated assumptions, and the deliverables say so — the
+processing log carries the assumptions verbatim, the run summary PDF names the
+method that run used, and the GUI no longer renders "tokens at least".
+
+## §10 restated against a completed full-corpus run (2026-07-31)
+
+The first end-to-end run of the whole D-12 corpus finished: **368 documents,
+18,521 pages, page accounting reconciling to zero discrepancy** (acceptance
+criterion 2, on real material, for the first time). Measured:
+
+| | measured |
+|---|---|
+| walk + extract (Stages 1-2) | 2,848.5 s — **99.1% of the run** |
+| everything else — Bates, Doc IDs, reconciliation, classification, all of §7 and §8, the accounting gate, the hash manifest | **25.7 s combined** |
+| same corpus with OCR disabled, from scratch, idle machine | **3,046.7 s (50.8 min)** |
+| OCR's share, over the identical first 62 documents both ways | **≈ 2.0–2.3× — OCR roughly doubles extraction, for 2.2% of the pages** |
+
+A clean from-scratch OCR-on wall clock is **not** established (the completing run
+resumed 62 documents from an interrupted first attempt); ≈100 minutes is the best
+available figure and is an upper bound. §10's "under 60 minutes" is not met and
+is not restated as a general target until a clean run exists. Two documents also
+exceeded the shipped 3,600 s per-file timeout and would have been abandoned —
+loudly, never silently — so that default is too tight for this corpus.
+
+The consequence for where effort goes is unambiguous: **optimizing anything but
+extraction is optimizing 0.9% of the run.**
+
+## Corpus reality vs. the spec's assumption (recorded 2026-07-30)
+
+The requirements' motivating figures (§1: "38 MODEC MPRs at ~20 MB / ~150 pages
+each"; §10 performance target: "~5,700 pages with ~50% scanned in under 60
+minutes") do not match the corpus that actually exists:
+
+| | spec assumption | measured |
+|---|---|---|
+| documents | 38 MPRs | 298 PDF + 53 DOCX + 17 PPTX + 7 DOC |
+| PDF pages | ~5,700 | 17,732 |
+| scanned share | ~50% | 2.6% (461 pages) |
+
+Consequences carried into the build rather than left implicit: the OCR-dominated
+performance target is far easier than specified (461 pages to OCR, not ~2,850),
+but the corpus is **3× larger in page count**, so the non-OCR path — extraction,
+hashing, accounting, emit — is the real performance risk, not OCR. The §10
+target should be restated against measured numbers once Sprint 1 has a timed
+end-to-end run; it is not amended here on prediction.
+
 ## Amendments to requirements_v1.0 implied by these rulings
 
 - §3 Tier-1 table: "Local OCR (Tesseract)" → "Local OCR (rapidocr, ONNX; per-page confidence recorded)" subject to the D-01 bake-off.
