@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import replace
 
 from dociq.contracts import (
     Disposition,
@@ -490,9 +491,8 @@ def at_measured_scale(plan: ReductionPlan) -> ReductionPlan:
     return ReductionPlan(
         full_tokens=MEASURED_PRETOKENS,
         levers=tuple(
-            ReductionLever(le.key, le.label, round(le.tokens * factor),
-                           round(le.pages * factor), le.kind, le.engaged,
-                           le.estimated)
+            replace(le, tokens=round(le.tokens * factor),
+                    pages=round(le.pages * factor))
             for le in plan.levers
         ),
         capacity=plan.capacity,

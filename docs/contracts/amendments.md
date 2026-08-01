@@ -825,3 +825,71 @@ docstring and understates the ruling under the new one; it now reads
 "reference, not a target" with the source in its tooltip and in a line under the
 headline. No literal `200_000` appears anywhere in `dociq/gui/`, and
 `tests/test_gui_screen_states.py` asserts it.
+
+---
+
+## A-11, A-12, A-13 — APPLIED (2026-08-01)
+
+Raised by Track E; applied centrally to `src/dociq/gui/pipeline.py` on
+`build/sprint-2` so Tracks D, E and F receive one seam rather than three. The
+cases are recorded above as Track E argued them; what follows is what was
+actually applied, and the one defect applying it uncovered.
+
+**A-11 — APPLIED as proposed.** `PipelineAPI.profile_rules(profile)` returns
+`(levers, basis, source)`. Track E already consumes exactly this tuple through a
+duck-typed hook whose absence *renders* as a loud empty state that disables
+approval, so adoption is wiring.
+
+**A-11b — APPLIED, and NOT as Track E left it.** Track E proposed `rule` and
+`note` on `ReductionLever` but declined to apply them, on the reasoning that
+rule identity is a true attribution and enough to ship. It is enough to ship;
+it is not enough to *defend*. §6 gives a profile a notes field for why a
+section was dropped and who approved it, and D-05 puts a copy of the profile in
+the matter folder precisely so that sentence survives. An omission an expert
+cannot explain in their own words is an omission they cannot defend, and the
+alternative — a widget paraphrasing the rationale — is the tool putting words
+in the expert's mouth about evidence. Both fields are carried verbatim.
+
+**A-12 — APPLIED as proposed**, plus `PackageResult` as a presentation record
+in the seam (`root`, `file_count`, `total_bytes`, `scope_statement`,
+`doc_count`), the same treatment `Reconciliation` already gets.
+`scope_statement` is the same sentence written INTO the package, not a second
+one rendered beside it: under D-20 every Path A package is a subset unless it
+says otherwise, and two sentences that can drift is how a subset comes to look
+like a whole record.
+
+`build_package` may be OMITTED by an adapter that does not offer Path A, rather
+than returning an empty result. The GUI probes for it and disables the action
+with the reason on screen; a stand-in that silently returned nothing would
+leave the operator pressing a button that appears to work.
+
+**A-13 — APPLIED with Track E's wording.** The docstring asserted the threshold
+was unruled, which D-21 made false. Corrected, not deleted: what remains true —
+that 200,000 is unmeasured and unconfirmed against Anthropic's published limits
+— is the part a reader needs.
+
+### The defect applying A-11b uncovered
+
+`ReductionPlan.with_toggled` rebuilt `ReductionLever` by listing its fields
+positionally. That was correct on the day it was written and silently lossy for
+every field added afterwards — so the moment `rule` and `note` existed, an
+expert's stated reason for an omission would have been on screen before a click
+and gone after it. Nothing would have raised.
+
+**Class, not repro.** Four sites rebuilt the record from its parts — the seam,
+the mock's measured-scale rescale, and two screen-state tests. A lossy rebuild
+inside a *fixture* is worse than one in the product: it produces a passing test
+of the wrong record. All four now use `dataclasses.replace`.
+
+Two probes, both watched RED under perturbation before being trusted:
+
+- `test_toggling_preserves_every_lever_field_except_engaged` — generated from
+  `dataclasses.fields(ReductionLever)`, so a field added next year is covered
+  the moment it exists. Asserting only `rule` and `note` would have been a test
+  of this amendment rather than of the defect.
+- `test_no_lever_rebuild_site_lists_fields_positionally` — walks the **AST** of
+  every module in `src/` and `tests/`. Its first version used a regex and
+  **missed the very rebuild that motivated it**: the call was
+  `ReductionLever(lever.key, ...)` and the pattern stopped at the dot. Recorded
+  because it is the general lesson — a regex over source is a guess about
+  syntax, and this probe's whole value is that it cannot be fooled by one.

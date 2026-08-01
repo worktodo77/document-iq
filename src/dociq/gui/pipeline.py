@@ -24,7 +24,7 @@ Track C may not import ``ingest``, ``identify``, ``docid``, ``profiles``,
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from dociq.contracts import RunConfig, RunResult
@@ -34,10 +34,16 @@ DIRECT_CONTEXT_TOKENS = 200_000
 """How much text a Claude Project holds in direct context before it falls back
 to retrieval mode — the reference row at the foot of the reduction waterfall.
 
-**UNCONFIRMED.** Alex has not ruled this threshold and it is not measured; 200K
-is a working placeholder. It is a single named constant precisely so that
-confirming it is a one-line change — the literal appears nowhere else, and no
-screen may inline it.
+**RULED D-21 (2026-08-01), NOT MEASURED.** 200,000 is the working figure Alex
+ruled to keep, rendered as a named, sourced reference line — "Claude Project
+direct context" — and never as a budget or a target (D-15: over-capacity is the
+expected state). It has NOT been confirmed against Anthropic's published limits.
+It is a single named constant precisely so that confirming it is a one-line
+change — the literal appears nowhere else, and no screen may inline it.
+
+Amendment A-13. The previous docstring said the threshold was unruled, which
+D-21 made false; the sentence was corrected rather than deleted, because what
+remains true — that it is unmeasured — is the part a reader needs.
 """
 
 
@@ -192,6 +198,23 @@ class ReductionLever:
     same column, in the same type, is a claim the run cannot support — and the
     reader has no way to tell which is which unless the row says so."""
 
+    rule: str = ""
+    """The profile's own matching rule for this section, verbatim (A-11b).
+
+    Attribution by rule *identity* — "profile X v1 → section 'photo_logs' →
+    DROP" — is true but tells the expert nothing about what actually matched.
+    This is the pattern itself, so the checklist can show what a DROP catches
+    rather than only that one exists."""
+
+    note: str = ""
+    """The profile's §6 notes field for this section: why it is dropped and who
+    approved it (A-11b).
+
+    This is what makes an omission defensible **in the expert's own words**
+    rather than in the tool's. It is carried verbatim and never paraphrased by
+    a widget — a GUI-authored rationale for an evidentiary omission would be the
+    tool putting words in the expert's mouth."""
+
     @property
     def locked(self) -> bool:
         return self.kind == LEVER_AUTOMATIC
@@ -214,12 +237,20 @@ class ReductionPlan:
 
     def with_toggled(self, key: str) -> "ReductionPlan":
         """A copy with one expert lever flipped. Locked levers ignore the call
-        rather than raising: a click on a locked row is a question, not a bug."""
+        rather than raising: a click on a locked row is a question, not a bug.
+
+        Rebuilt with :func:`dataclasses.replace`, NOT by re-listing the fields
+        positionally. The positional form was correct until A-11b added ``rule``
+        and ``note``, at which point every toggle would have silently dropped an
+        expert's stated reason for an omission — visible on screen before the
+        click and gone after it. Field-by-field reconstruction of a frozen
+        record is a defect waiting for the next field; ``replace`` cannot have
+        that failure mode. ``tests/test_view_models.py`` asserts the property
+        over every field rather than over the two this amendment happened to
+        add."""
         levers = tuple(
             lever if (lever.key != key or lever.locked)
-            else ReductionLever(lever.key, lever.label, lever.tokens,
-                                lever.pages, lever.kind, not lever.engaged,
-                                lever.estimated)
+            else replace(lever, engaged=not lever.engaged)
             for lever in self.levers
         )
         return ReductionPlan(self.full_tokens, levers, self.capacity, self.basis)
@@ -306,6 +337,29 @@ class RunOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class PackageResult:
+    """What §8 Path A actually wrote (amendment A-12).
+
+    A presentation record, like :class:`Reconciliation` — the GUI never touches
+    ``emit`` and never writes a file, so this is how it learns what exists.
+
+    :attr:`scope_statement` is not decoration and not a caption. **D-20 rules
+    that Path A is proven on a deliberately scoped SUBSET**, so every package is
+    a subset unless it says otherwise, and downstream nobody can tell a subset
+    from a whole record by looking at it. The statement is written INTO the
+    package ahead of everything else; this field is the same sentence, so the
+    screen shows the operator exactly what the recipient will read rather than
+    a second sentence that could drift from it.
+    """
+
+    root: str
+    file_count: int
+    total_bytes: int
+    scope_statement: str
+    doc_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class RunRequest:
     """What the setup screen collected. Turned into a :class:`RunConfig` by the
     adapter — building the config is pipeline work, not GUI work, because the
@@ -348,6 +402,64 @@ class PipelineAPI(Protocol):
         on_progress: ProgressCallback,
         should_cancel: CancelCheck,
     ) -> RunOutcome:
+        ...
+
+    def profile_rules(
+        self, profile: ProfileInfo
+    ) -> tuple[tuple[ReductionLever, ...], TokenBasis, str]:
+        """The profile's KEEP/DROP rules, what each is worth, and — in the
+        pipeline's own words — where the rules and the figures came from
+        (amendment A-11).
+
+        §6's checklist gates a run: the expert approves the omissions BEFORE the
+        pipeline commits to them, which means the rules must cross the seam
+        before there is a :class:`RunOutcome` to carry them. ``ProfileInfo``
+        says only HOW MANY rules a profile holds, never which.
+
+        Rows for a profile that has not been run against this matter carry
+        ``estimated=True`` — they are projections, not counts.
+
+        An adapter that cannot supply these returns ``((), TokenBasis(), "")``.
+        The screen renders that as a loud empty state that DISABLES approval,
+        because an empty checklist that says it is empty is safe and one that
+        looks complete is not.
+        """
+        ...
+
+    def matter_layout_note(self, outcome: RunOutcome) -> str:
+        """§8 Path B: what is in the matter folder and what to point Claude at,
+        in the pipeline's words, HAVING CHECKED (amendment A-12).
+
+        ``emit.handoff.expert_assist_layout`` inspects the folder rather than
+        describing it from memory, and that distinction is the whole point:
+        Path B's claim is that DocIQ writes where Expert Assist already reads,
+        and asserting that without looking is precisely the assertion worth
+        checking. Returns "" when the adapter did not look — the screen then
+        says so instead of implying a verified folder.
+        """
+        ...
+
+    def build_package(
+        self,
+        outcome: RunOutcome,
+        doc_ids: tuple[str, ...],
+        scope_statement: str,
+    ) -> PackageResult:
+        """§8 Path A: assemble ``upload_package/`` for exactly ``doc_ids``, with
+        ``scope_statement`` written into the package ahead of everything else
+        (amendment A-12, D-20).
+
+        Emit-layer work, deliberately: the GUI may not import ``emit``, and a
+        second copy of §8's "only these files are uploaded" rule in a widget
+        would fail by uploading DocIQ's own audit trail into the evidence
+        corpus.
+
+        An adapter that does not offer Path A may omit this method entirely
+        rather than returning an empty result — the GUI probes for it and
+        disables the action WITH THE REASON ON SCREEN. A stand-in silently
+        returning nothing would leave the operator pressing a button that
+        appears to work.
+        """
         ...
 
     def disclosure(self) -> str:
@@ -411,6 +523,7 @@ __all__ = [
     "TokenEstimate",
     "ReconciliationRow",
     "Reconciliation",
+    "PackageResult",
     "RunOutcome",
     "RunRequest",
     "ProgressEvent",

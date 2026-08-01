@@ -323,3 +323,91 @@ def test_mock_is_deterministic() -> None:
     """A screen render is only reviewable if the fixture behind it is fixed."""
     a, b = build_summary(_outcome()), build_summary(_outcome())
     assert a == b
+
+
+# ---------------------------------------------------------------------------
+# Amendment A-11b: ``rule`` and ``note`` joined ``ReductionLever``.
+#
+# The interesting defect was not the missing fields, it was ``with_toggled``
+# rebuilding the record by listing its fields positionally: correct on the day
+# it was written, and silently lossy for every field added afterwards. An
+# expert's stated reason for an omission would have been on screen before a
+# click and gone after it.
+#
+# So the probe is over EVERY field, generated from the dataclass itself, not
+# over the two fields this amendment happened to add. A future field is covered
+# the moment it exists — which is the only version of this test that stays true.
+
+
+def _lever_fields() -> tuple[str, ...]:
+    import dataclasses
+
+    from dociq.gui.pipeline import ReductionLever
+
+    return tuple(f.name for f in dataclasses.fields(ReductionLever))
+
+
+def test_toggling_preserves_every_lever_field_except_engaged():
+    import dataclasses
+
+    from dociq.gui.pipeline import LEVER_EXPERT, ReductionLever
+
+    # Every field given a value distinguishable from its default, so a dropped
+    # field shows up as a difference rather than coinciding with the default.
+    lever = ReductionLever(
+        key="photo_logs", label="Photo logs", tokens=41_000, pages=612,
+        kind=LEVER_EXPERT, engaged=True, estimated=True,
+        rule="section:^PHOTO LOG", note="Dropped per J. Long, 2026-08-01.",
+    )
+    plan = ReductionPlan(full_tokens=900_000, levers=(lever,))
+
+    toggled = plan.with_toggled("photo_logs").levers[0]
+
+    assert toggled.engaged is False, "the toggle must actually toggle"
+    for name in _lever_fields():
+        if name == "engaged":
+            continue
+        assert getattr(toggled, name) == getattr(lever, name), (
+            f"with_toggled dropped ReductionLever.{name!r} — it rebuilds the "
+            f"record and lost a field it did not name"
+        )
+    # And back again: two toggles are the identity, over every field.
+    assert plan.with_toggled("photo_logs").with_toggled("photo_logs") == plan
+
+
+def test_no_lever_rebuild_site_lists_fields_positionally():
+    """The CLASS, not the repro.
+
+    Four sites rebuilt a ``ReductionLever`` from its parts; each was a place a
+    later field could vanish. They now use ``dataclasses.replace``. This asserts
+    no new one reappears, in the product AND in the tests — a lossy rebuild
+    inside a fixture produces a passing test of the wrong record.
+    """
+    import ast
+
+    # Parsed, not pattern-matched. The first version of this probe used a
+    # regex, and it MISSED the very rebuild that motivated it — the offending
+    # call was ``ReductionLever(lever.key, ...)`` and the pattern stopped at the
+    # dot. A regex over source is a guess about syntax; the AST is the syntax.
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for path in sorted((root / "src").rglob("*.py")) + sorted(
+        (root / "tests").rglob("*.py")
+    ):
+        if path.name == Path(__file__).name:
+            continue  # this file constructs one deliberately, by keyword
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "ReductionLever"
+                and node.args  # any positional argument at all
+            ):
+                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert not offenders, (
+        "ReductionLever built or rebuilt with positional fields at "
+        + ", ".join(offenders)
+        + " — use dataclasses.replace() or keywords, so a field added later "
+          "cannot be silently dropped"
+    )

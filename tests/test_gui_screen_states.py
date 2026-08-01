@@ -579,8 +579,7 @@ def test_an_estimated_expert_lever_is_marked_in_the_same_column(window):
 
     outcome = _outcome()
     levers = tuple(
-        ReductionLever(le.key, le.label, le.tokens, le.pages, le.kind,
-                       le.engaged, estimated=not le.locked)
+        replace(le, estimated=not le.locked)
         for le in outcome.plan.levers
     )
     window.show_outcome(outcome)
@@ -597,8 +596,7 @@ def test_a_counted_expert_lever_is_not_marked_as_projected(window):
 
     outcome = _outcome()
     levers = tuple(
-        ReductionLever(le.key, le.label, le.tokens, le.pages, le.kind,
-                       le.engaged, estimated=False)
+        replace(le, estimated=False)
         for le in outcome.plan.levers
     )
     window.show_outcome(outcome)
