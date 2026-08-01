@@ -37,6 +37,7 @@ import json
 import shutil
 import socket
 import sys
+import os
 import tempfile
 from pathlib import Path
 
@@ -161,7 +162,19 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     chk = _Check()
-    work = Path(tempfile.mkdtemp(prefix="dociq-selftest-"))
+    # A fixed work dir when asked for. `source_root` is inside the hashed
+    # content -- deliberately, it is one of the determinism contract's three
+    # inputs -- so a randomized temp dir makes the reported corpus hash differ
+    # on every invocation. That is correct behavior, but it means the headline
+    # number cannot be compared across sessions or machines, and a reviewer
+    # seeing it move has no cheap way to tell design from defect.
+    fixed = os.environ.get("DOCIQ_SELFTEST_WORKDIR")
+    if fixed:
+        work = Path(fixed)
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+    else:
+        work = Path(tempfile.mkdtemp(prefix="dociq-selftest-"))
     print(f"LI Document IQ — Track A self-test\n  work dir: {work}")
     try:
         src = _fixture_root(work)

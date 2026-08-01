@@ -18,6 +18,7 @@ reuse audit flagged as untested in the original extractor.
 from __future__ import annotations
 
 import csv
+import hashlib
 import datetime
 import io
 import shutil
@@ -39,12 +40,74 @@ OUT = HERE / "generated"
 # ---------------------------------------------------------------------------
 
 
+def _pin_ooxml(path: Path) -> None:
+    """Rewrite an OOXML file with fixed zip member timestamps.
+
+    DOCX and XLSX are zip containers, and python-docx / openpyxl stamp each
+    member with the current time. Pinning ``core_properties`` fixes the
+    metadata *inside* the parts and leaves the container varying, so two builds
+    of the same fixture still differ — and because the file's SHA-256 is a Doc
+    ID input, that propagates into the index, the ledger and every downstream
+    artifact. The corpus then looks nondeterministic when only its inputs were.
+
+    Member ORDER is preserved. OOXML readers rely on it — rewriting these
+    archives in sorted order produces a file python-docx refuses to open — so
+    determinism here comes from pinning the timestamps, never from reordering.
+    """
+    import xml.etree.ElementTree as ET
+
+    stamp = FIXED_TIMESTAMP.strftime("%Y-%m-%dT%H:%M:%SZ")
+    _DC = "{http://purl.org/dc/terms/}"
+
+    def pin_core(data: bytes) -> bytes:
+        # Parsed, not regexed. The obvious regex over `<dcterms:created …>`
+        # also matches the `dcterms:W3CDTF` inside the element's own xsi:type
+        # attribute, which silently corrupts the part.
+        root = ET.fromstring(data)
+        for tag in ("created", "modified"):
+            for el in root.iter(_DC + tag):
+                el.text = stamp
+        for prefix, uri in (
+            ("cp", "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"),
+            ("dc", "http://purl.org/dc/elements/1.1/"),
+            ("dcterms", "http://purl.org/dc/terms/"),
+            ("dcmitype", "http://purl.org/dc/dcmitype/"),
+            ("xsi", "http://www.w3.org/2001/XMLSchema-instance"),
+        ):
+            ET.register_namespace(prefix, uri)
+        return ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+
+    with zipfile.ZipFile(path) as zin:
+        payload = [(i.filename, zin.read(i.filename)) for i in zin.infolist()]
+
+    # openpyxl rewrites dcterms:modified with the clock at save time whatever
+    # `wb.properties.modified` was set to, so the value has to be pinned after
+    # the fact rather than before it.
+    payload = [
+        (name, pin_core(data) if name == "docProps/core.xml" else data)
+        for name, data in payload
+    ]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in payload:
+            info = zipfile.ZipInfo(name, date_time=_ZIP_DATE)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o600 << 16
+            zout.writestr(info, data)
+
+
 def _pdf_canvas(path: Path):
     from reportlab.pdfgen import canvas
 
-    c = canvas.Canvas(str(path))
-    # reportlab stamps a creation date into the PDF trailer; pinning it is what
-    # makes two builds of the fixture corpus byte-identical.
+    # invariant=1 is the load-bearing argument: without it reportlab stamps a
+    # CreationDate and a random document ID into every PDF, so two builds of
+    # the fixture corpus differ and the self-test's reported corpus hash means
+    # nothing across sessions. Setting the title/author/producer below does NOT
+    # achieve this, which is what an earlier comment here claimed.
+    #
+    # The blast radius was wider than the PDFs: 14_transmittal.eml embeds one,
+    # and 10_misnamed.docx IS one under a wrong extension, so a single
+    # unpinned timestamp moved six of fourteen fixture files.
+    c = canvas.Canvas(str(path), invariant=1)
     c.setTitle("DocIQ synthetic fixture")
     c.setAuthor("DocIQ fixture generator")
     c.setSubject("synthetic")
@@ -142,6 +205,7 @@ def docx(path: Path) -> None:
     d.core_properties.last_modified_by = "DocIQ fixtures"
     d.core_properties.revision = 1
     d.save(str(path))
+    _pin_ooxml(path)
 
 
 def xlsx(path: Path) -> None:
@@ -159,6 +223,7 @@ def xlsx(path: Path) -> None:
     wb.properties.creator = "DocIQ fixtures"
     wb.properties.lastModifiedBy = "DocIQ fixtures"
     wb.save(str(path))
+    _pin_ooxml(path)
 
 
 def csv_file(path: Path) -> None:
@@ -303,10 +368,16 @@ def build(out: Path | None = None) -> Path:
     src = out / "matter"
     lock = out / ".build.lock"
     done = out / ".build.complete"
+    # The marker records WHICH generator built the corpus, not merely that one
+    # did. Keyed on "ok" alone, editing this file left a stale corpus in place
+    # forever and the tests silently kept asserting against the old bytes --
+    # which is exactly how a determinism fix here first looked like a product
+    # regression.
+    stamp = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
     out.mkdir(parents=True, exist_ok=True)
 
     for _ in range(600):  # ~60s; the build itself takes a few seconds
-        if done.exists():
+        if done.exists() and done.read_text(encoding='utf-8').strip() == stamp:
             return src
         try:
             lock.mkdir()
@@ -320,7 +391,7 @@ def build(out: Path | None = None) -> Path:
 
     try:
         _build_corpus(src)
-        done.write_text("ok", encoding="utf-8")
+        done.write_text(stamp, encoding="utf-8")
     finally:
         shutil.rmtree(lock, ignore_errors=True)
     return src
