@@ -78,7 +78,9 @@ __all__ = [
     "enumerate_guarded_entry_points",
     "audit_siblings",
     "MODEL_FETCH_MODULES",
+    "TRANSPORT_MODULES",
     "audit_model_fetch_imports",
+    "audit_transport_imports",
 ]
 
 
@@ -261,32 +263,52 @@ def no_network() -> NetworkGuard:
 # ---------------------------------------------------------------------------
 
 MODEL_FETCH_MODULES: tuple[str, ...] = (
-    # Everything a Python OCR/ONNX stack conventionally uses to fetch weights.
-    # Presence in ``sys.modules`` after a full OCR run is the finding: an
-    # unimported fetcher cannot fetch, and an imported one is a path that
-    # exists whether or not this corpus took it ("the corpus doesn't exercise
-    # it selects nothing").
+    # Clients that exist to GO AND GET SOMETHING. None of these is in DocIQ's
+    # declared dependency set, so any of them appearing in ``sys.modules``
+    # after a run means a dependency bump introduced a fetcher — which is a
+    # failure whether or not this corpus made it fetch. "The corpus doesn't
+    # exercise it" selects nothing.
     "huggingface_hub",
     "modelscope",
     "requests",
-    "urllib.request",
     "urllib3",
     "httpx",
-    "http.client",
+    "aiohttp",
+    "pip",
     "ftplib",
     "smtplib",
     "telnetlib",
     "xmlrpc.client",
     "webbrowser",
-    "pip",
+)
+
+TRANSPORT_MODULES: tuple[str, ...] = (
+    # Stdlib transport. DISCLOSED, not failed — and the difference is a
+    # measurement, not a concession. Both of DocIQ's document-writing
+    # dependencies import these at import time and neither is a fetcher:
+    #
+    #   reportlab (run_summary.pdf) -> urllib.request, http.client, ssl, socket
+    #   python-pptx (PPTX extraction) -> urllib.request, http.client, ssl, socket
+    #
+    # reportlab's ``ImageReader`` can read an image from a URL if it is handed
+    # one; DocIQ hands it bytes it read off disk, and the NetworkGuard's
+    # zero-attempt result over a whole pipeline run is the evidence that the
+    # path is never taken. Treating an import as an outbound call would make
+    # the probe cry wolf on every run and it would stop being read.
+    "urllib.request",
+    "http.client",
 )
 
 
 def audit_model_fetch_imports() -> tuple[str, ...]:
-    """Fetcher modules currently loaded in this interpreter. Empty is passing.
-
-    ``urllib.request`` and friends are stdlib, so "could be imported" is
-    meaningless; "was imported by the run" is the question, and it is the one
-    a client's IT reviewer would ask.
-    """
+    """Fetch-client modules loaded in this interpreter. Empty is passing."""
     return tuple(sorted(m for m in MODEL_FETCH_MODULES if m in sys.modules))
+
+
+def audit_transport_imports() -> tuple[str, ...]:
+    """Stdlib transport modules loaded. Reported with attribution, not failed.
+
+    See :data:`TRANSPORT_MODULES` for which dependency pulls each one in and
+    why the guard's attempt count, not this list, is the assurance.
+    """
+    return tuple(sorted(m for m in TRANSPORT_MODULES if m in sys.modules))

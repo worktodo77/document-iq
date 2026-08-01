@@ -70,6 +70,41 @@ if len(_model_files) != 3:
         f"{[Path(p).name for p, _ in _model_files]}"
     )
 
+# rapidocr does NOT import its three inference stages normally. It appends its
+# own package directory to `sys.path` and then
+# `importlib.import_module(config['Det']['module_name'])` — so `ch_ppocr_v3_det`,
+# `ch_ppocr_v3_rec` and `ch_ppocr_v2_cls` are imported as TOP-LEVEL modules,
+# by name, out of a YAML file. A module graph cannot see any of that.
+#
+# Unfixed, the packaged build failed in the worst available way: the models were
+# present, `ocr_available()` returned True, and every scanned page came out
+# EMPTY with `AttributeError: module 'ch_ppocr_v3_det' has no attribute
+# 'TextDetector'` swallowed into a per-document note. A client would have got a
+# corpus with its scanned evidence silently missing. It was caught only because
+# --selftest runs on the built artifact.
+#
+# The names are READ FROM rapidocr's own config.yaml rather than hard-coded, so
+# a version that renames a stage fails this build instead of shipping the same
+# silence again.
+import yaml as _yaml  # noqa: E402
+
+import rapidocr_onnxruntime as _rapidocr  # noqa: E402
+
+RAPIDOCR_DIR = Path(_rapidocr.__file__).resolve().parent
+_cfg = _yaml.safe_load((RAPIDOCR_DIR / "config.yaml").read_text(encoding="utf-8"))
+_stage_modules = sorted({
+    _cfg[stage]["module_name"] for stage in ("Det", "Rec", "Cls")
+    if isinstance(_cfg.get(stage), dict) and _cfg[stage].get("module_name")
+})
+if len(_stage_modules) != 3:
+    raise SystemExit(
+        f"expected 3 rapidocr inference stages in {RAPIDOCR_DIR / 'config.yaml'}, "
+        f"found {_stage_modules}")
+for _m in _stage_modules:
+    if not (RAPIDOCR_DIR / _m / "__init__.py").is_file():
+        raise SystemExit(f"rapidocr stage {_m!r} is not a package under "
+                         f"{RAPIDOCR_DIR}")
+
 datas = list(_rapidocr_data)
 datas += [(str(p), "assets/branding")
           for p in (REPO / "assets" / "branding").iterdir() if p.is_file()]
@@ -116,12 +151,15 @@ excludes = _PYSIDE6_UNUSED + [
 
 a = Analysis(
     [str(SPEC_DIR / "dociq_launcher.py")],
-    pathex=[str(SRC), str(FIXTURES)],
+    pathex=[str(SRC), str(FIXTURES), str(RAPIDOCR_DIR)],
     binaries=[],
     datas=datas,
     hiddenimports=[
         # Reached only through the launcher's argument routing, so the module
         # graph does not see them from the entry script alone.
+        # rapidocr's three inference stages, named in its config.yaml and
+        # imported as TOP-LEVEL modules through a sys.path append.
+        *_stage_modules,
         "make_fixtures",   # the bundled fixture corpus builder (--selftest)
         "dociq.selftest",
         "dociq.pipeline",

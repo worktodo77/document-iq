@@ -20,6 +20,38 @@ import pytest
 from dociq.verify import offline
 
 
+PROBE_SOURCE = """
+import sys, tempfile, pathlib
+sys.path.insert(0, sys.argv[1])
+import make_fixtures
+from dociq import pipeline
+from dociq.contracts import RunConfig
+from dociq.ingest import extract as ex, walker
+from dociq.profiles.model import OperatorStamp
+from dociq.verify import offline
+
+work = pathlib.Path(tempfile.mkdtemp())
+src = make_fixtures.build(work / 'fx')
+ex._OCR_ENGINE = None
+with offline.no_network() as guard:
+    pipeline.run(
+        RunConfig(source_root=str(src), output_root=str(work / 'out'),
+                  ocr_engine_version=ex.ocr_engine_version()),
+        pipeline.PipelineOptions(walk=walker.WalkOptions(resume=False),
+                                 matter_name='probe',
+                                 stamp=OperatorStamp('p', '2026-08-01T00:00:00Z',
+                                                     'p')))
+print('ATTEMPTS=' + str(len(guard.attempts)))
+print('FETCH=' + ','.join(offline.audit_model_fetch_imports()))
+print('TRANSPORT=' + ','.join(offline.audit_transport_imports()))
+"""
+"""Run in a SUBPROCESS so the answer is about a clean interpreter. In-process,
+pytest itself, the plugins, and every earlier test in the session have already
+imported half the stdlib — a `sys.modules` question asked inside a test session
+is asked of the wrong process."""
+
+
+
 def test_the_guarded_set_is_enumerated_not_described():
     """Fix the class: the covered entry points are a value, not prose."""
     names = offline.enumerate_guarded_entry_points()
@@ -144,27 +176,33 @@ def test_nested_guards_restore_in_order():
     assert socket.socket is original
 
 
-def test_no_fetch_capable_module_is_loaded_by_importing_the_pipeline():
-    """The model-fetch class, closed by absence rather than by one grep.
+def test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN():
+    """The fetch-client class, closed over a RUN and not merely over imports.
 
-    ``urllib.request`` is imported by this test module itself, so the assertion
-    is scoped: it names the modules a *fetch* needs and that nothing in DocIQ's
-    own import graph has any business pulling in.
+    The first version of this test imported ``dociq.pipeline`` and checked
+    ``sys.modules``. It passed, and it was too weak: the frozen build's
+    ``--offline-probe`` — which RUNS the pipeline rather than importing it —
+    immediately reported ``urllib.request`` and ``http.client`` loaded, because
+    ``reportlab`` (run_summary.pdf) and ``python-pptx`` pull them in when they
+    are first used. An import-only probe cannot see a module a run loads, and
+    the run is what ships.
+
+    So the check is now a subprocess that performs a whole pipeline run and
+    then reports. Fetch CLIENTS must be absent; stdlib transport is separately
+    reported with attribution (see ``offline.TRANSPORT_MODULES``) and the
+    guard's zero-attempt count is the assurance there.
     """
     import subprocess
 
-    code = (
-        "import sys;"
-        "import dociq.pipeline, dociq.selftest, dociq.ingest.extract;"
-        "from dociq.verify import offline;"
-        "print(','.join(offline.audit_model_fetch_imports()))"
-    )
-    proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                          text=True, env=_env_with_src())
-    assert proc.returncode == 0, proc.stderr[-1000:]
-    loaded = [m for m in proc.stdout.strip().split(",") if m]
-    assert loaded == [], (
-        f"importing the pipeline pulled in fetch-capable modules: {loaded}")
+    code = PROBE_SOURCE
+    proc = subprocess.run([sys.executable, "-c", code, str(_fixtures_dir())],
+                          capture_output=True, text=True, env=_env_with_src())
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    out = dict(line.split("=", 1) for line in proc.stdout.strip().splitlines()
+               if "=" in line)
+    assert out.get("ATTEMPTS") == "0", proc.stdout
+    fetch = [m for m in out.get("FETCH", "").split(",") if m]
+    assert fetch == [], f"a whole pipeline run loaded fetch clients: {fetch}"
 
 
 def _env_with_src():

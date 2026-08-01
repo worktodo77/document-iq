@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
 import re
 
 from dociq.contracts import document_sort_key
-from dociq.identify.bates import (
+from dociq.identify.bates import (  # noqa: F401
+    _parse_line,
     BatesDecision,
     BatesFormat,
     BatesZone,
@@ -308,3 +310,95 @@ def test_two_suffix_separators_are_two_formats_not_one():
         "MNFV 000392-CONF",
         None,
     ]
+
+
+# ---------------------------------------------------------------------------
+# Mixed-case production prefixes — the criterion-4 acceptance finding
+# ---------------------------------------------------------------------------
+#
+# The detector was uppercase-only. The MNFV disclosure's own production prefix
+# is `iiCON`, and on 280 sampled pages of it the detector proposed NOTHING and
+# scored 0% — every stamp present, correctly placed, and rejected on case
+# alone. Worse than a wrong answer, because "no format proposed" is the
+# ORDINARY outcome on an unstamped set (D-13), so nothing in the run said a
+# word about it. These tests are the class, not the one prefix.
+
+
+def _seq(prefix, sep, start, count, width=6):
+    return document(
+        f"prod/{prefix.lower()}.pdf",
+        tuple(page(i, f"body text for page {i}\n"
+                      f"{prefix}{sep}{start + i - 1:0{width}d}")
+              for i in range(1, count + 1)),
+    )
+
+
+def test_a_lowercase_production_prefix_is_detected():
+    """`iiCON000001` — the real prefix that scored 0%."""
+    doc = _seq("iiCON", "", 1483, 6)
+    proposal = propose_format((doc,))
+    assert proposal is not None, "a real, fully stamped production proposed nothing"
+    assert proposal.format.prefix == "iiCON"
+    out = apply_bates((doc,), BatesDecision(DecisionStatus.CONFIRMED,
+                                            proposal.format))
+    assert [p.bates for p in out[0].pages] == [
+        f"iiCON{1483 + i:06d}" for i in range(6)]
+
+
+@pytest.mark.parametrize("prefix,sep", [
+    ("iiCON", ""),          # lowercase-leading, no separator
+    ("Def", "-"),           # title case with a separator
+    ("PltfBates", " "),     # camel case
+    ("mnfv", " "),          # all lowercase
+    ("MNFV", " "),          # the uppercase case must not regress
+    ("Vol2.Def", "-"),      # digit-bearing prefix, separator required
+])
+def test_the_prefix_case_class_is_covered_not_just_the_one_prefix(prefix, sep):
+    doc = _seq(prefix, sep, 391, 5)
+    proposal = propose_format((doc,))
+    assert proposal is not None, f"{prefix!r} + {sep!r} proposed nothing"
+    assert proposal.format.prefix == prefix
+    assert proposal.format.separator == sep
+
+
+def test_case_is_preserved_and_never_folded():
+    """Two productions differing only in case are two formats.
+
+    Folding case would be the lazy fix and it would cross-apply one party's
+    numbering to another's pages — a locator pointing at a record that does not
+    exist, which §4 rates worse than no locator at all.
+    """
+    lower = _seq("iiCON", "", 1000, 6)
+    upper = document(
+        "prod/upper.pdf",
+        tuple(page(i, f"text\nIICON{2000 + i:06d}") for i in range(1, 7)),
+    )
+    proposal = propose_format((lower, upper))
+    assert proposal is not None
+    out = apply_bates((lower, upper), BatesDecision(DecisionStatus.CONFIRMED,
+                                                    proposal.format))
+    by_path = {d.rel_path: d for d in out}
+    chosen = proposal.format.prefix
+    other = "IICON" if chosen == "iiCON" else "iiCON"
+    other_doc = by_path[f"prod/{other.lower()}.pdf"]
+    assert all(p.bates is None for p in other_doc.pages), (
+        f"the {chosen!r} format was applied to {other!r} pages")
+
+
+def test_a_lowercase_prefix_round_trips_through_the_persisted_pattern():
+    doc = _seq("iiCON", "", 1483, 4)
+    fmt = propose_format((doc,)).format
+    assert parse_pattern(fmt.pattern) == fmt
+
+
+def test_widening_the_case_class_did_not_open_the_page_number_hole():
+    """The widening's cost, measured rather than assumed.
+
+    Allowing lowercase means more footer text parses as stamp-shaped. What
+    keeps it from becoming a false positive is unchanged and is asserted here:
+    the whole-line anchor, the three-digit floor, and the per-document coverage
+    bar.
+    """
+    for line in ("page 12", "Page 3 of 8", "Exhibit 4", "2024", "1,234.56",
+                 "Rev 3", "revised 2024-01-01", "$12,500.00"):
+        assert _parse_line(line) is None, line

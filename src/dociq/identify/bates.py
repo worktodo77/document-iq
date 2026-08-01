@@ -101,7 +101,7 @@ class BatesZone:
 
 # A Bates stamp is a production mark: an optional alphanumeric prefix, an
 # optional separator, and a run of digits — optionally followed by a short
-# alphanumeric suffix (confidentiality designations such as "-CONF"). Anchored
+# alphabetic suffix (confidentiality designations such as "-CONF"). Anchored
 # at both ends of the zone line, because an unanchored match would happily read
 # a date, a dollar figure, or a paragraph number as a Bates number.
 #
@@ -112,14 +112,31 @@ class BatesZone:
 # production. So a digit-bearing prefix REQUIRES a separator before the number,
 # and a separator-less prefix must end in a letter. Between them, no input has
 # two readings.
+#
+# THE LETTER CLASS IS ``[A-Za-z]``, NOT ``[A-Z]`` — corrected 2026-08-01 by the
+# criterion-4 acceptance run, which is the first time this code met a real
+# production. It was uppercase-only, and the MNFV disclosure's own production
+# prefix is **iiCON**. Every one of the 280 sampled pages carried its stamp,
+# correctly, in the zone the detector looks at, and every one was rejected —
+# 0% accuracy, no format proposed, and not a single warning anywhere in the
+# run, because an unstamped set producing nothing is the ordinary case (D-13).
+# A matter would have shipped with no Bates locators at all and nothing on the
+# face of the run to say so.
+#
+# The class, not the repro: a Bates prefix is a string a producing party
+# chooses, and nothing makes it uppercase. Lowercase ("iiCON"), mixed-case
+# ("Def", "PltfBates") and party-initial forms are all ordinary. Case is
+# PRESERVED, never folded: ``format_key`` compares the literal prefix, so a
+# production stamping ``iiCON`` and one stamping ``IICON`` remain two formats
+# and neither is applied to the other's pages.
 _CANDIDATE_RE = re.compile(
     r"""^
     (?:
-        (?P<prefix_sep>[A-Z][A-Z0-9]*(?:[ _.-][A-Z0-9]+)*)(?P<sep>[ _.-])
-      | (?P<prefix_bare>[A-Z](?:[A-Z0-9]*[A-Z])?)
+        (?P<prefix_sep>[A-Za-z][A-Za-z0-9]*(?:[ _.-][A-Za-z0-9]+)*)(?P<sep>[ _.-])
+      | (?P<prefix_bare>[A-Za-z](?:[A-Za-z0-9]*[A-Za-z])?)
     )?
     (?P<digits>\d{3,10})
-    (?:(?P<suffix_sep>[ _-])(?P<suffix>[A-Z]{1,12}))?
+    (?:(?P<suffix_sep>[ _-])(?P<suffix>[A-Za-z]{1,12}))?
     $""",
     re.VERBOSE,
 )

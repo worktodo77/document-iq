@@ -76,6 +76,48 @@ def _cmd_version() -> int:
     return 0 if ok else 1
 
 
+def _cmd_diagnose() -> int:
+    """Why the frozen build differs from the source tree — the two questions
+    the packaged offline probe asked and the source tree never had to.
+
+    Kept as a shipped command rather than a throwaway script: both findings it
+    was written for (OCR silently unavailable in the bundle, and fetch-capable
+    modules pulled in by the frozen import graph) are invisible from a
+    checkout, so the next person to hit them needs this to exist.
+    """
+    import importlib
+    import sys as _sys
+
+    print("import probe — each dependency the OCR path needs")
+    for name in ("fitz", "rapidocr_onnxruntime", "cv2", "numpy",
+                 "onnxruntime", "PIL.Image", "yaml", "shapely", "pyclipper"):
+        try:
+            m = importlib.import_module(name)
+            print(f"  OK    {name:22s} {getattr(m, '__file__', '')}")
+        except Exception as exc:
+            print(f"  FAIL  {name:22s} {type(exc).__name__}: {exc}")
+
+    from dociq.ingest import extract as ex
+
+    print(f"\nocr_models_present : {ex.ocr_models_present()}")
+    print(f"ocr_available      : {ex.ocr_available()}")
+
+    print("\nfetch-capable modules already in sys.modules, and who pulled "
+          "them in:")
+    baseline = set(_sys.modules)
+    from dociq.verify import offline
+
+    for name in offline.audit_model_fetch_imports():
+        importers = sorted(
+            m for m in baseline
+            if getattr(_sys.modules.get(m), "__dict__", None)
+            and name.split(".")[0] in getattr(_sys.modules[m], "__dict__", {}))
+        print(f"  {name}: referenced by {importers[:8] or '(no direct '
+              'attribute reference found — imported for its side effects or by '
+              'the bootstrap)'}")
+    return 0
+
+
 def _cmd_offline_probe(argv: list[str]) -> int:
     """Run the whole pipeline over the fixture corpus under the network guard.
 
@@ -148,8 +190,10 @@ def _cmd_offline_probe(argv: list[str]) -> int:
             print(guard.render())
         loaded = offline.audit_model_fetch_imports()
         if loaded:
-            failures.append(f"fetch-capable modules imported: {', '.join(loaded)}")
-        print(f"  fetch-capable modules imported: {', '.join(loaded) or 'none'}")
+            failures.append(f"fetch-client modules imported: {', '.join(loaded)}")
+        print(f"  fetch-client modules imported: {', '.join(loaded) or 'none'}")
+        print(f"  stdlib transport imported (disclosed, see offline.py): "
+              f"{', '.join(offline.audit_transport_imports()) or 'none'}")
 
         if failures:
             print(f"\nOFFLINE PROBE FAILED — {len(failures)} finding(s)")
@@ -203,6 +247,8 @@ def main(argv: list[str] | None = None) -> int:
         from dociq.selftest import main as selftest_main
 
         return selftest_main(args[1:])
+    if args and args[0] == "--diagnose":
+        return _cmd_diagnose()
     if args and args[0] == "--offline-probe":
         return _cmd_offline_probe(args[1:])
     if args and args[0].startswith("--"):

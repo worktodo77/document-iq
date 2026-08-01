@@ -174,9 +174,15 @@ def _check_no_network(chk: _Check) -> None:
                    f"{len(confs)} line(s), text {text[:40]!r}")
     loaded = offline.audit_model_fetch_imports()
     chk.expect(not loaded,
-               "no model-fetch or HTTP module was imported by this run",
-               "none of " + ", ".join(offline.MODEL_FETCH_MODULES)
+               "no fetch-client module was imported by this run",
+               ("none of " + ", ".join(offline.MODEL_FETCH_MODULES))
                if not loaded else "LOADED: " + ", ".join(loaded))
+    # Disclosed, not failed: reportlab and python-pptx import stdlib transport
+    # at import time and never call it. The zero-attempt count above is the
+    # assurance; this line exists so the fact is on the record rather than
+    # rediscovered as a surprise.
+    chk.ok("stdlib transport imported by reportlab / python-pptx (disclosed)",
+           ", ".join(offline.audit_transport_imports()) or "none")
 
 
 def main(argv: list[str] | None = None) -> int:
