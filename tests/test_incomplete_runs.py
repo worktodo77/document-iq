@@ -238,7 +238,7 @@ def test_every_return_in_the_walk_carries_a_stamped_terminal_status():
     the contract's COMPLETED default means such a return fails OPEN and
     silently.
 
-    Asserted from the source, because behaviour can only cover the paths
+    Asserted from the source, because behavior can only cover the paths
     someone thought to exercise — which is precisely how round 1 shipped this.
     """
     returns = _walk_run_returns()

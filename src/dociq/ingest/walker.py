@@ -1170,7 +1170,7 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
     # could be sitting under the source root.
     #
     # It blocks rather than quietly excluding the output folder. Excluding is the
-    # friendlier behaviour and may well be the right final answer, but it decides
+    # friendlier behavior and may well be the right final answer, but it decides
     # what a corpus IS — it would change the corpus hash of any matter already
     # arranged this way, silently, with no bad input anywhere. That is a ruling,
     # not a bug fix, so the run fails closed and names both remedies.

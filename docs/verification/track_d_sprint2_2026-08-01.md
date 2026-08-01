@@ -96,9 +96,9 @@ metadata operations on ~40 files. **Not measured on the real corpus** — see §
 
 ## 3. Defects found and fixed in this package
 
-Seven. Five were found by a test that asserted the behaviour; two (#5 and #7)
-by reading one function against another, which is the half that no green suite
-would ever have surfaced.
+Eight. Five were found by a test that asserted the behavior; two (#5 and #7)
+by reading one function against another, and one by the verification loop
+itself — which is the half that no scoped, green test run would have surfaced.
 
 1. **The roll-forward disclosure was silent in the commonest case.** The "a
    previous run's swap was completed for you" note keyed on the list of files the
@@ -164,6 +164,24 @@ would ever have surfaced.
    `os.path.realpath` rather than as strings, and the fail-before was watched red
    on all four cases. The AST enumeration in `tests/test_incomplete_runs.py`
    caught the new early return and was updated from 4 returns to 5.
+8. **An en-GB spelling in a new comment**, caught by the repo's US-English gate
+   (`test_the_chrome_is_us_english`) on run 1 of the definitive 8× loop — after
+   several targeted per-file runs had all been green. Trivial in itself and
+   recorded because the *mechanism* is not: every test run between edits had been
+   scoped to the files I was changing, and that gate scans all of `src/dociq`.
+   The verification loop earned its keep on its first iteration.
+
+### A behavior change worth naming: what the manifest now covers
+
+`mf.build()` runs against the staging directory, so `output_manifest.json`
+describes **the set this run produced** rather than everything in the matter
+folder at the moment the run ended. One consequence: an unrelated file an
+operator dropped into the output folder no longer appears as `unclassified` and
+no longer flips `PipelineOutcome.ok` to False. I believe that is more correct —
+the manifest's subject is the run's own output, and a foreign file is not a
+failure of this run — but it is a change in what the gate notices, it was not
+asked for, and it should be someone else's call to keep. An output DocIQ itself
+writes and nobody classified is still caught, because it would be in staging.
 
 ## 4. Judgment calls made against the brief, with reasoning
 
@@ -230,7 +248,7 @@ the format; False leaves the production unstamped for this run. There is no
 
 and `PipelineAPI.run` gains `confirm_bates: BatesConfirm | None = None`. Track E
 would need a modal; the run blocks until it returns, which is correct — the answer
-changes the Doc IDs. If the callback is absent the current behaviour stands.
+changes the Doc IDs. If the callback is absent the current behavior stands.
 **Sprint-2 acceptance criterion 4 (Bates ≥99% on the MNFV production) cannot be
 discharged through the GUI until this lands.**
 
