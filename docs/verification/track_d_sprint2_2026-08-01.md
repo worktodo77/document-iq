@@ -39,12 +39,20 @@ in no pipeline module (that test still passes, unchanged).
 
 ### Test runs
 
+All at the frozen tree `e27800c`, clean working copy, in one scripted loop.
+
 | check | result |
 |---|---|
-| full suite | **8 consecutive runs, 0 failures** |
-| `tests/test_adapter.py` + `tests/test_emit_atomicity.py` | **30 consecutive runs, 0 failures** — the 30 is because these touch temp directories, hashing, ordering and a thread pool |
+| full suite (**677 tests**) | **8 consecutive runs, 8 × exit 0**, 154–249 s each |
+| `tests/test_adapter.py` + `tests/test_emit_atomicity.py` (50 tests) | **30 consecutive runs, 0 failures** — 30 rather than 8 because these touch temp directories, hashing, ordering, a thread pool and a Qt window |
 | `python -m dociq.selftest` | **3 runs, exit 0, 66 checks** each, including its own 8-run × 30-seed determinism harness |
-| `tests/test_import_graph.py` | passing, unchanged |
+| `tests/test_import_graph.py` | passing, unchanged — the GUI still imports no pipeline package |
+
+New tests: 39 in `test_adapter.py`, 11 in `test_emit_atomicity.py`, 5 added to
+`test_incomplete_runs.py`.
+
+An earlier loop, at an earlier commit, went **red on run 1** — see defect 8. Both
+loops are reported; the passing one is not the only one that happened.
 
 ### Fail-before, watched red
 
