@@ -331,6 +331,67 @@ class RealPipeline:
         found.sort(key=lambda p: (p.label.lower(), p.profile_id, p.version))
         return tuple(found) + (NO_PROFILE,)
 
+    def profile_rules(
+        self, profile: ProfileInfo
+    ) -> tuple[tuple[ReductionLever, ...], TokenBasis, str]:
+        """§6's checklist: which rules this profile carries, and where they came
+        from. Amendment A-11's shape, implemented.
+
+        Not part of :class:`~dociq.gui.pipeline.PipelineAPI` — A-11 is raised and
+        not yet applied, so Track E asks for it by an optional ``getattr`` hook
+        and renders a loud empty state when it is absent. Absent is exactly what
+        it would be here: the real adapter without this method leaves the §6
+        profiling checklist permanently unapprovable, which disables the whole
+        workflow the screen exists for. It returns only types that already cross
+        the seam, so adopting A-11 later changes nothing here but the Protocol.
+
+        **Every row is `estimated=True` and carries no figures**, because before
+        a run there is nothing to count: these are the profile's rules, not this
+        matter's pages. §6 step 2's "frequency across the sample, average page
+        count" comes from a profiling run over a sample, which does not exist
+        yet. Zero with `estimated=True` is the honest encoding the seam has —
+        and it renders as "0 pages · 0 tokens (projected, not counted)", which
+        understates the case. See the verification note: the wording is Track
+        E's to fix, and the number is not one I may invent.
+        """
+        chosen = self._load(profile)
+        if chosen is None:
+            return (), TokenBasis(), ""
+
+        levers: list[ReductionLever] = []
+        seen: set[str] = set()
+        for rule in chosen.section_rules:
+            # The section as a human names it — the checklist renders this as
+            # `section "<key>"` and an expert has to recognize it. Rule ids are
+            # for the audit trail, and are the fallback only when a label would
+            # be ambiguous, because two rows reading "Photo logs" would be two
+            # omissions the expert cannot tell apart.
+            name = rule.label or rule.rule_id
+            if name in seen:
+                name = f"{name} (rule {rule.rule_id})"
+            seen.add(name)
+            levers.append(
+                ReductionLever(
+                    key=name,
+                    label=name,
+                    tokens=0,
+                    pages=0,
+                    kind=LEVER_EXPERT,
+                    engaged=rule.disposition is Disposition.DROP,
+                    estimated=True,
+                )
+            )
+
+        source = (
+            f"read from the profile library: {chosen.profile_id} "
+            f"v{chosen.version}"
+            + (f", saved by {chosen.created_by}" if chosen.created_by else "")
+            + (f" on {chosen.created_at}" if chosen.created_at else "")
+            + ". These are the profile's rules; no pages have been read for "
+            "this matter yet, so no row carries a page or token count."
+        )
+        return tuple(levers), TokenBasis(), source
+
     def preview_folder(self, path: str) -> FolderPreview:
         """What is in the folder, before anything is read.
 
@@ -441,20 +502,30 @@ class RealPipeline:
         silently running without an expert's rules and publishing the result as a
         reduced corpus is the failure mode this whole product is against.
         """
-        chosen = request.profile
-        if chosen is None or chosen.profile_id == NO_PROFILE.profile_id:
-            return ()
+        chosen = self._load(request.profile)
+        return (chosen,) if chosen is not None else ()
+
+    def _load(self, profile: ProfileInfo | None) -> FormatProfile | None:
+        """The library file behind a picker entry, or ``None`` for no profile.
+
+        One loader for the run and for the §6 checklist, so the rules an expert
+        approves on screen are read from the same file, by the same parser, as
+        the rules the run applies. Two readers would eventually show one thing
+        and drop another.
+        """
+        if profile is None or profile.profile_id == NO_PROFILE.profile_id:
+            return None
         directory = profile_library_dir(self._library_dir)
-        path = directory / f"{chosen.profile_id}.v{chosen.version}.yaml"
+        path = directory / f"{profile.profile_id}.v{profile.version}.yaml"
         if not path.is_file():
             raise ProfileError(
-                f"The profile '{chosen.label}' ({chosen.profile_id} "
-                f"v{chosen.version}) is no longer in the profile library at "
+                f"The profile '{profile.label}' ({profile.profile_id} "
+                f"v{profile.version}) is no longer in the profile library at "
                 f"{directory}. It was offered when this run was set up and has "
                 "been moved, renamed or deleted since. DocIQ will not run "
                 "without the rules it was told to apply."
             )
-        return (load_profile(path),)
+        return load_profile(path)
 
 
 class _Progress:

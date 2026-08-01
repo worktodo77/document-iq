@@ -147,6 +147,98 @@ def test_the_offered_order_is_deterministic(library):
 
 
 # ---------------------------------------------------------------------------
+# A-11's hook — §6's profiling checklist
+# ---------------------------------------------------------------------------
+
+
+def test_the_checklist_hook_lists_every_rule_the_profile_carries(library):
+    """FAIL-BEFORE: without ``profile_rules`` the real adapter renders Track E's
+    ``CHECKLIST_NO_RULES`` empty state, which **disables approval** — so §6's
+    profiling workflow cannot be completed against the real pipeline at all.
+    Track E left the hook optional (amendment A-11, not yet applied); absent is
+    exactly what it would be here.
+    """
+    _write(library, MPR)
+    pipe = adapter.RealPipeline()
+    chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
+
+    levers, basis, source = pipe.profile_rules(chosen)
+
+    assert len(levers) == len(MPR.section_rules)
+    assert len(levers) == chosen.section_rules, (
+        "the checklist's completeness cross-check would fail: the profile "
+        "declares one count and the rows show another"
+    )
+    by_key = {le.key: le for le in levers}
+    assert by_key["Progress narrative"].engaged is True, "a DROP rule reads KEEP"
+    assert by_key["Cover"].engaged is False, "a KEEP rule reads DROP"
+    assert all(le.kind == LEVER_EXPERT for le in levers)
+    assert all(le.estimated for le in levers), (
+        "a row with no measurement behind it was presented as counted"
+    )
+    assert all(le.tokens == 0 and le.pages == 0 for le in levers)
+    assert "mpr-test v1.0" in source and "no pages have been read" in source
+    assert basis.provenance == ""
+
+
+def test_the_checklist_hook_says_nothing_for_the_no_profile_choice(library):
+    levers, _basis, source = adapter.RealPipeline().profile_rules(
+        adapter.NO_PROFILE)
+    assert levers == ()
+    assert source == ""
+
+
+def test_two_rules_with_one_label_stay_two_rows(library):
+    """Two rows reading "Photo logs" are two omissions an expert cannot tell
+    apart — and the checklist keys its toggle on the row's key."""
+    clashing = FormatProfile(
+        profile_id="clash", version="1.0", display_name="Clashing labels",
+        section_rules=(
+            SectionRule("a", "AAA", disposition=Disposition.DROP,
+                        label="Photo logs", notes="test"),
+            SectionRule("b", "BBB", disposition=Disposition.DROP,
+                        label="Photo logs", notes="test"),
+        ),
+    )
+    _write(library, clashing)
+    pipe = adapter.RealPipeline()
+    chosen = [p for p in pipe.profiles() if p.profile_id == "clash"][0]
+    levers, _b, _s = pipe.profile_rules(chosen)
+    assert len({le.key for le in levers}) == 2, [le.key for le in levers]
+    assert len(levers) == chosen.section_rules
+
+
+def test_a_vanished_profile_does_not_silently_produce_an_empty_checklist(library):
+    """It raises; Track E's call site catches and renders the loud empty state,
+    which disables approval. An empty list returned quietly would read as "this
+    profile drops nothing"."""
+    _write(library, MPR)
+    pipe = adapter.RealPipeline()
+    chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
+    (library / "mpr-test.v1.0.yaml").unlink()
+
+    with pytest.raises(ProfileError):
+        pipe.profile_rules(chosen)
+
+
+def test_the_checklist_and_the_run_read_one_file_through_one_parser(library):
+    """Same loader for both, so the rules an expert approved on screen are the
+    rules the run applies."""
+    _write(library, MPR)
+    pipe = adapter.RealPipeline()
+    chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
+    levers, _b, _s = pipe.profile_rules(chosen)
+    loaded = pipe._profiles_for(_request(Path("."), profile=chosen))
+
+    assert len(loaded) == 1
+    assert len(levers) == len(loaded[0].section_rules)
+    dropped_on_screen = {le.key for le in levers if le.engaged}
+    dropped_in_run = {r.label or r.rule_id for r in loaded[0].section_rules
+                      if r.disposition is Disposition.DROP}
+    assert dropped_on_screen == dropped_in_run
+
+
+# ---------------------------------------------------------------------------
 # D-2 — preview_folder()
 # ---------------------------------------------------------------------------
 

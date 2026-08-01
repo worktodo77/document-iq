@@ -17,6 +17,7 @@ supports it, and the last section names the ones nothing supports.
 | D-4 `ReductionPlan` | `src/dociq/adapter.py` | counted per-section savings, expert levers only |
 | D-5 Bates confirmation | — | **STOP THE LINE**, see §5.1 |
 | D-6 emit atomicity | `src/dociq/emit/paths.py`, `src/dociq/pipeline.py` | staged, gated, swapped, roll-forward |
+| A-11 `profile_rules()` | `src/dociq/adapter.py` | implemented, unblocking Track E's §6 checklist |
 
 `get_pipeline()` returns `dociq.adapter.RealPipeline`. `set_pipeline()` still
 installs the mock, and `tests/test_gui_states.py` / `tests/test_view_models.py`
@@ -60,6 +61,7 @@ Nothing below is asserted from a green run alone.
 | progress without page counts | status reduced to "reading" | `test_progress_speaks_plain_language_about_pages` |
 | preview estimating outside its envelope | the shape gate removed | 2 of the 4 envelope cases |
 | figures handed over by an unpublished run | all four `if outcome.published` guards removed | `test_the_adapter_refuses_figures_from_an_unpublished_run` |
+| A-11's hook absent | `profile_rules` renamed away | 5 checklist tests |
 
 The last one is worth a sentence. Removing those guards passed the whole suite at
 first, because a cancelled walk returns before Stage 6 and therefore carries no
@@ -216,6 +218,15 @@ or (b) withdraw the claim from the UI (see §5.5).
 
 ## 5. STOP THE LINE — seam and coordination items
 
+**Cross-track note, discovered late:** `build/sprint-2` moved while this branch
+was building — Track E merged at `8c3953b`, raising A-11, A-12 and A-13. None of
+them touches `gui/pipeline.py`'s types, so **there is no conflict on the seam**.
+The only file both tracks edited is `gui/mock_pipeline.py`, where my change is
+confined to the module docstring. **A-11 is implemented here** (see §1) — Track E
+left `profile_rules` as an optional `getattr` hook, and without it the real
+adapter leaves §6's profiling checklist permanently unapprovable. This branch has
+NOT been merged with `build/sprint-2`; that is the coordinator's call.
+
 Each is reported with the exact shape proposed. None has been applied locally.
 
 ### 5.1 Bates confirmation has no callback (D-5, the item the brief flagged)
@@ -294,7 +305,24 @@ change the corpus hash. `disclosure()` is reserved for saying a pipeline is not
 real. An expert's saved ruling silently missing from the picker is a bad failure;
 please route a channel for it.
 
-### 5.5 A UI claim the build does not support (Track E's file — not edited)
+### 5.5 `ChecklistRow.scale()` renders "0 tokens" where it means "not measured"
+
+Track E's checklist row renders `f"{pages:,} pages · {tokens} tokens"` plus
+"(projected, not counted)" when `estimated` is set. The real adapter's
+`profile_rules` returns rules with no figures — correctly, because before a run
+there is nothing to count — so every row reads **"0 pages · 0 tokens (projected,
+not counted)"**, which an operator reads as "this rule saves nothing" rather than
+"nothing has been measured yet". The seam has no way to say the second: zero is
+both "measured zero" and "not measured", exactly as
+`FolderPreview.estimated_minutes` overloads zero (§5.3), and there the seam
+documents the meaning while here it does not.
+
+Cheapest fix is Track E's, in one method: when `estimated` and `tokens == 0 and
+pages == 0`, render "not measured for this matter". §6 step 2's real answer —
+frequency across a sample and average page count — needs a profiling run over a
+sample, which does not exist in either track.
+
+### 5.6 A UI claim the build does not support (Track E's file — not edited)
 
 `src/dociq/gui/widgets.py:511` renders the hint *"Removed mechanically — exact
 duplicates and page furniture"*. DocIQ removes neither. With no automatic lever
