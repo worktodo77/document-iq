@@ -144,7 +144,7 @@ Path B is the recommended route for forensic matters (full audit trail stays loc
 
 ## 10. Technical Requirements
 
-- **Platform:** Windows 10/11, 64-bit. Single-file executable (PyInstaller or equivalent). No installer, no admin rights, no external runtime dependencies.
+- **Platform:** Windows 10/11, 64-bit. **AMENDED by D-22 (Alex, 2026-08-01):** a PyInstaller **one-folder** build shipped as a **single zip** the user unpacks once — *not* a `--onefile` executable. The bundled ONNX OCR models push the payload past ~100 MB, and `--onefile` re-extracts all of it to a temp directory on every launch (multi-second cold starts, and a temp-extract-then-execute pattern that endpoint protection on locked-down law-firm machines quarantines). The intent — one thing to hand over — is preserved by the zip. Still binding: no installer, no admin rights, no external runtime dependencies.
 - **Stack (indicative):** Python 3.11+; pypdf + PyMuPDF (PDF; per the reused MIP 3.9 layer); **rapidocr_onnxruntime (OCR — D-01)**; python-docx, extract-msg, openpyxl (other formats; full dependency set declared explicitly — the MIP 3.9 pyproject omits several used libraries, see reuse audit); a lightweight GUI framework consistent with LI's existing tools (PySide6 family).
 - **Network:** None. The application must function with all network interfaces disabled and must make no outbound connections.
 - **Performance target:** A 38-document / ~5,700-page matter set with ~50% scanned pages completes in under 60 minutes on a standard business laptop (OCR-dominated). Native-text sets should complete in minutes.
@@ -166,7 +166,7 @@ Audit performed 2026-07-30 — see [mip39_ingestion_audit_2026-07-30.md](../reus
 
 ## 13. Acceptance Criteria
 
-1. Processes the reference MODEC set (38 MPRs, ~20 MB each, mixed native/scanned) end-to-end without manual intervention; output corpus loads into a Claude Project and is consumed by Expert Assist evidence-mining without format errors.
+1. Processes the reference MODEC set end-to-end without manual intervention; the output corpus is consumed by Expert Assist evidence-mining without format errors. **AMENDED by D-20 (Alex, 2026-08-01):** the original wording ("loads into a Claude Project") assumed a matter fits direct context; the measured corpus is 70–100× that, so no reduction achieves it. Discharged as — **Path B proven at full scale (all 368 documents, read from the matter folder)**, **Path A proven on a stated, deliberately scoped subset** that genuinely fits. The acceptance note states the Path A scope rather than implying full-corpus coverage. The "38 MPRs, ~20 MB each, mixed native/scanned" figure is superseded by the measured corpus (see *Corpus reality vs. the spec's assumption* in the decision register).
 2. Page accounting reconciles to zero discrepancy across the full set.
 3. Every page marker in clean_text resolves to the correct page of the original PDF on spot-check (sample: 50 random markers).
 4. Bates detection ≥ 99% accuracy on stamped sets; all misses flagged, none silently wrong.
