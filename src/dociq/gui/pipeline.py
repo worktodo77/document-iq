@@ -485,16 +485,25 @@ def set_pipeline(pipeline: PipelineAPI | None) -> None:
 
 
 def get_pipeline() -> PipelineAPI:
-    """THE SWAP POINT.
+    """THE SWAP POINT — **swapped** (Sprint 2).
 
-    Sprint 1 returns the mock. Sprint 2 returns the real adapter, and that is
-    the entire integration change on the GUI side.
+    Returns the real adapter, :class:`dociq.adapter.RealPipeline`. The mock is
+    still installable through :func:`set_pipeline`, and that is how
+    ``tests/test_gui_states.py`` and ``tests/test_view_models.py`` keep proving
+    the seam holds: they are the only thing that can, because they are the only
+    consumer that runs against both sides of it.
+
+    The import is function-local and stays that way. ``dociq.adapter`` imports
+    six pipeline packages, and ``tests/test_import_graph.py`` asserts that
+    importing the whole GUI pulls in none of them — a module-level import here
+    would make merely opening the window drag in ``rapidocr``, and would break
+    the freeze's Track-C rule at its only remaining seam.
     """
     if _OVERRIDE is not None:
         return _OVERRIDE
-    from dociq.gui.mock_pipeline import MockPipeline
+    from dociq.adapter import RealPipeline
 
-    return MockPipeline()
+    return RealPipeline()
 
 
 def config_from(request: RunRequest) -> RunConfig:

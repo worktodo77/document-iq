@@ -30,7 +30,7 @@ import json
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from dociq.contracts import (
     ContractViolation,
@@ -66,6 +66,7 @@ from dociq.emit.indexbook import (
     write_reconciliation_csv,
 )
 from dociq.emit.log import LogBundle, build_log, write_processing_log
+from dociq.emit import paths as emit_paths
 from dociq.emit.paths import OutputLayout
 from dociq.emit.summary import build_summary_data, write_run_summary
 from dociq.identify.bates import (
@@ -93,7 +94,48 @@ from dociq.verify import accounting, manifest as mf
 from dociq.verify.tokens import TokenEstimate as MeasuredEstimate
 from dociq.verify.tokens import estimate_for_texts
 
-__all__ = ["OCR_DISABLED", "PipelineOptions", "PipelineOutcome", "run"]
+__all__ = [
+    "OCR_DISABLED",
+    "PipelineOptions",
+    "PipelineOutcome",
+    "StageProgress",
+    "STAGES",
+    "run",
+]
+
+STAGES: tuple[tuple[int, str], ...] = (
+    (1, "Reading the folder"),
+    (2, "Extracting text"),
+    (3, "Bates numbers and document IDs"),
+    (4, "Applying the profile"),
+    (5, "Writing the deliverables"),
+    (6, "Checking the results"),
+)
+"""§4's six stages, in plain language, numbered as §4 numbers them.
+
+Named here rather than in a screen because the stage a run is in is the
+pipeline's fact, not the GUI's — and because the measured reality makes the
+numbering load-bearing rather than decorative. The register's §10 restatement
+measured Stages 1-2 at **99.1% of run time** and everything after them at 25.7
+seconds combined; a progress bar driven only by the walk therefore sits at 99%
+for the whole of the rest of the run, which reads as a hang. Stages 3-6 are
+short, and they still have to say they are happening.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class StageProgress:
+    """Which of §4's stages the run is in. Reporting only — it never reaches
+    disk, never enters hashed content, and no output depends on it."""
+
+    stage: int
+    name: str
+    detail: str = ""
+    total: int = len(STAGES)
+
+    @property
+    def headline(self) -> str:
+        return f"Step {self.stage} of {self.total} — {self.name}"
 
 OCR_DISABLED = "disabled"
 """``RunConfig.ocr_engine`` for a run that read no image page.
@@ -133,6 +175,19 @@ class PipelineOptions:
     """Ledger of a previous run, for the D-04 renumbering check. Defaults to
     whatever ``doc_ids_issued.json`` is already sitting in the output root —
     which is the re-run case D-04 (b) is actually about."""
+
+    on_stage: Callable[["StageProgress"], None] | None = None
+    """Called once as each of §4's stages begins, and once when the run ends.
+
+    :class:`~dociq.ingest.walker.WalkOptions` already carries a within-stage
+    progress hook, and it covers Stage 1 — which is 99.1% of the wall clock and
+    0% of the remaining five stages. Without this, every GUI progress bar stops
+    at the walk's last tick and stays there while Bates detection, identifier
+    assignment, reconciliation, classification, all of §7's emit and the
+    accounting and manifest gates run. Reporting only: nothing here reaches
+    disk, and an exception raised by the callback is not caught, because a
+    consumer that cannot render progress is a bug in the consumer.
+    """
 
     write_workbook: bool = True
     write_summary_pdf: bool = True
@@ -447,54 +502,52 @@ _STALE_PATTERNS = (
     mf.MANIFEST_NAME,
     "profile/*.yaml",
     f"{INCOMPLETE_DIR}/*",
+    "upload_package",
 )
-"""Deliverables a re-run replaces. ``upload_package/`` is absent because
-:func:`~dociq.emit.handoff.build_upload_package` already rebuilds it from
-scratch, and ``doc_ids_issued.json`` is absent because it is this run's *input*
-to the D-04 renumbering check — deleting it would silence the one warning the
-re-run case exists to produce.
+"""Deliverables a re-run replaces.
+
+``doc_ids_issued.json`` is absent because it is this run's *input* to the D-04
+renumbering check — deleting it would silence the one warning the re-run case
+exists to produce. (It is still replaced: the run stages a new one, and the swap
+moves it over the old.)
+
+``upload_package`` IS listed, as a whole directory, and the reason it used to be
+absent no longer holds. :func:`~dociq.emit.handoff.build_upload_package` rebuilds
+the package from scratch — but since the staging swap it rebuilds it *in
+staging*, so the destination's copy is no longer touched by the emit at all. Left
+unlisted, a re-run that produced fewer documents would leave the previous run's
+extra ``upload_package/LI-06999.txt`` sitting in a folder an operator uploads
+whole. The claim that the rebuild covers it was true of the old write path and is
+withdrawn with it.
 
 ``incomplete_run/*`` IS purged: once a complete run has written this folder, the
 record of an earlier aborted attempt describes a state the folder is no longer
 in, and leaving it would put a "RUN BLOCKED" artifact beside a good output set."""
 
 
-def _purge_stale_deliverables(
+def _stale_deliverables(
     layout: OutputLayout, termination: RunTermination
 ) -> tuple[str, ...]:
-    """Remove the previous run's deliverables from the destination.
+    """ENUMERATE the previous run's deliverables this run supersedes.
 
-    Re-running a matter means replacing its outputs, and a leftover
-    ``clean_text/LI-06881.txt`` from a run against an older master index is
-    worse than a missing one: it sits in the folder Expert Assist reads, under
-    an identifier this run gave to a different document.
-
-    ``termination`` is a REQUIRED argument, and it is checked here rather than
-    only at the call site (Codex B-1). Destroying a complete prior corpus
-    because a preflight check failed is the worst outcome this pipeline can
-    produce, so the guard is a property of the function that does the deleting:
-    the only way to call it is to hand it a proof that the run completed, and
-    the proof is validated. :func:`run` also returns before Stage 5 on any
-    non-complete termination, so the ordering and the argument are two
-    independent defences and the raise below is unreachable from the shipped
-    path.
-
-    Nothing is deleted silently — the list goes into the log's ``run`` section,
-    which is outside the hashed content precisely because a first run and a
-    re-run must not differ inside it.
+    Split from the removal (which is now :func:`~dociq.emit.paths.commit_staging`
+    acting on the marker) because the two happen at different times: the list has
+    to be in the processing log, and the log is written *before* the swap. It
+    carries the same required, validated ``termination`` argument as the removal
+    always has, so the guard sits on the function that decides what gets deleted
+    as well as on the one that deletes it.
     """
     if not termination.publishable:
         raise ContractViolation(
-            "refusing to remove a previous run's deliverables for a run that "
-            f"ended {termination.status.value}: {termination.reason}"
+            "refusing to list a previous run's deliverables for replacement for "
+            f"a run that ended {termination.status.value}: {termination.reason}"
         )
-    removed: list[str] = []
+    found: list[str] = []
     for pattern in _STALE_PATTERNS:
         for path in sorted(layout.root.glob(pattern)):
-            if path.is_file():
-                removed.append(path.relative_to(layout.root).as_posix())
-                path.unlink()
-    return tuple(removed)
+            if path.is_file() or path.is_dir():
+                found.append(path.relative_to(layout.root).as_posix())
+    return tuple(sorted(found))
 
 
 def _abort(
@@ -680,6 +733,26 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     def mark(stage: str, t0: float) -> None:
         timings.append((stage, round(time.monotonic() - t0, 3)))
 
+    def stage(number: int, detail: str = "") -> None:
+        if opts.on_stage is not None:
+            opts.on_stage(StageProgress(number, dict(STAGES)[number], detail))
+
+    # An interrupted swap from a PREVIOUS run is finished before this one reads
+    # or writes anything. It is the first statement of the run on purpose: the
+    # folder that swap was replacing is the folder this run is about to read its
+    # own previous ledger from, and rolling forward afterwards would compare
+    # against a set that is half of one run and half of another.
+    #
+    # `was_pending` is asked BEFORE the recovery and is what the disclosure keys
+    # on. The recovery's return value is the list of files it *removed*, which is
+    # empty for the commonest interrupted swap of all — a first run into an empty
+    # folder, where there was nothing to supersede. Keying the disclosure on it
+    # made a completed roll-forward silent whenever the folder had been empty,
+    # which is the case an operator is least likely to reconstruct unaided.
+    was_pending = emit_paths.pending_swap(layout)
+    recovered = emit_paths.recover_pending(layout)
+    emit_paths.discard_staging(layout)
+
     index = opts.master_index
     if index is None and opts.master_index_path:
         index = load_master_index(opts.master_index_path)
@@ -767,7 +840,20 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # ---- Stages 1-2 --------------------------------------------------------
     t = time.monotonic()
     walk_notes = walker.RunNotes()
+    if was_pending:
+        # An invocation fact, so it travels with the resume and cancellation
+        # notes — visible to the operator, outside the hashed content. A folder
+        # whose deliverables were completed by a LATER run's recovery rather
+        # than by the run that produced them is exactly the kind of thing an
+        # auditor should not have to infer.
+        walk_notes.invocation.append(
+            f"RECOVERED: a previous run had finished writing its deliverables "
+            f"but was interrupted while moving them into place; the move was "
+            f"completed before this run started ({len(recovered)} superseded "
+            "file(s) removed).")
+    stage(1)
     walked = walker.run(walk_config, opts.walk, walk_notes)
+    stage(2, f"{len(walked.documents)} document(s) read")
     mark("walk_extract", t)
 
     # Codex B-1. A blocked or cancelled walk stops HERE, before Stage 3 and
@@ -793,6 +879,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     documents: tuple[DocumentRecord, ...] = walked.documents
 
     # ---- Stage 3 -----------------------------------------------------------
+    stage(3)
     t = time.monotonic()
     decision = _bates_decision(documents, opts, config, stamp, warnings)
     documents = apply_bates(documents, decision)
@@ -848,6 +935,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     mark("assign_reconcile", t)
 
     # ---- Stage 4 -----------------------------------------------------------
+    stage(4)
     t = time.monotonic()
     applied = apply_profiles(documents, opts.profiles)
     documents = applied.documents
@@ -944,28 +1032,46 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     )
 
     # ---- Stage 5 -----------------------------------------------------------
+    #
+    # EVERYTHING below is written into `stage_out`, a staging directory inside
+    # the matter folder, and moved into place in one go at the end (Sprint-1
+    # merge readiness, NOT PROVEN item 8). The previous shape — purge the
+    # destination, then emit into it — meant that a crash anywhere in emit left
+    # a folder holding some of the old run's deliverables and some of the new
+    # one's, under Doc IDs that need not agree, with nothing on disk saying so.
+    #
+    # The staging path is NOT part of any hashed artifact and must never become
+    # one. `_hashes_of` keys on paths relative to the layout root, `sources.json`
+    # stores paths relative to the layout root, and the recorded configuration
+    # keeps `output_root` pointing at the DESTINATION — a run staged at a
+    # different path is not a different run. This is the same class of mistake as
+    # the output root inside the log's hashed content in Sprint 1, and
+    # `tests/test_emit_atomicity.py` proves byte-identity across two
+    # destinations, which is the only check that would catch it.
+    stage(5)
     t = time.monotonic()
-    stale = _purge_stale_deliverables(layout, walk_notes.termination)
+    stale = _stale_deliverables(layout, walk_notes.termination)
+    stage_out = emit_paths.staging_layout(layout)
     written: list[Path] = []
     # Clean text is for EXTRACTED documents only. An unsupported file has no
     # text to write and must not appear in ``sources.json``, which is the map
     # Expert Assist reads to find a document's content — a Doc ID pointing at a
     # file that was never read would be worse than its absence. It appears in
     # the index instead, which is the inventory (B-7).
-    text_result = write_clean_text(documents, layout)
-    written.extend(layout.root / rel for _, rel in text_result.sources)
-    written.append(write_sources_json(text_result, layout))
+    text_result = write_clean_text(documents, stage_out)
+    written.extend(stage_out.root / rel for _, rel in text_result.sources)
+    written.append(write_sources_json(text_result, stage_out))
     rows = build_index_rows(documents + unsupported, bates_ranges=ranges)
-    written.append(write_index_csv(rows, layout))
+    written.append(write_index_csv(rows, stage_out))
     if index is not None:
-        written.append(write_reconciliation_csv(report, layout))
+        written.append(write_reconciliation_csv(report, stage_out))
     for profile in opts.profiles:
-        written.append(write_matter_copy(profile, layout.root))
+        written.append(write_matter_copy(profile, stage_out.root))
 
-    # The ledger is read above, before this line overwrites it: comparing a run
-    # against the ledger it just wrote would report that nothing was renumbered,
-    # every time, forever.
-    written.append(ledger.write(layout.issued_ids))
+    # The ledger is read above, from the DESTINATION, before this line writes the
+    # new one into staging: comparing a run against the ledger it just wrote
+    # would report that nothing was renumbered, every time, forever.
+    written.append(ledger.write(stage_out.issued_ids))
 
     bundle = build_log(
         effective,
@@ -981,7 +1087,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         token_estimate=after,
         warnings=warnings,
         stamp=stamp,
-        output_hashes=_hashes_of(written, layout),
+        output_hashes=_hashes_of(written, stage_out),
         run_notes={
             # The terminal status is recorded on EVERY run, not only on the
             # ones that end badly (Codex B-1). A consumer must be able to ask
@@ -1005,16 +1111,17 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 "disk_headroom_x100": round(walker._DISK_HEADROOM * 100),
             },
             "stale_outputs_removed": list(stale),
+            "recovered_swap": list(recovered),
             "load_dependent_extraction": list(walk_notes.load_dependent),
             "invocation_notes": list(walk_notes.invocation),
         },
     )
-    write_processing_log(bundle, layout)
+    write_processing_log(bundle, stage_out)
 
     if opts.write_workbook:
         write_index_xlsx(
             rows,
-            layout,
+            stage_out,
             report if index is not None else None,
             matter_name=opts.matter_name,
         )
@@ -1037,11 +1144,11 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 warnings=tuple(all_warnings),
                 termination=walk_notes.termination,
             ),
-            layout,
+            stage_out,
         )
     if opts.write_package:
         build_upload_package(
-            layout,
+            stage_out,
             matter_name=opts.matter_name,
             document_count=len(documents),
             page_count=result.pages_in,
@@ -1052,11 +1159,28 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     mark("emit", t)
 
     # ---- Stage 6 (the gates) ----------------------------------------------
+    #
+    # Run against STAGING, before anything reaches the matter folder. The
+    # manifest is a hash of the set this run produced, so building it over the
+    # destination would have it hash whatever a previous run left behind that
+    # this one does not replace — and running the gates before the swap means a
+    # set that fails them never displaces a set that passed.
+    stage(6)
     t = time.monotonic()
     report_acc = accounting.check(result)
-    man = mf.build(layout.root, config=effective)
-    mf.write(layout.root, man)
+    man = mf.build(stage_out.root, config=effective)
+    mf.write(stage_out.root, man)
     mark("verify", t)
+
+    # ---- The swap ----------------------------------------------------------
+    #
+    # Two statements, in this order, and the order is the guarantee: the marker
+    # says "staging holds a COMPLETE set of deliverables and the folder they
+    # replace is listed here", and only then does anything move. A crash before
+    # the marker leaves the matter folder exactly as the last complete run left
+    # it; a crash after it leaves a swap that the next run rolls forward.
+    emit_paths.mark_ready(layout, stale)
+    emit_paths.commit_staging(layout)
 
     return PipelineOutcome(
         result=result,
