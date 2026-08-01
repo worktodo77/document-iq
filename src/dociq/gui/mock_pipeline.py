@@ -1,4 +1,4 @@
-"""A deterministic stand-in for the real pipeline (Sprint 1 only).
+"""A deterministic stand-in for the real pipeline.
 
 It exists so the shell can be built, rendered and tested before Track A's spine
 lands, and it is deliberately the *only* place in the GUI that manufactures
@@ -14,8 +14,19 @@ the spec's assumption": 298 PDF / 53 DOCX / 17 PPTX / 7 DOC, 17,732 PDF pages),
 because the design decision that matters most — that a fully reduced matter
 still does not fit in direct context — is only exercised at that size.
 
-Sprint 2 deletes this module and :func:`dociq.gui.pipeline.get_pipeline` returns
-the real adapter instead.
+**Sprint 2 did not delete this module, and the plan that said it would is
+withdrawn.** :func:`dociq.gui.pipeline.get_pipeline` now returns
+:class:`dociq.adapter.RealPipeline`, and the mock is installed by
+:func:`~dociq.gui.pipeline.set_pipeline` instead — by ``tests/test_gui_states.py``
+and ``tests/test_view_models.py``, which are the only thing that can demonstrate
+the seam still holds (a seam with one implementation is an interface nobody has
+tested), and by ``python -m dociq.gui.app --mock`` for reviewing a screen without
+a corpus to hand. Its :meth:`MockPipeline.disclosure` is what keeps that safe.
+
+Every number in here remains a FIXTURE and none of it is measured. Nothing in
+this module may be imported by the real adapter, and nothing here may grow a
+second life as a default — that is what :meth:`MockPipeline.disclosure` is
+policing, and it is why the real adapter's disclosure is empty.
 """
 
 from __future__ import annotations
