@@ -18,6 +18,7 @@ from dociq.gui.pipeline import (  # noqa: E402
     TokenEstimate,
 )
 from dociq.gui.view_models import (  # noqa: E402
+    CAPACITY_LABEL,
     FLAG_OCR,
     FLAG_RECONCILIATION,
     FLAG_UNSUPPORTED,
@@ -91,26 +92,59 @@ def test_no_profile_keeps_every_page() -> None:
     assert view.pages_kept == view.pages_in
 
 
-def test_capacity_verdict_is_conservative_at_the_boundary() -> None:
+def test_capacity_reading_is_conservative_at_the_boundary() -> None:
     """It "fits" only if the UPPER end of the D-03 range fits — a range whose
     top overflows must not be reported as fitting."""
     over = CapacityReading(TokenEstimate(
         chars=int(DIRECT_CONTEXT_TOKENS * 3.4), ratio_low=3.3, ratio_high=3.6))
     assert over.tokens.low < DIRECT_CONTEXT_TOKENS < over.tokens.high
     assert not over.fits
-    assert "retrieval mode" in over.verdict()
 
     under = CapacityReading(TokenEstimate(
         chars=int(DIRECT_CONTEXT_TOKENS * 2.0), ratio_low=3.3, ratio_high=3.6))
     assert under.fits
-    assert "Fits directly" in under.verdict()
 
 
-def test_capacity_caption_is_the_one_d07_specifies() -> None:
-    reading = CapacityReading(TokenEstimate(340_000, 3.3, 3.6))
-    caption = reading.caption()
-    assert caption.endswith("of direct-context capacity")
-    assert "%" in caption
+def test_no_screen_wording_tells_the_operator_to_get_under_the_line() -> None:
+    """D-21: the reference line is never a budget or a target.
+
+    ``CapacityReading.verdict()`` used to end "Drop more sections, or split the
+    matter" — an instruction to reduce until the figure fits, which is what
+    D-15 and D-21 both rule against. It and ``caption()`` are WITHDRAWN, not
+    reworded, and this test is what stops the sentence coming back somewhere
+    else. The claim, not just the code.
+    """
+    assert not hasattr(CapacityReading, "verdict")
+    assert not hasattr(CapacityReading, "caption")
+
+    # Scanned over string LITERALS that are not docstrings — the text that can
+    # reach a screen. A raw substring scan of the source flags the very comment
+    # recording the withdrawal, which would make the guard unmaintainable and
+    # therefore short-lived.
+    import ast
+
+    banned = ("drop more sections", "reduce to fit", "reduced to fit",
+              "in order to fit", "get under", "to fit within")
+    src = Path(__file__).resolve().parents[1] / "src" / "dociq" / "gui"
+    offenders: list[str] = []
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        docstrings = {
+            id(node.body[0].value)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef))
+            and node.body and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        }
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and id(node) not in docstrings):
+                for phrase in banned:
+                    if phrase in node.value.lower():
+                        offenders.append(f"{path.name}:{node.lineno}: {phrase}")
+    assert not offenders, offenders
 
 
 def test_token_headline_is_always_a_range() -> None:
@@ -140,7 +174,7 @@ def test_the_expected_case_is_over_capacity_and_is_not_a_failure() -> None:
     screen must state the shortfall and hand over a route, not an error."""
     view = build_summary(_outcome())
     assert not view.fits()
-    assert "above direct-context capacity" in view.capacity_line()
+    assert CAPACITY_LABEL in view.capacity_line()
     assert "×" in view.capacity_line()
     route = view.route_line()
     assert "Expert Assist" in route and "Cowork" in route
@@ -262,7 +296,7 @@ def test_the_multiplier_survives_three_digits() -> None:
                         structural_tokens=250 * DIRECT_CONTEXT_TOKENS,
                         provenance="pre-token count")
     line = _view_with(est).capacity_line()
-    assert "250× above direct-context capacity" in line
+    assert f"250× the {CAPACITY_LABEL} reference line" in line
     assert "." not in line.split("×")[0].replace("about ", "")
 
 

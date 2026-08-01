@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -38,7 +39,17 @@ from dociq.gui.pipeline import (
     RunRequest,
 )
 from dociq.gui.theme import PAGE_MARGIN, UNIT, Theme
-from dociq.gui.view_models import FlagGroup, SummaryView
+from dociq.gui.view_models import (
+    SCOPE_ALL,
+    SCOPE_DATES,
+    SCOPE_TYPES,
+    ChecklistRow,
+    FlagGroup,
+    HandoffView,
+    PackageScope,
+    ProfileChecklistView,
+    SummaryView,
+)
 from dociq.gui.widgets import (
     Chip,
     ReductionWaterfall,
@@ -122,6 +133,7 @@ class SetupScreen(QWidget):
 
     run_requested = Signal(object)  # RunRequest
     profile_new_requested = Signal()
+    profile_review_requested = Signal(object)  # ProfileInfo
     source_chosen = Signal(str)
 
     def __init__(self, theme: Theme, profiles: tuple[ProfileInfo, ...],
@@ -166,6 +178,15 @@ class SetupScreen(QWidget):
 
         self._profile = QComboBox()
         self._profile.setFont(theme.body(10))
+        # A combo sizes its minimum to its LONGEST item, so a profile named
+        # "MODEC monthly progress report · 4 section rules" pushed step 2's row
+        # past the viewport and made the whole setup page scroll sideways at
+        # the product's minimum window. Capped here rather than by shortening
+        # the label: the label is the operator's plain-language handle on the
+        # profile and is not the layout's to trim.
+        self._profile.setMinimumContentsLength(24)
+        self._profile.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         for p in profiles:
             suffix = (f"  ·  {p.section_rules} section rules"
                       if p.section_rules else "")
@@ -180,7 +201,22 @@ class SetupScreen(QWidget):
         new_profile.clicked.connect(self.profile_new_requested.emit)
         prof_row.addWidget(new_profile)
         prof_holder = QWidget()
-        prof_holder.setLayout(prof_row)
+        prof_box = QVBoxLayout(prof_holder)
+        prof_box.setContentsMargins(0, 0, 0, 0)
+        prof_box.setSpacing(UNIT // 2)
+        prof_inner = QWidget()
+        prof_inner.setLayout(prof_row)
+        prof_box.addWidget(prof_inner)
+        # A LINK, not a peer button. D-16 removed "Review what gets dropped" as
+        # a button because a second button beside the primary read as a
+        # prerequisite step — but §6 still requires the checklist to exist and
+        # requires that nothing be dropped that the expert was not shown. A
+        # link alongside the existing "Profile new format…" link keeps exactly
+        # one forward action on this screen while leaving the review reachable.
+        self._review = _button("See what this profile keeps and drops…",
+                               theme, "link")
+        self._review.clicked.connect(self._emit_review)
+        prof_box.addWidget(self._review, alignment=Qt.AlignmentFlag.AlignLeft)
         lay.addWidget(_Step(
             2, "Format profile", theme, prof_holder,
             "A profile lists the sections an expert approved for removal. "
@@ -305,6 +341,11 @@ class SetupScreen(QWidget):
     def _emit_run(self) -> None:
         self.run_requested.emit(self.request())
 
+    def _emit_review(self) -> None:
+        profile = self._profile.currentData()
+        if profile is not None:
+            self.profile_review_requested.emit(profile)
+
     # -- pickers ------------------------------------------------------------
 
     def _pick_source(self) -> None:
@@ -395,6 +436,11 @@ class ProgressScreen(QWidget):
         row_lay.setContentsMargins(0, UNIT, 0, UNIT)
         name = QLabel(event.filename)
         name.setFont(self._theme.body(10))
+        # Wrapped, so the label's MINIMUM width is not its full text width. An
+        # unwrapped label inside a scroll area sets the scrolled widget's
+        # minimum, and one long path then makes the whole list scroll sideways
+        # — the class of defect the state grid caught on three screens at once.
+        name.setWordWrap(True)
         status = QLabel(event.status)
         status.setFont(self._theme.body(9))
         status.setStyleSheet(
@@ -414,6 +460,7 @@ class SummaryScreen(QWidget):
     flag_selected = Signal(str)
     new_run_requested = Signal()
     open_output_requested = Signal()
+    handoff_requested = Signal()
     plan_changed = Signal(object)  # ReductionPlan
 
     def __init__(self, theme: Theme, parent=None) -> None:
@@ -471,6 +518,22 @@ class SummaryScreen(QWidget):
         self._waterfall = ReductionWaterfall(theme)
         self._waterfall.lever_toggled.connect(self._toggle_lever)
         lay.addWidget(self._waterfall)
+
+        # The two totals, kept apart on screen as well as in the model. D-14
+        # forbids merging them; a single "reduced by X" line under the stack
+        # would merge them in the reader's head no matter what the rows said,
+        # because it is the only figure they would carry away.
+        self._split = QLabel("")
+        self._split.setFont(theme.body_strong(9))
+        self._split.setWordWrap(True)
+        self._split.setStyleSheet(f"color: {theme.palette.navy};")
+        lay.addWidget(self._split)
+        # D-21: what was dropped, named, so the expert can describe the
+        # omission rather than a figure they reduced to.
+        self._drops = _muted("", theme, 9)
+        lay.addWidget(self._drops)
+        self._capacity_source = _muted("", theme, 8)
+        lay.addWidget(self._capacity_source)
         self._route = _muted("", theme, 10)
         lay.addWidget(self._route)
         self._stale = _muted("", theme, 9)
@@ -509,12 +572,13 @@ class SummaryScreen(QWidget):
         self._open = _button("Open the output folder", theme)
         self._open.clicked.connect(self.open_output_requested.emit)
         foot.addWidget(self._open)
+        # The ONE forward action on this screen (D-16). "Start another run" and
+        # "Open the output folder" are secondary by weight and by object name;
+        # the outcome this screen leads to is the analysis, and §8 makes that a
+        # single button that then offers the two sanctioned routes.
         self._claude = _button("Analyze in Claude", theme, "primary")
         self._claude.setEnabled(False)
-        self._claude.setToolTip(
-            "Available once the pipeline is wired in Sprint 2 — the handoff "
-            "package (§8) is assembled from a real run's outputs."
-        )
+        self._claude.clicked.connect(self.handoff_requested.emit)
         foot.addWidget(self._claude)
         lay.addLayout(foot)
 
@@ -570,12 +634,23 @@ class SummaryScreen(QWidget):
                                  if view.output_root else "")
         self._open.setEnabled(bool(view.output_root)
                               and Path(view.output_root).is_dir())
+        # The handoff screen describes routes to a corpus ON DISK. A run that
+        # published nothing has no such corpus, and offering to hand it over
+        # would point Claude at the previous run's deliverables (finding B-1).
+        self._claude.setEnabled(view.published and bool(view.output_root))
+        self._claude.setToolTip(
+            "" if (view.published and view.output_root)
+            else "This run wrote no deliverables, so there is nothing to hand over."
+        )
 
     def _paint_headline(self, view: SummaryView) -> None:
         self._headline.setText(view.headline())
         self._unit.setText(view.headline_unit())
         self._capacity_line.setText(view.capacity_line())
         self._basis.setText(view.basis_note())
+        self._split.setText(view.split_line())
+        self._drops.setText(view.drops_line())
+        self._capacity_source.setText(view.capacity_source_line())
         self._route.setText(view.route_line())
 
     def _toggle_lever(self, key: str) -> None:
@@ -649,10 +724,12 @@ class DetailScreen(QWidget):
             head = QHBoxLayout()
             primary = QLabel(it.primary)
             primary.setFont(self._theme.body_strong(10))
+            primary.setWordWrap(True)  # see ProgressScreen.append
             head.addWidget(primary, 1)
             if it.locator:
                 loc = QLabel(it.locator)
                 loc.setFont(self._theme.mono_plain(8))
+                loc.setWordWrap(True)
                 loc.setStyleSheet(f"color: {self._theme.palette.ink_muted};")
                 head.addWidget(loc)
             row_lay.addLayout(head)
@@ -660,3 +737,425 @@ class DetailScreen(QWidget):
             self._items_lay.insertWidget(self._items_lay.count() - 1, row)
             self._items_lay.insertWidget(self._items_lay.count() - 1,
                                          Rule(self._theme))
+
+
+DISPOSITION_WORDS = ("DROP", "KEEP", "AUTOMATIC")
+"""Every value :meth:`ChecklistRow.disposition_word` can return.
+
+Enumerated so the column that holds them can be sized from the widest one. A
+test asserts this tuple is exhaustive — otherwise adding a fourth word would
+reintroduce the clipping this exists to prevent, silently.
+"""
+
+
+def _disposition_column_width(theme: Theme) -> int:
+    metrics = QFontMetrics(theme.label(9))
+    return max(metrics.horizontalAdvance(word)
+               for word in DISPOSITION_WORDS) + UNIT * 2
+
+
+class ProfileChecklistScreen(QWidget):
+    """§6 step 2/3 — what this profile KEEPs and DROPs, before a run commits.
+
+    **Nothing may be dropped that this screen did not show.** That is not a
+    slogan: Principle 3 makes an unapproved omission indistinguishable from a
+    missing document, so an omission the expert never saw is, downstream, a
+    document that vanished. The screen therefore enumerates every rule, states
+    what each one is worth, attributes each one to the rule that carries it,
+    and — when the rule count it was given disagrees with the count the profile
+    declares — refuses to pretend the list is complete.
+
+    Exactly one forward action (D-16): "Use this profile".
+    """
+
+    back_requested = Signal()
+    profile_accepted = Signal(object)  # ProfileInfo
+
+    def __init__(self, theme: Theme, parent=None) -> None:
+        super().__init__(parent)
+        self._theme = theme
+        self._view: ProfileChecklistView | None = None
+        page, lay = _page(theme)
+
+        back = _button("← Back", theme, "link")
+        back.clicked.connect(self.back_requested.emit)
+        lay.addWidget(back, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self._title = QLabel("")
+        self._title.setFont(theme.title(16))
+        self._title.setStyleSheet(f"color: {theme.palette.navy};")
+        lay.addWidget(self._title)
+        self._subtitle = _muted("", theme, 9)
+        lay.addWidget(self._subtitle)
+        self._source = _muted("", theme, 9)
+        lay.addWidget(self._source)
+        lay.addSpacing(UNIT)
+
+        lay.addWidget(SectionLabel("Sections this profile decides", theme))
+        lay.addWidget(Rule(theme, strong=True))
+        self._rows = QWidget()
+        self._rows_lay = QVBoxLayout(self._rows)
+        self._rows_lay.setContentsMargins(0, 0, 0, 0)
+        self._rows_lay.setSpacing(0)
+        self._rows_lay.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._rows)
+        lay.addWidget(scroll, 1)
+
+        # The completeness claim, in the warn color when it is a warning. It
+        # sits directly under the list and directly above the action, because
+        # it is the last thing read before the profile is accepted.
+        self._completeness = QLabel("")
+        self._completeness.setFont(theme.body(9))
+        self._completeness.setWordWrap(True)
+        lay.addWidget(self._completeness)
+        lay.addWidget(Rule(theme))
+
+        self._drops = QLabel("")
+        self._drops.setFont(theme.body_strong(10))
+        self._drops.setWordWrap(True)
+        self._drops.setStyleSheet(f"color: {theme.palette.navy};")
+        lay.addWidget(self._drops)
+        self._automatic = _muted("", theme, 9)
+        lay.addWidget(self._automatic)
+        self._basis = _muted("", theme, 8)
+        lay.addWidget(self._basis)
+
+        foot = QHBoxLayout()
+        foot.addStretch(1)
+        self._accept = _button("Use this profile", theme, "primary")
+        self._accept.setFont(theme.body_strong(10))
+        self._accept.clicked.connect(self._emit_accept)
+        foot.addWidget(self._accept)
+        lay.addLayout(foot)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(page)
+
+    def show_checklist(self, view: ProfileChecklistView) -> None:
+        self._view = view
+        self._title.setText(view.profile.label)
+        self._subtitle.setText(
+            f"{view.profile.profile_id} · version {view.profile.version} "
+            f"· {view.profile.section_rules} declared section "
+            f"rule{'' if view.profile.section_rules == 1 else 's'}"
+        )
+        self._source.setText(
+            view.source
+            or "The pipeline did not say where these rules came from."
+        )
+
+        clear_layout(self._rows_lay, keep_trailing=1)  # keep the stretch
+        for row in view.rows:
+            self._rows_lay.insertWidget(self._rows_lay.count() - 1,
+                                        self._row_widget(row))
+            self._rows_lay.insertWidget(self._rows_lay.count() - 1,
+                                        Rule(self._theme))
+        if view.empty:
+            self._rows_lay.insertWidget(
+                self._rows_lay.count() - 1,
+                _muted("No section rules to show.", self._theme, 10))
+
+        note = view.completeness_note()
+        self._completeness.setText(note)
+        alarming = not view.approvable
+        tone = (self._theme.palette.warn if alarming
+                else self._theme.palette.ink_muted)
+        self._completeness.setStyleSheet(f"color: {tone};")
+        self._drops.setText(view.drop_summary())
+        self._automatic.setText(view.automatic_summary())
+        self._basis.setText(view.basis_note())
+        # A profile whose rule list cannot be shown in full must not be
+        # accepted from this screen. Refusing is the only honest option: the
+        # button's whole meaning is "I have seen what this drops".
+        self._accept.setEnabled(not alarming)
+        self._accept.setToolTip(
+            "" if not alarming
+            else "This profile's rules cannot be shown in full, so they "
+                 "cannot be approved here."
+        )
+
+    def _row_widget(self, row: ChecklistRow) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, UNIT * 1.5, 0, UNIT * 1.5)
+        lay.setSpacing(2)
+
+        head = QHBoxLayout()
+        head.setSpacing(UNIT * 2)
+        # The disposition as a WORD, not only as a color or a checkbox glyph:
+        # the sheet is printed and forwarded, and a monochrome print of a
+        # colored tick is a blank.
+        mark = QLabel(row.disposition_word())
+        mark.setFont(self._theme.label(9))
+        # Sized from the WIDEST word this column can ever hold, not from a
+        # guessed multiple of the grid unit: a hand-picked 64 px clipped
+        # "AUTOMATIC" to "AUTOMAT", which is a truncation the screen performed
+        # and did not say it had performed. The column still aligns across
+        # rows because every row is measured against the same maximum.
+        mark.setFixedWidth(_disposition_column_width(self._theme))
+        mark.setStyleSheet(
+            f"color: {self._theme.palette.accent if row.expert_drop else self._theme.palette.ink_muted};"
+        )
+        head.addWidget(mark)
+        label = QLabel(row.lever.label)
+        label.setFont(self._theme.body_strong(10))
+        label.setWordWrap(True)
+        head.addWidget(label, 1)
+        scale = QLabel(row.scale())
+        scale.setFont(self._theme.mono_plain(8))
+        scale.setStyleSheet(f"color: {self._theme.palette.ink_muted};")
+        head.addWidget(scale)
+        lay.addLayout(head)
+        lay.addWidget(_muted(row.attribution(), self._theme, 9))
+        return w
+
+    def _emit_accept(self) -> None:
+        if self._view is not None:
+            self.profile_accepted.emit(self._view.profile)
+
+
+class HandoffScreen(QWidget):
+    """§8 / acceptance criterion 8 — "Analyze in Claude", Paths B and A.
+
+    Path B leads. §8 recommends it for forensic matters and D-20 makes it the
+    route proven at full scale, so it is first on the screen, it is described
+    in full, and its action is the primary one. Path A is real and is bounded:
+    D-20 proves it on a deliberately scoped subset, so this screen makes the
+    operator choose that scope and shows them, verbatim, the statement of scope
+    that will be written INTO the package. A package that silently contains
+    part of a matter is the worst thing this screen could produce.
+    """
+
+    back_requested = Signal()
+    open_matter_folder_requested = Signal()
+    build_package_requested = Signal(object)  # PackageScope
+    scope_changed = Signal(object)            # PackageScope
+
+    def __init__(self, theme: Theme, parent=None) -> None:
+        super().__init__(parent)
+        self._theme = theme
+        self._view: HandoffView | None = None
+        page, lay = _page(theme)
+
+        back = _button("← Back to the summary", theme, "link")
+        back.clicked.connect(self.back_requested.emit)
+        lay.addWidget(back, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        title = QLabel("Analyze this matter in Claude")
+        title.setFont(theme.title(16))
+        title.setStyleSheet(f"color: {theme.palette.navy};")
+        lay.addWidget(title)
+        lay.addWidget(_muted(
+            "Two routes. They are not equivalent, and the recommended one is "
+            "first.", theme))
+        lay.addSpacing(UNIT * 2)
+
+        # -- Path B ---------------------------------------------------------
+        lay.addWidget(SectionLabel(
+            "Recommended — Expert Assist reads the folder from disk", theme))
+        lay.addWidget(Rule(theme, strong=True))
+        lay.addWidget(_muted(
+            "Open Claude Cowork (or Claude Code) with the matter output folder "
+            "as its working directory, then run the Expert Assist intake "
+            "skill. Nothing is uploaded, the audit trail stays local beside "
+            "the evidence, and the whole record is in scope — this is the "
+            "route proven on every document of the matter.", theme, 10))
+        self._folder = QLineEdit()
+        self._folder.setReadOnly(True)
+        self._folder.setFont(theme.mono_plain(9))
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self._folder, 1)
+        copy = _button("Copy path", theme)
+        copy.clicked.connect(self._copy_path)
+        row.addWidget(copy)
+        self._open = _button("Open the matter folder", theme, "primary")
+        self._open.clicked.connect(self.open_matter_folder_requested.emit)
+        row.addWidget(self._open)
+        holder = QWidget()
+        holder.setLayout(row)
+        lay.addWidget(holder)
+        self._path_b_note = _muted("", theme, 9)
+        lay.addWidget(self._path_b_note)
+        lay.addSpacing(UNIT * 3)
+
+        # -- Path A ---------------------------------------------------------
+        lay.addWidget(SectionLabel(
+            "Alternative — a package to upload in the browser", theme))
+        lay.addWidget(Rule(theme, strong=True))
+        lay.addWidget(_muted(
+            "A Claude Project holds far less than a full matter record, so an "
+            "upload package covers a scope you choose. Choose it deliberately: "
+            "the scope is written into the package, and downstream nobody can "
+            "tell a subset from a whole record unless the package says so.",
+            theme, 10))
+
+        scope_row = QHBoxLayout()
+        scope_row.setSpacing(UNIT * 2)
+        self._scope_kind = QComboBox()
+        self._scope_kind.setFont(theme.body(10))
+        self._scope_kind.addItem("Every document in the matter", SCOPE_ALL)
+        self._scope_kind.addItem("Only documents in a date range", SCOPE_DATES)
+        self._scope_kind.addItem("Only documents of one type", SCOPE_TYPES)
+        self._scope_kind.currentIndexChanged.connect(self._emit_scope)
+        scope_row.addWidget(self._scope_kind, 1)
+        self._date_from = QComboBox()
+        self._date_from.setFont(theme.body(10))
+        self._date_from.currentIndexChanged.connect(self._emit_scope)
+        self._date_to = QComboBox()
+        self._date_to.setFont(theme.body(10))
+        self._date_to.currentIndexChanged.connect(self._emit_scope)
+        self._doc_type = QComboBox()
+        self._doc_type.setFont(theme.body(10))
+        self._doc_type.currentIndexChanged.connect(self._emit_scope)
+        for combo in (self._date_from, self._date_to, self._doc_type):
+            scope_row.addWidget(combo, 1)
+        scope_holder = QWidget()
+        scope_holder.setLayout(scope_row)
+        lay.addWidget(scope_holder)
+
+        self._scope_caution = QLabel("")
+        self._scope_caution.setFont(theme.body(9))
+        self._scope_caution.setWordWrap(True)
+        self._scope_caution.setStyleSheet(f"color: {theme.palette.warn};")
+        lay.addWidget(self._scope_caution)
+
+        lay.addWidget(SectionLabel("Written into the package, verbatim", theme))
+        self._statement = QLabel("")
+        self._statement.setFont(theme.mono_plain(8))
+        self._statement.setWordWrap(True)
+        lay.addWidget(self._statement)
+
+        foot = QHBoxLayout()
+        self._blocker = _muted("", theme, 9)
+        foot.addWidget(self._blocker, 1)
+        self._build = _button("Build the upload package", theme)
+        self._build.clicked.connect(self._emit_build)
+        foot.addWidget(self._build)
+        lay.addLayout(foot)
+        lay.addStretch(1)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        outer.addWidget(scroll)
+
+    # -- state --------------------------------------------------------------
+
+    def show_handoff(self, view: HandoffView) -> None:
+        self._view = view
+        self._folder.setText(view.output_root)
+        self._path_b_note.setText(view.path_b_note())
+        self._open.setEnabled(view.path_b_ready())
+
+        self._reload_scope_choices(view)
+        # The controls are SYNCED to the view's scope, not merely repopulated.
+        # Without this the screen showed the view's scope statement while
+        # ``scope()`` — which is what the build button hands to the pipeline —
+        # still read the untouched controls. A package whose contents disagree
+        # with the scope statement printed inside it is the precise failure
+        # this screen exists to prevent, so the two cannot have separate
+        # sources of truth.
+        self._sync_controls(view.scope)
+
+        self._statement.setText(view.scope_statement())
+        self._scope_caution.setText(view.scope_caution())
+        blocker = view.package_blocker()
+        self._blocker.setText(blocker)
+        self._build.setEnabled(not blocker)
+        self._build.setToolTip(blocker)
+
+        kind = view.scope.kind
+        self._date_from.setVisible(kind == SCOPE_DATES)
+        self._date_to.setVisible(kind == SCOPE_DATES)
+        self._doc_type.setVisible(kind == SCOPE_TYPES)
+
+    def _reload_scope_choices(self, view: HandoffView) -> None:
+        """Populate the date and type pickers from the run's own documents.
+
+        Selection over contract data already on screen: the pipeline decided
+        what a document's type and dates are, this only lists them. Repopulated
+        only when the values actually changed, because clearing a combo emits
+        ``currentIndexChanged`` and a re-entrant scope change would reset the
+        operator's choice the instant they made it.
+        """
+        for combo, values in ((self._date_from, view.dated),
+                              (self._date_to, view.dated),
+                              (self._doc_type, view.doc_types)):
+            if [combo.itemData(i) for i in range(combo.count())] == list(values):
+                continue
+            was = combo.blockSignals(True)
+            combo.clear()
+            for value in values:
+                combo.addItem(value, value)
+            if combo is self._date_to and values:
+                combo.setCurrentIndex(len(values) - 1)
+            combo.blockSignals(was)
+
+    def _sync_controls(self, scope: PackageScope) -> None:
+        """Point every control at ``scope`` without re-emitting a change."""
+        def _select(combo: QComboBox, value: str) -> None:
+            if not value:
+                return
+            was = combo.blockSignals(True)
+            index = combo.findData(value)
+            if index < 0:
+                # A scope value the run's documents do not offer — set from a
+                # saved scope, or a range that matches nothing. It is ADDED
+                # rather than ignored: silently leaving the control on some
+                # other value would show the operator a scope that is not the
+                # one the statement beneath it describes.
+                combo.addItem(value, value)
+                index = combo.count() - 1
+            if combo.currentIndex() != index:
+                combo.setCurrentIndex(index)
+            combo.blockSignals(was)
+
+        _select(self._scope_kind, scope.kind)
+        if scope.kind == SCOPE_DATES:
+            _select(self._date_from, scope.date_from)
+            _select(self._date_to, scope.date_to)
+        elif scope.kind == SCOPE_TYPES and scope.doc_types:
+            _select(self._doc_type, scope.doc_types[0])
+
+    def scope(self) -> PackageScope:
+        kind = self._scope_kind.currentData()
+        if kind == SCOPE_DATES:
+            return PackageScope(kind=SCOPE_DATES,
+                                date_from=self._date_from.currentData() or "",
+                                date_to=self._date_to.currentData() or "")
+        if kind == SCOPE_TYPES:
+            chosen = self._doc_type.currentData()
+            return PackageScope(kind=SCOPE_TYPES,
+                                doc_types=(chosen,) if chosen else ())
+        return PackageScope()
+
+    def _emit_scope(self) -> None:
+        self.scope_changed.emit(self.scope())
+
+    def _emit_build(self) -> None:
+        """Build the scope whose statement is ON SCREEN, not the controls'.
+
+        The view is what produced the sentence the operator just read. Reading
+        the controls again here would let a scope the screen never rendered —
+        one set programmatically, or one whose value is not among the offered
+        choices — reach the package builder under a statement describing
+        something else.
+        """
+        if self._view is None:
+            return
+        self.build_package_requested.emit(self._view.scope)
+
+    def _copy_path(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        clipboard = QApplication.clipboard()
+        if clipboard is not None and self._view is not None:
+            clipboard.setText(self._view.output_root)

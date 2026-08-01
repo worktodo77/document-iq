@@ -242,6 +242,38 @@ def _section(page_no: int, total: int) -> str:
     return "Progress by Discipline"
 
 
+_DATE_RE = re.compile(r"(\d{4})-(\d{2})(?:-(\d{2}))?")
+
+
+def _fixture_dates(rel_path: str) -> tuple[str, ...]:
+    """ISO dates a real Stage-3 pass would have detected in the document.
+
+    Read off the fixture's own filenames so the set is deterministic AND has
+    genuine holes: correspondence and quarterly cost reports carry no ISO date,
+    which is what makes the handoff screen's "documents with no detected date
+    are not in a date-scoped package" caution exercisable rather than
+    theoretical.
+    """
+    match = _DATE_RE.search(rel_path)
+    if match is None:
+        return ()
+    year, month, day = match.groups()
+    return (f"{year}-{month}-{day or '01'}",)
+
+
+def _fixture_doc_type(rel_path: str) -> str | None:
+    """Document type from the fixture's folder — a filename pattern, which is
+    what the contract permits (``DocumentRecord.doc_type``: "from the active
+    profile or a filename pattern. Never inferred by AI")."""
+    folder = rel_path.split("/", 1)[0]
+    return {
+        "MPR": "Monthly progress report",
+        "Correspondence": "Correspondence",
+        "Meetings": "Meeting minutes",
+        "Cost": "Cost report",
+    }.get(folder)
+
+
 def _build_document(index: int, rel_path: str, pages: int, scanned: int,
                     status: ProcessingStatus, apply_profile: bool,
                     profile: ProfileInfo | None) -> DocumentRecord:
@@ -285,7 +317,8 @@ def _build_document(index: int, rel_path: str, pages: int, scanned: int,
         ext=ext,
         pages=tuple(records),
         status=status,
-        doc_type=profile.label if (apply_profile and profile) else None,
+        detected_dates=_fixture_dates(rel_path),
+        doc_type=_fixture_doc_type(rel_path),
         profile_id=profile.profile_id if (apply_profile and profile) else None,
         profile_version=profile.version if (apply_profile and profile) else None,
         li_file_no=f"{6000 + index * 7}",
@@ -383,6 +416,62 @@ def _build_plan(documents: tuple[DocumentRecord, ...],
     )
 
 
+_PROFILE_SOURCE = (
+    "Section rules read from the profile in the DocIQ profile library. Page "
+    "and token figures are projected from the fixture corpus, not counted "
+    "from a run of this matter."
+)
+
+_PROFILE_BASIS = TokenBasis(
+    provenance=PROVENANCE_STRUCTURAL + ", projected across the fixture corpus",
+    is_structural=True,
+)
+
+
+def _profile_levers() -> tuple[ReductionLever, ...]:
+    """The checklist's rows, measured off the fixture without a run.
+
+    ``estimated=True`` on every row and it is not a formality: this is what a
+    profile WOULD remove, projected before any page of this matter has been
+    read. Standing in the same column as a completed run's counted figures
+    without saying so is the claim ``ReductionLever.estimated`` exists to stop.
+    """
+    structural: dict[str, int] = {}
+    pages: dict[str, int] = {}
+    for index, (_rel, page_count, _scanned, _status) in enumerate(_CORPUS):
+        for page_no in range(1, page_count + 1):
+            key = _section(page_no, page_count)
+            structural[key] = (structural.get(key, 0)
+                               + _structural_tokens(_page_text(index, page_no)))
+            pages[key] = pages.get(key, 0) + 1
+    levers = [
+        ReductionLever(
+            key=name,
+            label=_LABELS[name],
+            tokens=structural.get(name, 0),
+            pages=pages.get(name, 0),
+            kind=LEVER_EXPERT,
+            engaged=name in _DEFAULT_DROPS,
+            estimated=True,
+        )
+        for name, _label in _LEVER_SECTIONS
+        if pages.get(name, 0)
+    ]
+    levers.append(ReductionLever(
+        key="automatic",
+        label="Duplicate copies and page furniture",
+        tokens=round(sum(structural.values()) * AUTOMATIC_SAVING_SHARE),
+        pages=round(sum(pages.values()) * AUTOMATIC_SAVING_SHARE),
+        kind=LEVER_AUTOMATIC,
+        engaged=True,
+        estimated=True,
+    ))
+    return tuple(levers)
+
+
+_PROFILE_LEVERS = _profile_levers()
+
+
 def at_measured_scale(plan: ReductionPlan) -> ReductionPlan:
     """The same plan, scaled up to the measured record's structural estimate.
 
@@ -444,6 +533,48 @@ class MockPipeline:
 
     def profiles(self) -> tuple[ProfileInfo, ...]:
         return PROFILES
+
+    # -- optional adapter hooks (see docs/contracts/amendments.md A-11/A-13) --
+    #
+    # NOT part of ``PipelineAPI``: the seam is frozen and shared with Track D,
+    # so these are raised as amendments and duck-typed in the meantime. The GUI
+    # asks with ``getattr`` and renders the absence rather than assuming it.
+
+    def profile_rules(
+        self, profile: ProfileInfo
+    ) -> tuple[tuple[ReductionLever, ...], TokenBasis, str]:
+        """The §6 checklist's rows: what this profile keeps and drops.
+
+        Sliced to the profile's own declared rule count rather than always
+        returning all four fixture sections — a checklist that showed rules a
+        profile does not carry is the same defect as one that hides rules it
+        does, and the screen's completeness check has to be exercised by a mock
+        that can actually disagree with itself.
+        """
+        if profile.section_rules <= 0:
+            return (), _PROFILE_BASIS, _PROFILE_SOURCE
+        levers = tuple(
+            lever for lever in _PROFILE_LEVERS if not lever.locked
+        )[: profile.section_rules]
+        automatic = tuple(le for le in _PROFILE_LEVERS if le.locked)
+        return levers + automatic, _PROFILE_BASIS, _PROFILE_SOURCE
+
+    def matter_layout_note(self, outcome: RunOutcome) -> str:
+        """§8 Path B: what is in the matter folder, in the pipeline's words.
+
+        The real adapter reads this from ``emit.handoff.expert_assist_layout``,
+        which CHECKS the folder rather than describing it from memory. The mock
+        states the layout it would write and says it checked nothing, because a
+        stand-in that reports a verified folder is a stand-in that has told the
+        operator something false.
+        """
+        return (
+            "Point Claude at this folder. It holds clean_text/ (one text file "
+            "per document, original page numbers in the markers), "
+            "sources.json, document_index.csv and processing_log.json — the "
+            "layout Expert Assist's evidence-mining skill expects, with no "
+            "rearrangement. Sample data: nothing on disk was checked."
+        )
 
     def preview_folder(self, path: str) -> FolderPreview:
         by_ext: dict[str, int] = {}

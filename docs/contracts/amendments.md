@@ -636,3 +636,192 @@ they should not be attributed to Codex:
   different caps, a different OCR model or with OCR disabled could be replayed
   into a run whose manifest then hashed the new settings. It now uses the same
   identity projection that validates the evidence it replays.
+
+---
+
+## A-11 — the seam cannot deliver a profile's section rules before a run
+
+**Raised by:** Track E (GUI, Sprint 2), 2026-08-01
+**Affects:** `dociq/gui/pipeline.py` — `PipelineAPI`, `ProfileInfo`
+**Proposed severity:** MINOR (additive protocol method, no existing field changes)
+
+### The case
+
+§6 requires a profiling checklist: an expert reviews each recurring section, its
+frequency, its page count, and its KEEP/DROP disposition, and *approves the
+omissions* before a run commits. Principle 3 is what makes that load-bearing —
+an omission the expert never saw is, downstream, indistinguishable from a
+document that went missing.
+
+The seam offers `PipelineAPI.profiles() -> tuple[ProfileInfo, ...]`, and
+`ProfileInfo` carries only `section_rules: int` — *how many* rules a profile
+holds, never *which*. `ReductionLever` is the right shape for a rule row and
+already crosses the seam, but only inside a `ReductionPlan` on a `RunOutcome`,
+i.e. **after** the run the checklist is supposed to gate.
+
+### Why a local workaround would be wrong
+
+The GUI could read the profile YAML itself. That would import `dociq.profiles`,
+which `tests/test_import_graph.py` forbids, and would put a second profile
+parser in the product — disagreeing with the pipeline's the first time either
+changed, in the one screen whose entire value is that it agrees.
+
+### Proposed shape
+
+```python
+class PipelineAPI(Protocol):
+    def profile_rules(
+        self, profile: ProfileInfo
+    ) -> tuple[tuple[ReductionLever, ...], TokenBasis, str]:
+        """The profile's KEEP/DROP rules, what each is worth, and — in the
+        pipeline's own words — where the rules and figures came from.
+
+        Rows for a profile that has not been run against this matter carry
+        ``estimated=True``: they are projections, not counts.
+        """
+```
+
+Returning existing types keeps the amendment additive. A default in the protocol
+(`return (), TokenBasis(), ""`) would let Track D adopt it lazily.
+
+### What Track E did in the meantime
+
+The checklist screen consumes exactly the tuple above, obtained by duck-typed
+`getattr(pipeline, "profile_rules", None)`. A pipeline that does not offer it
+renders `CHECKLIST_NO_RULES` — a loud empty state that **disables approval** —
+rather than an empty list that reads as "nothing is dropped". The mock supplies
+the hook so the state grid exercises both branches.
+
+### Related gap, same screen: rules carry no stated reason
+
+§6 gives a profile a free-text notes field ("why sections were dropped, who
+approved") and D-05 puts a copy of the profile in the matter folder as the
+record of that decision. Neither reaches the GUI. `ReductionLever` has no field
+for the rule's own text or the profile's note, so the checklist attributes each
+drop by rule *identity* (`<profile_id> v<version> → section "<key>" → DROP`)
+and cannot show the pattern that matched or the note the expert wrote.
+
+Proposed, additive, both defaulted to `""`:
+
+```python
+@dataclass(frozen=True, slots=True)
+class ReductionLever:
+    ...
+    rule: str = ""   # the profile's own matching rule, verbatim
+    note: str = ""   # the profile's notes field for this section
+```
+
+Not applied here. Rule identity is a true attribution and is enough to ship;
+the note is what makes the omission *defensible in the expert's own words*, and
+that is worth an amendment rather than a GUI-authored paraphrase.
+
+---
+
+## A-12 — the seam cannot carry the §8 handoff
+
+**Raised by:** Track E (GUI, Sprint 2), 2026-08-01
+**Affects:** `dociq/gui/pipeline.py` — `PipelineAPI`, `RunOutcome`
+**Proposed severity:** MINOR (two additive protocol methods)
+
+### The case
+
+§9 acceptance criterion 8 requires "Analyze in Claude" to be a real action, and
+§8 defines the two sanctioned routes. Both need something the seam has no way to
+express:
+
+* **Path B** needs the pipeline's statement of what is in the matter folder.
+  `emit/handoff.py::expert_assist_layout` already produces exactly this and
+  *checks the folder* rather than describing it from memory — `present`,
+  `missing`, `instructions`. None of it crosses the seam; `RunOutcome` carries
+  only `output_root: str`.
+* **Path A** needs the package to be *built*. That is emit-layer work
+  (`build_upload_package`), and D-20 adds a requirement the existing function
+  does not have: the package is a **deliberately scoped subset**, and the scope
+  must be stated **inside the package**, because downstream nobody can tell a
+  subset from a whole record unless the package says so.
+
+### Why a local workaround would be wrong
+
+Writing `upload_package/` from a widget would import `dociq.emit` (forbidden),
+and would put a second copy of §8's "only these files are uploaded" rule in the
+product — the rule whose failure mode is DocIQ's own audit trail being uploaded
+into the evidence corpus.
+
+Describing the matter folder from the GUI's own knowledge of the layout would be
+a claim about disk made by something that did not look at disk. Path B's whole
+argument is that DocIQ writes where Expert Assist already reads; asserting that
+without checking is exactly the assertion that would be worth checking.
+
+### Proposed shape
+
+```python
+class PipelineAPI(Protocol):
+    def matter_layout_note(self, outcome: RunOutcome) -> str:
+        """What is in the matter folder and what to point Claude at, in the
+        pipeline's words, having checked. "" when it did not look."""
+
+    def build_package(
+        self, outcome: RunOutcome, doc_ids: tuple[str, ...],
+        scope_statement: str,
+    ) -> "PackageResult":
+        """Assemble §8 Path A's upload_package/ for exactly ``doc_ids``, with
+        ``scope_statement`` written into README_START_HERE.txt ahead of
+        everything else (D-20)."""
+```
+
+`build_upload_package` would gain a `doc_ids` filter and a `scope_statement`
+that `render_readme` emits first. `PackageResult` can be a presentation record
+in the seam (root path, file count, total bytes, unenforced limits) — the same
+treatment `Reconciliation` already gets.
+
+### What Track E did in the meantime
+
+Both are duck-typed hooks. Absent `matter_layout_note`, Path B says the pipeline
+confirmed nothing and the operator should check the folder. Absent
+`build_package`, the Path A button is **disabled with the reason on screen**
+(`PATH_A_UNAVAILABLE`) rather than greyed out silently. The scope selection, the
+subset arithmetic and the scope statement are all built and rendered verbatim
+now, so adopting the amendment is a wiring change, not a design change.
+
+---
+
+## A-13 — `DIRECT_CONTEXT_TOKENS`' docstring asserts the figure is unruled; D-21 ruled it
+
+**Raised by:** Track E (GUI, Sprint 2), 2026-08-01
+**Affects:** `dociq/gui/pipeline.py` — `DIRECT_CONTEXT_TOKENS` docstring only
+**Proposed severity:** TRIVIAL (documentation; no code or field changes)
+
+### The case
+
+The docstring reads: "**UNCONFIRMED.** Alex has not ruled this threshold and it
+is not measured; 200K is a working placeholder."
+
+D-21 (2026-08-01) rules it: **keep 200,000**, and render it as a named, sourced
+reference line called "Claude Project direct context", never as a budget or a
+target. So the first sentence is now false — the threshold *is* ruled. What
+remains true, and must not be lost in the correction, is that it is **not
+measured and not confirmed against Anthropic's published limits**.
+
+Raised rather than edited because the file is frozen and shared with Track D,
+and because it is a *claim*, not an identifier: withdrawing it means correcting
+the sentence, not deleting the constant.
+
+### Proposed wording
+
+> **RULED D-21 (2026-08-01), NOT MEASURED.** 200,000 is the working figure Alex
+> ruled to keep, rendered as a named, sourced reference line — "Claude Project
+> direct context" — and never as a budget or a target (D-15: over-capacity is
+> the expected state). It has not been confirmed against Anthropic's published
+> limits. It is a single named constant precisely so that confirming it is a
+> one-line change — the literal appears nowhere else, and no screen may inline
+> it.
+
+### What Track E did in the meantime
+
+The GUI names the line `CAPACITY_LABEL` and sources it `CAPACITY_SOURCE` in
+`view_models.py`, both stating D-21 and both stating that it is unconfirmed. The
+waterfall row previously read "unconfirmed", which was right under the old
+docstring and understates the ruling under the new one; it now reads
+"reference, not a target" with the source in its tooltip and in a line under the
+headline. No literal `200_000` appears anywhere in `dociq/gui/`, and
+`tests/test_gui_screen_states.py` asserts it.
