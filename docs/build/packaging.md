@@ -25,7 +25,7 @@ packaging change that was never launched is not a deliverable.
 |---|---|
 | `packaging/DocumentIQ.spec` | the reproducible half — what goes in, what is excluded, both executables, the icon |
 | `packaging/build.py` | the other reproducible half — paths, cleaning, zipping, and the three verification checks |
-| `packaging/dociq_launcher.py` | the frozen entry point: bundle bootstrap plus `--version` / `--selftest` / `--offline-probe` |
+| `packaging/dociq_launcher.py` | the frozen entry point: bundle bootstrap plus `--version` / `--selftest` / `--offline-probe` / `--diagnose` |
 | `packaging/rthook_offline.py` | runtime hook: pins the bundled model directory and the ecosystem offline flags before any import |
 
 ### Authorization note — PyInstaller is not installed in the venv
@@ -66,6 +66,13 @@ install` above, and it should be run once so this note can be deleted.**
   before it draws anything.
 - **`tests/fixtures/make_fixtures.py`, as a module.** So `--selftest` and
   `--offline-probe` run on the shipped artifact rather than only on a checkout.
+- **rapidocr's three inference stages as top-level modules** (`ch_ppocr_v3_det`,
+  `ch_ppocr_v3_rec`, `ch_ppocr_v2_cls`), whose names the spec READS from
+  rapidocr's own `config.yaml`. The library imports them by name through a
+  `sys.path` append, which no module graph can see. Without them the packaged
+  build reported models present, `ocr_available() == True`, and returned every
+  scanned page EMPTY — the defect that made `--selftest`-on-the-artifact worth
+  building.
 
 ## Verifying the artifact
 
@@ -77,8 +84,14 @@ clause asks for:
 DocumentIQ\DocumentIQ-cli.exe --version          # models found, cold start
 DocumentIQ\DocumentIQ-cli.exe --offline-probe    # ZERO outbound attempts
 DocumentIQ\DocumentIQ-cli.exe --selftest         # the full end-to-end gate
+DocumentIQ\DocumentIQ-cli.exe --diagnose         # why the bundle differs from a checkout
 DocumentIQ\DocumentIQ.exe                        # the application itself
 ```
+
+`--selftest` on the built artifact was run and **passed: 70 checks, including
+the determinism proof over 8 varied hash seeds executed inside the frozen
+executable** (the exe re-enters itself per repetition — see
+`determinism.DETERMINISM_RUN_FLAG`).
 
 `--offline-probe` runs a whole pipeline over the bundled fixture corpus with
 `dociq.verify.offline.NetworkGuard` installed. The guard **counts** attempts
@@ -91,11 +104,11 @@ comes off on a client machine.
 
 | quantity | measured |
 |---|---|
-| unpacked payload | **388.7 MB across 932 files** |
-| shipped zip | **176.2 MB** |
-| PyInstaller build wall clock | ~53 s |
-| first launch of a never-run copy | **2.2 s** (dominated by the on-access AV scan of 388 MB of new binaries) |
-| steady-state launch, 29 further runs | **min 0.31 s / median 0.49 s** |
+| unpacked payload | **393.1 MB across 939 files** |
+| shipped zip | **178.2 MB** |
+| PyInstaller build wall clock | ~180 s |
+| first launch of a never-run copy | **2.651 s** (dominated by the on-access AV scan of 393 MB of new binaries) |
+| steady-state launch, 29 further runs | **min 0.320 s / median 0.461 s / max 0.962 s** |
 
 The steady-state figure is what D-22's reasoning is about and it had never been
 measured. It is reported over 30 runs, with the first held out and named,
@@ -106,7 +119,7 @@ the first-run cost.
 `--onefile` was **not** built for comparison, so "onefile would be slower" is
 still the argument D-22 makes and not a measurement. What *is* now measured is
 that the one-folder build's steady-state launch is half a second, and that the
-payload it would have to re-extract on every launch is 388 MB.
+payload it would have to re-extract on every launch is 393 MB.
 
 ## What is deliberately not claimed
 
