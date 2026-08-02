@@ -58,6 +58,7 @@ from dociq.contracts import DocumentRecord, PageRecord, document_sort_key
 
 __all__ = [
     "BatesZone",
+    "FOOTER_BLOCK_MAX_LINES",
     "BatesFormat",
     "BatesCandidate",
     "BatesProposal",
@@ -69,11 +70,36 @@ __all__ = [
     "PATTERN_TOKEN_VERSION",
     "parse_pattern",
     "detect_candidates",
+    "zone_has_candidate",
+    "stamp_tokens",
     "propose_format",
     "apply_bates",
     "document_ranges",
     "ranges_by_sort_key",
 ]
+
+
+FOOTER_BLOCK_MAX_LINES = 4
+"""How many recovered stamp tokens the targeted footer re-OCR (D-25) may append
+to a page's text.
+
+The extractor appends the tokens it recovers from a high-resolution crop of the
+page's footer/header band to the END of the page text, so that the ordinary
+zone sees them. Appending to the tail is what makes the recovered stamp
+reachable, and it is also what could push the *existing* tail out of the zone —
+which would turn a page that ``apply_bates`` currently gets right, via the
+confirmed-token fallback, into a miss.
+
+So the bound is not decorative: :attr:`BatesZone.tail_lines` is
+``_TAIL_LINES_BASE + FOOTER_BLOCK_MAX_LINES``, which makes eviction impossible
+by construction rather than unlikely in practice. ``tests/test_bates.py``
+asserts the relation, so raising one without the other is a test failure.
+"""
+
+_TAIL_LINES_BASE = 4
+"""The tail zone the ordinary text stream gets, before the footer re-OCR block
+is allowed for. Four lines is what the detector looked at before D-25 and it is
+still the whole of what a page's own text contributes."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,10 +108,13 @@ class BatesZone:
 
     Both bounds are explicit and reported (no silent caps): a stamp outside the
     zone is a miss, and an operator is entitled to know how wide DocIQ looked.
+
+    ``tail_lines`` carries a deliberate margin — see
+    :data:`FOOTER_BLOCK_MAX_LINES`.
     """
 
     head_lines: int = 3
-    tail_lines: int = 4
+    tail_lines: int = _TAIL_LINES_BASE + FOOTER_BLOCK_MAX_LINES
 
     def slice_lines(self, text: str) -> tuple[tuple[int, str], ...]:
         """Zone lines as ``(line index, text)``, head first then tail, without
@@ -398,6 +427,90 @@ def detect_candidates(
     return tuple(out)
 
 
+def zone_has_candidate(text: str, zone: BatesZone | None = None) -> bool:
+    """Whether the ordinary text of one page already offers a stamp-shaped line.
+
+    This is the trigger the extractor uses to decide whether a page is worth a
+    targeted footer re-OCR (D-25), and it lives here rather than in the
+    extractor so that "stamp-shaped" has exactly one definition. A page that
+    already carries a candidate is left alone; a page that carries none is the
+    only page the expensive second pass can help.
+
+    It is deliberately **format-agnostic**: extraction happens at Stage 1 and
+    the production's format is not confirmed until Stage 3, so the trigger
+    cannot ask "does this match the confirmed format?" — only "did the ordinary
+    pass produce anything stamp-shaped at all?".
+    """
+    z = zone or BatesZone()
+    return any(_parse_line(line) is not None for _, line in z.slice_lines(text))
+
+
+def stamp_tokens(text: str, *, limit: int = FOOTER_BLOCK_MAX_LINES) -> tuple[str, ...]:
+    """The stamp-shaped tokens inside ``text``, in reading order, deduplicated.
+
+    Used to reduce a re-OCR'd footer strip to the part that could be a Bates
+    stamp. The whole strip is *not* appended to the page: the page already has
+    its own reading of that footer from the ordinary pass, and appending a
+    second full reading would double-count the footer in every downstream token
+    count, dedup and summary for the sake of one locator.
+
+    **Two acceptances, and the split is what keeps this from widening
+    detection.**
+
+    1. A whole line that parses is taken whole. That is byte-for-byte what
+       :func:`detect_candidates` would have accepted had the ordinary pass read
+       that line, so it adds no shape the detector did not already admit — and
+       it is the only way a *separated* stamp (``MNFV 000391``) survives,
+       because its two halves are two words.
+    2. Otherwise, a single WORD inside the line that parses **and carries a
+       prefix**. That recovers the shape the acceptance run actually hit — a
+       stamp folded into a longer line, ``... Sierra Madre Street in
+       iiCON003961`` — without reading prose as a production mark.
+
+    Both restrictions were put there by a failing test rather than by taste:
+
+    * a multi-word scan inside a line reads ``30 June 2019`` as the stamp
+      ``June 2019``, which is a date in every document ever produced;
+    * a bare-number word is not admitted inside a line, because
+      ``Page 3 of 12 MNFV 000391`` would otherwise yield ``000391`` — the same
+      page, a *different* locator, and a wrong one. The whole-line rule already
+      keeps bare numbers to the case detection admits them in.
+
+    A separated stamp folded into a longer line is therefore **missed** rather
+    than guessed at. That is the failure direction §4 asks for everywhere else
+    in this module, and the band crop usually isolates the stamp on a line of
+    its own in any case.
+
+    ``limit`` is a stated bound, not a silent cap; the caller reports it.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def emit(tok: str) -> bool:
+        """True when the caller should stop — the bound is reached."""
+        if tok in seen:
+            return False
+        seen.add(tok)
+        out.append(tok)
+        return len(out) >= limit
+
+    for raw_line in text.split("\n"):
+        line = " ".join(raw_line.split())
+        if not line:
+            continue
+        if _parse_line(line) is not None:
+            if emit(line):
+                return tuple(out)
+            continue
+        for word in line.split():
+            parsed = _parse_line(word)
+            if parsed is None or not parsed.prefix:
+                continue
+            if emit(word):
+                return tuple(out)
+    return tuple(out)
+
+
 class DecisionStatus(str, Enum):
     """State of the §4 Stage-3 confirmation."""
 
@@ -602,14 +715,24 @@ def _confirmed_token_re(fmt: BatesFormat) -> re.Pattern[str]:
     return re.compile(r"(?<![A-Za-z0-9])(" + "".join(parts) + r")(?![A-Za-z0-9])")
 
 
-def _embedded_stamp(text: str, zone: BatesZone,
-                    token_re: re.Pattern[str]) -> str | None:
-    """The confirmed stamp found inside a longer zone line, or ``None``.
+def _zone_stamp(text: str, zone: BatesZone,
+                token_re: re.Pattern[str]) -> str | None:
+    """The one confirmed stamp in this page's zone, or ``None``.
 
     ``None`` when the zone holds no match **and** when it holds two different
-    ones: a page whose footer OCR'd into two candidate locators is a page
-    DocIQ cannot locate, and picking one would be a guess wearing a locator's
+    ones: a page whose footer read as two candidate locators is a page DocIQ
+    cannot locate, and picking one would be a guess wearing a locator's
     clothes.
+
+    **This is the only reading rule, for anchored and folded stamps alike**, and
+    that unification is a fix, not a tidy-up. It used to be a fallback: an
+    anchored zone line matching the confirmed format won outright, and only a
+    page with no such line was searched for a folded one. D-25's footer re-OCR
+    appends a recovered stamp as its own line, which is anchored — so a band
+    pass that misread one digit would have produced an anchored ``iiCON003945``
+    that beat the folded, correct ``iiCON003944`` already in the zone, and
+    turned a right answer into a wrong one. Two different confirmed stamps in
+    one zone is a REFUSAL wherever they came from.
     """
     found: set[str] = set()
     for _, line in zone.slice_lines(text):
@@ -637,30 +760,29 @@ def apply_bates(
     ``MNFV 1234567890``, and a locator that is not in the production is worse
     than no locator, because the record it points at does not exist.
 
-    **Two passes, and the second one is why (criterion-4 acceptance run,
-    2026-08-01).** The whole-line anchor is right for *detection*, where the
-    grammar is open-ended and an unanchored match would read a date, a dollar
-    figure or a paragraph number as a Bates number. It is too strict for
-    *application*, where the format is already confirmed and known exactly. On
-    the MNFV production, OCR'd pages fold the burned-in stamp into a longer
-    line — a signature block that ends ``... in iiCON003961``, a page whose
-    text came back as ``untij isfiyed iiCON003944`` — and the stamp is right
-    there, correct, and rejected because it does not occupy the line alone.
-    Measured on the acceptance sample: **every one of these was an OCR page**,
-    and no native-text page needed the second pass.
+    **The zone is searched for the confirmed format as a standalone token
+    (criterion-4 acceptance run, 2026-08-01).** The whole-line anchor is right
+    for *detection*, where the grammar is open-ended and an unanchored match
+    would read a date, a dollar figure or a paragraph number as a Bates number.
+    It is too strict for *application*, where the format is already confirmed
+    and known exactly. On the MNFV production, OCR'd pages fold the burned-in
+    stamp into a longer line — a signature block that ends ``... in
+    iiCON003961``, a page whose text came back as ``untij isfiyed
+    iiCON003944`` — and the stamp is right there, correct, and rejected because
+    it does not occupy the line alone. Measured on the acceptance sample:
+    **every one of these was an OCR page**, and no native-text page needed it.
 
-    So a page that no zone line claims outright is searched for the confirmed
-    format as a *standalone token*, delimited so it cannot match inside a
-    longer alphanumeric run. This cannot widen what is accepted: it looks for
-    exactly the string the operator confirmed, at exactly the confirmed widths.
-    A page with two different stamps in its zone is left UNSTAMPED rather than
-    guessed at — an ambiguous locator is the failure §4 rates worse than none.
+    The token search cannot widen what is accepted: it looks for exactly the
+    string the operator confirmed, at exactly the confirmed widths, delimited so
+    it cannot match inside a longer alphanumeric run. A page with two different
+    stamps in its zone is left UNSTAMPED rather than guessed at — an ambiguous
+    locator is the failure §4 rates worse than none. See :func:`_zone_stamp`
+    for why anchored and folded stamps go through one rule and not two.
     """
     if decision is None or not decision.applies:
         return tuple(sorted(documents, key=document_sort_key))
     assert decision.format is not None
     fmt = decision.format
-    target = fmt.key()
     z = zone or BatesZone()
     token_re = _confirmed_token_re(fmt)
 
@@ -669,18 +791,7 @@ def apply_bates(
         pages: list[PageRecord] = []
         changed = False
         for page in doc.pages:
-            stamp: str | None = None
-            for _, line in z.slice_lines(page.text):
-                parsed = _parse_line(line)
-                if parsed is None:
-                    continue
-                if parsed.format_key == target and fmt.accepts_width(
-                    parsed.digit_width
-                ):
-                    stamp = line
-                    break
-            if stamp is None:
-                stamp = _embedded_stamp(page.text, z, token_re)
+            stamp = _zone_stamp(page.text, z, token_re)
             if stamp is not None and page.bates != stamp:
                 pages.append(page.evolve(bates=stamp))
                 changed = True

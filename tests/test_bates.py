@@ -509,3 +509,169 @@ def test_the_anchored_path_still_wins_and_still_records_the_line():
     doc = document("prod/native.pdf", (page(1, "body\niiCON003944"),))
     out = apply_bates((doc,), _confirmed())
     assert out[0].pages[0].bates == "iiCON003944"
+
+
+# ---------------------------------------------------------------------------
+# D-25 — the targeted footer re-OCR, on the detection side
+# ---------------------------------------------------------------------------
+#
+# The extractor crops the stamp band of a page whose ordinary reading yielded
+# nothing stamp-shaped, re-reads it at 400 dpi, and APPENDS the stamp-shaped
+# tokens it recovers to the tail of the page text. Everything below is about
+# the two properties that makes or breaks:
+#
+#   * the appended block must not evict what was already in the zone — a page
+#     that ``apply_bates`` gets right today through the confirmed-token
+#     fallback must not become a miss because a second pass added lines;
+#   * a recovered token is TEXT, never a locator. It is judged by the same
+#     grammar and the same confirmed format as anything else, so a misread
+#     footer stays a flagged miss and cannot become a wrong number.
+
+
+def test_the_tail_zone_reserves_exactly_the_footer_block():
+    """The invariant, asserted rather than remembered.
+
+    Raising :data:`FOOTER_BLOCK_MAX_LINES` without raising ``tail_lines`` is
+    the change that would silently reintroduce eviction, and it is a one-line
+    change someone will make.
+    """
+    from dociq.identify.bates import _TAIL_LINES_BASE, FOOTER_BLOCK_MAX_LINES
+
+    assert BatesZone().tail_lines == _TAIL_LINES_BASE + FOOTER_BLOCK_MAX_LINES
+
+
+@pytest.mark.parametrize("original_tail", range(1, 5))
+@pytest.mark.parametrize("appended", range(1, 5))
+def test_an_appended_footer_block_never_evicts_an_original_zone_line(
+        original_tail, appended):
+    """The class, over every shape of page the merge can produce.
+
+    Not one repro: every combination of "lines the ordinary pass put in the
+    tail" x "tokens the second pass appended", up to both bounds.
+    """
+    from dociq.identify.bates import FOOTER_BLOCK_MAX_LINES
+
+    assert appended <= FOOTER_BLOCK_MAX_LINES
+    body = ["body"] * 12
+    tail = [f"original tail {i}" for i in range(original_tail)]
+    before = "\n".join(body + tail)
+    after = "\n".join(body + tail + [f"iiCON{900000 + i}" for i in range(appended)])
+    zone = BatesZone()
+    kept = {line for _, line in zone.slice_lines(after)}
+    for _, line in zone.slice_lines(before):
+        assert line in kept, (
+            f"{line!r} fell out of the zone when {appended} token(s) were "
+            f"appended — the footer block evicted the ordinary reading")
+
+
+def test_a_recovered_token_lets_a_folded_stamp_page_be_located():
+    """The whole point: the ordinary pass read no stamp, the band pass did."""
+    doc = document("prod/ocr.pdf", (page(1, "body\nphotograph, no footer read"),))
+    assert apply_bates((doc,), _confirmed())[0].pages[0].bates is None
+    recovered = document("prod/ocr.pdf",
+                         (page(1, "body\nphotograph, no footer read\niiCON003944"),))
+    assert apply_bates((recovered,), _confirmed())[0].pages[0].bates == "iiCON003944"
+
+
+def test_a_misread_recovered_token_stays_a_MISS_and_never_a_WRONG_number():
+    """The failure direction §4 requires, through the D-25 path specifically.
+
+    A band pass that reads ``iCON003944`` for ``iiCON003944`` appends a token
+    that is stamp-SHAPED and is not the confirmed format. The page must come
+    back unstamped, not stamped with a locator that is not in the production.
+    """
+    doc = document("prod/ocr.pdf", (page(1, "body\nnothing read\niCON003944"),))
+    assert apply_bates((doc,), _confirmed())[0].pages[0].bates is None
+
+
+def test_a_recovered_token_that_disagrees_with_the_page_leaves_it_unstamped():
+    """Two different confirmed-format stamps in the zone is a refusal, and the
+    band pass is a new way to produce that state."""
+    doc = document("prod/ocr.pdf",
+                   (page(1, "body\nfooter iiCON003944 read badly\niiCON003945"),))
+    assert apply_bates((doc,), _confirmed())[0].pages[0].bates is None
+
+
+# --- the trigger ----------------------------------------------------------
+
+
+def test_zone_has_candidate_is_the_trigger_and_matches_detection():
+    """One grammar. Whatever ``detect_candidates`` would accept on a page is
+    exactly what makes the second pass unnecessary for that page."""
+    from dociq.identify.bates import zone_has_candidate
+
+    for text in ("body\niiCON003944", "MNFV 000391\nbody", "body\nABC-000123"):
+        doc = document("a.pdf", (page(1, text),))
+        assert zone_has_candidate(text) is True
+        assert detect_candidates((doc,)) != ()
+    for text in ("body\nno stamp here", "body\n12", "body\n30 June 2019",
+                 "body\nuntij isfiyed iiCON003944", ""):
+        doc = document("a.pdf", (page(1, text),))
+        assert zone_has_candidate(text) is False
+        assert detect_candidates((doc,)) == ()
+
+
+def test_the_trigger_respects_the_zone():
+    """A stamp buried mid-page does not spare the page a second look."""
+    from dociq.identify.bates import zone_has_candidate
+
+    text = "\n".join(["head"] * 3 + ["iiCON003944"] + ["filler"] * 12
+                     + ["foot"] * 8)
+    assert zone_has_candidate(text) is False
+
+
+# --- the token reducer ----------------------------------------------------
+
+
+def test_stamp_tokens_keeps_a_separated_stamp_whole_or_not_at_all():
+    """A separated stamp survives only as a whole line, and that is deliberate.
+
+    Scanned word by word, ``Page 3 of 12 MNFV 000391`` yields the bare
+    ``000391`` — the same page, a different locator, and a wrong one. Refusing
+    is the failure direction §4 asks for; guessing is not.
+    """
+    from dociq.identify.bates import stamp_tokens
+
+    assert stamp_tokens("MNFV 000391") == ("MNFV 000391",)
+    assert stamp_tokens("MNFV 000391-CONF") == ("MNFV 000391-CONF",)
+    # The line is taken exactly as detection would have taken it — prefix and
+    # all — and NOT reduced to the bare number. The junk prefix cannot match a
+    # confirmed format, so the page stays a miss; ``000391`` would have matched
+    # a bare-number production and located the page wrongly.
+    assert stamp_tokens("Page 3 of 12    MNFV 000391") == \
+        ("Page 3 of 12 MNFV 000391",)
+    assert _parse_line("Page 3 of 12 MNFV 000391") is not None
+    assert "000391" not in stamp_tokens("Page 3 of 12    MNFV 000391")
+
+
+def test_stamp_tokens_finds_a_stamp_folded_into_a_line():
+    from dociq.identify.bates import stamp_tokens
+
+    assert stamp_tokens("... 76 S. Sierra Madre Street in iiCON003961") == \
+        ("iiCON003961",)
+
+
+def test_stamp_tokens_rejects_what_detection_rejects():
+    """Nothing may be recovered here that detection would not have accepted."""
+    from dociq.identify.bates import stamp_tokens
+
+    for junk in ("Page 3 of 12", "30 June 2019", "$1,250.00", "12", "", "  ",
+                 "Rev. 2 dated 5 May", "issued 30 June 2019 to the Engineer"):
+        assert stamp_tokens(junk) == (), junk
+
+
+def test_stamp_tokens_is_bounded_deduplicated_and_ordered():
+    from dociq.identify.bates import FOOTER_BLOCK_MAX_LINES, stamp_tokens
+
+    text = "\n".join(f"iiCON{900000 + i}" for i in range(10))
+    got = stamp_tokens(text)
+    assert len(got) == FOOTER_BLOCK_MAX_LINES
+    assert got == tuple(f"iiCON{900000 + i}" for i in range(FOOTER_BLOCK_MAX_LINES))
+    assert stamp_tokens("iiCON003944\niiCON003944") == ("iiCON003944",)
+
+
+def test_stamp_tokens_is_stable_over_repeated_calls():
+    from dociq.identify.bates import stamp_tokens
+
+    text = "noise iiCON003944 noise\nMNFV 000391 tail\niiCON003945"
+    assert len({stamp_tokens(text) for _ in range(30)}) == 1
