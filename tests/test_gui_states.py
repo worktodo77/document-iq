@@ -307,7 +307,18 @@ def test_a_stand_in_pipeline_discloses_itself_on_screen(window) -> None:
     assert len(bars) == 1
     text = bars[0].findChild(QLabel).text()
     assert "Sample data" in text
-    assert "298" in text and "17,732" in text  # the measured record, stated
+    # The measured record, stated — and asserted FROM the constants rather than
+    # against literals. This test used to hard-code "298" and "17,732", which
+    # were the pre-token figures of a superseded measurement (PyMuPDF over the
+    # 298 source PDFs, no normalization, no OCR). When the constants were
+    # corrected to what the pipeline actually emits, a literal assertion would
+    # have gone red and invited someone to "fix" it back. A test cannot know
+    # which number is true; it can refuse to let the banner and the fixture
+    # disagree, which is the failure it is actually able to see.
+    from dociq.gui.mock_pipeline import MEASURED_DOCUMENTS, MEASURED_PAGES
+
+    assert str(MEASURED_DOCUMENTS) in text
+    assert f"{MEASURED_PAGES:,}" in text
 
     class _Silent(MockPipeline):
         def disclosure(self) -> str:

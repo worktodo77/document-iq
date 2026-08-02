@@ -9,10 +9,11 @@ Deterministic on purpose: no randomness, no clock, no filesystem read. The same
 call returns byte-identical records every time, so a screen render is a
 regression test rather than a snapshot of whatever the mock felt like producing.
 
-Scaled to the corpus that actually exists (decision register, "Corpus reality vs
-the spec's assumption": 298 PDF / 53 DOCX / 17 PPTX / 7 DOC, 17,732 PDF pages),
-because the design decision that matters most — that a fully reduced matter
-still does not fit in direct context — is only exercised at that size.
+Scaled to the corpus DocIQ actually emitted on its first full run — 368
+documents, 18,521 pages (the source folder is 298 PDF / 53 DOCX / 17 PPTX / 7
+DOC; see the decision register, "Corpus reality vs the spec's assumption") —
+because the design decision that matters most, that a fully reduced matter still
+does not fit in direct context, is only exercised at that size.
 
 **Sprint 2 did not delete this module, and the plan that said it would is
 withdrawn.** :func:`dociq.gui.pipeline.get_pipeline` now returns
@@ -89,15 +90,31 @@ nothing derived from it is displayed as fact. Do not replace these numbers with
 a guessed band."""
 
 # The measured record, for the disclosure the shell shows above every screen.
-MEASURED_DOCUMENTS = 298
-MEASURED_PAGES = 17_732
-MEASURED_CHARS = 49_031_833
-MEASURED_PRETOKENS = 19_388_495
-"""Track B's full-corpus pre-token count under DocIQ's own approximate split.
+MEASURED_DOCUMENTS = 368
+MEASURED_PAGES = 18_521
+MEASURED_CHARS = 50_190_410
+MEASURED_PRETOKENS = 17_252_003
+"""The full-corpus pre-token count **of the text DocIQ actually emits**, under
+DocIQ's own approximate split. Source: the first full pipeline run, 2026-07-31,
+368 documents, 2.91 chars/pre-token.
 
 **Not a token floor.** Naming it one was the defect in Codex review #1 finding
-B-6. It is a structural measurement of the source text; the token figure it
-implies depends on assumptions stated in :mod:`dociq.verify.tokens`."""
+B-6. It is a structural measurement of the emitted text; the token figure it
+implies depends on assumptions stated in :mod:`dociq.verify.tokens`.
+
+**This constant was 19,388,495 and that figure is SUPERSEDED for any statement
+about the deliverable** (decision register, 2026-07-31). It came from
+``tools/calibrate_tokens.py``, which reads with PyMuPDF, skips whitespace-only
+pages, applies no normalization, runs no OCR, and covers the 298 PDFs only — so
+it describes what the source PDFs contain under a different reader, not what
+DocIQ ships. On 131 identical pages PyMuPDF yields 16.7% more pre-tokens than
+the pypdf text DocIQ extracts, and contract normalization removes about 5% more.
+
+Corrected here because the shell renders these numbers in a banner that says
+"the measured record", above every screen. A superseded measurement presented as
+the current one is a false claim whether or not the code that computes it is
+right, and the fixture is the only place the shell can be wrong about a fact it
+did not compute — which is exactly why the disclosure exists."""
 
 AUTOMATIC_SAVING_SHARE = 0.14
 """Share of the record removed as exact-hash duplicates and page furniture.
@@ -487,11 +504,12 @@ _PROFILE_LEVERS = _profile_levers()
 def at_measured_scale(plan: ReductionPlan) -> ReductionPlan:
     """The same plan, scaled up to the measured record's structural estimate.
 
-    The fixture corpus is 8,387 pages; the record Track B measured is 17,732
-    PDF pages whose measured structure implies roughly 19.4M tokens (an
-    estimate, not a floor) — about 97× direct-context capacity, not 3.6×. The screens have to be reviewed at the magnitude they
-    will actually meet, because a two-digit multiplier and a three-digit one are
-    not the same layout problem.
+    The fixture corpus is 8,387 pages; the record the pipeline actually emitted
+    is 18,521 pages over 368 documents, whose measured structure implies roughly
+    17.3M tokens (an estimate, not a floor) — about 86× direct-context capacity,
+    not 3.6×. The screens have to be reviewed at the magnitude they will actually
+    meet, because a two-digit multiplier and a three-digit one are not the same
+    layout problem.
 
     Shape-preserving and clearly named: this is the fixture at real scale, not a
     second set of invented figures.
@@ -536,7 +554,11 @@ class MockPipeline:
         return (
             f"Sample data — Sprint-1 shell. These figures come from a fixture of "
             f"{len(_CORPUS)} documents / {pages:,} pages, not from a real run. "
-            f"The measured record is {MEASURED_DOCUMENTS} PDFs / "
+            # "documents", not "PDFs": 368 is the document count and only 298
+            # of them are PDFs. The banner's whole job is to be the one place on
+            # screen that states a measured fact, so it does not get to be loose
+            # about which fact it is stating.
+            f"The measured record is {MEASURED_DOCUMENTS} documents / "
             f"{MEASURED_PAGES:,} pages implying an estimated "
             f"{MEASURED_PRETOKENS / 1e6:.1f}M tokens — about {factor:.0f}× "
             "direct-context capacity."
