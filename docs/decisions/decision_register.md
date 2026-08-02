@@ -147,6 +147,53 @@ call under D-27). Everything else is a rounding error. That is a smaller and mor
 defensible claim than the mockups make, and it is the claim the product should
 make.
 
+| D-28 | Bates prefix normalization vs. reopening D-19 | **Normalize ONLY where the matter has exactly ONE confirmed prefix (Alex, 2026-08-02).** D-25's targeted footer re-OCR was built and **did not close criterion 4** — 91.512% unchanged. The wall is precise and was characterized page by page: rapidocr **reads the digits correctly and cannot resolve the `ii` prefix**, returning `iCON004926`, `jiCON004926`, `liCON002291`, `TiCON005000` for `iiCON…`. Exact recovery at 400 dpi is **1 in 12**; 600 and 800 dpi score *below* 400; detector-box widening scores 0 of 10. Ruling: repair the prefix when digits, digit width, separator and suffix match the confirmed format exactly and only a near-miss prefix differs — **and only when the matter carries exactly one confirmed prefix.** On a multi-prefix production, refuse outright and flag as today. The third condition is the ruling: it makes the wrong-series failure **structurally impossible** rather than merely unlikely, and the risk is concrete rather than theoretical — Track F found the MNFV set carries three prefix renderings, and a page filed under the wrong series is a locator an expert cites verbatim and cannot defend. Normalization is **disclosed, never silent**: §4's "flagged, not silently corrected" stands as the rule and this is a narrow ruled exception, so every repaired locator is recorded and distinguishable from a directly-read one. **Consequence to state rather than bury: if MNFV's acceptance subset is multi-prefix, D-28 refuses on it and criterion 4 remains NOT MET on the acceptance corpus** — the criterion would then be met on single-series matters and open on the hard case. D-19 was considered and not reopened; Tesseract stays written off, and the "never benchmarked against an alternative" liability recorded in D-19 now has its **first concrete page-level cost** on the record. | 2026-08-02 |
+
+## Acceptance criteria 1 and 8 — DISCHARGED on the real corpus (2026-08-02)
+
+One full-corpus run from scratch through `RealPipeline` (what the GUI calls),
+shipped defaults, no environment overrides, not resumed.
+
+- **6,182.4 s = 103.0 min**; 368 documents, 7 listed-only (`.doc`, per D-02)
+- **18,556 pages in = 18,556 kept + 0 dropped — zero discrepancy**
+- 17,266,810 pre-tokens / 50,251,852 chars; `corpus_sha256 b326d92e…`
+- Stages 1–2 = **99.70%** of the run; everything DocIQ adds after extraction = **18.5 s**
+- **Path B**: all four deliverables found in place, no rearrangement; §7's format
+  contract asserted over the whole corpus — 18,556 markers parsed (equal to
+  `pages_in`), `sources.json` resolving for all 368 — **zero format errors**.
+- **Path A**: whole-record package 371 files / 51.2 MB, plus a scoped subset
+  chosen through the GUI's own scope model — **15 of 368 documents, 0.57 MB,
+  154–168K tokens**, against 206 date windows measured of which 14 fit.
+
+**The gap found on the way: amendment A-12 was raised by Track D *and* Track E
+and applied by neither.** `RealPipeline` had no `matter_layout_note` and no
+`build_package`, so Path A's button was permanently disabled behind its own
+"this pipeline does not offer it" message and Path B showed the mock's words.
+Both were built before the criteria could be discharged. §8's "only the
+sanctioned files are uploaded" rule was implemented and never checked; it now
+raises. A subset package would have carried the whole matter's `sources.json`
+naming 353 documents that resolve to nothing, and printed the **whole corpus's**
+token figure in a 15-document README — where the capacity sentence derives from
+it, so the error would have arrived as advice.
+
+**NOT proven, and not to be written up as if it were:** *"accepted by a Claude
+Project" was never observed.* Uploading is a network action and nothing was
+uploaded; file types, sizes, count, structure and the README are proven, and
+that half needs a person with a browser. The 30 MB per-file limit is an
+assumption; the file-count limit is not enforced and says so. The 103-minute
+wall clock is an **upper bound** — another OCR job held the machine throughout —
+so a clean idle-machine figure still does not exist. Expert Assist itself was not
+run against the folder: the format contract was proven, not the skill. One run,
+so no determinism claim rests on it.
+
+**Open, deliberately not fixed:** the shipped 3,600 s per-file timeout fired on
+**six** documents, not the two previously recorded, and all six were recovered in
+full by the serial re-read. That makes it **load-dependent** and points at the
+extraction pool rather than at the files. The default was not raised — the root
+cause is unidentified, the right value is unknown, and it is a hashed
+run-identity input under A-04, so it is a ruling rather than a side effect of an
+acceptance note.
+
 ## Sprint-1 verification log
 
 **Track B master-index robustness (2026-07-30).** The Track B critic found a
