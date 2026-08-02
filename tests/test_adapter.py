@@ -664,3 +664,159 @@ def test_both_implementations_satisfy_the_same_protocol():
         assert isinstance(pipe.profiles(), tuple)
         assert all(isinstance(p, ProfileInfo) for p in pipe.profiles())
         assert isinstance(pipe.disclosure(), str)
+
+
+# ---------------------------------------------------------------------------
+# D-5 / A-12 — §8 handoff: Path B checked, Path A built
+# ---------------------------------------------------------------------------
+
+
+def test_path_b_note_says_it_LOOKED(real_run):
+    """FAIL-BEFORE: describing the folder from §7 rather than checking it is the
+    one thing Path B's claim cannot be proven by. `expert_assist_layout` inspects
+    disk; the note must be its report, not a restatement of the spec."""
+    outcome, _events, root = real_run
+    note = adapter.RealPipeline().matter_layout_note(outcome)
+    assert note.startswith("CHECKED")
+    for name in ("clean_text/", "sources.json", "document_index.csv",
+                 "processing_log.json"):
+        assert name in note
+    assert str(root) in note
+
+
+def test_path_b_note_names_what_is_missing(real_run, tmp_path):
+    """A folder that is NOT Expert-Assist-shaped must be reported as such —
+    otherwise the check is decoration."""
+    from dataclasses import replace
+
+    outcome = replace(real_run[0], output_root=str(tmp_path / "empty"))
+    note = adapter.RealPipeline().matter_layout_note(outcome)
+    assert "NOT ready" in note
+    assert "sources.json" in note
+
+
+def test_path_b_note_is_empty_when_there_is_nothing_to_look_at(real_run):
+    """The seam's documented "" — the pipeline did not look. Distinguished from
+    a verified folder, because the screen renders them differently."""
+    from dataclasses import replace
+
+    pipe = adapter.RealPipeline()
+    assert pipe.matter_layout_note(replace(real_run[0], published=False)) == ""
+    assert pipe.matter_layout_note(replace(real_run[0], output_root="")) == ""
+
+
+def test_build_package_writes_exactly_the_scoped_documents(real_run):
+    outcome, _events, root = real_run
+    ids = tuple(d.doc_id for d in outcome.result.documents)[:1]
+    result = adapter.RealPipeline().build_package(
+        outcome, ids, "SCOPE OF THIS PACKAGE\n" + "=" * 60 + "\n  MARKER-Z\n")
+    pkg = Path(result.root)
+    assert pkg == root / "upload_package"
+    assert result.doc_count == 1
+    texts = sorted(p.name for p in pkg.glob("*.txt")
+                   if p.name != "README_START_HERE.txt")
+    assert texts == [f"{ids[0]}.txt"]
+    assert "MARKER-Z" in result.scope_statement
+    assert (pkg / "README_START_HERE.txt").read_text(
+        encoding="utf-8").startswith("SCOPE OF THIS PACKAGE")
+
+
+def test_build_package_measures_the_SUBSET_not_the_corpus(real_run):
+    """FAIL-BEFORE: reading ``outcome.tokens_after`` puts the whole corpus's
+    figure in a one-document package's README — and the README's capacity
+    sentence is DERIVED from it, so the error arrives as advice."""
+    outcome, _events, root = real_run
+    docs = outcome.result.documents
+    assert len(docs) > 1, "fixture corpus too small to tell the two apart"
+    pipe = adapter.RealPipeline()
+
+    pipe.build_package(outcome, (docs[0].doc_id,), "S\n")
+    one = (root / "upload_package" / "README_START_HERE.txt").read_text(
+        encoding="utf-8")
+    pipe.build_package(outcome, tuple(d.doc_id for d in docs), "S\n")
+    every = (root / "upload_package" / "README_START_HERE.txt").read_text(
+        encoding="utf-8")
+
+    def headline(text: str) -> str:
+        return next(ln for ln in text.splitlines() if "Estimated size:" in ln)
+
+    assert headline(one) != headline(every)
+
+
+def test_build_package_refuses_an_empty_scope(real_run):
+    """The seam's contract is that an adapter which cannot do Path A OMITS the
+    method. A call that reaches here is one the screen believes will produce a
+    package, so returning an empty result would leave a button that appears to
+    work."""
+    with pytest.raises(ValueError):
+        adapter.RealPipeline().build_package(real_run[0], ("LI-99999",), "S\n")
+
+
+def test_build_package_refuses_a_run_that_published_nothing(real_run):
+    from dataclasses import replace
+
+    with pytest.raises(ValueError):
+        adapter.RealPipeline().build_package(
+            replace(real_run[0], published=False),
+            (real_run[0].result.documents[0].doc_id,), "S\n")
+
+
+def test_the_real_adapter_offers_both_A_12_hooks():
+    """The GUI probes for these by ``getattr`` and disables the action WITH THE
+    REASON when they are absent (A-12). Absent is what they were: Path A was
+    permanently disabled and Path B said the pipeline had not looked."""
+    pipe = adapter.RealPipeline()
+    assert callable(getattr(pipe, "build_package", None))
+    assert callable(getattr(pipe, "matter_layout_note", None))
+
+
+def test_the_handoff_SCREEN_drives_the_real_adapter_end_to_end(real_run):
+    """Track E §6.1/§6.2/§6.3, closed.
+
+    Both §8 screens were built against duck-typed hooks that only the mock
+    implemented, and Track E recorded plainly that neither had been driven by a
+    real pipeline and that no package had ever been built. This drives the real
+    ``MainWindow`` — real adapter, real run, real ``upload_package/`` on disk —
+    through the same signals the operator's clicks emit.
+    """
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from dociq.emit.handoff import README_NAME, assert_only_sanctioned
+    from dociq.gui.main_window import MainWindow
+    from dociq.gui.view_models import SCOPE_TYPES, PackageScope
+
+    outcome, _events, root = real_run
+    QApplication.instance() or QApplication([])
+    set_pipeline(None)
+    window = MainWindow()
+    try:
+        assert isinstance(window._pipeline, adapter.RealPipeline)
+        window.show_outcome(outcome)
+        window.show_handoff()
+
+        # Path B: the screen's note is the CHECKED one, not the mock's words.
+        view = window.handoff._view
+        assert view.path_b_ready()
+        assert view.path_b_note().startswith("CHECKED")
+        assert not view.package_blocker(), view.package_blocker()
+
+        # Path A: scope it the way the screen does, then press the button.
+        kind = view.doc_types[0]
+        window._rescope(PackageScope(kind=SCOPE_TYPES, doc_types=(kind,)))
+        window._build_package(window._scope)
+
+        pkg = root / "upload_package"
+        assert pkg.is_dir()
+        names = assert_only_sanctioned(pkg)
+        assert README_NAME in names
+        head = (pkg / README_NAME).read_text(encoding="utf-8")
+        assert head.startswith("SCOPE OF THIS PACKAGE")
+        expected = window.handoff._view.scope_statement()
+        assert expected.strip() in head, (
+            "the package does not carry the statement the operator was shown"
+        )
+    finally:
+        window.close()

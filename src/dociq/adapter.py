@@ -41,6 +41,7 @@ from dociq.gui.pipeline import (
     Reconciliation,
     ReconciliationRow,
     ReductionLever,
+    PackageResult,
     ReductionPlan,
     RunOutcome,
     RunRequest,
@@ -476,6 +477,105 @@ class RealPipeline:
             plan=_plan(result, before) if outcome.published else None,
             termination=outcome.termination,
             published=outcome.published,
+        )
+
+    # -- §8 handoff (amendment A-12) ----------------------------------------
+
+    def matter_layout_note(self, outcome: RunOutcome) -> str:
+        """§8 Path B, **having looked** — the folder checked, not described.
+
+        :func:`dociq.emit.handoff.expert_assist_layout` inspects the matter
+        folder for the four things Expert Assist reads. Reporting what it found
+        rather than what §7 says it writes is the entire value: Path B's claim is
+        "DocIQ writes where evidence-mining already looks", and that is precisely
+        the sentence worth checking before an operator relies on it.
+
+        Returns "" when there is nothing to look at — a run that published
+        nothing, or no output root — so the screen says the pipeline did not
+        look instead of implying a verified folder.
+        """
+        from dociq.emit.handoff import expert_assist_layout
+        from dociq.emit.paths import OutputLayout
+
+        if not outcome.output_root or not outcome.published:
+            return ""
+        found = expert_assist_layout(OutputLayout.at(outcome.output_root))
+        if found.missing:
+            return (
+                "CHECKED — and this folder is NOT ready for Expert Assist. "
+                f"Present: {', '.join(found.present) or 'nothing'}. MISSING: "
+                f"{', '.join(found.missing)}. Expert Assist reads these by name "
+                "from the matter root; re-run the matter before pointing Claude "
+                "at it."
+            )
+        return (
+            "CHECKED on disk just now — all four are present at the paths "
+            f"Expert Assist reads them from: {', '.join(found.present)}.\n\n"
+            + found.instructions
+        )
+
+    def build_package(
+        self,
+        outcome: RunOutcome,
+        doc_ids: tuple[str, ...],
+        scope_statement: str,
+    ) -> PackageResult:
+        """§8 Path A: write ``upload_package/`` for exactly ``doc_ids`` (A-12).
+
+        **The token figure is re-measured over the selected documents**, not
+        read from :attr:`RunOutcome.tokens_after`. That field describes the whole
+        corpus; putting it in a twelve-document package's README would tell the
+        recipient the folder in front of them is 70× a Project's capacity when it
+        may be a hundredth of that — and the README's capacity sentence is
+        derived from it, so the error would arrive as advice.
+
+        Raises rather than returning an empty result when the scope selects
+        nothing: the seam's contract is that an adapter which cannot do Path A
+        omits the method, so a call that reaches here is a call the screen
+        believes will produce a package.
+        """
+        from dociq.emit.handoff import build_upload_package
+        from dociq.emit.paths import OutputLayout
+
+        if not outcome.published or not outcome.output_root:
+            raise ValueError(
+                "This run published no deliverables, so there is no clean_text/ "
+                "to build a package from."
+            )
+        wanted = set(doc_ids)
+        selected = [d for d in outcome.result.documents if d.doc_id in wanted]
+        if not selected:
+            raise ValueError(
+                "This scope selects no documents; there is nothing to package."
+            )
+
+        texts = [page.text for doc in selected for page in doc.pages
+                 if page.disposition is not Disposition.DROP]
+        estimate = vt.estimate_for_texts(texts)
+
+        package = build_upload_package(
+            OutputLayout.at(outcome.output_root),
+            matter_name=Path(outcome.output_root).name,
+            document_count=len(selected),
+            page_count=sum(len(doc.pages) for doc in selected),
+            estimate=estimate,
+            has_bates=any(page.bates for doc in selected for page in doc.pages),
+            id_regime=outcome.result.config.id_regime.value,
+            doc_ids=tuple(doc_ids),
+            scope_statement=scope_statement,
+            unsupported=len(outcome.result.unsupported),
+        )
+        return PackageResult(
+            root=str(package.root),
+            file_count=package.check.file_count,
+            total_bytes=package.check.total_bytes,
+            # The statement the package ACTUALLY carries, read back off the
+            # result rather than echoed from the argument. They differ exactly
+            # when the caller passed nothing and the emit layer authored the
+            # default — and the screen's whole job here is to show the operator
+            # what the recipient will read.
+            scope_statement=package.scope_statement,
+            doc_count=package.doc_count,
         )
 
     # -- internals ----------------------------------------------------------
