@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import random
 import re
@@ -324,6 +325,35 @@ class AccuracyReport:
         return "\n".join(lines)
 
 
+FOOTER_REOCR = True
+"""Whether the run exercises D-25's targeted footer re-OCR.
+
+A module global rather than a parameter threaded through four functions,
+because it is a property of the RUN and the tool runs one measurement at a
+time. ``--no-footer-reocr`` sets it False, which is how the before-number is
+produced with the after-code — the only honest way to attribute a delta.
+"""
+
+
+def has_ocr_pages(path: Path) -> bool | None:
+    """Whether this PDF has any page DocIQ would have to OCR.
+
+    Cheap: the text layer only, no recognition. It exists because the D-25 band
+    pass CANNOT change a document with no such page — it is reached only when
+    the OCR map is non-empty — so a re-measurement may skip those documents and
+    carry their baseline result forward without weakening the figure. The
+    argument is asserted in ``tests/test_footer_reocr.py``, not just stated.
+    """
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(path.read_bytes()))
+        return any(len((pg.extract_text() or "").strip()) < ex._NATIVE_TEXT_FLOOR
+                   for pg in reader.pages)
+    except Exception:
+        return None
+
+
 def _document_from_pdf(path: Path, rel: str) -> DocumentRecord | None:
     """Extract one PDF through DocIQ's OWN extractor.
 
@@ -336,7 +366,8 @@ def _document_from_pdf(path: Path, rel: str) -> DocumentRecord | None:
     except OSError:
         return None
     try:
-        pages, notes = ex._extract_pdf(raw, ex.ExtractOptions(ocr_enabled=True))
+        pages, notes = ex._extract_pdf(
+            raw, ex.ExtractOptions(ocr_enabled=True, footer_reocr=FOOTER_REOCR))
     except Exception as exc:
         print(f"    ! {rel}: {type(exc).__name__}: {exc}")
         return None
@@ -526,8 +557,21 @@ def main(argv: list[str] | None = None) -> int:
                          "comparison. Disclosed, never silent: the skipped "
                          "files are listed in the report.")
     ap.add_argument("--seed", type=int, default=20240529)
+    ap.add_argument("--no-footer-reocr", action="store_true",
+                    help="run with D-25's targeted footer re-OCR disabled, to "
+                         "produce the before-number with the after-code")
+    ap.add_argument("--only-ocr-docs", action="store_true",
+                    help="restrict the page-level comparison to sampled "
+                         "documents that contain at least one page DocIQ must "
+                         "OCR. The footer re-OCR cannot change any other "
+                         "document, so this measures exactly the pages that "
+                         "can move — at a fraction of the machine time. The "
+                         "documents dropped are counted in the report.")
     ap.add_argument("--out", default="", help="write the JSON report here")
     args = ap.parse_args(argv)
+
+    global FOOTER_REOCR
+    FOOTER_REOCR = not args.no_footer_reocr
 
     reports: dict = {"generated": time.strftime("%Y-%m-%dT%H:%M:%S"),
                      "method": "D-23: whole-set continuity + sampled page-level "
@@ -598,7 +642,24 @@ def main(argv: list[str] | None = None) -> int:
             rng = random.Random(args.seed)
             rng.shuffle(candidates)
             chosen = sorted(candidates[:args.sample_docs], key=lambda t: t[1])
+            dropped_native = 0
+            if args.only_ocr_docs:
+                keep = []
+                for path, rel, gt in chosen:
+                    got = has_ocr_pages(path)
+                    if got is False:
+                        dropped_native += 1
+                        continue
+                    keep.append((path, rel, gt))   # None (unreadable) is kept
+                chosen = keep
             rep = measure_accuracy(chosen, f"page-level vs {opt.name}")
+            rep.notes.append(f"footer re-OCR (D-25): "
+                             f"{'ON' if FOOTER_REOCR else 'OFF'}")
+            if args.only_ocr_docs:
+                rep.notes.append(
+                    f"--only-ocr-docs: {dropped_native} sampled document(s) "
+                    f"have no page DocIQ must OCR and were not re-measured; "
+                    f"the footer re-OCR cannot reach them")
             rep.notes.append(
                 f"sampled {len(chosen)} of {len(candidates)} eligible "
                 f"document(s) (seed {args.seed}); "

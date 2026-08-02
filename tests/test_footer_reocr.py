@@ -468,3 +468,25 @@ def test_the_calibration_is_identical_run_to_run(counting_bands, monkeypatch,
     b = ex._extract_pdf(raw, ex.ExtractOptions())
     assert [p.text for p in a[0]] == [p.text for p in b[0]]
     assert a[1] == b[1]
+
+
+def test_a_document_with_no_OCR_page_is_untouched_by_the_band_pass(monkeypatch):
+    """The load-bearing premise of the ``--only-ocr-docs`` re-measurement.
+
+    If this were false, restricting a re-measurement to documents that contain
+    an OCR'd page would silently drop pages that had in fact changed, and the
+    reported figure would be built on a false argument rather than on a
+    property of the code.
+    """
+    called = []
+    monkeypatch.setattr(ex, "_reocr_bands",
+                        lambda raw, pages: called.append(pages) or {})
+    raw = (FIXTURES / "01_native_report.pdf").read_bytes()
+    before, notes_before = ex._extract_pdf(raw, ex.ExtractOptions(
+        footer_reocr=False))
+    after, notes_after = ex._extract_pdf(raw, ex.ExtractOptions(
+        footer_reocr=True))
+    assert called == []
+    assert all(p.kind is PageKind.NATIVE for p in before)
+    assert [p.text for p in before] == [p.text for p in after]
+    assert notes_before == notes_after
