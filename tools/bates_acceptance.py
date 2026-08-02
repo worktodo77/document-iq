@@ -543,18 +543,34 @@ def negative_control(root: Path, limit: int) -> AccuracyReport:
     # the process before it reported. `propose_format` needs a corpus view, so
     # the DOCUMENTS are streamed and only their *candidates* are kept — the
     # tiny records detection actually reasons over.
+    # PROGRESS IS PRINTED PER DOCUMENT, and that is not decoration. A run of
+    # this over the real corpus went eighteen thousand CPU-seconds and then sat
+    # at ~0.01 cores and ~0 bytes/s of I/O, alive and producing nothing — and
+    # because the loop printed only at the end there was no way to tell a slow
+    # corpus from a hung one, or to name the document it hung on. The tool's own
+    # docstring already says a run that dies without printing is not a bound;
+    # this loop was the last place that was still true.
     all_candidates: list[B.BatesCandidate] = []
     pages_by_key: dict[tuple, int] = {}
-    for p in pdfs:
+    for n, p in enumerate(pdfs, 1):
+        t_doc = time.perf_counter()
+        print(f"  [{n}/{len(pdfs)}] {p.name} ...", end="", flush=True)
         d = _document_from_pdf(p, p.name)
         if d is None:
+            print(" UNREADABLE", flush=True)
             continue
         rep.documents += 1
         rep.pages_compared += len(d.pages)
         from dociq.contracts import document_sort_key
 
         pages_by_key[document_sort_key(d)] = len(d.pages)
-        all_candidates.extend(B.detect_candidates((d,)))
+        cands = B.detect_candidates((d,))
+        all_candidates.extend(cands)
+        n_ocr = sum(1 for pg in d.pages if pg.kind.value == "ocr")
+        print(f" {len(d.pages)}p ({n_ocr} ocr), {len(cands)} candidate(s), "
+              f"{time.perf_counter() - t_doc:.1f}s "
+              f"[running total {rep.pages_compared} pages, "
+              f"{len(all_candidates)} candidates]", flush=True)
         del d
 
     # Re-apply propose_format's own thresholds to the streamed candidates. The
