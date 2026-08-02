@@ -647,6 +647,20 @@ sheet size a production contains. Beyond it the band is read left to right and
 the REMAINDER IS NOT READ — a stamp out there is a miss, which is the failure
 direction §4 asks for, and the ceiling is stated here rather than discovered."""
 
+_FOOTER_PROBE_PAGES = 4
+"""How many of a document's qualifying pages are probed on BOTH bands before
+the pass decides which band, if either, reads this production.
+
+Four rather than one because a production's first scanned page can be a cover
+sheet, a photograph, or a fax header, and one unlucky page should not switch the
+pass off for a 300-page document. Four rather than forty because the decision is
+about where the production burns its stamp, and that does not vary page to page.
+
+Stated rather than tuned: a stamped production resolves the very first page
+probed, so this bound costs it nothing; an unreadable scan pays eight
+recognitions instead of thousands, and the pages it declines to read are
+reported in the document's notes."""
+
 _FOOTER_CHUNK_PAGES = 8
 """Pages whose tiles are rasterized before any of them is recognized. Bounds
 peak memory the way :func:`_ocr_pdf_pages` does, and lower here because one page
@@ -732,16 +746,9 @@ def _band_tokens(arr) -> tuple[tuple[str, ...], tuple[float, ...]]:
     return tokens, tuple(confs)
 
 
-def _reocr_bands(raw: bytes, pages: list[int]
-                 ) -> dict[int, tuple[tuple[str, ...], tuple[float, ...]]]:
-    """Re-read the stamp band of the given 0-based pages.
-
-    The BOTTOM band is read first for every page in ``pages``; the TOP band is
-    read only for the pages the bottom band did not resolve. §4 says "page
-    corners/footers" and a header-stamped production is an ordinary thing, so
-    the top of the page is covered rather than assumed away — but it is covered
-    second and only where the first pass came back empty, which is what keeps
-    the cost proportional to the problem instead of to the corpus.
+def _band_pass(doc, idxs: list[int], top: bool, pool,
+               out: dict[int, tuple[tuple[str, ...], tuple[float, ...]]]) -> bool:
+    """Read one band of the given pages into ``out``. True if anything read.
 
     **Assembled in submission order, never completion order.** Tiles are
     submitted page by page and left to right and their results are consumed in
@@ -749,44 +756,95 @@ def _reocr_bands(raw: bytes, pages: list[int]
     That is the same rule, and the same reason, as :func:`_ocr_pdf_pages`, and
     it is what makes criterion 7 hold over a pass that fans out.
     """
+    recovered = False
+    for c0 in range(0, len(idxs), _FOOTER_CHUNK_PAGES):
+        jobs: list[tuple[int, object]] = []
+        for i in idxs[c0:c0 + _FOOTER_CHUNK_PAGES]:
+            out.setdefault(i, ((), ()))
+            try:
+                tiles = _band_tiles(doc[i], FOOTER_REOCR_DPI,
+                                    FOOTER_REOCR_BAND_PT, top=top)
+            except Exception:
+                continue          # one page that will not rasterize, not the doc
+            jobs.extend((i, pool.submit(_band_tokens, a)) for a in tiles)
+        merged: dict[int, tuple[list[str], list[float]]] = {}
+        for i, fut in jobs:
+            try:
+                toks, confs = fut.result()
+            except Exception:
+                toks, confs = (), ()
+            slot = merged.setdefault(i, ([], []))
+            for tok, conf in zip(toks, confs):
+                if tok in slot[0]:          # the tile overlap sees it twice
+                    continue
+                if len(slot[0]) >= FOOTER_BLOCK_MAX_LINES:
+                    break
+                slot[0].append(tok)
+                slot[1].append(conf)
+        for i, (toks, confs) in merged.items():
+            if toks:
+                out[i] = (tuple(toks), tuple(confs))
+                recovered = True
+    return recovered
+
+
+def _reocr_bands(raw: bytes, pages: list[int]
+                 ) -> dict[int, tuple[tuple[str, ...], tuple[float, ...]]]:
+    """Re-read the stamp band of the given 0-based pages.
+
+    §4 says "page corners/footers", so both the bottom and the top of the page
+    are covered — a header-stamped production is an ordinary thing and assuming
+    it away would be a silent limit.
+
+    **It CALIBRATES, and that is what makes it affordable.** "Only where it can
+    help" is a per-PAGE test and a per-page test is not enough: on an image-only
+    document every page qualifies, and reading two bands of five tiles each on a
+    300-page scan is three thousand recognitions for one document. That is not a
+    hypothetical — it is what a criterion-4 re-run was doing when it passed nine
+    hours and had to be killed.
+
+    Where a production burns its stamp is a property of the PRODUCTION, not of
+    the page. So the first :data:`_FOOTER_PROBE_PAGES` qualifying pages are
+    probed on both bands; after that only the band(s) that actually read
+    something are used, and if NEITHER read anything the pass stops for that
+    document. A scan whose footers cannot be read costs eight recognitions
+    instead of three thousand; a stamped production keeps every page it was
+    going to get, because a production that stamps its footer resolves the very
+    first page probed.
+
+    The calibration is a function of the page contents in page order, so it is
+    identical run to run for the same bytes. The pages it declines to read are
+    the caller's to disclose: every page this was ASKED about has an entry in
+    the returned mapping, so ``len(pages) - len(result)`` is the number skipped.
+    """
     import fitz
 
     out: dict[int, tuple[tuple[str, ...], tuple[float, ...]]] = {}
     pool = _ocr_page_pool()
     with fitz.open(stream=raw, filetype="pdf") as doc:
         idxs = [i for i in pages if 0 <= i < len(doc)]
+        if not idxs:
+            return out
+        probe, rest = idxs[:_FOOTER_PROBE_PAGES], idxs[_FOOTER_PROBE_PAGES:]
+
+        # Phase 1 — probe both bands, bottom first, on the opening pages.
+        productive: set[bool] = set()
         for top in (False, True):
-            todo = [i for i in idxs if not out.get(i, ((), ()))[0]]
+            todo = [i for i in probe if not out.get(i, ((), ()))[0]]
             if not todo:
                 break
-            for c0 in range(0, len(todo), _FOOTER_CHUNK_PAGES):
-                jobs: list[tuple[int, object]] = []
-                for i in todo[c0:c0 + _FOOTER_CHUNK_PAGES]:
-                    try:
-                        tiles = _band_tiles(doc[i], FOOTER_REOCR_DPI,
-                                            FOOTER_REOCR_BAND_PT, top=top)
-                    except Exception:
-                        out.setdefault(i, ((), ()))  # one bad page, not the doc
-                        continue
-                    out.setdefault(i, ((), ()))
-                    jobs.extend((i, pool.submit(_band_tokens, a)) for a in tiles)
-                merged: dict[int, tuple[list[str], list[float]]] = {}
-                for i, fut in jobs:
-                    try:
-                        toks, confs = fut.result()
-                    except Exception:
-                        toks, confs = (), ()
-                    slot = merged.setdefault(i, ([], []))
-                    for tok, conf in zip(toks, confs):
-                        if tok in slot[0]:      # the tile overlap sees it twice
-                            continue
-                        if len(slot[0]) >= FOOTER_BLOCK_MAX_LINES:
-                            break
-                        slot[0].append(tok)
-                        slot[1].append(conf)
-                for i, (toks, confs) in merged.items():
-                    if toks:
-                        out[i] = (tuple(toks), tuple(confs))
+            if _band_pass(doc, todo, top, pool, out):
+                productive.add(top)
+
+        # Phase 2 — the remainder, on the bands that demonstrably read this
+        # production. Nothing productive means nothing is read at all.
+        for top in (False, True):
+            if top not in productive:
+                continue
+            todo = [i for i in rest if not out.get(i, ((), ()))[0]]
+            if not todo:
+                break
+            _band_pass(doc, todo, top, pool, out)
     return out
 
 
@@ -994,6 +1052,7 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     # produced nothing stamp-shaped anywhere in the Bates zone. The trigger is
     # a pure function of the text just read, so it is identical run to run.
     reocr: dict[int, tuple[tuple[str, ...], tuple[float, ...]]] = {}
+    n_footer_declined = 0
     if ocr_by_page and opt.footer_reocr:
         from ..identify.bates import zone_has_candidate
 
@@ -1003,6 +1062,7 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
         if retry:
             try:
                 reocr = _reocr_bands(raw, retry)
+                n_footer_declined = len(retry) - len(reocr)
             except Exception as exc:
                 notes.append(f"{M_OCR_FOOTER}: {exc}")
 
@@ -1065,6 +1125,16 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                      f"({FOOTER_REOCR_DPI} dpi, "
                      f"{FOOTER_REOCR_BAND_PT / 72:.2f}in band, at most "
                      f"{FOOTER_BLOCK_MAX_LINES} token(s) per page)")
+    if n_footer_declined:
+        # The calibration bound, disclosed the same way every other bound in
+        # this module is: neither band read a stamp on the pages it probed, so
+        # the rest of the document was not re-read. Those pages are misses, and
+        # an operator can see that they were never looked at rather than looked
+        # at and found wanting.
+        notes.append(f"{n_footer_declined} page(s) were not re-read by the "
+                     f"targeted footer re-OCR: neither the footer nor the "
+                     f"header band produced a stamp on the first "
+                     f"{_FOOTER_PROBE_PAGES} page(s) probed in this document")
     return pages, notes
 
 

@@ -376,3 +376,95 @@ def test_a_degenerate_page_cannot_make_the_band_pass_unbounded(size):
     thousand recognitions."""
     tiles, _px = _tiles(*size, top=False)
     assert len(tiles) <= ex._FOOTER_MAX_TILES, (size, len(tiles))
+
+
+# ---------------------------------------------------------------------------
+# the calibration — what makes this affordable on a whole corpus
+# ---------------------------------------------------------------------------
+
+
+def _many_page_scan(tmp_path, n_pages: int):
+    """An image-only PDF of ``n_pages`` — the shape that made the cost explode."""
+    import fitz
+
+    doc = fitz.open()
+    for _ in range(n_pages):
+        doc.new_page(width=612, height=792)
+    path = tmp_path / "scan.pdf"
+    doc.save(str(path))
+    doc.close()
+    return path.read_bytes()
+
+
+@pytest.fixture
+def counting_bands(monkeypatch):
+    """Count every band read, and let a test choose what each band returns."""
+    seen: list[tuple[int, bool]] = []
+
+    def fake_band_tiles(page, dpi, band, *, top):
+        seen.append((page.number, top))
+        return [("band", page.number, top)]
+
+    monkeypatch.setattr(ex, "_band_tiles", fake_band_tiles)
+    monkeypatch.setattr(ex, "_page_array", lambda page: ("page", page.number))
+    monkeypatch.setattr(ex, "_ocr_array",
+                        lambda arr: ("scanned body text, no stamp", [0.8]))
+    return seen
+
+
+def test_an_unreadable_scan_costs_the_probe_and_nothing_more(
+        counting_bands, monkeypatch, tmp_path):
+    """The nine-hour defect, as an assertion.
+
+    Two bands x five tiles x 300 pages is three thousand recognitions for one
+    document. Neither band reads anything here, so the pass must stop after the
+    probe."""
+    monkeypatch.setattr(ex, "ocr_lines", lambda arr: [_Line("no stamp anywhere")])
+    raw = _many_page_scan(tmp_path, 60)
+    _pages, notes = ex._extract_pdf(raw, ex.ExtractOptions())
+    assert len(counting_bands) == 2 * ex._FOOTER_PROBE_PAGES
+    declined = [n for n in notes if "were not re-read" in n]
+    assert len(declined) == 1
+    assert f"{60 - ex._FOOTER_PROBE_PAGES} page(s)" in declined[0]
+
+
+def test_a_stamped_production_is_not_cut_short_by_the_calibration(
+        counting_bands, monkeypatch, tmp_path):
+    """The bound must cost a real production nothing: its first probed page
+    resolves, so every page is read — and only on the band that worked."""
+    monkeypatch.setattr(ex, "ocr_lines", lambda arr: (
+        [_Line(f"iiCON{900000 + arr[1]}", 0.95)] if not arr[2] else [_Line("")]))
+    raw = _many_page_scan(tmp_path, 20)
+    pages, _notes = ex._extract_pdf(raw, ex.ExtractOptions())
+    assert [p for p in counting_bands if p[1]] == []      # top never read
+    assert len(counting_bands) == 20                      # every page, once
+    assert all(p.text.endswith(f"iiCON{900000 + i}") for i, p in enumerate(pages))
+
+
+def test_a_HEADER_stamped_production_calibrates_onto_the_top_band(
+        counting_bands, monkeypatch, tmp_path):
+    """§4 says "corners/footers". A header-stamped production is ordinary, and
+    it must not cost every page a wasted footer read after the probe."""
+    monkeypatch.setattr(ex, "ocr_lines", lambda arr: (
+        [_Line(f"iiCON{900000 + arr[1]}", 0.95)] if arr[2] else [_Line("body")]))
+    raw = _many_page_scan(tmp_path, 12)
+    pages, _notes = ex._extract_pdf(raw, ex.ExtractOptions())
+    after_probe = [p for p in counting_bands
+                   if p[0] >= ex._FOOTER_PROBE_PAGES]
+    assert after_probe and all(top for _i, top in after_probe)
+    assert all(p.text.endswith(f"iiCON{900000 + i}") for i, p in enumerate(pages))
+
+
+@pytest.mark.parametrize("run", range(REPEATS))
+def test_the_calibration_is_identical_run_to_run(counting_bands, monkeypatch,
+                                                 tmp_path, run):
+    """A decision made from a threaded pass is a determinism hazard unless it
+    is a function of the page contents in page order."""
+    monkeypatch.setattr(ex, "ocr_lines", lambda arr: (
+        [_Line(f"iiCON{900000 + arr[1]}", 0.95)]
+        if not arr[2] and arr[1] % 3 == 0 else [_Line("")]))
+    raw = _many_page_scan(tmp_path, 15)
+    a = ex._extract_pdf(raw, ex.ExtractOptions())
+    b = ex._extract_pdf(raw, ex.ExtractOptions())
+    assert [p.text for p in a[0]] == [p.text for p in b[0]]
+    assert a[1] == b[1]
