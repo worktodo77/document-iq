@@ -99,6 +99,54 @@ be.
 Recorded rather than quietly amended in place, because the ruling was made on a
 factual claim about client material and the claim was checked and found wrong.
 
+| D-27 | Schedule / activity tables — the corpus's largest lever | **Offer as a DROP lever, DEFAULT OFF (Alex, 2026-08-01).** Measured over 36 real documents / 1,535 pages / 3.34M characters: schedule and activity tables are **33.9% of the corpus text across 258 pages** — the only category whose removal changes whether a matter fits, and roughly **170× the photographs**. They are P6 activity listings pasted into progress reports, and where the native `.xer` files are already in evidence the pasted grid is a lossy render of a better source. Ruling: the template recognizes them as a section type and offers them in the checklist with that reason stated on the row, but never drops them unless the expert engages the lever. Rejected: defaulting the lever ON where schedule files are present in the matter folder (it would make a substantive evidentiary decision on a file-presence heuristic, and a pasted table that *differs* from the native file is itself evidence); and refusing to offer them at all (forfeits the only lever that materially reduces this corpus and makes the reduction feature close to cosmetic). | 2026-08-01 |
+
+## Measured: where the tokens actually are, and what recognizes them (2026-08-01)
+
+Design pass for D-24, over 36 documents / 1,535 pages / 3,337,999 characters of
+the real record. Full analysis in `docs/design/section_taxonomy.md`.
+
+| category (deterministically detectable) | pages | share of text |
+|---|---:|---:|
+| narrative & everything else | 1,140 | 52.5% |
+| **schedule / activity tables** | 258 | **33.9%** |
+| page furniture (repeated header/footer lines) | — | 8.0% |
+| table of contents | 65 | 5.4% |
+| photo / figure / divider pages | 54 | **0.2%** |
+| empty / image-only | 18 | 0.0% |
+
+**Two results that change the design.**
+
+**Photographs are worth 0.2%, not the headline saving.** The Sprint-1 mockups
+advertise "Photo logs" as the largest expert lever at −2.49M tokens; that is
+wrong by about two orders of magnitude. A photo page carries almost no *text*,
+and tokens come from text. Photo logs are a **page-count** lever, not a token
+lever — and Path B, which D-20 makes the primary route, does not care about page
+count. The waterfall must stop showing a token saving the corpus cannot support.
+
+**A heading regex finds letterhead, not sections.** Matching heading-shaped
+lines returns, in frequency order, `FPSO ALMIRANTE BARROSO MV32` (1,017),
+`PETROBRAS` (981), `WEEKLY PROGRESS REPORT NO. #` (320), then document and
+revision numbers. The obvious recognition mechanism is **excluded on measurement**
+— it would have looked reasonable, passed review, and silently dropped the wrong
+pages.
+
+**What works instead: the document's own outline.** 40% of the PDFs carry PDF
+bookmarks with a real section vocabulary — `EXECUTIVE SUMMARY`, `PROGRESS
+PHOTOS`, `HSE`, `CRITICAL PATH NARRATIVE`, `APPENDICES`, `OVERALL PROGRESS
+S-CURVE`. Where an outline exists the section→page map is a **lookup, not an
+inference**, and it is the document's own statement about itself. Recognition is
+therefore tiered — outline → the document's own TOC → measurable page-class rules
+→ expert-entered page ranges — with the tier recorded per page, because the tiers
+are not equally strong and rendering them identically would be this feature's
+quiet lie.
+
+**Honest consequence:** the real reduction story on this corpus is furniture and
+TOC (13.4%, safe, largely automatic) plus schedule tables (33.9%, the expert's
+call under D-27). Everything else is a rounding error. That is a smaller and more
+defensible claim than the mockups make, and it is the claim the product should
+make.
+
 ## Sprint-1 verification log
 
 **Track B master-index robustness (2026-07-30).** The Track B critic found a
