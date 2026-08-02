@@ -671,3 +671,27 @@ def test_summary_never_calls_the_token_figure_a_floor(tmp_path):
         "the absence of a floor is a fact the reader needs stated, not merely "
         "a phrase the PDF avoids"
     )
+
+
+def test_the_subset_filter_keys_on_doc_ids_not_file_stems(tmp_path, monkeypatch):
+    """FAIL-BEFORE: keying the filter on ``Path.stem`` works only while
+    ``safe_component`` is the identity on a Doc ID. A future ID that needed
+    sanitizing would filter ``sources.json`` and ``document_index.csv`` to
+    nothing — a package with text files and an empty manifest, which is worse
+    than either failing loudly."""
+    import dociq.emit.handoff as h
+
+    layout, docs = full_matter(tmp_path)
+    # Force the sanitizer to bite, so stem != doc_id for every document.
+    monkeypatch.setattr(h, "safe_component", lambda name: "x_" + name)
+    for doc in docs:
+        (layout.clean_text / f"x_{doc.doc_id}.txt").write_text("x", encoding="utf-8")
+
+    pkg = h.build_upload_package(
+        layout, doc_ids=(docs[0].doc_id,), scope_statement="S\n")
+    sources = json.loads(
+        (layout.upload_package / "sources.json").read_text(encoding="utf-8"))
+    assert set(sources) == {docs[0].doc_id}, (
+        "the filter dropped every row — it is keyed on the file name, not the ID"
+    )
+    assert pkg.missing == ()

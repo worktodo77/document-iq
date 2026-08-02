@@ -382,12 +382,19 @@ def build_upload_package(
     available = _text_files(layout)
     if doc_ids is None:
         selected, missing, subset = available, (), False
+        keep: set[str] = set()
     else:
         wanted = {f"{safe_component(d)}.txt": d for d in doc_ids}
         selected = [p for p in available if p.name in wanted]
         found = {p.name for p in selected}
         missing = tuple(sorted(d for n, d in wanted.items() if n not in found))
         subset = len(selected) != len(available)
+        # The Doc IDs themselves, NOT the file stems. They are equal today —
+        # ``safe_component`` is the identity on a Doc ID by construction — but
+        # ``sources.json`` and ``document_index.csv`` are keyed by Doc ID, so a
+        # future ID that needed sanitizing would filter both to nothing and
+        # produce a package with text files and an empty manifest.
+        keep = {wanted[n] for n in found}
 
     copied: list[str] = []
     oversized: list[tuple[str, int]] = []
@@ -405,7 +412,6 @@ def build_upload_package(
         shutil.copyfile(src, dst)
         record(dst.name, dst.stat().st_size)
 
-    keep = {p.stem for p in selected}
     for src, filtered in (
         (layout.sources_json, _filtered_sources(layout, keep) if subset else None),
         (layout.index_csv, _filtered_index_csv(layout, keep) if subset else None),
