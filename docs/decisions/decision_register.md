@@ -71,6 +71,34 @@ reported separately and never averaged, because the average would be the
 flattering figure and the less honest one. Detail and results in
 `docs/verification/track_f_sprint2_2026-08-01.md` §4.
 
+| D-24 | Built-in profiles — should DocIQ ship any DROP rules? | **Ship STANDARD TEMPLATES keyed to PAGE TYPE, not to any corpus project (Alex, 2026-08-01).** Track D shipped no built-in profiles at all, reasoning that `SectionRule.validate()` refuses a DROP rule without a "who approved" field, so a profile in the box would be an omission decision no expert made. The reasoning is sound and the outcome is not: an analyst opening a matter gets the evidentiary guarantees and none of the reduction until somebody authors YAML. Ruling: there **should** be standard templates for what *types of pages* get dropped, and they must **not be attributable to any of the corpus projects** — no "MODEC MPR profile", no "Petrobras CER profile", because a template named after a matter implies decisions taken on that matter. ⏳ **The template content is NOT yet designed** — Alex: "we will need to figure this out." Open sub-questions for a dedicated design pass: which page types are generic enough to be safe defaults (photo logs? transmittal sheets? distribution lists?); how a template satisfies the approver check without naming an expert who never saw the matter; and whether templates arrive pre-engaged or as an explicit opt-in the checklist forces the expert through. Until that pass lands, Track D's "no profile — keep every page" remains the only built-in, which is the safe direction to be wrong in. | 2026-08-01 |
+
+| D-25 | Acceptance criterion 4 shortfall — 91.5% against a ≥99% bar | **Close it with TARGETED FOOTER RE-OCR, not an engine swap (Alex, 2026-08-01).** Track F measured criterion 4 against the MNFV production's own load files: **593/648 = 91.512% overall, 0 wrong, 0 false positives, 55 missed** — decomposing to **100.000% on native-text pages (568/568)** and **31.250% on OCR'd pages (25/80)**. Every shortfall is an absent locator, never an incorrect one. The residue is rapidocr failing to read a small footer stamp on a whole-page pass optimized for body text. Ruling: treat the Bates stamp as **its own recognition problem** — crop the footer zone and re-OCR it at much higher resolution with settings suited to a short alphanumeric string — rather than reopening D-19. Rejected: reopening the Tesseract benchmark (would reverse a ruling one day old and cost sprint time) and conceding the criterion on scanned productions (Bates detection exists precisely for that class of matter). **Recorded plainly: this is the first concrete cost of D-19's "the shipped OCR engine has never been benchmarked against an alternative", and the targeted fix may not reach 99% either — that will be known only after it is built and measured. If it does not, D-19 is back on the table on evidence.** | 2026-08-01 |
+
+| D-26 | Build environment — PyInstaller and the opencv mismatch | **Both authorized (Alex, 2026-08-01).** Install `pyinstaller==6.20.0` into `document-iq\.venv` and declare it in `pyproject.toml` as a build-time dependency, replacing Track F's scratch-directory `PYTHONPATH` workaround — packaging is a Codex #2 merge-gate deliverable and "reproducible from a committed spec plus a documented command" was not true while the build depended on an undocumented staging step. Also remove the stray non-headless `opencv-python` that was installed alongside `opencv-python-headless` and winning at import, so the venv matches its declaration again. That mismatch is exactly the class of gap D-11 was created to close, and the packaged build has already demonstrated the failure mode concretely: it silently produced **no OCR at all** — models present, `ocr_available()` returning True, every scanned page empty — because an import resolved differently than expected. | 2026-08-01 |
+
+## Correction — D-23's premise was wrong (2026-08-01)
+
+D-23 ruled the Bates ground-truth method on the stated basis that "MNFV is
+image-only, so every candidate ground-truth number is itself OCR of a footer
+stamp." **That premise is false.** The MNFV production is a 2,138-document set
+shipping `.OPT` / `.LFP` / `.DAT` / `.LST` load files and an embedded text
+layer, so its ground truth is **authoritative**, not OCR-derived — Track F
+scored criterion 4 against the load files rather than against its own reading.
+
+The **method is unaffected and stands**: whole-set sequence continuity plus a
+hand-checked sample is the right shape regardless of where truth comes from,
+and the continuity half earned itself immediately — it found a real defect in
+the client's own production (`MNFV 2836-2899` and `MNFV 2890-2953` overlap by
+10 numbers), which was flagged and not corrected. What changes is the *stated
+reason*: the acceptance note must not claim ground truth is OCR-derived when it
+is not, and the blind hand-check (100/100 read, 0 disagreements) is
+corroboration of the load files rather than the primary source it was ruled to
+be.
+
+Recorded rather than quietly amended in place, because the ruling was made on a
+factual claim about client material and the claim was checked and found wrong.
+
 ## Sprint-1 verification log
 
 **Track B master-index robustness (2026-07-30).** The Track B critic found a
