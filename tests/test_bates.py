@@ -697,3 +697,341 @@ def test_stamp_tokens_is_stable_over_repeated_calls():
 
     text = "noise iiCON003944 noise\nMNFV 000391 tail\niiCON003945"
     assert len({stamp_tokens(text) for _ in range(30)}) == 1
+
+
+# ---------------------------------------------------------------------------
+# D-28 — prefix repair, and the two gates that make it safe
+# ---------------------------------------------------------------------------
+#
+# rapidocr reads this production's stamp DIGITS correctly and cannot resolve its
+# PREFIX (D-25, measured). The prefix carries no per-page information — every
+# page of a confirmed production has the same one — so D-28 permits repairing
+# it, but ONLY where a wrong-series locator is structurally impossible: a matter
+# with exactly one proposable prefix has no second series to file a page under.
+
+from dociq.contracts import PageKind  # noqa: E402
+from dociq.identify.bates import (  # noqa: E402
+    NEAR_MISS_DOUBLED,
+    NEAR_MISS_SINGLE_DOUBLED,
+    NEAR_MISS_SUBSTITUTION,
+    apply_bates_reported,
+    matter_prefixes,
+    near_miss_rule,
+)
+
+
+def _ocr(n, text):
+    return page(n, text).evolve(kind=PageKind.OCR, ocr_conf=0.9)
+
+
+def _clean_production(prefix="iiCON", n=6, start=900000):
+    """A matter whose every page carries the same prefix — the single-prefix
+    case D-28 permits repair in."""
+    return document("prod/clean.pdf",
+                    tuple(_ocr(i, f"body\n{prefix}{start + i:06d}")
+                          for i in range(1, n + 1)))
+
+
+# --- the distance rule, stated and enumerated ------------------------------
+
+
+@pytest.mark.parametrize("read,rule", [
+    ("jiCON", NEAR_MISS_SUBSTITUTION),        # measured on the corpus
+    ("liCON", NEAR_MISS_SUBSTITUTION),        # measured
+    ("TiCON", NEAR_MISS_SUBSTITUTION),        # measured
+    ("IiCON", None),                          # a pure CASE change is not a
+    ("iiCOn", None),                          # near miss: iiCON and IICON are
+                                              # two formats, deliberately
+    ("iCON", NEAR_MISS_DOUBLED),              # measured
+    ("iiiCON", NEAR_MISS_SINGLE_DOUBLED),
+])
+def test_the_near_miss_rule_is_the_stated_class_not_the_measured_strings(
+        read, rule):
+    assert near_miss_rule(read, "iiCON") == rule
+
+
+@pytest.mark.parametrize("read", [
+    "iiCON",        # exact — a read is not a repair
+    "",
+    "xxCON",        # two edits
+    "iiCOM",        # M/N is not a listed confusion
+    "CON",          # two deletions
+    "iiCONX",       # an insertion that is not a doubling
+    "iiXCON",       # ditto, interior
+    "iiCON0",       # THE DANGEROUS ONE — would steal a digit from the number
+    "0iCON",        # a digit substitution
+    "iiCO",         # deletion of a character that was not doubled
+])
+def test_the_near_miss_rule_refuses_everything_else(read):
+    assert near_miss_rule(read, "iiCON") is None
+
+
+def test_the_rule_never_edits_a_DIGIT():
+    """With a separator-less format the prefix abuts the number. A rule that
+    collapsed ``iiCON0`` to ``iiCON`` would move a digit out of a seven-digit
+    number and produce a locator for a page that does not exist."""
+    assert near_miss_rule("iiCON0", "iiCON") is None
+    assert near_miss_rule("VOL22", "VOL2") is None
+    assert near_miss_rule("VOL2", "VOL22") is None
+
+
+# --- gate 1: the matter must carry exactly one proposable prefix -----------
+
+
+def test_a_single_prefix_matter_permits_repair():
+    doc = _clean_production()
+    misread = document("prod/x.pdf", (_ocr(1, "photo\njiCON900099"),))
+    app = apply_bates_reported((doc, misread), _confirmed())
+    assert app.matter_prefixes == ("iiCON",)
+    assert app.normalization_available is True
+    assert app.refused_reason is None
+    assert [p.bates for p in app.documents[1].pages] == ["iiCON900099"]
+
+
+def test_a_MULTI_prefix_matter_refuses_outright():
+    """The ruling. Not "unlikely" — structurally impossible, because the second
+    series exists and DocIQ cannot tell which one the page belongs to."""
+    a = _clean_production()
+    b = document("prod/other.pdf",
+                 tuple(_ocr(i, f"body\niCON{800000 + i:06d}") for i in range(1, 6)))
+    misread = document("prod/x.pdf", (_ocr(1, "photo\njiCON900099"),))
+    app = apply_bates_reported((a, b, misread), _confirmed())
+    assert len(app.matter_prefixes) > 1
+    assert app.normalization_available is False
+    assert app.normalized == ()
+    assert app.documents[2].pages[0].bates is None      # flagged, as today
+    assert "REFUSED" in (app.refused_reason or "")
+    assert "iCON" in (app.refused_reason or "")
+
+
+def test_the_refusal_survives_the_near_miss_prefix_looking_like_a_series():
+    """The case that decides the acceptance corpus, asserted as behaviour.
+
+    Twenty one-page documents each misread as ``jiCON…`` clear the proposal
+    bars on their own, so the census sees two prefixes and D-28 refuses — even
+    though every one of them IS a misreading of the confirmed prefix. That is
+    the ruled outcome, not a defect: DocIQ cannot tell that case apart from a
+    genuine second production.
+    """
+    clean = _clean_production()
+    noise = [document(f"prod/n{i}.pdf", (_ocr(1, f"photo\njiCON{910000 + i:06d}"),))
+             for i in range(20)]
+    app = apply_bates_reported((clean, *noise), _confirmed())
+    assert app.matter_prefixes == ("iiCON", "jiCON")
+    assert app.normalization_available is False
+    assert app.normalized == ()
+
+
+def test_the_census_ignores_stray_lines_the_way_propose_format_does():
+    """A prefix on two pages of an eighteen-thousand-page record is not a
+    series, and must not switch repair off for a matter that has only one."""
+    clean = _clean_production(n=40)
+    strays = document("reports/long.pdf", tuple(
+        _ocr(i, f"Ordinary report body.\nCP{i:06d}" if i <= 2
+             else "Ordinary report body, no stamp.")
+        for i in range(1, 201)))
+    assert matter_prefixes((clean, strays)) == ("iiCON",)
+
+
+def test_the_census_is_as_permissive_as_the_grammar_and_that_is_recorded():
+    """A finding, asserted so it cannot quietly stop being true.
+
+    The census uses the SAME grammar as detection, and that grammar reads
+    ``sheet 137`` as prefix ``sheet`` + number ``137``. Where such lines fall in
+    the Bates zone often enough to clear the per-document bar, the census sees a
+    second prefix and D-28 refuses. That is the conservative direction and it is
+    the ruled one — but it means ordinary page text, not only a real second
+    production, can switch repair off, and an operator reading
+    ``refused_reason`` should not be surprised by a "prefix" that is a word.
+    """
+    clean = _clean_production(n=6)
+    numbered = document("reports/numbered.pdf", tuple(
+        _ocr(i, f"Section text.\nsheet {100 + i}") for i in range(1, 21)))
+    assert matter_prefixes((clean, numbered)) == ("iiCON", "sheet")
+
+
+def test_a_streaming_caller_must_supply_the_matter_census():
+    """The gate asks about the MATTER. Handed one document, the census would
+    answer about that document — which is how a single-document view reports
+    "one prefix" for a matter that has four."""
+    a = _clean_production()
+    b = document("prod/other.pdf",
+                 tuple(_ocr(i, f"body\niCON{800000 + i:06d}") for i in range(1, 6)))
+    # a document that, seen ALONE, looks like a clean single-prefix matter
+    streamed = document("prod/x.pdf", (
+        _ocr(1, "body\niiCON900201"),
+        _ocr(2, "body\niiCON900202"),
+        _ocr(3, "photo\njiCON900203"),
+    ))
+    census = matter_prefixes((a, b, streamed))
+    assert len(census) > 1
+    # streamed, WITHOUT the census: the gate is asked about one document
+    naive = apply_bates_reported((streamed,), _confirmed())
+    assert naive.matter_prefixes == ("iiCON",)           # the wrong population
+    assert naive.normalization_available is True
+    assert naive.documents[0].pages[2].bates == "iiCON900203"
+    # streamed, WITH it: the matter's answer governs and repair is refused
+    correct = apply_bates_reported((streamed,), _confirmed(),
+                                   matter_prefix_census=census)
+    assert correct.normalization_available is False
+    assert correct.documents[0].pages[2].bates is None
+
+
+# --- gate 2: only pages DocIQ had to OCR -----------------------------------
+
+
+def test_a_NATIVE_page_is_never_repaired():
+    """A text layer is exact. A prefix that differs there is a real difference
+    in the document, not a misreading of it."""
+    clean = _clean_production()
+    native = document("prod/native.pdf", (page(1, "body\njiCON900099"),))
+    app = apply_bates_reported((clean, native), _confirmed())
+    assert app.normalization_available is True
+    assert app.normalized == ()
+    assert app.documents[1].pages[0].bates is None
+
+
+# --- it can never produce a WRONG locator ---------------------------------
+
+
+@pytest.mark.parametrize("bad", [
+    "jiCON90009",        # 5 digits, not 6
+    "jiCON9000999",      # 7 digits
+    "jiCON 900099",      # a separator the format does not have
+])
+def test_repair_never_touches_anything_but_the_prefix(bad):
+    clean = _clean_production()
+    d = document("prod/x.pdf", (_ocr(1, f"photo\n{bad}"),))
+    app = apply_bates_reported((clean, d), _confirmed())
+    assert app.documents[1].pages[0].bates is None, bad
+    assert app.normalized == ()
+
+
+def test_repair_honours_the_confirmed_SUFFIX():
+    fmt_dec = _confirmed(prefix="MNFV", sep=" ", widths=(6,), suffix="CONF",
+                         suffix_sep="-")
+    clean = document("prod/clean.pdf", tuple(
+        _ocr(i, f"body\nMNFV {900000 + i:06d}-CONF") for i in range(1, 6)))
+    no = document("prod/y.pdf", (_ocr(1, "photo\nMNFY 900098"),))
+    app = apply_bates_reported((clean, no), fmt_dec)
+    assert app.documents[1].pages[0].bates is None       # no suffix -> refused
+
+
+def test_two_different_repairs_in_one_zone_leave_the_page_unstamped():
+    """The ambiguity rule is the same one and for the same reason."""
+    clean = _clean_production()
+    d = document("prod/x.pdf", (_ocr(1, "photo\njiCON900099 and liCON900098"),))
+    app = apply_bates_reported((clean, d), _confirmed())
+    assert app.documents[1].pages[0].bates is None
+    assert app.normalized == ()
+
+
+def test_the_same_page_read_twice_is_not_ambiguous():
+    clean = _clean_production()
+    d = document("prod/x.pdf", (_ocr(1, "jiCON900099\nbody\nliCON900099"),))
+    app = apply_bates_reported((clean, d), _confirmed())
+    assert app.documents[1].pages[0].bates == "iiCON900099"
+
+
+def test_an_exact_read_beats_a_repair_and_is_not_REPORTED_as_one():
+    clean = _clean_production()
+    d = document("prod/x.pdf", (_ocr(1, "photo\niiCON900099\njiCON900099"),))
+    app = apply_bates_reported((clean, d), _confirmed())
+    assert app.documents[1].pages[0].bates == "iiCON900099"
+    assert app.normalized == ()
+
+
+# --- disclosure ------------------------------------------------------------
+
+
+def test_every_repair_is_disclosed_with_what_the_page_actually_READS():
+    """A bare "this page was repaired" is not a useful disclosure unless an
+    expert can see what it was repaired FROM and by which rule."""
+    clean = _clean_production()
+    d = document("prod/x.pdf", (_ocr(1, "photo\njiCON900099"),))
+    app = apply_bates_reported((clean, d), _confirmed())
+    assert len(app.normalized) == 1
+    rec = app.normalized[0]
+    assert rec.read == "jiCON900099"
+    assert rec.applied == "iiCON900099"
+    assert rec.rule == NEAR_MISS_SUBSTITUTION
+    assert rec.page_no == 1
+
+
+def test_the_repair_leaves_no_trace_on_the_page_beyond_the_locator():
+    """Determinism: nothing about the repair may enter hashed content beyond
+    the locator itself. The page record carries a Bates number and no story."""
+    clean = _clean_production()
+    d = document("prod/x.pdf", (_ocr(1, "photo\njiCON900099"),))
+    before = d.pages[0]
+    app = apply_bates_reported((clean, d), _confirmed())
+    after = app.documents[1].pages[0]
+    assert after.bates == "iiCON900099"
+    assert after.text == before.text
+    assert after.notes == before.notes
+    assert after.evolve(bates=None) == before.evolve(bates=None)
+
+
+@pytest.mark.parametrize("run", range(30))
+def test_repair_is_identical_run_to_run(run):
+    clean = _clean_production()
+    d = document("prod/x.pdf", (_ocr(1, "photo\njiCON900099"),
+                                _ocr(2, "photo\nliCON900100")))
+    app = apply_bates_reported((clean, d), _confirmed())
+    assert [p.bates for p in app.documents[1].pages] == \
+        ["iiCON900099", "iiCON900100"]
+    assert [(n.read, n.applied, n.rule) for n in app.normalized] == [
+        ("jiCON900099", "iiCON900099", NEAR_MISS_SUBSTITUTION),
+        ("liCON900100", "iiCON900100", NEAR_MISS_SUBSTITUTION),
+    ]
+
+
+def test_apply_bates_is_the_documents_half_of_apply_bates_reported():
+    """One pass, two views. Two implementations would eventually disagree."""
+    clean = _clean_production()
+    d = document("prod/x.pdf", (_ocr(1, "photo\njiCON900099"),))
+    plain = apply_bates((clean, d), _confirmed())
+    full = apply_bates_reported((clean, d), _confirmed())
+    assert plain == full.documents
+
+
+def test_reducing_a_page_to_its_zone_is_lossless_for_stage_3():
+    """The acceptance harness holds every sampled document at once, so that the
+    D-28 census can be asked about the MATTER. It can only afford to do that by
+    keeping each page's Bates ZONE and dropping the rest, and that is only
+    honest if re-slicing a zone gives the zone back.
+    """
+    import sys
+    from pathlib import Path as _P
+    sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "tools"))
+    import bates_acceptance as BA
+    from dociq.identify.bates import BatesZone
+
+    long_page = "\n".join(
+        ["head one", "head two", "head three"]
+        + [f"body line {i}" for i in range(40)]
+        + ["tail a", "tail b", "tail c", "tail d",
+           "tail e", "tail f", "tail g", "iiCON900042"])
+    doc = document("prod/long.pdf", (
+        _ocr(1, long_page),
+        _ocr(2, "short\niiCON900043"),
+        _ocr(3, ""),
+    ))
+    reduced = BA.zone_only(doc)
+    z = BatesZone()
+    for a, b in zip(doc.pages, reduced.pages):
+        assert [ln for _, ln in z.slice_lines(a.text)] == \
+            [ln for _, ln in z.slice_lines(b.text)]
+    # Everything detection USES is preserved. ``line_index`` is not, and cannot
+    # be — it is a position in a text stream that has had its middle removed —
+    # so it is named here rather than glossed over. Nothing downstream reads it;
+    # it exists to tell an operator where in the page a candidate sat.
+    def _load_bearing(cands):
+        return [(c.sort_key, c.page_no, c.raw, c.format_key, c.number,
+                 c.digit_width) for c in cands]
+
+    assert _load_bearing(detect_candidates((doc,))) == \
+        _load_bearing(detect_candidates((reduced,)))
+    assert matter_prefixes((doc,)) == matter_prefixes((reduced,))
+    assert [p.bates for p in apply_bates((doc,), _confirmed())[0].pages] == \
+        [p.bates for p in apply_bates((reduced,), _confirmed())[0].pages]

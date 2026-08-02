@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Sequence
@@ -74,7 +75,7 @@ from dociq.identify.bates import (
     BatesPatternError,
     BatesRange,
     DecisionStatus,
-    apply_bates,
+    apply_bates_reported,
     document_ranges,
     parse_pattern,
     propose_format,
@@ -882,7 +883,26 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     stage(3)
     t = time.monotonic()
     decision = _bates_decision(documents, opts, config, stamp, warnings)
-    documents = apply_bates(documents, decision)
+    applied = apply_bates_reported(documents, decision)
+    documents = applied.documents
+    # D-28's repair is disclosed, never silent. §4 requires misses to be
+    # flagged and never quietly corrected; prefix repair is a narrow ruled
+    # exception to that, so the run says how many locators it repaired and the
+    # refusal — when the matter carries more than one prefix — is a warning in
+    # its own right rather than an absence an operator has to notice.
+    if applied.normalized:
+        rules = Counter(n.rule for n in applied.normalized)
+        warnings.append(
+            f"{len(applied.normalized)} Bates locator(s) were REPAIRED under "
+            f"D-28: the page's own reading differed from the confirmed format "
+            f"in the prefix alone, by "
+            + "; ".join(f"{r} ({n})" for r, n in sorted(rules.items()))
+            + f". Examples: "
+            + ", ".join(f"{n.read} -> {n.applied}"
+                        for n in applied.normalized[:3])
+        )
+    elif applied.refused_reason and len(applied.matter_prefixes) > 1:
+        warnings.append(applied.refused_reason)
     ranges = document_ranges(documents)
     mark("bates", t)
 

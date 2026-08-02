@@ -42,7 +42,7 @@ import re
 import sys
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -288,6 +288,14 @@ class AccuracyReport:
     seconds: float = 0.0
     proposal: str = ""
     notes: list[str] = field(default_factory=list)
+    matter_prefixes: list = field(default_factory=list)
+    normalization_available: bool = False
+    refused_reason: str = ""
+    normalized: list = field(default_factory=list)
+    """D-28 repairs, as ``(rel, page, what the page reads, what was written,
+    rule)``. Reported in full rather than counted: a repaired locator that
+    nobody can inspect is the silent correction §4 forbids."""
+
     by_kind: dict = field(default_factory=dict)
     """``{page kind: [compared, correct]}``.
 
@@ -313,6 +321,15 @@ class AccuracyReport:
             f"    MISSED (no stamp detected where one exists): {len(self.missed)}",
             f"    FALSE POSITIVE  : {len(self.false_positive)}",
         ]
+        lines.append(
+            f"    prefixes in the matter (D-28 gate): "
+            f"{self.matter_prefixes or '(none)'} -> prefix repair "
+            f"{'AVAILABLE' if self.normalization_available else 'REFUSED'}")
+        if self.refused_reason:
+            lines.append(f"    {self.refused_reason}")
+        lines.append(f"    locators REPAIRED under D-28: {len(self.normalized)}")
+        for row in self.normalized[:10]:
+            lines.append(f"    repaired: {row}")
         for kind, (n, ok) in sorted(self.by_kind.items()):
             lines.append(f"    by page kind — {kind:9s}: {ok}/{n} "
                          f"({100.0 * ok / n if n else 0:.3f}%)")
@@ -400,6 +417,32 @@ proposal was derived from is printed with the result.
 """
 
 
+def zone_only(doc: DocumentRecord) -> DocumentRecord:
+    """The same document with every page reduced to its Bates ZONE.
+
+    Stage 3 reads nothing but the zone, so this is lossless for what is being
+    measured — and it is what makes ONE streaming extraction pass enough.
+
+    D-28's third gate is a question about the MATTER ("does it carry exactly one
+    proposable prefix?"), so the answer cannot be computed one document at a
+    time. Holding every extracted document to answer it is what killed three
+    earlier runs at 4-14 GB resident. A page's zone is at most eleven short
+    lines, so the whole sample fits in a couple of megabytes.
+
+    Lossless, not approximately lossless: re-slicing a zone gives the zone back.
+    The head takes the first three of at most eleven lines, which are the
+    original first three; the tail takes the last eight, which are the original
+    last eight. ``tests/test_bates.py`` asserts it rather than asserting it here
+    in prose.
+    """
+    z = B.BatesZone()
+    pages = tuple(
+        p.evolve(text="\n".join(line for _, line in z.slice_lines(p.text)))
+        for p in doc.pages
+    )
+    return replace(doc, pages=pages)
+
+
 def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],
                      label: str) -> AccuracyReport:
     """``pairs`` is ``(pdf path, rel name, ground-truth Bates per page)``."""
@@ -411,7 +454,7 @@ def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],
     for path, rel, _gt in pairs[:PROPOSAL_DOCS]:
         doc = _document_from_pdf(path, rel)
         if doc is not None:
-            head.append(doc)
+            head.append(zone_only(doc))
     proposal = B.propose_format(head) if head else None
     decision = None
     if proposal is not None:
@@ -427,7 +470,8 @@ def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],
         rep.proposal = f"(none proposed from the first {len(head)} document(s))"
     del head
 
-    # --- pass 2: stream the whole sample ------------------------------------
+    # --- pass 2: extract ONCE, keeping only what Stage 3 reads --------------
+    reduced: list[tuple[DocumentRecord, str, list[str]]] = []
     for path, rel, gt in pairs:
         doc = _document_from_pdf(path, rel)
         if doc is None:
@@ -438,9 +482,24 @@ def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],
                 f"{rel}: DocIQ read {len(doc.pages)} page(s), the ground truth "
                 f"names {len(gt)} — compared positionally up to the shorter of "
                 f"the two; the remainder counts as missed")
-        stamped = B.apply_bates((doc,), decision)[0]
-        n = max(len(gt), len(stamped.pages))
-        for i in range(n):
+        reduced.append((zone_only(doc), rel, gt))
+        del doc
+
+    # --- the matter-wide census, which D-28's third gate is asked of --------
+    census = B.matter_prefixes([d for d, _rel, _gt in reduced])
+    rep.matter_prefixes = list(census)
+
+    # --- pass 3: apply and score -------------------------------------------
+    for doc, rel, gt in reduced:
+        applied = B.apply_bates_reported((doc,), decision,
+                                         matter_prefix_census=census)
+        rep.normalization_available = applied.normalization_available
+        rep.refused_reason = applied.refused_reason or ""
+        for n in applied.normalized:
+            rep.normalized.append((rel, n.page_no, n.read, n.applied, n.rule))
+        stamped = applied.documents[0]
+        n_pages = max(len(gt), len(stamped.pages))
+        for i in range(n_pages):
             expected = gt[i] if i < len(gt) else None
             got = stamped.pages[i].bates if i < len(stamped.pages) else None
             page_no = i + 1
@@ -460,7 +519,6 @@ def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],
                 slot[1] += 1
             else:
                 rep.wrong.append((rel, page_no, expected, got))
-        del doc, stamped
     rep.seconds = time.perf_counter() - t0
     return rep
 
