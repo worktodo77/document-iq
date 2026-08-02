@@ -101,6 +101,48 @@ factual claim about client material and the claim was checked and found wrong.
 
 | D-27 | Schedule / activity tables — the corpus's largest lever | **Offer as a DROP lever, DEFAULT OFF (Alex, 2026-08-01).** Measured over 36 real documents / 1,535 pages / 3.34M characters: schedule and activity tables are **33.9% of the corpus text across 258 pages** — the only category whose removal changes whether a matter fits, and roughly **170× the photographs**. They are P6 activity listings pasted into progress reports, and where the native `.xer` files are already in evidence the pasted grid is a lossy render of a better source. Ruling: the template recognizes them as a section type and offers them in the checklist with that reason stated on the row, but never drops them unless the expert engages the lever. Rejected: defaulting the lever ON where schedule files are present in the matter folder (it would make a substantive evidentiary decision on a file-presence heuristic, and a pasted table that *differs* from the native file is itself evidence); and refusing to offer them at all (forfeits the only lever that materially reduces this corpus and makes the reduction feature close to cosmetic). | 2026-08-01 |
 
+### OUTCOME of D-25 — the targeted fix was built, and it does NOT close criterion 4 (2026-08-01)
+
+D-25 ruled targeted footer re-OCR and recorded that "the targeted fix may not
+reach 99% either — that will be known only after it is built and measured. If it
+does not, D-19 is back on the table on evidence."
+
+**It was built and measured. It does not, and here is the evidence.**
+
+The pass works as ruled: on pages where the whole-page recognition returned
+nothing, a 400 dpi tiled crop of the physical stamp band returns a reading. But
+the reading is wrong in one specific, repeatable way — **rapidocr reads this
+production's stamp DIGITS correctly and cannot resolve its PREFIX.** It returns
+`iCON004926`, `jiCON004926`, `liCON002291`, `TiCON005000` for a stamp that reads
+`iiCON004926`. Measured over pages drawn from the baseline's own miss list: at
+400 dpi, exact recovery is **1 of 12** and **1 of 10** on two independent
+subsets, with the six digits correct nearly every time.
+
+**It is not a resolution problem, a cropping problem or a preprocessing
+problem**, and each was tested rather than assumed: 600 dpi and 800 dpi score
+*below* 400; widening the detector's box (`unclip_ratio` 2.2 and 3.0,
+`box_thresh` 0.3) recovers nothing; Otsu binarization gains a little on the
+prefix and truncates a digit run elsewhere. It is the recognition model.
+
+That makes this the first hard, page-level cost of D-19's "never benchmarked
+against an alternative on this corpus", and **D-19 is therefore back on the
+table on evidence, exactly as D-25 provided for.**
+
+**One alternative would close it without reopening D-19, and it needs a
+ruling.** A confirmed production's prefix carries no per-page information — every
+page has the same one — so a recovered token whose digits, digit width,
+separator and suffix match the confirmed format exactly, and whose prefix is a
+near-miss of it, could be normalized to the confirmed prefix. It could not point
+at a different page. It was **not** done unilaterally: §4 requires misses to be
+flagged rather than silently corrected, and `bates.py` deliberately holds that
+`iiCON` and `IICON` are two formats and neither is applied to the other's pages.
+
+Full method, the five defects the work found and fixed, the cost measurements,
+and — importantly — the two measurements that did NOT complete (the harness
+after-number and the Petrobras negative control, both blocked by machine
+contention, both with their commands written out) are in
+`docs/verification/bates_d25_2026-08-01.md`.
+
 ## Measured: where the tokens actually are, and what recognizes them (2026-08-01)
 
 Design pass for D-24, over 36 documents / 1,535 pages / 3,337,999 characters of

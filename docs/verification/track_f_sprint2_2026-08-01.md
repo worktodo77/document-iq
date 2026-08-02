@@ -1,5 +1,15 @@
 # Track F — Sprint 2 verification record
 
+> **Superseded in part, 2026-08-01.** §4.6's figures remain the criterion-4
+> BASELINE and were reproduced digit-for-digit on `build/s2-bates`. What §4.6
+> says about the OCR residue — that it "belongs in the D-19 conversation" — was
+> then acted on under D-25: the targeted footer re-OCR was built and measured,
+> and it does **not** close the criterion. The residue is rapidocr reading this
+> production's stamp digits correctly and failing on its `ii` prefix at every
+> resolution, crop and preprocessing tested. See
+> `docs/verification/bates_d25_2026-08-01.md`. The Bates zone described in §4 is
+> also now three head lines and **eight** tail lines, not four.
+
 **Branch:** `build/s2-track-f` · **Date:** 2026-08-01 · **Machine:** Windows 11
 Pro 26200, 32 cores, Python 3.14.5, `document-iq\.venv`
 
