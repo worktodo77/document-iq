@@ -66,7 +66,17 @@ ADJACENT_PATTERNS = ("reconciliation.csv", "doc_ids_issued.json",
 Hashed and compared, but deliberately not part of ``corpus_sha256`` — see the
 module docstring. ``upload_package/*`` is copies of files already inside the
 claim plus a generated README, so it cannot be the *source* of a break, but a
-difference there would mean the copy step is not reproducing what it copied."""
+difference there would mean the copy step is not reproducing what it copied.
+
+**What these hashes describe, precisely.** They are the package **this run
+emitted** — the whole extracted record. §8 Path A lets the operator rebuild that
+directory afterwards for a deliberately scoped subset (D-20, A-12), and when
+they do, the folder no longer matches these hashes. That is not a determinism
+break and nothing treats it as one: :func:`compare` is only ever used between
+two runs, each building its own manifest from its own output, and nothing
+re-verifies a folder against its stored manifest. Stated here because the
+alternative is a reader taking a stored hash for a description of what is on
+disk right now."""
 
 EXCLUDED_REASONS = {
     "run_summary.pdf": "embeds a generation timestamp",
