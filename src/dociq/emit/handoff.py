@@ -11,10 +11,19 @@ Path A assembles ``upload_package/`` containing **only** what is meant to be
 uploaded: ``clean_text/*.txt``, ``sources.json`` and ``document_index.csv``. The
 processing log and run summary stay behind in the matter folder — they are the
 audit trail, and uploading them would put DocIQ's own internals into the
-evidence corpus.
+evidence corpus. That rule is now *asserted* rather than merely implemented:
+see :data:`SANCTIONED_NAMES` and :func:`assert_only_sanctioned`.
 
 Path B writes nothing new: the matter folder *is* the Expert Assist layout, and
 this module verifies that rather than rearranging it.
+
+**D-20 (amendment A-12).** A Path A package is a deliberately scoped SUBSET
+unless it says otherwise, and once a folder has been dragged into a Project
+nobody downstream can tell a subset from a whole record by looking at it. So
+:func:`build_upload_package` takes a ``doc_ids`` filter and a
+``scope_statement``, and :func:`render_readme` emits that statement **first, at
+the top of the file, ahead of everything else** — before the title, before the
+counts, before the instruction block.
 """
 
 from __future__ import annotations
@@ -23,7 +32,9 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from dociq.emit.paths import OutputLayout, write_text_deterministic
+from dociq.contracts import canonical_json
+from dociq.emit.indexbook import INDEX_COLUMNS
+from dociq.emit.paths import OutputLayout, safe_component, write_text_deterministic
 from dociq.verify.tokens import TokenEstimate
 
 __all__ = [
@@ -32,12 +43,63 @@ __all__ = [
     "UploadPackage",
     "build_upload_package",
     "render_readme",
+    "default_scope_statement",
     "ExpertAssistLayout",
     "expert_assist_layout",
+    "assert_only_sanctioned",
+    "PackageContentError",
     "README_NAME",
+    "SANCTIONED_NAMES",
 ]
 
 README_NAME = "README_START_HERE.txt"
+
+SANCTIONED_NAMES = frozenset({"sources.json", "document_index.csv", README_NAME})
+"""Non-``.txt`` files §8 permits in the package, exhaustively.
+
+Everything else in the package must be a ``clean_text`` file. This set is the
+machine-readable form of §8's "containing only the files intended for upload",
+and :func:`assert_only_sanctioned` is what makes it load-bearing rather than
+documentation. The failure mode it exists to prevent is specific and bad:
+``processing_log.json``, ``run_summary.pdf``, ``output_manifest.json``,
+``doc_ids_issued.json``, ``reconciliation.csv`` and the matter's profile copy
+are DocIQ's own audit trail, and uploading them puts the tool's internals into
+the evidence corpus — where an analyst can quote them back as if they were
+project records.
+"""
+
+
+class PackageContentError(RuntimeError):
+    """An unsanctioned file reached the upload package (§8).
+
+    Raised rather than warned. A package is dragged into a Project whole; there
+    is no step at which an operator inspects it file by file, so a warning about
+    an extra file is a warning nobody acts on before the upload happens.
+    """
+
+
+def assert_only_sanctioned(root: Path) -> tuple[str, ...]:
+    """Fail unless every file under ``root`` is one §8 sanctions.
+
+    Walks the tree rather than listing the top level: a subdirectory of audit
+    files would pass a top-level check and upload just the same.
+    """
+    names = tuple(
+        sorted(str(p.relative_to(root)).replace("\\", "/")
+               for p in root.rglob("*") if p.is_file())
+    )
+    intruders = tuple(
+        n for n in names
+        if n not in SANCTIONED_NAMES and not (n.endswith(".txt") and "/" not in n)
+    )
+    if intruders:
+        raise PackageContentError(
+            "§8 permits only clean_text/*.txt, sources.json, "
+            f"document_index.csv and {README_NAME} in an upload package. These "
+            f"would have been uploaded into the evidence corpus: "
+            f"{', '.join(intruders)}"
+        )
+    return names
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +145,55 @@ class UploadPackage:
     readme: Path
     mode_statement: str
 
+    doc_count: int = 0
+    """Documents whose text is in the package. Not ``len(files)`` minus a
+    constant: the caller needs a figure it can put on screen beside the scope
+    statement, and deriving it by subtracting "the three non-text files" is a
+    rule that breaks the moment the package gains a fourth."""
+
+    scope_statement: str = ""
+    """The statement written into the package, returned verbatim so the screen
+    shows the operator exactly what the recipient will read (A-12)."""
+
+    missing: tuple[str, ...] = ()
+    """Doc IDs that were asked for and have no ``clean_text`` file.
+
+    Reported rather than silently skipped: a package one document short of the
+    scope its own statement claims is a smaller version of the D-20 failure, and
+    the operator is the only one who can say whether it matters."""
+
+
+def default_scope_statement(document_count: int, matter_name: str = "",
+                            unsupported: int = 0) -> str:
+    """The full-scope statement, for a package nobody scoped (D-20).
+
+    **This wording is deliberately duplicated** from
+    :meth:`dociq.gui.view_models.PackageScope.statement`, and the duplication is
+    structural rather than careless: the pagemodel freeze forbids the GUI from
+    importing :mod:`dociq.emit`, so a single shared author is not available to
+    both. ``tests/test_emit.py::test_scope_statement_authors_agree`` binds the
+    two — the whole-record wording must be character-identical, or one of the
+    two is drifting and the test says which.
+
+    A package built with no statement at all is the failure D-20 exists to
+    prevent, so there is no "" path: the pipeline's own whole-corpus package
+    gets this, and a scoped package gets the operator's.
+    """
+    listed = (
+        f"\n  {unsupported:,} further file{'' if unsupported == 1 else 's'} "
+        "in this matter were inventoried and hashed but their text was not "
+        "extracted (unsupported formats, §5). They are NOT in this package; "
+        "each has a row in document_index.csv with the status Unsupported."
+        if unsupported else ""
+    )
+    head = f"SCOPE OF THIS PACKAGE{(' — ' + matter_name) if matter_name else ''}"
+    body = (
+        f"This package covers ALL {document_count:,} documents whose text DocIQ "
+        "extracted from the matter record."
+        + (listed or " It is the complete production as DocIQ processed it.")
+    )
+    return f"{head}\n{'=' * 60}\n  {body}\n"
+
 
 def render_readme(
     *,
@@ -93,6 +204,7 @@ def render_readme(
     estimate: TokenEstimate,
     has_bates: bool,
     id_regime: str,
+    scope_statement: str = "",
 ) -> str:
     """The §8 Path A ``README_START_HERE.txt``.
 
@@ -100,7 +212,18 @@ def render_readme(
     the folder, and Claude, which needs the citation conventions stated before
     it reads a page marker. The instruction block is written to be pasted
     verbatim into a Project's instructions field.
+
+    ``scope_statement`` (D-20, amendment A-12) is emitted **first — before the
+    title line and before any count**. Position is the whole point: a scope
+    caveat under a "368 documents, 18,521 pages" headline is read after the
+    reader has already formed the belief it exists to prevent. If it is empty a
+    full-scope statement is authored by :func:`default_scope_statement`, because
+    a package that says nothing about its scope is exactly the artifact D-20
+    forbids.
     """
+    scope = scope_statement.strip() or default_scope_statement(
+        document_count, matter_name
+    ).strip()
     bates_line = (
         "Page markers also carry the Bates number where one was detected, in the "
         "form `===== PAGE 12 [BATES: MNFV 000391] =====`. Cite the Bates number "
@@ -109,7 +232,8 @@ def render_readme(
         else "This document set is not Bates-stamped; cite the document ID and the "
         "original page number."
     )
-    return f"""LI DOCUMENT IQ — {matter_name or "matter"} — START HERE
+    return f"""{scope}
+LI DOCUMENT IQ — {matter_name or "matter"} — START HERE
 {"=" * 60}
 
 WHAT THIS FOLDER IS
@@ -135,6 +259,8 @@ PROJECT INSTRUCTIONS (paste this block)
 You are assisting with a forensic analysis of the {matter_name or "matter"}
 document set.{f" Documents span {date_range}." if date_range else ""}
 
+{scope}
+
 The knowledge base contains {document_count} documents as plain text, one file
 per document, named by document ID ({id_regime} numbering).
 
@@ -159,15 +285,61 @@ WHAT IS NOT HERE
 """
 
 
-def _iter_package_sources(layout: OutputLayout) -> list[Path]:
-    files = sorted(
+def _text_files(layout: OutputLayout) -> list[Path]:
+    return sorted(
         (p for p in layout.clean_text.glob("*.txt") if p.is_file()),
         key=lambda p: p.name,
     )
-    for extra in (layout.sources_json, layout.index_csv):
-        if extra.is_file():
-            files.append(extra)
-    return files
+
+
+def _filtered_sources(layout: OutputLayout, keep: set[str]) -> str | None:
+    """``sources.json`` restricted to ``keep``, or ``None`` if unreadable.
+
+    A subset package that carried the whole matter's ``sources.json`` would hand
+    the reader a manifest naming documents the package does not contain — and
+    §7 makes ``sources.json`` the thing Expert Assist reads to find text, so
+    every one of those names is a path that resolves to nothing. Filtering keeps
+    the manifest true of the folder it sits in.
+    """
+    import json
+
+    try:
+        payload = json.loads(layout.sources_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return canonical_json(
+        {k: v for k, v in payload.items() if k in keep}
+    ) + "\n"
+
+
+def _filtered_index_csv(layout: OutputLayout, keep: set[str]) -> str | None:
+    """``document_index.csv`` restricted to ``keep``, header preserved.
+
+    Rows are matched on column 0 (``Doc ID``), which is
+    :data:`dociq.emit.indexbook.INDEX_COLUMNS`\\ [0] — asserted below rather than
+    assumed, because a column reorder would otherwise filter on ``Filename`` and
+    quietly produce an empty index.
+    """
+    assert INDEX_COLUMNS[0] == "Doc ID"
+    import csv
+    import io
+
+    try:
+        text = layout.index_csv.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    rows = list(csv.reader(io.StringIO(text, newline="")))
+    if not rows:
+        return None
+    header, body = rows[0], rows[1:]
+    kept = [r for r in body if r and r[0] in keep]
+    out = io.StringIO(newline="")
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(header)
+    writer.writerows(kept)
+    return out.getvalue()
 
 
 def build_upload_package(
@@ -181,12 +353,25 @@ def build_upload_package(
     has_bates: bool = False,
     id_regime: str = "DIQ-native",
     limits: ProjectLimits | None = None,
+    doc_ids: tuple[str, ...] | None = None,
+    scope_statement: str = "",
+    unsupported: int = 0,
 ) -> UploadPackage:
     """Assemble ``upload_package/`` (§8 Path A).
 
     The package is rebuilt from scratch each time. A stale text file left over
     from an earlier run would be uploaded as if it were current evidence, which
     is a worse failure than a slow rebuild.
+
+    ``doc_ids`` (A-12) selects which documents' text goes in; ``None`` means all
+    of them. When it selects a proper subset, ``sources.json`` and
+    ``document_index.csv`` are **filtered to match** rather than copied whole —
+    an index listing 368 documents inside a folder holding 12 is an invitation
+    to cite the 356 that are not there.
+
+    ``scope_statement`` (D-20) is written into the README ahead of everything
+    else. It is never optional in effect: an empty one is replaced by
+    :func:`default_scope_statement`.
     """
     lim = limits or ProjectLimits()
     target = layout.upload_package
@@ -194,34 +379,79 @@ def build_upload_package(
         shutil.rmtree(target)
     target.mkdir(parents=True, exist_ok=True)
 
+    available = _text_files(layout)
+    if doc_ids is None:
+        selected, missing, subset = available, (), False
+        keep: set[str] = set()
+    else:
+        wanted = {f"{safe_component(d)}.txt": d for d in doc_ids}
+        selected = [p for p in available if p.name in wanted]
+        found = {p.name for p in selected}
+        missing = tuple(sorted(d for n, d in wanted.items() if n not in found))
+        subset = len(selected) != len(available)
+        # The Doc IDs themselves, NOT the file stems. They are equal today —
+        # ``safe_component`` is the identity on a Doc ID by construction — but
+        # ``sources.json`` and ``document_index.csv`` are keyed by Doc ID, so a
+        # future ID that needed sanitizing would filter both to nothing and
+        # produce a package with text files and an empty manifest.
+        keep = {wanted[n] for n in found}
+
     copied: list[str] = []
     oversized: list[tuple[str, int]] = []
     total = 0
-    for src in _iter_package_sources(layout):
+
+    def record(name: str, size: int) -> None:
+        nonlocal total
+        total += size
+        copied.append(name)
+        if size > lim.max_file_bytes:
+            oversized.append((name, size))
+
+    for src in selected:
         dst = target / src.name
         shutil.copyfile(src, dst)
-        size = dst.stat().st_size
-        total += size
-        copied.append(dst.name)
-        if size > lim.max_file_bytes:
-            oversized.append((dst.name, size))
+        record(dst.name, dst.stat().st_size)
+
+    for src, filtered in (
+        (layout.sources_json, _filtered_sources(layout, keep) if subset else None),
+        (layout.index_csv, _filtered_index_csv(layout, keep) if subset else None),
+    ):
+        if not src.is_file():
+            continue
+        dst = target / src.name
+        if filtered is None:
+            shutil.copyfile(src, dst)
+        else:
+            write_text_deterministic(dst, filtered)
+        record(dst.name, dst.stat().st_size)
 
     if estimate is None:
         from dociq.verify.tokens import estimate_tokens
 
         estimate = estimate_tokens("")
 
+    doc_count = document_count or len(selected)
+    scope = scope_statement.strip() or default_scope_statement(
+        doc_count, matter_name, unsupported
+    )
     readme_text = render_readme(
         matter_name=matter_name,
-        document_count=document_count or max(len(copied) - 2, 0),
+        document_count=doc_count,
         page_count=page_count,
         date_range=date_range,
         estimate=estimate,
         has_bates=has_bates,
         id_regime=id_regime,
+        scope_statement=scope,
     )
     readme = write_text_deterministic(target / README_NAME, readme_text)
     copied.append(README_NAME)
+
+    # §8's "only the sanctioned files" rule, checked against what is ON DISK
+    # rather than against what this function believes it wrote. The two differ
+    # exactly when something else put a file there, which is the case worth
+    # catching.
+    assert_only_sanctioned(target)
 
     unenforced: list[str] = []
     if lim.max_files == 0:
@@ -243,6 +473,9 @@ def build_upload_package(
         check=check,
         readme=readme,
         mode_statement=verdict.statement,
+        doc_count=len(selected),
+        scope_statement=scope,
+        missing=missing,
     )
 
 

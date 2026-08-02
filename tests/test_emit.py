@@ -26,8 +26,12 @@ from dociq.emit.cleantext import (
 )
 from dociq.emit.handoff import (
     README_NAME,
+    SANCTIONED_NAMES,
+    PackageContentError,
     ProjectLimits,
+    assert_only_sanctioned,
     build_upload_package,
+    default_scope_statement,
     expert_assist_layout,
     render_readme,
 )
@@ -436,6 +440,184 @@ def test_readme_states_original_pagination():
     assert "not Bates-stamped" in text
 
 
+# --- D-20 / A-12: the scope statement, the doc_ids filter, the §8 rule -----
+
+
+def test_the_scope_statement_is_the_very_first_thing_in_the_readme(tmp_path):
+    """FAIL-BEFORE: with the statement appended, or placed under the "368
+    documents, 18,521 pages" headline, it is read *after* the belief it exists to
+    prevent has already formed. D-20 makes position part of the requirement."""
+    layout, docs = full_matter(tmp_path)
+    scope = default_scope_statement(1, "P495")
+    pkg = build_upload_package(
+        layout, matter_name="P495", doc_ids=(docs[0].doc_id,),
+        document_count=1, scope_statement=scope,
+    )
+    text = pkg.readme.read_text(encoding="utf-8")
+    assert text.startswith("SCOPE OF THIS PACKAGE"), text[:120]
+    assert text.index("SCOPE OF THIS PACKAGE") < text.index("LI DOCUMENT IQ")
+
+
+def test_the_scope_statement_is_also_inside_the_pasteable_instructions(tmp_path):
+    """The README is one file among hundreds in a Project's knowledge; the
+    instruction block is what actually steers the model. A scope that appears
+    only in the README is a scope the analysis never sees."""
+    layout, docs = full_matter(tmp_path)
+    pkg = build_upload_package(
+        layout, doc_ids=(docs[0].doc_id,), document_count=1,
+        scope_statement="SCOPE OF THIS PACKAGE\n" + "=" * 60 + "\n  MARKER-X\n",
+    )
+    text = pkg.readme.read_text(encoding="utf-8")
+    block = text.split("PROJECT INSTRUCTIONS (paste this block)")[1]
+    assert "MARKER-X" in block
+
+
+def test_a_package_with_no_stated_scope_is_impossible(tmp_path):
+    """D-20's core rule. Every package says what it covers, including the one
+    nobody scoped — because downstream a silent whole-record package and a
+    silent subset are the same artifact."""
+    layout, docs = full_matter(tmp_path)
+    pkg = build_upload_package(layout, document_count=len(docs))
+    assert pkg.scope_statement
+    assert "covers ALL" in pkg.scope_statement
+    assert pkg.readme.read_text(encoding="utf-8").startswith(
+        "SCOPE OF THIS PACKAGE")
+
+
+def test_doc_ids_selects_exactly_those_documents(tmp_path):
+    layout, docs = full_matter(tmp_path)
+    chosen = (docs[0].doc_id, docs[2].doc_id)
+    pkg = build_upload_package(layout, doc_ids=chosen, scope_statement="S\n")
+    texts = {n for n in pkg.files if n.endswith(".txt") and n != README_NAME}
+    assert texts == {f"{d}.txt" for d in chosen}
+    assert pkg.doc_count == 2
+    assert not (layout.upload_package / f"{docs[1].doc_id}.txt").exists()
+
+
+def test_a_subset_package_filters_sources_json_and_the_index(tmp_path):
+    """FAIL-BEFORE: copying both whole hands the reader a manifest naming
+    documents the folder does not contain — and §7 makes ``sources.json`` the
+    thing Expert Assist reads to FIND text, so each of those names is a path
+    that resolves to nothing."""
+    layout, docs = full_matter(tmp_path)
+    chosen = (docs[0].doc_id,)
+    build_upload_package(layout, doc_ids=chosen, scope_statement="S\n")
+    root = layout.upload_package
+
+    sources = json.loads((root / "sources.json").read_text(encoding="utf-8"))
+    assert set(sources) == set(chosen)
+
+    rows = list(csv.reader((root / "document_index.csv").read_text(
+        encoding="utf-8").splitlines()))
+    assert rows[0] == list(INDEX_COLUMNS)
+    assert [r[0] for r in rows[1:]] == list(chosen)
+
+    # The MATTER folder's copies are untouched — the filtering happens on the
+    # way into the package, never to the deliverable itself.
+    whole = json.loads(layout.sources_json.read_text(encoding="utf-8"))
+    assert len(whole) == len(docs)
+
+
+def test_a_whole_record_packages_index_is_byte_identical_to_the_matters(tmp_path):
+    """Round-trip fidelity: when nothing is excluded, the package's index and
+    manifest are byte-for-byte the matter's, so the two are comparable.
+
+    **What this does NOT establish, stated because the probe was run and came
+    back green:** it does not distinguish the copy path from the filter path.
+    Rewriting a full selection through ``_filtered_sources`` /
+    ``_filtered_index_csv`` also produces identical bytes — which is a property
+    worth having and is what this asserts. It is not a test that the code took
+    the copy branch, and it is not written as one."""
+    layout, docs = full_matter(tmp_path)
+    build_upload_package(layout, doc_ids=tuple(d.doc_id for d in docs),
+                         scope_statement="S\n")
+    assert (layout.upload_package / "document_index.csv").read_bytes() == \
+        layout.index_csv.read_bytes()
+    assert (layout.upload_package / "sources.json").read_bytes() == \
+        layout.sources_json.read_bytes()
+
+
+def test_a_doc_id_with_no_text_file_is_reported_not_swallowed(tmp_path):
+    """A package one document short of the scope its own statement claims is a
+    smaller version of the D-20 failure, and only the operator can judge it."""
+    layout, docs = full_matter(tmp_path)
+    pkg = build_upload_package(
+        layout, doc_ids=(docs[0].doc_id, "LI-99999"), scope_statement="S\n")
+    assert pkg.missing == ("LI-99999",)
+    assert pkg.doc_count == 1
+
+
+def test_the_unsupported_files_are_named_in_the_scope_statement():
+    """§5 listed-only files can never be in a Path A package, so a package
+    calling itself the complete production while they exist makes exactly the
+    claim D-20 forbids, in the one file a reader would trust to know better."""
+    plain = default_scope_statement(10, "P495")
+    with_listed = default_scope_statement(10, "P495", unsupported=7)
+    assert "complete production" in plain
+    assert "complete production" not in with_listed
+    assert "7 further files" in with_listed
+
+
+def test_scope_statement_authors_agree_on_the_whole_record_wording():
+    """The freeze forbids the GUI importing ``emit``, so §8's whole-record
+    wording has two authors by construction. This binds them: if either drifts,
+    an operator reads one sentence on screen and the recipient reads another."""
+    from dociq.gui.view_models import PackageScope
+
+    for count, matter, listed in ((3, "P495", 0), (368, "matter", 7),
+                                  (1, "", 1), (0, "x", 0)):
+        assert default_scope_statement(count, matter, listed) == \
+            PackageScope().statement(count, count, matter, listed)
+
+
+# --- §8's "only the sanctioned files" rule ---------------------------------
+
+
+def test_an_audit_file_in_the_package_is_refused(tmp_path):
+    """FAIL-BEFORE: without this the failure mode §8 exists to prevent is
+    silent — ``processing_log.json`` uploaded into the evidence corpus, where an
+    analyst can quote DocIQ's own internals back as a project record."""
+    root = tmp_path / "pkg"
+    root.mkdir()
+    (root / "LI-00001.txt").write_text("x", encoding="utf-8")
+    (root / "processing_log.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(PackageContentError) as exc:
+        assert_only_sanctioned(root)
+    assert "processing_log.json" in str(exc.value)
+
+
+@pytest.mark.parametrize("intruder", [
+    "processing_log.json", "run_summary.pdf", "output_manifest.json",
+    "doc_ids_issued.json", "reconciliation.csv", "profile/mpr.v1.yaml",
+    "nested/notes.txt", ".dociq/staging_ready.json",
+])
+def test_every_non_sanctioned_output_is_caught(tmp_path, intruder):
+    """The CLASS, enumerated: every §7 deliverable that is NOT one of §8's
+    three, plus a nested text file (a top-level-only check would pass it) and
+    DocIQ's own run state."""
+    root = tmp_path / "pkg"
+    (root / intruder).parent.mkdir(parents=True, exist_ok=True)
+    (root / intruder).write_text("x", encoding="utf-8")
+    with pytest.raises(PackageContentError):
+        assert_only_sanctioned(root)
+
+
+def test_the_sanctioned_set_is_exactly_section_8s_three(tmp_path):
+    assert SANCTIONED_NAMES == {"sources.json", "document_index.csv", README_NAME}
+    root = tmp_path / "pkg"
+    root.mkdir()
+    for name in (*SANCTIONED_NAMES, "LI-00001.txt"):
+        (root / name).write_text("x", encoding="utf-8")
+    assert len(assert_only_sanctioned(root)) == 4
+
+
+def test_a_built_package_passes_its_own_rule(tmp_path):
+    """The global probe, on the real emit path rather than on a planted tree."""
+    layout, docs = full_matter(tmp_path)
+    build_upload_package(layout, document_count=len(docs))
+    assert_only_sanctioned(layout.upload_package)
+
+
 def test_path_b_layout_is_verified_not_rearranged(tmp_path):
     layout, _ = full_matter(tmp_path)
     ea = expert_assist_layout(layout)
@@ -489,3 +671,27 @@ def test_summary_never_calls_the_token_figure_a_floor(tmp_path):
         "the absence of a floor is a fact the reader needs stated, not merely "
         "a phrase the PDF avoids"
     )
+
+
+def test_the_subset_filter_keys_on_doc_ids_not_file_stems(tmp_path, monkeypatch):
+    """FAIL-BEFORE: keying the filter on ``Path.stem`` works only while
+    ``safe_component`` is the identity on a Doc ID. A future ID that needed
+    sanitizing would filter ``sources.json`` and ``document_index.csv`` to
+    nothing — a package with text files and an empty manifest, which is worse
+    than either failing loudly."""
+    import dociq.emit.handoff as h
+
+    layout, docs = full_matter(tmp_path)
+    # Force the sanitizer to bite, so stem != doc_id for every document.
+    monkeypatch.setattr(h, "safe_component", lambda name: "x_" + name)
+    for doc in docs:
+        (layout.clean_text / f"x_{doc.doc_id}.txt").write_text("x", encoding="utf-8")
+
+    pkg = h.build_upload_package(
+        layout, doc_ids=(docs[0].doc_id,), scope_statement="S\n")
+    sources = json.loads(
+        (layout.upload_package / "sources.json").read_text(encoding="utf-8"))
+    assert set(sources) == {docs[0].doc_id}, (
+        "the filter dropped every row — it is keyed on the file name, not the ID"
+    )
+    assert pkg.missing == ()

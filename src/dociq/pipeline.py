@@ -1155,6 +1155,14 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             estimate=after,
             has_bates=any(r.pages_with_bates for r in ranges.values()),
             id_regime=effective.id_regime.value,
+            # The run's own package is the whole extracted record, so it takes
+            # the whole-record scope statement (D-20). It is stated rather than
+            # left implicit precisely because a package with no scope line is
+            # indistinguishable from a subset once it has been uploaded — and
+            # the §5 listed-only files are named, because they are the one thing
+            # a "complete production" claim would silently be wrong about.
+            doc_ids=None,
+            unsupported=len(unsupported),
         )
     mark("emit", t)
 
