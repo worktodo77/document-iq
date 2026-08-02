@@ -50,8 +50,15 @@ should say so explicitly.
 
 §4 Stage 3 says "page corners/footers". The frozen contract carries page *text*,
 not glyph coordinates, so `dociq.identify.bates` approximates the zone by
-position in the text stream: the first three and last four lines of a page,
+position in the text stream: the first three and last eight lines of a page,
 both bounds configurable and reported.
+
+The tail was four lines until D-25 (2026-08-01). The targeted footer re-OCR
+appends at most `FOOTER_BLOCK_MAX_LINES` recovered stamp tokens to the end of a
+page's text, and the tail zone now carries exactly that many lines of margin —
+`_TAIL_LINES_BASE + FOOTER_BLOCK_MAX_LINES` — so the appended block cannot push
+the page's own reading out of the zone. Four lines remains the whole of what a
+page's own text contributes.
 
 This finds header and footer stamps, which is where productions put them, and
 it correctly finds nothing on an unstamped corpus. It would miss a stamp that an

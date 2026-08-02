@@ -414,6 +414,10 @@ def test_widening_the_case_class_did_not_open_the_page_number_hole():
 # OCR page. Detection stays anchored (an open grammar unanchored reads dates and
 # dollar figures as Bates numbers); APPLICATION of an already-confirmed format
 # does not need to be.
+#
+# It was a FALLBACK when it was written — an anchored line won outright and only
+# a page with none was searched for a folded stamp. D-25 made that unsafe and it
+# is now the single rule; see ``test_an_anchored_line_does_not_outrank_a_folded_one``.
 
 
 def _confirmed(prefix="iiCON", sep="", widths=(6,), suffix=None, suffix_sep=""):
@@ -504,11 +508,29 @@ def test_the_embedded_search_does_not_fire_without_a_confirmed_decision():
         assert out[0].pages[0].bates is None
 
 
-def test_the_anchored_path_still_wins_and_still_records_the_line():
-    """No regression: a zone line that IS the stamp behaves exactly as before."""
+def test_a_zone_line_that_IS_the_stamp_is_recorded_unchanged():
+    """No regression: a page whose footer line is the stamp behaves as before."""
     doc = document("prod/native.pdf", (page(1, "body\niiCON003944"),))
     out = apply_bates((doc,), _confirmed())
     assert out[0].pages[0].bates == "iiCON003944"
+
+
+def test_an_anchored_line_does_not_outrank_a_folded_one():
+    """The claim this file used to make — "the anchored path still WINS" — is
+    withdrawn, and this is what replaced it.
+
+    Anchored-first was safe only while nothing could add an anchored line to a
+    page that already held a folded stamp. D-25's footer re-OCR does exactly
+    that, so a band pass that misread one digit would have produced an anchored
+    ``iiCON003945`` that beat the folded, correct ``iiCON003944``. There is one
+    rule now and it refuses on disagreement.
+    """
+    doc = document("prod/ocr.pdf", (
+        page(1, "body\nfooter iiCON003944 read badly\niiCON003945"),   # disagree
+        page(2, "body\nfooter iiCON003944 read badly\niiCON003944"),   # agree
+    ))
+    out = apply_bates((doc,), _confirmed())
+    assert [p.bates for p in out[0].pages] == [None, "iiCON003944"]
 
 
 # ---------------------------------------------------------------------------
