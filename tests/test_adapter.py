@@ -768,3 +768,55 @@ def test_the_real_adapter_offers_both_A_12_hooks():
     pipe = adapter.RealPipeline()
     assert callable(getattr(pipe, "build_package", None))
     assert callable(getattr(pipe, "matter_layout_note", None))
+
+
+def test_the_handoff_SCREEN_drives_the_real_adapter_end_to_end(real_run):
+    """Track E §6.1/§6.2/§6.3, closed.
+
+    Both §8 screens were built against duck-typed hooks that only the mock
+    implemented, and Track E recorded plainly that neither had been driven by a
+    real pipeline and that no package had ever been built. This drives the real
+    ``MainWindow`` — real adapter, real run, real ``upload_package/`` on disk —
+    through the same signals the operator's clicks emit.
+    """
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from dociq.emit.handoff import README_NAME, assert_only_sanctioned
+    from dociq.gui.main_window import MainWindow
+    from dociq.gui.view_models import SCOPE_TYPES, PackageScope
+
+    outcome, _events, root = real_run
+    QApplication.instance() or QApplication([])
+    set_pipeline(None)
+    window = MainWindow()
+    try:
+        assert isinstance(window._pipeline, adapter.RealPipeline)
+        window.show_outcome(outcome)
+        window.show_handoff()
+
+        # Path B: the screen's note is the CHECKED one, not the mock's words.
+        view = window.handoff._view
+        assert view.path_b_ready()
+        assert view.path_b_note().startswith("CHECKED")
+        assert not view.package_blocker(), view.package_blocker()
+
+        # Path A: scope it the way the screen does, then press the button.
+        kind = view.doc_types[0]
+        window._rescope(PackageScope(kind=SCOPE_TYPES, doc_types=(kind,)))
+        window._build_package(window._scope)
+
+        pkg = root / "upload_package"
+        assert pkg.is_dir()
+        names = assert_only_sanctioned(pkg)
+        assert README_NAME in names
+        head = (pkg / README_NAME).read_text(encoding="utf-8")
+        assert head.startswith("SCOPE OF THIS PACKAGE")
+        expected = window.handoff._view.scope_statement()
+        assert expected.strip() in head, (
+            "the package does not carry the statement the operator was shown"
+        )
+    finally:
+        window.close()
