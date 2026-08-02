@@ -127,3 +127,32 @@ The zip is **not** byte-identical between builds. Zip entries carry mtimes and
 PyInstaller stamps a build time. DocIQ's byte-identical claim is about the
 **output corpus** (Principle 5, the freeze) and has never covered the
 deliverable; widening it here would be a claim nobody could keep.
+
+## Environment (D-26, applied 2026-08-01)
+
+PyInstaller is now installed in `document-iq\.venv` and declared in
+`pyproject.toml` under `[project.optional-dependencies] build`. The scratch
+directory + `--pyinstaller-path` workaround is no longer needed; the documented
+build command now works from a clean checkout, which is what "reproducible"
+was supposed to mean.
+
+### Trap: uninstalling `opencv-python` also removes headless's `cv2`
+
+Both `opencv-python` and `opencv-python-headless` install the **same `cv2`
+package directory**. The venv had both, non-headless winning at import, against
+a declaration of headless only. Removing the stray one deleted `cv2` outright
+even though headless was still installed and still listed by `pip list`:
+
+    pip uninstall -y opencv-python      # cv2 now gone
+    python -c "import cv2"              # ModuleNotFoundError
+
+The fix is to reinstall headless afterwards and verify the import rather than
+trusting `pip list`:
+
+    pip install --force-reinstall --no-deps "opencv-python-headless==5.0.0.93"
+    python -c "import cv2, rapidocr_onnxruntime; print(cv2.__version__)"
+
+Recorded because it is the same shape as the defect that motivated the cleanup:
+the packaged build reported `ocr_available()` True with the models present and
+produced no OCR at all. In both cases the inventory said one thing and the
+import resolved to another, and only running the thing revealed it.

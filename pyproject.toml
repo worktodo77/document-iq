@@ -53,6 +53,11 @@ dependencies = [
 dev = [
     "pytest>=9.1.1,<10",
 ]
+build = [
+    # Packaging only (D-22 one-folder build, D-26). Not a runtime dependency:
+    # the shipped artifact contains no PyInstaller.
+    "pyinstaller==6.20.0",
+]
 
 [project.scripts]
 dociq = "dociq.gui.app:main"
