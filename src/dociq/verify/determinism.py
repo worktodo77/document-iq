@@ -83,12 +83,30 @@ stand-in — because the byte-identical claim is about the files DocIQ ships. A
 proof over a probe emitter proves the probe."""
 
 
+DETERMINISM_RUN_FLAG = "--determinism-run"
+"""How a FROZEN build re-enters itself for one determinism repetition.
+
+``sys.executable -c <source>`` is the interpreter contract, and a PyInstaller
+build has no interpreter on the command line: ``sys.executable`` is
+``DocumentIQ.exe``, which does not accept ``-c`` and would take the runner
+source as a positional argument. Unfixed, the determinism proof either fails or
+— worse — silently runs the GUI eight times and compares eight empty output
+directories, which reconcile perfectly.
+
+So the frozen build re-invokes itself with this flag and the launcher executes
+:data:`_RUNNER`. One runner source, two ways in.
+"""
+
+
 def _one_run(source_root: Path, out: Path, seed: str) -> str | None:
     """Run the pipeline in a subprocess. Returns an error string or ``None``."""
-    env = dict(os.environ, PYTHONHASHSEED=seed,
-               PYTHONPATH=str(Path(__file__).resolve().parents[2]))
-    proc = subprocess.run([sys.executable, "-c", _RUNNER, str(source_root),
-                           str(out)], env=env, capture_output=True, text=True)
+    env = dict(os.environ, PYTHONHASHSEED=seed)
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, DETERMINISM_RUN_FLAG, str(source_root), str(out)]
+    else:
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+        cmd = [sys.executable, "-c", _RUNNER, str(source_root), str(out)]
+    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
     if proc.returncode != 0:
         return (proc.stderr or proc.stdout or "unknown failure")[-800:]
     return None

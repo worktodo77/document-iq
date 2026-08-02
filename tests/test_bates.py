@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
 import re
 
 from dociq.contracts import document_sort_key
-from dociq.identify.bates import (
+from dociq.identify.bates import (  # noqa: F401
+    _parse_line,
     BatesDecision,
     BatesFormat,
     BatesZone,
@@ -308,3 +310,202 @@ def test_two_suffix_separators_are_two_formats_not_one():
         "MNFV 000392-CONF",
         None,
     ]
+
+
+# ---------------------------------------------------------------------------
+# Mixed-case production prefixes — the criterion-4 acceptance finding
+# ---------------------------------------------------------------------------
+#
+# The detector was uppercase-only. The MNFV disclosure's own production prefix
+# is `iiCON`, and on 280 sampled pages of it the detector proposed NOTHING and
+# scored 0% — every stamp present, correctly placed, and rejected on case
+# alone. Worse than a wrong answer, because "no format proposed" is the
+# ORDINARY outcome on an unstamped set (D-13), so nothing in the run said a
+# word about it. These tests are the class, not the one prefix.
+
+
+def _seq(prefix, sep, start, count, width=6):
+    return document(
+        f"prod/{prefix.lower()}.pdf",
+        tuple(page(i, f"body text for page {i}\n"
+                      f"{prefix}{sep}{start + i - 1:0{width}d}")
+              for i in range(1, count + 1)),
+    )
+
+
+def test_a_lowercase_production_prefix_is_detected():
+    """`iiCON000001` — the real prefix that scored 0%."""
+    doc = _seq("iiCON", "", 1483, 6)
+    proposal = propose_format((doc,))
+    assert proposal is not None, "a real, fully stamped production proposed nothing"
+    assert proposal.format.prefix == "iiCON"
+    out = apply_bates((doc,), BatesDecision(DecisionStatus.CONFIRMED,
+                                            proposal.format))
+    assert [p.bates for p in out[0].pages] == [
+        f"iiCON{1483 + i:06d}" for i in range(6)]
+
+
+@pytest.mark.parametrize("prefix,sep", [
+    ("iiCON", ""),          # lowercase-leading, no separator
+    ("Def", "-"),           # title case with a separator
+    ("PltfBates", " "),     # camel case
+    ("mnfv", " "),          # all lowercase
+    ("MNFV", " "),          # the uppercase case must not regress
+    ("Vol2.Def", "-"),      # digit-bearing prefix, separator required
+])
+def test_the_prefix_case_class_is_covered_not_just_the_one_prefix(prefix, sep):
+    doc = _seq(prefix, sep, 391, 5)
+    proposal = propose_format((doc,))
+    assert proposal is not None, f"{prefix!r} + {sep!r} proposed nothing"
+    assert proposal.format.prefix == prefix
+    assert proposal.format.separator == sep
+
+
+def test_case_is_preserved_and_never_folded():
+    """Two productions differing only in case are two formats.
+
+    Folding case would be the lazy fix and it would cross-apply one party's
+    numbering to another's pages — a locator pointing at a record that does not
+    exist, which §4 rates worse than no locator at all.
+    """
+    lower = _seq("iiCON", "", 1000, 6)
+    upper = document(
+        "prod/upper.pdf",
+        tuple(page(i, f"text\nIICON{2000 + i:06d}") for i in range(1, 7)),
+    )
+    proposal = propose_format((lower, upper))
+    assert proposal is not None
+    out = apply_bates((lower, upper), BatesDecision(DecisionStatus.CONFIRMED,
+                                                    proposal.format))
+    by_path = {d.rel_path: d for d in out}
+    chosen = proposal.format.prefix
+    other = "IICON" if chosen == "iiCON" else "iiCON"
+    other_doc = by_path[f"prod/{other.lower()}.pdf"]
+    assert all(p.bates is None for p in other_doc.pages), (
+        f"the {chosen!r} format was applied to {other!r} pages")
+
+
+def test_a_lowercase_prefix_round_trips_through_the_persisted_pattern():
+    doc = _seq("iiCON", "", 1483, 4)
+    fmt = propose_format((doc,)).format
+    assert parse_pattern(fmt.pattern) == fmt
+
+
+def test_widening_the_case_class_did_not_open_the_page_number_hole():
+    """The widening's cost, measured rather than assumed.
+
+    Allowing lowercase means more footer text parses as stamp-shaped. What
+    keeps it from becoming a false positive is unchanged and is asserted here:
+    the whole-line anchor, the three-digit floor, and the per-document coverage
+    bar.
+    """
+    for line in ("page 12", "Page 3 of 8", "Exhibit 4", "2024", "1,234.56",
+                 "Rev 3", "revised 2024-01-01", "$12,500.00"):
+        assert _parse_line(line) is None, line
+
+
+# ---------------------------------------------------------------------------
+# The confirmed stamp folded into a longer OCR line
+# ---------------------------------------------------------------------------
+#
+# From the criterion-4 acceptance run: on OCR'd pages the production's burned-in
+# stamp lands inside a longer line, correct and complete, and the whole-line
+# anchor rejected it. 72 of 648 sampled pages were missed and every one was an
+# OCR page. Detection stays anchored (an open grammar unanchored reads dates and
+# dollar figures as Bates numbers); APPLICATION of an already-confirmed format
+# does not need to be.
+
+
+def _confirmed(prefix="iiCON", sep="", widths=(6,), suffix=None, suffix_sep=""):
+    fmt = BatesFormat(prefix=prefix, separator=sep, digit_widths=widths,
+                      suffix=suffix, suffix_sep=suffix_sep)
+    return BatesDecision(DecisionStatus.CONFIRMED, fmt)
+
+
+def test_a_confirmed_stamp_inside_a_longer_ocr_line_is_applied():
+    """The two real shapes, verbatim in form from the acceptance run."""
+    doc = document("prod/ocr.pdf", (
+        page(1, "body\nuntij isfiyed iiCON003944"),
+        page(2, "body\niicon Ryan McAllister Project Manager "
+                "ryan@example.com 76 S. Sierra Madre Street in iiCON003961"),
+    ))
+    out = apply_bates((doc,), _confirmed())
+    assert [p.bates for p in out[0].pages] == ["iiCON003944", "iiCON003961"]
+
+
+def test_the_embedded_search_records_the_STAMP_not_the_whole_line():
+    doc = document("prod/ocr.pdf",
+                   (page(1, "body\nsome noise iiCON003944 more noise"),))
+    out = apply_bates((doc,), _confirmed())
+    assert out[0].pages[0].bates == "iiCON003944"
+
+
+def test_the_embedded_search_cannot_match_inside_a_longer_run():
+    """`iiCON001483` must not be found inside `XiiCON0014837`."""
+    doc = document("prod/ocr.pdf", (
+        page(1, "body\ngarbage XiiCON0014837 garbage"),
+        page(2, "body\ngarbage iiCON0014831 garbage"),
+    ))
+    out = apply_bates((doc,), _confirmed())
+    assert [p.bates for p in out[0].pages] == [None, None]
+
+
+def test_two_different_confirmed_stamps_in_one_zone_leave_the_page_unstamped():
+    """An ambiguous locator is worse than none (§4). Not a guess, a refusal."""
+    doc = document("prod/ocr.pdf",
+                   (page(1, "body\nfooter iiCON003944 and iiCON003945"),))
+    out = apply_bates((doc,), _confirmed())
+    assert out[0].pages[0].bates is None
+
+
+def test_the_same_stamp_twice_in_one_zone_is_not_ambiguous():
+    doc = document("prod/ocr.pdf",
+                   (page(1, "header iiCON003944\nbody\nfooter iiCON003944"),))
+    out = apply_bates((doc,), _confirmed())
+    assert out[0].pages[0].bates == "iiCON003944"
+
+
+def test_the_embedded_search_honours_the_confirmed_WIDTH():
+    """It is the confirmed format that is searched for, not a looser one."""
+    doc = document("prod/ocr.pdf", (
+        page(1, "body\nnoise iiCON1234567890 noise"),   # 10 digits, not 6
+        page(2, "body\nnoise iiCON003944 noise"),       # 6 digits, confirmed
+    ))
+    out = apply_bates((doc,), _confirmed(widths=(6,)))
+    assert [p.bates for p in out[0].pages] == [None, "iiCON003944"]
+
+
+def test_the_embedded_search_honours_the_confirmed_SUFFIX():
+    doc = document("prod/ocr.pdf", (
+        page(1, "body\nnoise MNFV 000391 noise"),        # no -CONF
+        page(2, "body\nnoise MNFV 000392-CONF noise"),
+    ))
+    out = apply_bates((doc,), _confirmed(prefix="MNFV", sep=" ", widths=(6,),
+                                         suffix="CONF", suffix_sep="-"))
+    assert [p.bates for p in out[0].pages] == [None, "MNFV 000392-CONF"]
+
+
+def test_the_embedded_search_is_confined_to_the_ZONE():
+    """A number in the middle of the page is not a footer stamp."""
+    body = "\n".join(["header"] * 3 + ["mid-page iiCON003944 mid-page"]
+                     + ["filler"] * 8 + ["footer"] * 4)
+    doc = document("prod/ocr.pdf", (page(1, body),))
+    out = apply_bates((doc,), _confirmed())
+    assert out[0].pages[0].bates is None
+
+
+def test_the_embedded_search_does_not_fire_without_a_confirmed_decision():
+    doc = document("prod/ocr.pdf",
+                   (page(1, "body\nnoise iiCON003944 noise"),))
+    for decision in (None,
+                     BatesDecision(DecisionStatus.PENDING),
+                     BatesDecision(DecisionStatus.REJECTED)):
+        out = apply_bates((doc,), decision)
+        assert out[0].pages[0].bates is None
+
+
+def test_the_anchored_path_still_wins_and_still_records_the_line():
+    """No regression: a zone line that IS the stamp behaves exactly as before."""
+    doc = document("prod/native.pdf", (page(1, "body\niiCON003944"),))
+    out = apply_bates((doc,), _confirmed())
+    assert out[0].pages[0].bates == "iiCON003944"

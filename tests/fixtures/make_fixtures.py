@@ -350,6 +350,39 @@ def misnamed_pdf(path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _generator_stamp() -> str:
+    """Identity of THIS generator, readable from a checkout or from a bundle.
+
+    ``sha256(Path(__file__).read_bytes())`` is the natural expression and it is
+    wrong inside a PyInstaller build: ``__file__`` names a path in the archive
+    that does not exist on disk, so the packaged self-test died with
+    ``FileNotFoundError`` before it built a single fixture. This is the fourth
+    member of one class — every place in the tree that derives a *path* from
+    ``__file__`` and expects a real file there. The other three were
+    ``branding.palette``'s brand directory, ``ingest.extract``'s OCR model
+    directory and ``verify.determinism``'s subprocess ``PYTHONPATH``; this one
+    was missed on the first sweep because the sweep read ``src/`` and this file
+    lives under ``tests/``. Recorded rather than quietly fixed, because the
+    lesson is about the sweep, not about the line.
+
+    Frozen, the module's own compiled code stands in for its source bytes. It
+    changes when the generator changes, which is the whole property the stamp
+    needs; it is simply not the same VALUE as the source hash, so a corpus
+    built by the frozen build and one built from a checkout do not share a
+    completion marker. They also never share a directory, so nothing rebuilds
+    that would not have rebuilt anyway.
+    """
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+    except OSError:
+        import importlib.util
+        import marshal
+
+        spec = importlib.util.find_spec(__name__)
+        code = spec.loader.get_code(__name__)  # type: ignore[union-attr]
+        return hashlib.sha256(marshal.dumps(code)).hexdigest()[:16]
+
+
 def build(out: Path | None = None) -> Path:
     """(Re)generate the corpus and return its root.
 
@@ -373,7 +406,7 @@ def build(out: Path | None = None) -> Path:
     # forever and the tests silently kept asserting against the old bytes --
     # which is exactly how a determinism fix here first looked like a product
     # regression.
-    stamp = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+    stamp = _generator_stamp()
     out.mkdir(parents=True, exist_ok=True)
 
     for _ in range(600):  # ~60s; the build itself takes a few seconds

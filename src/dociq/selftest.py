@@ -35,7 +35,6 @@ import csv
 import dataclasses
 import json
 import shutil
-import socket
 import sys
 import os
 import tempfile
@@ -95,18 +94,25 @@ class _Check:
 
 
 def _fixture_root(work: Path) -> Path:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "fixtures"))
-    import make_fixtures
+    """Build the synthetic corpus, from the source tree or from the bundle.
+
+    The fixture builder is shipped INSIDE the packaged build so
+    ``DocumentIQ-cli.exe --selftest`` runs the same gate on the artifact that
+    actually goes to a client. A gate that can only run from a checkout proves
+    the checkout.
+    """
+    if getattr(sys, "frozen", False):
+        import make_fixtures  # bundled into the PYZ by packaging/DocumentIQ.spec
+    else:
+        sys.path.insert(
+            0, str(Path(__file__).resolve().parents[2] / "tests" / "fixtures"))
+        import make_fixtures  # type: ignore[no-redef]
 
     return make_fixtures.build(work / "fixtures")
 
 
 def _check_no_network(chk: _Check) -> None:
-    """Principle 4. Prove the OCR path needs no socket by taking sockets away.
-
-    ``socket.socket`` is replaced with a raiser for the duration, so any
-    outbound attempt — the model download the vendored code used to permit —
-    fails loudly instead of quietly succeeding on a connected machine.
+    """Principle 4. Prove the OCR path makes no outbound call — by counting.
 
     Critically, the shared ``_OCR_ENGINE`` singleton is torn down first. By
     the time this runs, Stage 1-2 has already OCR'd the fixture corpus and
@@ -114,44 +120,69 @@ def _check_no_network(chk: _Check) -> None:
     prove that *inference* needs no socket; the historical hazard this
     guards against (``enable_os_trust()``) lived in *construction* — a
     cold-cache model load — which a warm-engine probe never exercises. Forcing
-    a fresh ``RapidOCR(...)`` build under the blocked socket is the only way
-    this check is honest about what it claims.
+    a fresh ``RapidOCR(...)`` build under the guard is the only way this check
+    is honest about what it claims.
+
+    **Changed 2026-08-01 (Track F).** This check used to replace
+    ``socket.socket`` with a raiser and assert only that OCR still produced
+    lines. That is a weaker claim than §10 makes: a library that attempts a
+    fetch inside ``try/except Exception`` passes a blocking probe in silence
+    and still writes an outbound packet the moment the block is lifted on a
+    client machine. :mod:`dociq.verify.offline` records every attempt across
+    the whole guarded class and the assertion is now ``guard.clean`` — zero
+    attempts — with "OCR still worked" kept as a second, separate check so a
+    guard that broke OCR outright cannot read as a pass.
     """
-    real = socket.socket
+    from .verify import offline
 
-    class _Blocked(Exception):
-        pass
-
-    def _no_socket(*a, **k):
-        raise _Blocked("network access attempted during OCR")
-
-    from .ingest.extract import ocr_models_present
-
-    ok, msg = ocr_models_present()
+    ok, msg = ex.ocr_models_present()
     if not chk.expect(ok, "OCR models present locally", msg or str(ex.ocr_model_dir())):
         return
-    was_warm = ex._OCR_ENGINE is not None
-    ex._OCR_ENGINE = None  # force a genuine cold construction under the block
-    socket.socket = _no_socket  # type: ignore[assignment]
-    try:
-        from PIL import Image, ImageDraw
-        import numpy as np
+    chk.expect(not offline.audit_siblings(),
+               "every outbound-capable socket entry point is guarded or "
+               "accounted for",
+               f"{len(offline.enumerate_guarded_entry_points())} guarded: "
+               + ", ".join(offline.enumerate_guarded_entry_points()))
 
-        img = Image.new("L", (600, 120), 255)
-        ImageDraw.Draw(img).text((10, 40), "OFFLINE OCR CHECK 2024", fill=0)
-        arr = np.repeat(np.array(img)[:, :, None], 3, axis=2)
-        text, confs = ex._ocr_array(arr)
-        chk.expect(bool(confs),
-                   "OCR ran with sockets disabled, including cold engine "
-                   "construction" + (" (previously warm; reset for this "
-                   "check)" if was_warm else ""),
+    was_warm = ex._OCR_ENGINE is not None
+    ex._OCR_ENGINE = None  # force a genuine cold construction under the guard
+    confs: list = []
+    text = ""
+    failure: str | None = None
+    with offline.no_network() as guard:
+        try:
+            from PIL import Image, ImageDraw
+            import numpy as np
+
+            img = Image.new("L", (600, 120), 255)
+            ImageDraw.Draw(img).text((10, 40), "OFFLINE OCR CHECK 2024", fill=0)
+            arr = np.repeat(np.array(img)[:, :, None], 3, axis=2)
+            text, confs = ex._ocr_array(arr)
+        except Exception as exc:  # pragma: no cover — engine-level failure
+            failure = f"{type(exc).__name__}: {exc}"
+    chk.expect(guard.clean,
+               "ZERO outbound attempts during cold OCR engine construction "
+               "and inference" + (" (engine was warm; reset for this check)"
+                                  if was_warm else ""),
+               guard.render().splitlines()[0])
+    if not guard.clean:
+        print(guard.render())
+    if failure:
+        chk.fail("OCR ran under the network guard", failure)
+    else:
+        chk.expect(bool(confs), "OCR ran under the network guard",
                    f"{len(confs)} line(s), text {text[:40]!r}")
-    except _Blocked as exc:
-        chk.fail("OCR ran with sockets disabled", str(exc))
-    except Exception as exc:  # pragma: no cover — engine-level failure
-        chk.fail("OCR ran with sockets disabled", f"{type(exc).__name__}: {exc}")
-    finally:
-        socket.socket = real  # type: ignore[assignment]
+    loaded = offline.audit_model_fetch_imports()
+    chk.expect(not loaded,
+               "no fetch-client module was imported by this run",
+               ("none of " + ", ".join(offline.MODEL_FETCH_MODULES))
+               if not loaded else "LOADED: " + ", ".join(loaded))
+    # Disclosed, not failed: reportlab and python-pptx import stdlib transport
+    # at import time and never call it. The zero-attempt count above is the
+    # assurance; this line exists so the fact is on the record rather than
+    # rediscovered as a surprise.
+    chk.ok("stdlib transport imported by reportlab / python-pptx (disclosed)",
+           ", ".join(offline.audit_transport_imports()) or "none")
 
 
 def main(argv: list[str] | None = None) -> int:

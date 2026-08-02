@@ -48,6 +48,29 @@ Consequence for the product's positioning, flagged: §7 and D-03 make the token 
 
 | D-23 | Acceptance criterion 4 — how Bates ground truth is established on MNFV | **Sequence-continuity proof over the whole set + a hand-checked stratified sample of ~100 pages.** MNFV is image-only, so every candidate ground-truth number is itself OCR of a footer stamp; a sample alone cannot see a systematic off-by-one or a document-boundary error, and a full hand-check does not scale. So: machine-verify the *structural* property over every stamped page — each document's Bates range monotonic, gapless within the document, non-overlapping across documents, contiguous across the production — which catches the whole error class; then hand-verify a stratified sample against the page images for absolute correctness. The ≥99% figure is stated **with its method**, and misses are flagged rather than silently corrected (§4). The acceptance note must state plainly that ground truth is OCR-derived and what the continuity proof does and does not establish. | 2026-08-01 |
 
+### CORRECTION to D-13 and D-23's premise — the MNFV ground truth is not all OCR-derived (Track F, 2026-08-01)
+
+D-13 calls the MNFV set "image-only" and D-23 builds its whole method on the
+consequence: "every candidate ground-truth number is itself OCR of a footer
+stamp". **That is true of part of the set and false of the larger part**, and
+the correction is recorded here rather than left in a verification note because
+D-23's ruling text asserts it.
+
+`Desktop\Files for Claude\20240529` holds two different things:
+
+| set | documents | pages | ground truth |
+|---|---|---|---|
+| `20240510 Initial Discl` — a standard e-discovery production, prefix `iiCON` | 2,138 | 11,561 | its own **load files** (`.OPT` / `.LFP` / `.DAT` / `.LST`) — the producing party's authoritative page-level numbering, generated when the stamps were burned in, **not** a re-reading of them. The PDFs also carry the vendor's embedded text layer, so DocIQ reads their stamps on the native path, not through OCR. |
+| `Initial Disclosures` + `Supplemental` — combined PDFs, prefix `MNFV` | 16 PDFs | 2,963 | **filename ranges only** — document-level and weak. D-23's caveat applies here in full, and was measured to bite: the filenames pad to four digits (`MNFV 0919`) while the stamp burned into the page pads to five (`MNFV 00919`). |
+
+**D-23's METHOD is unaffected and was followed as ruled** — continuity over the
+whole set, plus a hand-checked stratified sample. What changes is the strength
+of the resulting number: the page-level figure for the 2,138-document
+production rests on authoritative, non-OCR ground truth. The two sets are
+reported separately and never averaged, because the average would be the
+flattering figure and the less honest one. Detail and results in
+`docs/verification/track_f_sprint2_2026-08-01.md` §4.
+
 ## Sprint-1 verification log
 
 **Track B master-index robustness (2026-07-30).** The Track B critic found a

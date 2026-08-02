@@ -20,11 +20,33 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-BRAND_DIR = _REPO_ROOT / "assets" / "branding"
+def _brand_dir() -> Path:
+    """Where the shipped brand art lives, source tree or frozen build.
+
+    From the source tree it is ``<repo>/assets/branding``, four parents up.
+    That arithmetic is wrong in a PyInstaller build, where this file sits at
+    ``<bundle>/dociq/branding/palette.py`` and the same four parents land
+    outside the bundle entirely — so the icon, the header lockup and the
+    monogram the palette is SAMPLED from all resolve to nothing, and the
+    packaged app either ships an unbranded window or fails at import when the
+    palette cannot find its source art.
+
+    ``sys._MEIPASS`` is PyInstaller's own answer to "where did my data go", and
+    it is the only reliable one: the bundle directory is not derivable from
+    ``__file__`` because the launcher may run from anywhere. Checked first, so
+    the frozen path never depends on the source-tree arithmetic being right.
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "assets" / "branding"
+    return Path(__file__).resolve().parents[3] / "assets" / "branding"
+
+
+BRAND_DIR = _brand_dir()
 MONOGRAM_SOURCE = BRAND_DIR / "li_monogram_source.png"
 WORDMARK_SOURCE = BRAND_DIR / "li_logo.png"
 
