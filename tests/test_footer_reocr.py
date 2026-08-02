@@ -360,3 +360,19 @@ def test_the_band_is_a_higher_RESOLUTION_re_render_not_an_upscale():
 def test_a_page_shorter_than_the_band_is_not_a_crash_or_a_zero_tile():
     tiles, _px = _tiles(300, 40, top=False)
     assert tiles and all(w > 0 and h > 0 for w, h in tiles)
+
+
+@pytest.mark.parametrize("size", [
+    (612, 0.1),      # degenerate: wide and essentially flat
+    (5000, 3),       # ten feet of paper, three points deep
+    (0, 792),        # zero width
+    (612, 0),        # zero height
+])
+def test_a_degenerate_page_cannot_make_the_band_pass_unbounded(size):
+    """"A real production cannot contain this" is exactly the assumption that
+    produces a run which never finishes. Tile width is ``8 x band`` and band is
+    bounded by page height, so a very wide, very SHORT page makes tiles
+    arbitrarily narrow — a 612 x 0.1pt page would otherwise be nearly a
+    thousand recognitions."""
+    tiles, _px = _tiles(*size, top=False)
+    assert len(tiles) <= ex._FOOTER_MAX_TILES, (size, len(tiles))

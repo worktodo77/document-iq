@@ -633,6 +633,20 @@ Without it a stamp straddling a tile boundary is cut in half and read as two
 things, neither of which is a locator. One fifth is comfortably wider than any
 stamp relative to a ten-inch tile."""
 
+_FOOTER_MAX_TILES = 12
+"""Hard ceiling on tiles per band, disclosed rather than silent.
+
+Tile width is ``8 x band`` and ``band`` is ``min(1.25in, page height)``, so a
+page that is very wide and very SHORT makes tiles arbitrarily narrow: a
+612 x 0.1pt page yields nearly a thousand of them. That is a degenerate page
+rather than a real one, but "degenerate input cannot reach this" is exactly the
+assumption that produces a run that never finishes.
+
+Twelve covers a page ten feet wide at the full band height, which is past any
+sheet size a production contains. Beyond it the band is read left to right and
+the REMAINDER IS NOT READ — a stamp out there is a miss, which is the failure
+direction §4 asks for, and the ceiling is stated here rather than discovered."""
+
 _FOOTER_CHUNK_PAGES = 8
 """Pages whose tiles are rasterized before any of them is recognized. Bounds
 peak memory the way :func:`_ocr_pdf_pages` does, and lower here because one page
@@ -651,6 +665,14 @@ def _band_tiles(page, dpi: int, band_pt: float, *, top: bool) -> list:
     wide, so a tile is ~1.7 Mpx at 400 dpi whatever the page is, and the tile
     COUNT grows with page width alone. A four-foot-wide page costs five tiles,
     not fifty megapixels.
+
+    **The band is rendered ONCE and sliced, and that is a fix rather than a
+    style.** Rendering each tile with its own ``get_pixmap`` clip re-decodes the
+    page's embedded image every time: on this corpus a page is a 230 MB
+    photograph, so five tiles top and bottom meant ten full decodes of it. The
+    acceptance run took over an hour and a half that way and had to be killed.
+    One render, then numpy views — the pixels are the same and the decode
+    happens once.
     """
     import cv2
     import fitz
@@ -659,32 +681,33 @@ def _band_tiles(page, dpi: int, band_pt: float, *, top: bool) -> list:
     r = page.rect
     band = min(band_pt, r.height)
     y0 = r.y0 if top else r.y1 - band
-    width = min(r.width, _FOOTER_MAX_ASPECT * band)
-    step = width * (1.0 - _FOOTER_TILE_OVERLAP)
+    pix = page.get_pixmap(dpi=dpi, clip=fitz.Rect(r.x0, y0, r.x1, y0 + band))
+    arr = np.frombuffer(pix.samples, np.uint8).reshape(
+        pix.height, pix.width, pix.n)
+    if pix.n == 1:
+        arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+    elif pix.n == 3:
+        arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+    else:
+        arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
 
-    spans: list[tuple[float, float]] = []
-    x = r.x0
+    h, w = arr.shape[:2]
+    if h <= 0 or w <= 0:
+        return []
+    tile_w = min(w, max(1, int(round(_FOOTER_MAX_ASPECT * h))))
+    step = max(1, int(round(tile_w * (1.0 - _FOOTER_TILE_OVERLAP))))
+
+    spans: list[tuple[int, int]] = []
+    x = 0
     while True:
-        x1 = min(x + width, r.x1)
-        span = (max(r.x0, x1 - width), x1)
+        x1 = min(x + tile_w, w)
+        span = (max(0, x1 - tile_w), x1)
         if span not in spans:
             spans.append(span)
-        if x1 >= r.x1 - 1e-9:
+        if x1 >= w or len(spans) >= _FOOTER_MAX_TILES:
             break
         x += step
-
-    out = []
-    for x0, x1 in spans:
-        pix = page.get_pixmap(dpi=dpi, clip=fitz.Rect(x0, y0, x1, y0 + band))
-        arr = np.frombuffer(pix.samples, np.uint8).reshape(
-            pix.height, pix.width, pix.n)
-        if pix.n == 1:
-            out.append(cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR))
-        elif pix.n == 3:
-            out.append(cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
-        else:
-            out.append(cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR))
-    return out
+    return [np.ascontiguousarray(arr[:, x0:x1]) for x0, x1 in spans]
 
 
 def _band_tokens(arr) -> tuple[tuple[str, ...], tuple[float, ...]]:
