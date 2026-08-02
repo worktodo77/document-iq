@@ -68,9 +68,9 @@ def stub_ocr(monkeypatch):
 @pytest.fixture
 def stub_band(monkeypatch, stub_ocr):
     """Band rasterization + recognition, recording every page it was asked for."""
-    def fake_band_array(page, dpi, band, *, top):
+    def fake_band_tiles(page, dpi, band, *, top):
         stub_ocr["band"].append((page.number, dpi, band, top))
-        return ("band", page.number, top)
+        return [("band", page.number, top)]
 
     def fake_ocr_lines(arr):
         if arr[0] != "band":
@@ -79,7 +79,7 @@ def stub_band(monkeypatch, stub_ocr):
             return [_Line("")]
         return [_Line(f"Page {arr[1] + 1}  iiCON{900000 + arr[1]}", 0.97)]
 
-    monkeypatch.setattr(ex, "_band_array", fake_band_array)
+    monkeypatch.setattr(ex, "_band_tiles", fake_band_tiles)
     monkeypatch.setattr(ex, "ocr_lines", fake_ocr_lines)
     return stub_ocr
 
@@ -126,9 +126,9 @@ def test_the_top_band_is_read_only_where_the_bottom_band_found_nothing(
     """§4 says "corners/footers", so a header-stamped production is covered —
     but it is covered second, and only on the pages the footer did not
     resolve. Page 0's footer carries a stamp; page 1's does not."""
-    def fake_band_array(page, dpi, band, *, top):
+    def fake_band_tiles(page, dpi, band, *, top):
         stub_ocr["band"].append((page.number, top))
-        return ("band", page.number, top)
+        return [("band", page.number, top)]
 
     def fake_ocr_lines(arr):
         if arr[0] == "band" and not arr[2] and arr[1] == 0:
@@ -137,7 +137,7 @@ def test_the_top_band_is_read_only_where_the_bottom_band_found_nothing(
             return [_Line("iiCON900001", 0.95)]
         return [_Line("nothing")]
 
-    monkeypatch.setattr(ex, "_band_array", fake_band_array)
+    monkeypatch.setattr(ex, "_band_tiles", fake_band_tiles)
     monkeypatch.setattr(ex, "ocr_lines", fake_ocr_lines)
     pages, _notes = _extract("02_scanned_instruction.pdf")
     assert sorted(stub_ocr["band"]) == [(0, False), (1, False), (1, True)]
@@ -180,6 +180,7 @@ def test_the_recovery_is_disclosed_in_the_document_notes(stub_band):
     assert len(note) == 1
     assert "2 page(s)" in note[0]
     assert str(ex.FOOTER_REOCR_DPI) in note[0]
+    assert "1.25in" in note[0]
     assert str(FOOTER_BLOCK_MAX_LINES) in note[0]
 
 
@@ -210,12 +211,12 @@ def test_a_failing_band_pass_marks_the_document_and_keeps_every_page(
 
 
 def test_one_unreadable_band_does_not_sink_the_others(monkeypatch, stub_ocr):
-    def fake_band_array(page, dpi, band, *, top):
+    def fake_band_tiles(page, dpi, band, *, top):
         if page.number == 0:
             raise RuntimeError("this page will not rasterize")
-        return ("band", page.number, top)
+        return [("band", page.number, top)]
 
-    monkeypatch.setattr(ex, "_band_array", fake_band_array)
+    monkeypatch.setattr(ex, "_band_tiles", fake_band_tiles)
     monkeypatch.setattr(ex, "ocr_lines",
                         lambda arr: [_Line(f"iiCON{900000 + arr[1]}", 0.9)])
     pages, _notes = _extract("02_scanned_instruction.pdf")
@@ -225,8 +226,8 @@ def test_one_unreadable_band_does_not_sink_the_others(monkeypatch, stub_ocr):
 
 def test_the_appended_block_can_never_exceed_its_stated_bound(
         monkeypatch, stub_ocr):
-    monkeypatch.setattr(ex, "_band_array",
-                        lambda page, dpi, band, *, top: ("band", page.number, top))
+    monkeypatch.setattr(ex, "_band_tiles",
+                        lambda page, dpi, band, *, top: [("band", page.number, top)])
     monkeypatch.setattr(ex, "ocr_lines", lambda arr: [
         _Line(" ".join(f"iiCON{900000 + i}" for i in range(20)), 0.9)])
     pages, _notes = _extract("02_scanned_instruction.pdf")
@@ -266,48 +267,96 @@ def test_nothing_about_the_ATTEMPT_reaches_the_page(stub_band):
 # geometry — the recognizer's own configuration is the constraint
 # ---------------------------------------------------------------------------
 
-
-def _band_shape(width_pt: float, height_pt: float, top: bool):
+def _tiles(width_pt: float, height_pt: float, top: bool):
     import fitz
 
     doc = fitz.open()
     doc.new_page(width=width_pt, height=height_pt)
-    arr = ex._band_array(doc[0], ex.FOOTER_REOCR_DPI, ex.FOOTER_REOCR_BAND,
-                         top=top)
+    out = [(a.shape[1], a.shape[0]) for a in
+           ex._band_tiles(doc[0], ex.FOOTER_REOCR_DPI, ex.FOOTER_REOCR_BAND_PT,
+                          top=top)]
+    page_px = ex._page_array(doc[0]).shape[0] * ex._page_array(doc[0]).shape[1]
     doc.close()
-    return arr.shape[1], arr.shape[0]  # (w, h) in pixels
+    return out, page_px
 
 
-@pytest.mark.parametrize("size", [
-    (612, 792),      # US Letter portrait
-    (792, 612),      # US Letter landscape — the shape that trips the bypass
-    (595, 842),      # A4 portrait
-    (1224, 792),     # 17x11 tabloid landscape
-    (200, 1200),     # absurdly tall
-])
+PAGE_SHAPES = [
+    (612, 792),        # US Letter portrait
+    (792, 612),        # US Letter landscape — the shape that trips the bypass
+    (595, 842),        # A4 portrait
+    (1224, 792),       # 17x11 tabloid landscape
+    (200, 1200),       # absurdly tall
+    (100, 100),        # smaller than the band is deep
+    (2700, 3681),      # a REAL page from the acceptance corpus: a 37x51in photo
+    (3600, 2761),      # ditto, landscape — 13:1 as a single strip
+    (4032, 3092),      # the widest page in the sampled production
+]
+
+
+@pytest.mark.parametrize("size", PAGE_SHAPES)
 @pytest.mark.parametrize("top", [False, True])
-def test_the_band_never_trips_the_recognizers_single_line_bypass(size, top):
+def test_no_tile_trips_the_recognizers_single_line_bypass(size, top):
     """rapidocr skips DETECTION when width/height exceeds ``width_height_ratio``
-    and recognizes the whole strip as one line — which would fold a page
-    number, a footer note and the stamp into one unparseable string. The band
-    height is bounded by the engine's own configured ratio, not by taste."""
-    w, h = _band_shape(*size, top=top)
-    assert w / h <= ex._FOOTER_MAX_ASPECT + 1e-6, (size, top, w, h)
+    and recognizes the whole strip as one line — which would fold a page number,
+    a footer note and the stamp into one unparseable string. Measured on the
+    corpus: the 3600pt-wide pages here are 13:1 as a single strip, detection was
+    bypassed, and the pass returned nothing readable at all."""
+    tiles, _px = _tiles(*size, top=top)
+    assert tiles
+    for w, h in tiles:
+        assert w / h <= ex._FOOTER_MAX_ASPECT + 1e-6, (size, top, w, h)
+
+
+@pytest.mark.parametrize("size", PAGE_SHAPES)
+def test_the_band_cost_scales_with_page_WIDTH_not_page_AREA(size):
+    """The defect this replaced: a band taken as a FRACTION of page height made
+    a 37x51in photograph a 43-megapixel recognition, and a sweep over 55 such
+    pages did not finish in ninety minutes.
+
+    A tile is at most ``band`` tall and ``8 x band`` wide, so its pixel count is
+    a constant of the resolution and the tile COUNT grows with width alone.
+    """
+    tiles, page_px = _tiles(*size, top=False)
+    cap = (ex.FOOTER_REOCR_BAND_PT * ex.FOOTER_REOCR_DPI / 72) ** 2 * \
+        ex._FOOTER_MAX_ASPECT
+    for w, h in tiles:
+        assert w * h <= cap * 1.01, (size, w, h)
+    assert len(tiles) <= max(1, round(size[0] / (ex._FOOTER_MAX_ASPECT *
+                                                 ex.FOOTER_REOCR_BAND_PT))) + 2
+    # An absolute ceiling for ANY page shape, stated rather than hoped for.
+    total = sum(w * h for w, h in tiles)
+    assert total <= 16e6, (size, total)
+    # And on the shapes that actually caused the defect — the corpus's own
+    # oversized photograph pages — the whole band pass is a FRACTION of what
+    # the ordinary whole-page pass already rasterizes at 200 dpi.
+    if size[0] * size[1] > 2e6:
+        assert total < page_px * 0.5, (size, total, page_px)
+
+
+@pytest.mark.parametrize("size", PAGE_SHAPES)
+def test_the_tiles_cover_the_whole_band_width_and_overlap(size):
+    """A stamp straddling a tile boundary would be cut in half and read as two
+    things, neither of which is a locator."""
+    tiles, _px = _tiles(*size, top=False)
+    px_per_pt = ex.FOOTER_REOCR_DPI / 72
+    covered = sum(w for w, _h in tiles) - \
+        (len(tiles) - 1) * ex._FOOTER_TILE_OVERLAP * tiles[0][0]
+    assert covered >= size[0] * px_per_pt - 2, (size, covered)
 
 
 def test_the_band_is_a_higher_RESOLUTION_re_render_not_an_upscale():
     """The mechanism is more pixels on the glyph before the recognizer's fixed
     48px crop resize. Rendering the same band at the page's own 200 dpi would
     add no information at all."""
-    import fitz
-
-    doc = fitz.open()
-    doc.new_page(width=612, height=792)
-    band = ex._band_array(doc[0], ex.FOOTER_REOCR_DPI, ex.FOOTER_REOCR_BAND,
-                          top=False)
-    page_px = ex._page_array(doc[0]).shape[0] * ex._page_array(doc[0]).shape[1]
-    doc.close()
     assert ex.FOOTER_REOCR_DPI > 200
-    # The band is a fraction of the page, at twice the resolution: it must be
-    # sharper per inch and still smaller than a whole page of pixels.
-    assert band.shape[0] * band.shape[1] < page_px * 2
+    tiles, page_px = _tiles(612, 792, top=False)
+    assert len(tiles) == 1
+    w, h = tiles[0]
+    assert h == pytest.approx(ex.FOOTER_REOCR_BAND_PT * ex.FOOTER_REOCR_DPI / 72,
+                              abs=2)
+    assert w * h < page_px
+
+
+def test_a_page_shorter_than_the_band_is_not_a_crash_or_a_zero_tile():
+    tiles, _px = _tiles(300, 40, top=False)
+    assert tiles and all(w > 0 and h > 0 for w, h in tiles)

@@ -588,69 +588,117 @@ FOOTER_REOCR_DPI = 400
 """Rasterization resolution for the band pass, against 200 dpi for the page.
 
 Doubling the resolution doubles the glyph height the recognizer sees BEFORE its
-own fixed-height crop resize, which is the entire mechanism: at 200 dpi a 10pt
-stamp is ~28 px tall and the recognizer's input is 48 px, so it is upsampling
-guesswork; at 400 dpi it is downsampling a real reading. The value is measured
-rather than assumed — ``docs/verification/bates_d25_2026-08-01.md`` reports the
-sweep over 300/400/600 dpi and what each cost."""
+own fixed-height crop resize, which is the mechanism: at 200 dpi a 10pt stamp is
+~28 px tall and the recognizer's input is 48 px, so it is upsampling guesswork;
+at 400 dpi it is downsampling a real reading.
 
-FOOTER_REOCR_BAND = 0.14
-"""Fraction of page height taken as the stamp band, top or bottom.
+**Measured, and the measurement bounds the claim.** Over the 55 pages the
+criterion-4 baseline missed, 400 dpi reads the stamp's DIGITS correctly where
+the whole-page pass read nothing at all. 300 dpi is close behind; 600 and 800
+dpi are WORSE, not better, which is the opposite of the naive expectation and
+the reason this number is measured rather than maximised. See
+``docs/verification/bates_d25_2026-08-01.md`` for the sweep, and for the part of
+the stamp the band pass does *not* fix.
+"""
 
-Wider than the 9% the hand-check renders, because the hand-check only had to
-show a human where the stamp was and this has to contain it: a page whose
-content runs low, or whose stamp sits above a footer rule, puts the stamp
-further up. Wider costs pixels; too narrow costs the stamp."""
+FOOTER_REOCR_BAND_PT = 90.0
+"""Height of the stamp band, in PDF points — a physical 1.25 inches, not a
+fraction of the page.
+
+This was a fraction of page height in the first draft and that was a defect,
+found by measuring rather than by reading. The acceptance corpus contains pages
+that are **2700 x 3681 points** — photographs whose page box is 37 x 51 inches —
+and 14% of that page is a seven-inch strip. Two things went wrong at once: the
+band became tens of megapixels (a sweep over 55 such pages did not finish in 90
+minutes), and its aspect ratio tripped the bypass below.
+
+A Bates stamp is burned in at a physical size, a physical distance from the
+physical edge of the page. On the acceptance corpus it sits within ~40 points of
+the bottom edge whether the page is letter-size or four feet tall. So the band
+is physical too, and its cost stops scaling with page AREA.
+"""
 
 _FOOTER_MAX_ASPECT = 8.0
 """rapidocr SKIPS text detection entirely when width/height exceeds its
 ``width_height_ratio`` (8.0 in the shipped ``config.yaml``) and recognizes the
-whole strip as a single line. On a letter page a 9%-height band is 8.5:1 and
-would trip exactly that, folding a page number, a footer note and the stamp
-into one unparseable string. The band is therefore never allowed to be thinner
-than ``width / 8``, which is a geometric consequence of the engine's own
-configuration rather than a tuned number."""
+whole strip as a single line. Measured on the corpus: a 3600pt-wide page's
+footer strip is 13:1, detection was bypassed, and the pass returned nothing
+readable at all. So the band is TILED — never stretched — and every tile is at
+most this ratio wide. It is the engine's own configuration, not a taste."""
+
+_FOOTER_TILE_OVERLAP = 0.2
+"""How much consecutive tiles overlap, as a fraction of tile width.
+
+Without it a stamp straddling a tile boundary is cut in half and read as two
+things, neither of which is a locator. One fifth is comfortably wider than any
+stamp relative to a ten-inch tile."""
+
+_FOOTER_CHUNK_PAGES = 8
+"""Pages whose tiles are rasterized before any of them is recognized. Bounds
+peak memory the way :func:`_ocr_pdf_pages` does, and lower here because one page
+can be several tiles."""
 
 
-def _band_array(page, dpi: int, band: float, *, top: bool):
-    """Rasterize the top or bottom band of one page into an OCR-ready array.
+def _band_tiles(page, dpi: int, band_pt: float, *, top: bool) -> list:
+    """The stamp band of one page, as OCR-ready tiles in left-to-right order.
 
-    The clip is taken in PDF user space and rendered at ``dpi``, so this is a
-    genuine re-render at higher resolution — not an upscale of the 200 dpi
+    The clip is taken in PDF user space and rendered at ``dpi``, so each tile is
+    a genuine re-render at higher resolution — not an upscale of the 200 dpi
     page image, which would add no information at all.
+
+    Cost is bounded by construction, and the bound is arithmetic rather than a
+    cap: a tile is at most ``band_pt`` tall and ``_FOOTER_MAX_ASPECT * band_pt``
+    wide, so a tile is ~1.7 Mpx at 400 dpi whatever the page is, and the tile
+    COUNT grows with page width alone. A four-foot-wide page costs five tiles,
+    not fifty megapixels.
     """
     import cv2
     import fitz
     import numpy as np
 
     r = page.rect
-    height = max(r.height * band, r.width / _FOOTER_MAX_ASPECT)
-    height = min(height, r.height)
-    clip = (fitz.Rect(r.x0, r.y0, r.x1, r.y0 + height) if top
-            else fitz.Rect(r.x0, r.y1 - height, r.x1, r.y1))
-    pix = page.get_pixmap(dpi=dpi, clip=clip)
-    arr = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)
-    if pix.n == 1:
-        return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
-    if pix.n == 3:
-        return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-    return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+    band = min(band_pt, r.height)
+    y0 = r.y0 if top else r.y1 - band
+    width = min(r.width, _FOOTER_MAX_ASPECT * band)
+    step = width * (1.0 - _FOOTER_TILE_OVERLAP)
+
+    spans: list[tuple[float, float]] = []
+    x = r.x0
+    while True:
+        x1 = min(x + width, r.x1)
+        span = (max(r.x0, x1 - width), x1)
+        if span not in spans:
+            spans.append(span)
+        if x1 >= r.x1 - 1e-9:
+            break
+        x += step
+
+    out = []
+    for x0, x1 in spans:
+        pix = page.get_pixmap(dpi=dpi, clip=fitz.Rect(x0, y0, x1, y0 + band))
+        arr = np.frombuffer(pix.samples, np.uint8).reshape(
+            pix.height, pix.width, pix.n)
+        if pix.n == 1:
+            out.append(cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR))
+        elif pix.n == 3:
+            out.append(cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
+        else:
+            out.append(cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR))
+    return out
 
 
 def _band_tokens(arr) -> tuple[tuple[str, ...], tuple[float, ...]]:
-    """``(stamp-shaped tokens, their confidences)`` from one band image."""
+    """``(stamp-shaped tokens, their confidences)`` from one band tile."""
     from ..identify.bates import stamp_tokens
 
     lines = ocr_lines(arr)
-    text = "\n".join(ln.text for ln in lines)
-    tokens = stamp_tokens(text)
+    tokens = stamp_tokens("\n".join(ln.text for ln in lines))
     if not tokens:
         return (), ()
     # Each token's confidence is the confidence of the recognized line it came
-    # out of. A token that spans two recognized lines cannot happen — the
-    # search runs per line — so the mapping is total, and a token whose line
-    # cannot be identified scores 0.0 rather than silently perfect, the same
-    # rule ``ocr_lines`` applies to a line with no usable score.
+    # out of. A token whose line cannot be identified scores 0.0 rather than
+    # silently perfect — the same rule ``ocr_lines`` applies to a line with no
+    # usable score.
     confs: list[float] = []
     for tok in tokens:
         best = 0.0
@@ -672,36 +720,50 @@ def _reocr_bands(raw: bytes, pages: list[int]
     second and only where the first pass came back empty, which is what keeps
     the cost proportional to the problem instead of to the corpus.
 
-    Keyed by page index and reassembled by index, never by completion order —
-    the same rule, and the same reason, as :func:`_ocr_pdf_pages`.
+    **Assembled in submission order, never completion order.** Tiles are
+    submitted page by page and left to right and their results are consumed in
+    that same order, so which tile finishes first cannot change a page's text.
+    That is the same rule, and the same reason, as :func:`_ocr_pdf_pages`, and
+    it is what makes criterion 7 hold over a pass that fans out.
     """
     import fitz
 
     out: dict[int, tuple[tuple[str, ...], tuple[float, ...]]] = {}
     pool = _ocr_page_pool()
-    chunk_n = 16
     with fitz.open(stream=raw, filetype="pdf") as doc:
         idxs = [i for i in pages if 0 <= i < len(doc)]
         for top in (False, True):
             todo = [i for i in idxs if not out.get(i, ((), ()))[0]]
             if not todo:
                 break
-            for c0 in range(0, len(todo), chunk_n):
-                arrays: dict[int, object] = {}
-                for i in todo[c0:c0 + chunk_n]:
+            for c0 in range(0, len(todo), _FOOTER_CHUNK_PAGES):
+                jobs: list[tuple[int, object]] = []
+                for i in todo[c0:c0 + _FOOTER_CHUNK_PAGES]:
                     try:
-                        arrays[i] = _band_array(doc[i], FOOTER_REOCR_DPI,
-                                                FOOTER_REOCR_BAND, top=top)
+                        tiles = _band_tiles(doc[i], FOOTER_REOCR_DPI,
+                                            FOOTER_REOCR_BAND_PT, top=top)
                     except Exception:
-                        out.setdefault(i, ((), ()))
-                futs = {i: pool.submit(_band_tokens, a) for i, a in arrays.items()}
-                for i, fut in futs.items():
+                        out.setdefault(i, ((), ()))  # one bad page, not the doc
+                        continue
+                    out.setdefault(i, ((), ()))
+                    jobs.extend((i, pool.submit(_band_tokens, a)) for a in tiles)
+                merged: dict[int, tuple[list[str], list[float]]] = {}
+                for i, fut in jobs:
                     try:
-                        got = fut.result()
+                        toks, confs = fut.result()
                     except Exception:
-                        got = ((), ())
-                    if got[0] or i not in out:
-                        out[i] = got
+                        toks, confs = (), ()
+                    slot = merged.setdefault(i, ([], []))
+                    for tok, conf in zip(toks, confs):
+                        if tok in slot[0]:      # the tile overlap sees it twice
+                            continue
+                        if len(slot[0]) >= FOOTER_BLOCK_MAX_LINES:
+                            break
+                        slot[0].append(tok)
+                        slot[1].append(conf)
+                for i, (toks, confs) in merged.items():
+                    if toks:
+                        out[i] = (tuple(toks), tuple(confs))
     return out
 
 
@@ -978,7 +1040,7 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
         notes.append(f"{n_footer_recovered} page(s) had a stamp-shaped token "
                      f"recovered by the targeted footer re-OCR "
                      f"({FOOTER_REOCR_DPI} dpi, "
-                     f"{FOOTER_REOCR_BAND:.0%} band, at most "
+                     f"{FOOTER_REOCR_BAND_PT / 72:.2f}in band, at most "
                      f"{FOOTER_BLOCK_MAX_LINES} token(s) per page)")
     return pages, notes
 
