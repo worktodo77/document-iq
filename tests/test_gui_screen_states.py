@@ -275,12 +275,67 @@ def test_every_button_kind_has_a_disabled_appearance(app) -> None:
     secondary or link action rendered identically to a live one — full-strength
     label, crisp border. The reason for the refusal is always stated beside it,
     but a control that looks pressable invites the press before the reason is
-    read."""
+    read.
+
+    **This test used to check that the SELECTOR STRING existed** — and a
+    rehearsal review proved it vacuous by mutation: setting every
+    ``#secondary:disabled`` colour identical to the enabled rule left a disabled
+    button visually indistinguishable from a live one, and the test still
+    passed. Presence of a rule is not evidence of an appearance. It now compares
+    the resolved declarations and requires the rendered result to actually
+    differ."""
+    import re
+
     from dociq.gui.theme import build_theme, stylesheet
 
     qss = stylesheet(build_theme())
+
+    def declarations(selector: str) -> dict[str, str]:
+        m = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", qss)
+        assert m, f"no rule for {selector}"
+        out: dict[str, str] = {}
+        for decl in m.group(1).split(";"):
+            if ":" in decl:
+                prop, _, val = decl.partition(":")
+                out[prop.strip()] = val.strip()
+        return out
+
+    def appearance(rule: dict[str, str]) -> dict[str, str]:
+        """The three things that decide whether a control reads as pressable,
+        canonicalized so the same colour written two ways compares equal.
+
+        ``border: 1px solid #AAC3D7`` and ``border-color: #AAC3D7`` render the
+        same edge. Comparing raw property names would score those as a
+        difference and call an identical-looking button "disabled" — the exact
+        false pass this test exists to prevent, reintroduced one level down.
+        """
+        def colour_of(*props: str) -> str:
+            for prop in props:
+                if prop in rule:
+                    found = re.findall(r"#[0-9A-Fa-f]{3,8}|\b[a-z]+\b",
+                                       rule[prop])
+                    hexes = [t for t in found if t.startswith("#")]
+                    if hexes:
+                        return hexes[-1].lower()
+                    if found and found[-1] in ("transparent", "none"):
+                        return found[-1]
+            return ""
+
+        return {
+            "color": colour_of("color"),
+            "background": colour_of("background", "background-color"),
+            "border": colour_of("border-color", "border"),
+        }
+
     for kind in ("primary", "secondary", "link"):
-        assert f"QPushButton#{kind}:disabled" in qss, kind
+        enabled = appearance(declarations(f"QPushButton#{kind}"))
+        disabled = appearance(declarations(f"QPushButton#{kind}:disabled"))
+        assert enabled != disabled, (
+            f"QPushButton#{kind}:disabled renders identically to the enabled "
+            f"rule — same text colour, same fill, same edge. A refused control "
+            f"that looks pressable invites the press before the reason stated "
+            f"beside it is read. enabled={enabled} disabled={disabled}"
+        )
 
 
 def test_the_grid_covers_every_screen() -> None:
@@ -824,12 +879,25 @@ def _with_builder(calls: list):
 
 def test_the_gui_never_writes_the_package_itself(app, tmp_path) -> None:
     """Assembling ``upload_package/`` is emit-layer work. What crosses the seam
-    is the scope and the statement that must travel inside the package."""
+    is the scope and the statement that must travel inside the package.
+
+    **The emptiness check used to be vacuous** and a rehearsal review proved it
+    by mutation: nothing under test ever pointed at ``tmp_path``, so making
+    ``_build_package`` write a real file to disk — a direct violation of the
+    property this test names — left it passing. It was asserting that an
+    unrelated, untouched directory was untouched.
+
+    The run's ``output_root`` is now ``tmp_path``, which is where a GUI that
+    wrote files would write them: the package lands under the output root by
+    construction. The assertion is load-bearing only because the directory it
+    inspects is the one a violation would land in."""
+    from dataclasses import replace
+
     calls: list[dict] = []
 
     win = MainWindow(pipeline=_with_builder(calls))
     try:
-        win.show_outcome(_outcome())
+        win.show_outcome(replace(_outcome(), output_root=str(tmp_path)))
         win.show_handoff()
         assert win.handoff._build.isEnabled()
         win._rescope(PackageScope(SCOPE_DATES, "2021-01-01", "2021-12-31"))
@@ -839,7 +907,11 @@ def test_the_gui_never_writes_the_package_itself(app, tmp_path) -> None:
     assert len(calls) == 1
     assert calls[0]["ids"]
     assert "SUBSET" in calls[0]["statement"]
-    assert not list(tmp_path.iterdir())  # the GUI wrote nothing
+    # The output root itself, and anything anywhere beneath it.
+    assert not list(tmp_path.rglob("*")), (
+        f"the GUI wrote into the output root: "
+        f"{[str(p) for p in tmp_path.rglob('*')]}"
+    )
 
 
 def test_the_package_built_is_the_one_whose_statement_was_shown(app) -> None:
