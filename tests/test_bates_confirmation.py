@@ -188,6 +188,65 @@ def test_a_stored_confirmation_does_not_ask_again(stamped_corpus, tmp_path):
     assert _locators(outcome), "the stored confirmation was not applied"
 
 
+def test_aborting_at_the_confirmation_publishes_nothing(stamped_corpus, tmp_path):
+    """The abort path through the REAL pipeline, not through a stand-in.
+
+    Walking away at Stage 3 must take the ordinary cancellation road: nothing
+    published, ``incomplete_run/`` written, terminal status CANCELLED — and, the
+    part that is easy to lose, **the previous run's deliverables left exactly as
+    they were** (Codex B-1). A second publication rule for a second abort site
+    is a second chance to get publication wrong.
+    """
+    from dociq.runstate import RunAborted, TerminalStatus
+
+    out = tmp_path / "out"
+    # The first run DECLINES rather than confirms, and that is not incidental:
+    # a confirmation is stored, so the second run would load it and never ask —
+    # which is the correct behaviour and would make this test vacuous. A
+    # declined run publishes deliverables and stores no pattern, so the matter
+    # is still one the prompt can appear on.
+    good = adapter.RealPipeline().run(
+        _request(stamped_corpus, out), lambda _e: None, lambda: False,
+        confirm_bates=lambda _p: False)
+    assert good.published
+    index_before = (out / "document_index.xlsx")
+    stamp_before = index_before.stat().st_mtime_ns if index_before.exists() else None
+
+    def walk_away(_proposal):
+        raise RunAborted("the operator closed the window")
+
+    outcome = adapter.RealPipeline().run(
+        _request(stamped_corpus, out), lambda _e: None, lambda: False,
+        confirm_bates=walk_away)
+
+    assert not outcome.published
+    assert outcome.termination.status is TerminalStatus.CANCELLED
+    assert "Stage 3" in outcome.termination.reason
+    assert (out / "incomplete_run").is_dir()
+    if stamp_before is not None:
+        assert index_before.stat().st_mtime_ns == stamp_before, \
+            "an abandoned run overwrote the last complete run's deliverables"
+    # NOT recorded as a refusal anywhere.
+    assert not any("DECLINED" in w for w in outcome.result.warnings)
+
+
+def test_the_summary_distinguishes_declined_from_not_yet_confirmed():
+    """``_bates_note`` reaches ``run_summary.pdf``. "The operator has not
+    confirmed it" and "the operator declined it" are different facts, and an
+    expert forwards this sentence."""
+    from dociq.identify.bates import BatesDecision, BatesFormat
+    from dociq.pipeline import _bates_note
+
+    fmt = BatesFormat(prefix="IICON", separator=" ", digit_widths=(6,))
+    pending = _bates_note(BatesDecision(DecisionStatus.PENDING, fmt), {})
+    rejected = _bates_note(BatesDecision(DecisionStatus.REJECTED, fmt), {})
+    absent = _bates_note(None, {})
+
+    assert "DECLINED" in rejected
+    assert "has not confirmed" in pending
+    assert len({pending, rejected, absent}) == 3
+
+
 # ---------------------------------------------------------------------------
 # The GUI round trip — worker thread to GUI thread and back
 # ---------------------------------------------------------------------------
