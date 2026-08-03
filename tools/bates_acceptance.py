@@ -35,13 +35,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import random
 import re
 import sys
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -287,6 +288,14 @@ class AccuracyReport:
     seconds: float = 0.0
     proposal: str = ""
     notes: list[str] = field(default_factory=list)
+    matter_prefixes: list = field(default_factory=list)
+    normalization_available: bool = False
+    refused_reason: str = ""
+    normalized: list = field(default_factory=list)
+    """D-28 repairs, as ``(rel, page, what the page reads, what was written,
+    rule)``. Reported in full rather than counted: a repaired locator that
+    nobody can inspect is the silent correction §4 forbids."""
+
     by_kind: dict = field(default_factory=dict)
     """``{page kind: [compared, correct]}``.
 
@@ -312,6 +321,15 @@ class AccuracyReport:
             f"    MISSED (no stamp detected where one exists): {len(self.missed)}",
             f"    FALSE POSITIVE  : {len(self.false_positive)}",
         ]
+        lines.append(
+            f"    prefixes in the matter (D-28 gate): "
+            f"{self.matter_prefixes or '(none)'} -> prefix repair "
+            f"{'AVAILABLE' if self.normalization_available else 'REFUSED'}")
+        if self.refused_reason:
+            lines.append(f"    {self.refused_reason}")
+        lines.append(f"    locators REPAIRED under D-28: {len(self.normalized)}")
+        for row in self.normalized[:10]:
+            lines.append(f"    repaired: {row}")
         for kind, (n, ok) in sorted(self.by_kind.items()):
             lines.append(f"    by page kind — {kind:9s}: {ok}/{n} "
                          f"({100.0 * ok / n if n else 0:.3f}%)")
@@ -322,6 +340,35 @@ class AccuracyReport:
             for row in rows:
                 lines.append(f"    {label}: {row}")
         return "\n".join(lines)
+
+
+FOOTER_REOCR = True
+"""Whether the run exercises D-25's targeted footer re-OCR.
+
+A module global rather than a parameter threaded through four functions,
+because it is a property of the RUN and the tool runs one measurement at a
+time. ``--no-footer-reocr`` sets it False, which is how the before-number is
+produced with the after-code — the only honest way to attribute a delta.
+"""
+
+
+def has_ocr_pages(path: Path) -> bool | None:
+    """Whether this PDF has any page DocIQ would have to OCR.
+
+    Cheap: the text layer only, no recognition. It exists because the D-25 band
+    pass CANNOT change a document with no such page — it is reached only when
+    the OCR map is non-empty — so a re-measurement may skip those documents and
+    carry their baseline result forward without weakening the figure. The
+    argument is asserted in ``tests/test_footer_reocr.py``, not just stated.
+    """
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(path.read_bytes()))
+        return any(len((pg.extract_text() or "").strip()) < ex._NATIVE_TEXT_FLOOR
+                   for pg in reader.pages)
+    except Exception:
+        return None
 
 
 def _document_from_pdf(path: Path, rel: str) -> DocumentRecord | None:
@@ -336,7 +383,8 @@ def _document_from_pdf(path: Path, rel: str) -> DocumentRecord | None:
     except OSError:
         return None
     try:
-        pages, notes = ex._extract_pdf(raw, ex.ExtractOptions(ocr_enabled=True))
+        pages, notes = ex._extract_pdf(
+            raw, ex.ExtractOptions(ocr_enabled=True, footer_reocr=FOOTER_REOCR))
     except Exception as exc:
         print(f"    ! {rel}: {type(exc).__name__}: {exc}")
         return None
@@ -369,6 +417,32 @@ proposal was derived from is printed with the result.
 """
 
 
+def zone_only(doc: DocumentRecord) -> DocumentRecord:
+    """The same document with every page reduced to its Bates ZONE.
+
+    Stage 3 reads nothing but the zone, so this is lossless for what is being
+    measured — and it is what makes ONE streaming extraction pass enough.
+
+    D-28's third gate is a question about the MATTER ("does it carry exactly one
+    proposable prefix?"), so the answer cannot be computed one document at a
+    time. Holding every extracted document to answer it is what killed three
+    earlier runs at 4-14 GB resident. A page's zone is at most eleven short
+    lines, so the whole sample fits in a couple of megabytes.
+
+    Lossless, not approximately lossless: re-slicing a zone gives the zone back.
+    The head takes the first three of at most eleven lines, which are the
+    original first three; the tail takes the last eight, which are the original
+    last eight. ``tests/test_bates.py`` asserts it rather than asserting it here
+    in prose.
+    """
+    z = B.BatesZone()
+    pages = tuple(
+        p.evolve(text="\n".join(line for _, line in z.slice_lines(p.text)))
+        for p in doc.pages
+    )
+    return replace(doc, pages=pages)
+
+
 def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],
                      label: str) -> AccuracyReport:
     """``pairs`` is ``(pdf path, rel name, ground-truth Bates per page)``."""
@@ -380,7 +454,7 @@ def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],
     for path, rel, _gt in pairs[:PROPOSAL_DOCS]:
         doc = _document_from_pdf(path, rel)
         if doc is not None:
-            head.append(doc)
+            head.append(zone_only(doc))
     proposal = B.propose_format(head) if head else None
     decision = None
     if proposal is not None:
@@ -396,7 +470,8 @@ def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],
         rep.proposal = f"(none proposed from the first {len(head)} document(s))"
     del head
 
-    # --- pass 2: stream the whole sample ------------------------------------
+    # --- pass 2: extract ONCE, keeping only what Stage 3 reads --------------
+    reduced: list[tuple[DocumentRecord, str, list[str]]] = []
     for path, rel, gt in pairs:
         doc = _document_from_pdf(path, rel)
         if doc is None:
@@ -407,9 +482,24 @@ def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],
                 f"{rel}: DocIQ read {len(doc.pages)} page(s), the ground truth "
                 f"names {len(gt)} — compared positionally up to the shorter of "
                 f"the two; the remainder counts as missed")
-        stamped = B.apply_bates((doc,), decision)[0]
-        n = max(len(gt), len(stamped.pages))
-        for i in range(n):
+        reduced.append((zone_only(doc), rel, gt))
+        del doc
+
+    # --- the matter-wide census, which D-28's third gate is asked of --------
+    census = B.matter_prefixes([d for d, _rel, _gt in reduced])
+    rep.matter_prefixes = list(census)
+
+    # --- pass 3: apply and score -------------------------------------------
+    for doc, rel, gt in reduced:
+        applied = B.apply_bates_reported((doc,), decision,
+                                         matter_prefix_census=census)
+        rep.normalization_available = applied.normalization_available
+        rep.refused_reason = applied.refused_reason or ""
+        for n in applied.normalized:
+            rep.normalized.append((rel, n.page_no, n.read, n.applied, n.rule))
+        stamped = applied.documents[0]
+        n_pages = max(len(gt), len(stamped.pages))
+        for i in range(n_pages):
             expected = gt[i] if i < len(gt) else None
             got = stamped.pages[i].bates if i < len(stamped.pages) else None
             page_no = i + 1
@@ -429,7 +519,6 @@ def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],
                 slot[1] += 1
             else:
                 rep.wrong.append((rel, page_no, expected, got))
-        del doc, stamped
     rep.seconds = time.perf_counter() - t0
     return rep
 
@@ -454,18 +543,34 @@ def negative_control(root: Path, limit: int) -> AccuracyReport:
     # the process before it reported. `propose_format` needs a corpus view, so
     # the DOCUMENTS are streamed and only their *candidates* are kept — the
     # tiny records detection actually reasons over.
+    # PROGRESS IS PRINTED PER DOCUMENT, and that is not decoration. A run of
+    # this over the real corpus went eighteen thousand CPU-seconds and then sat
+    # at ~0.01 cores and ~0 bytes/s of I/O, alive and producing nothing — and
+    # because the loop printed only at the end there was no way to tell a slow
+    # corpus from a hung one, or to name the document it hung on. The tool's own
+    # docstring already says a run that dies without printing is not a bound;
+    # this loop was the last place that was still true.
     all_candidates: list[B.BatesCandidate] = []
     pages_by_key: dict[tuple, int] = {}
-    for p in pdfs:
+    for n, p in enumerate(pdfs, 1):
+        t_doc = time.perf_counter()
+        print(f"  [{n}/{len(pdfs)}] {p.name} ...", end="", flush=True)
         d = _document_from_pdf(p, p.name)
         if d is None:
+            print(" UNREADABLE", flush=True)
             continue
         rep.documents += 1
         rep.pages_compared += len(d.pages)
         from dociq.contracts import document_sort_key
 
         pages_by_key[document_sort_key(d)] = len(d.pages)
-        all_candidates.extend(B.detect_candidates((d,)))
+        cands = B.detect_candidates((d,))
+        all_candidates.extend(cands)
+        n_ocr = sum(1 for pg in d.pages if pg.kind.value == "ocr")
+        print(f" {len(d.pages)}p ({n_ocr} ocr), {len(cands)} candidate(s), "
+              f"{time.perf_counter() - t_doc:.1f}s "
+              f"[running total {rep.pages_compared} pages, "
+              f"{len(all_candidates)} candidates]", flush=True)
         del d
 
     # Re-apply propose_format's own thresholds to the streamed candidates. The
@@ -526,8 +631,21 @@ def main(argv: list[str] | None = None) -> int:
                          "comparison. Disclosed, never silent: the skipped "
                          "files are listed in the report.")
     ap.add_argument("--seed", type=int, default=20240529)
+    ap.add_argument("--no-footer-reocr", action="store_true",
+                    help="run with D-25's targeted footer re-OCR disabled, to "
+                         "produce the before-number with the after-code")
+    ap.add_argument("--only-ocr-docs", action="store_true",
+                    help="restrict the page-level comparison to sampled "
+                         "documents that contain at least one page DocIQ must "
+                         "OCR. The footer re-OCR cannot change any other "
+                         "document, so this measures exactly the pages that "
+                         "can move — at a fraction of the machine time. The "
+                         "documents dropped are counted in the report.")
     ap.add_argument("--out", default="", help="write the JSON report here")
     args = ap.parse_args(argv)
+
+    global FOOTER_REOCR
+    FOOTER_REOCR = not args.no_footer_reocr
 
     reports: dict = {"generated": time.strftime("%Y-%m-%dT%H:%M:%S"),
                      "method": "D-23: whole-set continuity + sampled page-level "
@@ -598,7 +716,24 @@ def main(argv: list[str] | None = None) -> int:
             rng = random.Random(args.seed)
             rng.shuffle(candidates)
             chosen = sorted(candidates[:args.sample_docs], key=lambda t: t[1])
+            dropped_native = 0
+            if args.only_ocr_docs:
+                keep = []
+                for path, rel, gt in chosen:
+                    got = has_ocr_pages(path)
+                    if got is False:
+                        dropped_native += 1
+                        continue
+                    keep.append((path, rel, gt))   # None (unreadable) is kept
+                chosen = keep
             rep = measure_accuracy(chosen, f"page-level vs {opt.name}")
+            rep.notes.append(f"footer re-OCR (D-25): "
+                             f"{'ON' if FOOTER_REOCR else 'OFF'}")
+            if args.only_ocr_docs:
+                rep.notes.append(
+                    f"--only-ocr-docs: {dropped_native} sampled document(s) "
+                    f"have no page DocIQ must OCR and were not re-measured; "
+                    f"the footer re-OCR cannot reach them")
             rep.notes.append(
                 f"sampled {len(chosen)} of {len(candidates)} eligible "
                 f"document(s) (seed {args.seed}); "

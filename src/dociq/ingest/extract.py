@@ -54,6 +54,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..contracts import ExtractionError, PageKind, PageRecord, ProcessingStatus
+from ..identify.bates import FOOTER_BLOCK_MAX_LINES
 from .pagemodel import make_page, synthetic_pages
 
 # Tier 1 (§3) — extracted page by page.
@@ -116,6 +117,7 @@ _NATIVE_TEXT_FLOOR = 40
 
 M_OCR_PAGE = "ocr: page failed"
 M_OCR_DOC = "OCR pass failed for this document"
+M_OCR_FOOTER = "footer re-OCR pass failed"
 M_ATTACH_ENUM = "could not enumerate attachments"
 M_MSG_ATTACH = "could not read .msg attachments"
 M_ATTACH_READ = "an attachment could not be read"
@@ -128,6 +130,7 @@ M_EML_BODY = "email body could not be read"
 TRANSIENT_MARKERS: tuple[str, ...] = (
     M_OCR_PAGE,
     M_OCR_DOC,
+    M_OCR_FOOTER,
     M_ATTACH_ENUM,
     M_MSG_ATTACH,
     M_ATTACH_READ,
@@ -247,6 +250,14 @@ class ExtractOptions:
 
     ocr_enabled: bool = True
     """Off only for tests that must exercise the native path in isolation."""
+
+    footer_reocr: bool = True
+    """The D-25 targeted footer re-OCR.
+
+    A field rather than a module flag for the same reason as everything else
+    here: two matters running concurrently must not be able to change each
+    other's bytes. Off only for the tests that measure what the pass costs and
+    what it recovers, which need the before as well as the after."""
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +554,301 @@ def _ocr_pdf_pages(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
 
 
 # ---------------------------------------------------------------------------
+# Targeted footer re-OCR — D-25
+# ---------------------------------------------------------------------------
+#
+# A Bates stamp is not body text and reading it as body text is what the
+# criterion-4 acceptance run measured the cost of: 100.000% of native-text pages
+# carried their locator and 31.250% of OCR'd pages did (593/648 overall against
+# a >=99% bar, 0 wrong, 0 false positives, 55 absent). The whole-page pass is
+# one recognition tuned for a page of prose; a six-character stamp in a 10pt
+# footer is a rounding error inside it.
+#
+# So the stamp gets its own recognition. The band of the page where a stamp
+# lives is rasterized on its own at a much higher resolution and read again,
+# and only the stamp-shaped tokens of that reading are merged back.
+#
+# THREE PROPERTIES ARE LOAD-BEARING AND EACH IS ENFORCED HERE RATHER THAN
+# HOPED FOR:
+#
+# 1. It runs ONLY where it can help. The pass fires on a page that (a) DocIQ
+#    had to OCR at all and (b) whose ordinary reading yielded no stamp-shaped
+#    line anywhere in the Bates zone. A native-text page never pays for it, and
+#    on the acceptance corpus that is 568 of 648 pages.
+# 2. It cannot turn a miss into a WRONG answer. Nothing here writes a locator.
+#    It appends candidate TEXT, which Stage 3 then judges with exactly the same
+#    grammar and the same operator-confirmed format as any other text. A
+#    misread footer produces a token that does not match the confirmed format
+#    and is ignored, which leaves the page a flagged miss.
+# 3. Nothing about the attempt reaches hashed content. No timing, no retry
+#    count, no resolution, no marker. The output is a deterministic function of
+#    the page bytes: the same PDF yields the same appended tokens forever.
+
+FOOTER_REOCR_DPI = 400
+"""Rasterization resolution for the band pass, against 200 dpi for the page.
+
+Doubling the resolution doubles the glyph height the recognizer sees BEFORE its
+own fixed-height crop resize, which is the mechanism: at 200 dpi a 10pt stamp is
+~28 px tall and the recognizer's input is 48 px, so it is upsampling guesswork;
+at 400 dpi it is downsampling a real reading.
+
+**Measured, and the measurement bounds the claim.** Over the 55 pages the
+criterion-4 baseline missed, 400 dpi reads the stamp's DIGITS correctly where
+the whole-page pass read nothing at all. 300 dpi is close behind; 600 and 800
+dpi are WORSE, not better, which is the opposite of the naive expectation and
+the reason this number is measured rather than maximised. See
+``docs/verification/bates_d25_2026-08-01.md`` for the sweep, and for the part of
+the stamp the band pass does *not* fix.
+"""
+
+FOOTER_REOCR_BAND_PT = 90.0
+"""Height of the stamp band, in PDF points — a physical 1.25 inches, not a
+fraction of the page.
+
+This was a fraction of page height in the first draft and that was a defect,
+found by measuring rather than by reading. The acceptance corpus contains pages
+that are **2700 x 3681 points** — photographs whose page box is 37 x 51 inches —
+and 14% of that page is a seven-inch strip. Two things went wrong at once: the
+band became tens of megapixels (a sweep over 55 such pages did not finish in 90
+minutes), and its aspect ratio tripped the bypass below.
+
+A Bates stamp is burned in at a physical size, a physical distance from the
+physical edge of the page. On the acceptance corpus it sits within ~40 points of
+the bottom edge whether the page is letter-size or four feet tall. So the band
+is physical too, and its cost stops scaling with page AREA.
+"""
+
+_FOOTER_MAX_ASPECT = 8.0
+"""rapidocr SKIPS text detection entirely when width/height exceeds its
+``width_height_ratio`` (8.0 in the shipped ``config.yaml``) and recognizes the
+whole strip as a single line. Measured on the corpus: a 3600pt-wide page's
+footer strip is 13:1, detection was bypassed, and the pass returned nothing
+readable at all. So the band is TILED — never stretched — and every tile is at
+most this ratio wide. It is the engine's own configuration, not a taste."""
+
+_FOOTER_TILE_OVERLAP = 0.2
+"""How much consecutive tiles overlap, as a fraction of tile width.
+
+Without it a stamp straddling a tile boundary is cut in half and read as two
+things, neither of which is a locator. One fifth is comfortably wider than any
+stamp relative to a ten-inch tile."""
+
+_FOOTER_MAX_TILES = 12
+"""Hard ceiling on tiles per band, disclosed rather than silent.
+
+Tile width is ``8 x band`` and ``band`` is ``min(1.25in, page height)``, so a
+page that is very wide and very SHORT makes tiles arbitrarily narrow: a
+612 x 0.1pt page yields nearly a thousand of them. That is a degenerate page
+rather than a real one, but "degenerate input cannot reach this" is exactly the
+assumption that produces a run that never finishes.
+
+Twelve covers a page ten feet wide at the full band height, which is past any
+sheet size a production contains. Beyond it the band is read left to right and
+the REMAINDER IS NOT READ — a stamp out there is a miss, which is the failure
+direction §4 asks for, and the ceiling is stated here rather than discovered."""
+
+_FOOTER_PROBE_PAGES = 4
+"""How many of a document's qualifying pages are probed on BOTH bands before
+the pass decides which band, if either, reads this production.
+
+Four rather than one because a production's first scanned page can be a cover
+sheet, a photograph, or a fax header, and one unlucky page should not switch the
+pass off for a 300-page document. Four rather than forty because the decision is
+about where the production burns its stamp, and that does not vary page to page.
+
+Stated rather than tuned: a stamped production resolves the very first page
+probed, so this bound costs it nothing; an unreadable scan pays eight
+recognitions instead of thousands, and the pages it declines to read are
+reported in the document's notes."""
+
+_FOOTER_CHUNK_PAGES = 8
+"""Pages whose tiles are rasterized before any of them is recognized. Bounds
+peak memory the way :func:`_ocr_pdf_pages` does, and lower here because one page
+can be several tiles."""
+
+
+def _band_tiles(page, dpi: int, band_pt: float, *, top: bool) -> list:
+    """The stamp band of one page, as OCR-ready tiles in left-to-right order.
+
+    The clip is taken in PDF user space and rendered at ``dpi``, so each tile is
+    a genuine re-render at higher resolution — not an upscale of the 200 dpi
+    page image, which would add no information at all.
+
+    Cost is bounded by construction, and the bound is arithmetic rather than a
+    cap: a tile is at most ``band_pt`` tall and ``_FOOTER_MAX_ASPECT * band_pt``
+    wide, so a tile is ~1.7 Mpx at 400 dpi whatever the page is, and the tile
+    COUNT grows with page width alone. A four-foot-wide page costs five tiles,
+    not fifty megapixels.
+
+    **The band is rendered ONCE and sliced, and that is a fix rather than a
+    style.** Rendering each tile with its own ``get_pixmap`` clip re-decodes the
+    page's embedded image every time: on this corpus a page is a 230 MB
+    photograph, so five tiles top and bottom meant ten full decodes of it. The
+    acceptance run took over an hour and a half that way and had to be killed.
+    One render, then numpy views — the pixels are the same and the decode
+    happens once.
+    """
+    import cv2
+    import fitz
+    import numpy as np
+
+    r = page.rect
+    band = min(band_pt, r.height)
+    y0 = r.y0 if top else r.y1 - band
+    pix = page.get_pixmap(dpi=dpi, clip=fitz.Rect(r.x0, y0, r.x1, y0 + band))
+    arr = np.frombuffer(pix.samples, np.uint8).reshape(
+        pix.height, pix.width, pix.n)
+    if pix.n == 1:
+        arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+    elif pix.n == 3:
+        arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+    else:
+        arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+
+    h, w = arr.shape[:2]
+    if h <= 0 or w <= 0:
+        return []
+    tile_w = min(w, max(1, int(round(_FOOTER_MAX_ASPECT * h))))
+    step = max(1, int(round(tile_w * (1.0 - _FOOTER_TILE_OVERLAP))))
+
+    spans: list[tuple[int, int]] = []
+    x = 0
+    while True:
+        x1 = min(x + tile_w, w)
+        span = (max(0, x1 - tile_w), x1)
+        if span not in spans:
+            spans.append(span)
+        if x1 >= w or len(spans) >= _FOOTER_MAX_TILES:
+            break
+        x += step
+    return [np.ascontiguousarray(arr[:, x0:x1]) for x0, x1 in spans]
+
+
+def _band_tokens(arr) -> tuple[tuple[str, ...], tuple[float, ...]]:
+    """``(stamp-shaped tokens, their confidences)`` from one band tile."""
+    from ..identify.bates import stamp_tokens
+
+    lines = ocr_lines(arr)
+    tokens = stamp_tokens("\n".join(ln.text for ln in lines))
+    if not tokens:
+        return (), ()
+    # Each token's confidence is the confidence of the recognized line it came
+    # out of. A token whose line cannot be identified scores 0.0 rather than
+    # silently perfect — the same rule ``ocr_lines`` applies to a line with no
+    # usable score.
+    confs: list[float] = []
+    for tok in tokens:
+        best = 0.0
+        for ln in lines:
+            if tok in " ".join(ln.text.split()):
+                best = max(best, ln.conf)
+        confs.append(best)
+    return tokens, tuple(confs)
+
+
+def _band_pass(doc, idxs: list[int], top: bool, pool,
+               out: dict[int, tuple[tuple[str, ...], tuple[float, ...]]]) -> bool:
+    """Read one band of the given pages into ``out``. True if anything read.
+
+    **Assembled in submission order, never completion order.** Tiles are
+    submitted page by page and left to right and their results are consumed in
+    that same order, so which tile finishes first cannot change a page's text.
+    That is the same rule, and the same reason, as :func:`_ocr_pdf_pages`, and
+    it is what makes criterion 7 hold over a pass that fans out.
+    """
+    recovered = False
+    for c0 in range(0, len(idxs), _FOOTER_CHUNK_PAGES):
+        jobs: list[tuple[int, object]] = []
+        for i in idxs[c0:c0 + _FOOTER_CHUNK_PAGES]:
+            out.setdefault(i, ((), ()))
+            try:
+                tiles = _band_tiles(doc[i], FOOTER_REOCR_DPI,
+                                    FOOTER_REOCR_BAND_PT, top=top)
+            except Exception:
+                continue          # one page that will not rasterize, not the doc
+            jobs.extend((i, pool.submit(_band_tokens, a)) for a in tiles)
+        merged: dict[int, tuple[list[str], list[float]]] = {}
+        for i, fut in jobs:
+            try:
+                toks, confs = fut.result()
+            except Exception:
+                toks, confs = (), ()
+            slot = merged.setdefault(i, ([], []))
+            for tok, conf in zip(toks, confs):
+                if tok in slot[0]:          # the tile overlap sees it twice
+                    continue
+                if len(slot[0]) >= FOOTER_BLOCK_MAX_LINES:
+                    break
+                slot[0].append(tok)
+                slot[1].append(conf)
+        for i, (toks, confs) in merged.items():
+            if toks:
+                out[i] = (tuple(toks), tuple(confs))
+                recovered = True
+    return recovered
+
+
+def _reocr_bands(raw: bytes, pages: list[int]
+                 ) -> dict[int, tuple[tuple[str, ...], tuple[float, ...]]]:
+    """Re-read the stamp band of the given 0-based pages.
+
+    §4 says "page corners/footers", so both the bottom and the top of the page
+    are covered — a header-stamped production is an ordinary thing and assuming
+    it away would be a silent limit.
+
+    **It CALIBRATES, and that is what makes it affordable.** "Only where it can
+    help" is a per-PAGE test and a per-page test is not enough: on an image-only
+    document every page qualifies, and reading two bands of five tiles each on a
+    300-page scan is three thousand recognitions for one document. That is not a
+    hypothetical — it is what a criterion-4 re-run was doing when it passed nine
+    hours and had to be killed.
+
+    Where a production burns its stamp is a property of the PRODUCTION, not of
+    the page. So the first :data:`_FOOTER_PROBE_PAGES` qualifying pages are
+    probed on both bands; after that only the band(s) that actually read
+    something are used, and if NEITHER read anything the pass stops for that
+    document. A scan whose footers cannot be read costs eight recognitions
+    instead of three thousand; a stamped production keeps every page it was
+    going to get, because a production that stamps its footer resolves the very
+    first page probed.
+
+    The calibration is a function of the page contents in page order, so it is
+    identical run to run for the same bytes. The pages it declines to read are
+    the caller's to disclose: every page this was ASKED about has an entry in
+    the returned mapping, so ``len(pages) - len(result)`` is the number skipped.
+    """
+    import fitz
+
+    out: dict[int, tuple[tuple[str, ...], tuple[float, ...]]] = {}
+    pool = _ocr_page_pool()
+    with fitz.open(stream=raw, filetype="pdf") as doc:
+        idxs = [i for i in pages if 0 <= i < len(doc)]
+        if not idxs:
+            return out
+        probe, rest = idxs[:_FOOTER_PROBE_PAGES], idxs[_FOOTER_PROBE_PAGES:]
+
+        # Phase 1 — probe both bands, bottom first, on the opening pages.
+        productive: set[bool] = set()
+        for top in (False, True):
+            todo = [i for i in probe if not out.get(i, ((), ()))[0]]
+            if not todo:
+                break
+            if _band_pass(doc, todo, top, pool, out):
+                productive.add(top)
+
+        # Phase 2 — the remainder, on the bands that demonstrably read this
+        # production. Nothing productive means nothing is read at all.
+        for top in (False, True):
+            if top not in productive:
+                continue
+            todo = [i for i in rest if not out.get(i, ((), ()))[0]]
+            if not todo:
+                break
+            _band_pass(doc, todo, top, pool, out)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Photo PDFs — deterministic EXIF, no AI (§12)
 # ---------------------------------------------------------------------------
 
@@ -741,9 +1047,29 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     elif need and not opt.ocr_enabled:
         notes.append(f"{len(need)} page(s) have no usable text layer; OCR disabled")
 
+    # --- D-25: the stamp gets its own recognition, where it can help --------
+    # Only pages DocIQ actually OCR'd, and only those whose ordinary reading
+    # produced nothing stamp-shaped anywhere in the Bates zone. The trigger is
+    # a pure function of the text just read, so it is identical run to run.
+    reocr: dict[int, tuple[tuple[str, ...], tuple[float, ...]]] = {}
+    n_footer_declined = 0
+    if ocr_by_page and opt.footer_reocr:
+        from ..identify.bates import zone_has_candidate
+
+        retry = [i for i in sorted(ocr_by_page)
+                 if not ocr_by_page[i].failed
+                 and not zone_has_candidate(ocr_by_page[i].text)]
+        if retry:
+            try:
+                reocr = _reocr_bands(raw, retry)
+                n_footer_declined = len(retry) - len(reocr)
+            except Exception as exc:
+                notes.append(f"{M_OCR_FOOTER}: {exc}")
+
     pages: list[PageRecord] = []
     n_ocr_failed = 0
     n_ocr_blank = 0
+    n_footer_recovered = 0
     for i in range(n):  # strictly by index — never by OCR completion order
         text, kind, confs = native[i], PageKind.NATIVE, None
         page_notes: tuple[str, ...] = ()
@@ -758,6 +1084,22 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                 kind = PageKind.OCR  # routed to OCR, recovered nothing
                 confs = list(got.confs)
                 n_ocr_blank += 1
+            # The recovered tokens are appended to the TAIL, which is where the
+            # Bates zone looks; ``BatesZone.tail_lines`` carries the matching
+            # margin so the block can never evict a line the ordinary pass put
+            # there. Their confidences join the page's, because they are text
+            # on the page now and §4 Stage 2's threshold is measured over the
+            # text the page actually carries.
+            extra, extra_confs = reocr.get(i, ((), ()))
+            if extra:
+                have = {ln.strip() for ln in text.split("\n")}
+                keep = [t for t in extra if t not in have]
+                if keep:
+                    text = (text.rstrip("\n") + "\n" if text.strip() else "") \
+                        + "\n".join(keep)
+                    confs = (confs or []) + [c for t, c in zip(extra, extra_confs)
+                                             if t in keep]
+                    n_footer_recovered += 1
         if i == 0 and photo:
             # The block describes the whole file, so it rides on page 1. When
             # the page also yielded read text the page stays OCR/NATIVE and
@@ -774,6 +1116,25 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     if n_ocr_blank:
         notes.append(f"{n_ocr_blank} page(s) routed to OCR recovered no text "
                      "(blank page, or nothing the engine could read)")
+    if n_footer_recovered:
+        # Disclosed, like every other bound in this module: an operator can see
+        # how much of the production's numbering came from the second pass
+        # rather than from the page's ordinary reading.
+        notes.append(f"{n_footer_recovered} page(s) had a stamp-shaped token "
+                     f"recovered by the targeted footer re-OCR "
+                     f"({FOOTER_REOCR_DPI} dpi, "
+                     f"{FOOTER_REOCR_BAND_PT / 72:.2f}in band, at most "
+                     f"{FOOTER_BLOCK_MAX_LINES} token(s) per page)")
+    if n_footer_declined:
+        # The calibration bound, disclosed the same way every other bound in
+        # this module is: neither band read a stamp on the pages it probed, so
+        # the rest of the document was not re-read. Those pages are misses, and
+        # an operator can see that they were never looked at rather than looked
+        # at and found wanting.
+        notes.append(f"{n_footer_declined} page(s) were not re-read by the "
+                     f"targeted footer re-OCR: neither the footer nor the "
+                     f"header band produced a stamp on the first "
+                     f"{_FOOTER_PROBE_PAGES} page(s) probed in this document")
     return pages, notes
 
 

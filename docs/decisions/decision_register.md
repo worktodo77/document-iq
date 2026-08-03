@@ -101,6 +101,48 @@ factual claim about client material and the claim was checked and found wrong.
 
 | D-27 | Schedule / activity tables — the corpus's largest lever | **Offer as a DROP lever, DEFAULT OFF (Alex, 2026-08-01).** Measured over 36 real documents / 1,535 pages / 3.34M characters: schedule and activity tables are **33.9% of the corpus text across 258 pages** — the only category whose removal changes whether a matter fits, and roughly **170× the photographs**. They are P6 activity listings pasted into progress reports, and where the native `.xer` files are already in evidence the pasted grid is a lossy render of a better source. Ruling: the template recognizes them as a section type and offers them in the checklist with that reason stated on the row, but never drops them unless the expert engages the lever. Rejected: defaulting the lever ON where schedule files are present in the matter folder (it would make a substantive evidentiary decision on a file-presence heuristic, and a pasted table that *differs* from the native file is itself evidence); and refusing to offer them at all (forfeits the only lever that materially reduces this corpus and makes the reduction feature close to cosmetic). | 2026-08-01 |
 
+### OUTCOME of D-25 — the targeted fix was built, and it does NOT close criterion 4 (2026-08-01)
+
+D-25 ruled targeted footer re-OCR and recorded that "the targeted fix may not
+reach 99% either — that will be known only after it is built and measured. If it
+does not, D-19 is back on the table on evidence."
+
+**It was built and measured. It does not, and here is the evidence.**
+
+The pass works as ruled: on pages where the whole-page recognition returned
+nothing, a 400 dpi tiled crop of the physical stamp band returns a reading. But
+the reading is wrong in one specific, repeatable way — **rapidocr reads this
+production's stamp DIGITS correctly and cannot resolve its PREFIX.** It returns
+`iCON004926`, `jiCON004926`, `liCON002291`, `TiCON005000` for a stamp that reads
+`iiCON004926`. Measured over pages drawn from the baseline's own miss list: at
+400 dpi, exact recovery is **1 of 12** and **1 of 10** on two independent
+subsets, with the six digits correct nearly every time.
+
+**It is not a resolution problem, a cropping problem or a preprocessing
+problem**, and each was tested rather than assumed: 600 dpi and 800 dpi score
+*below* 400; widening the detector's box (`unclip_ratio` 2.2 and 3.0,
+`box_thresh` 0.3) recovers nothing; Otsu binarization gains a little on the
+prefix and truncates a digit run elsewhere. It is the recognition model.
+
+That makes this the first hard, page-level cost of D-19's "never benchmarked
+against an alternative on this corpus", and **D-19 is therefore back on the
+table on evidence, exactly as D-25 provided for.**
+
+**One alternative would close it without reopening D-19, and it needs a
+ruling.** A confirmed production's prefix carries no per-page information — every
+page has the same one — so a recovered token whose digits, digit width,
+separator and suffix match the confirmed format exactly, and whose prefix is a
+near-miss of it, could be normalized to the confirmed prefix. It could not point
+at a different page. It was **not** done unilaterally: §4 requires misses to be
+flagged rather than silently corrected, and `bates.py` deliberately holds that
+`iiCON` and `IICON` are two formats and neither is applied to the other's pages.
+
+Full method, the five defects the work found and fixed, the cost measurements,
+and — importantly — the two measurements that did NOT complete (the harness
+after-number and the Petrobras negative control, both blocked by machine
+contention, both with their commands written out) are in
+`docs/verification/bates_d25_2026-08-01.md`.
+
 ## Measured: where the tokens actually are, and what recognizes them (2026-08-01)
 
 Design pass for D-24, over 36 documents / 1,535 pages / 3,337,999 characters of
@@ -148,6 +190,47 @@ defensible claim than the mockups make, and it is the claim the product should
 make.
 
 | D-28 | Bates prefix normalization vs. reopening D-19 | **Normalize ONLY where the matter has exactly ONE confirmed prefix (Alex, 2026-08-02).** D-25's targeted footer re-OCR was built and **did not close criterion 4** — 91.512% unchanged. The wall is precise and was characterized page by page: rapidocr **reads the digits correctly and cannot resolve the `ii` prefix**, returning `iCON004926`, `jiCON004926`, `liCON002291`, `TiCON005000` for `iiCON…`. Exact recovery at 400 dpi is **1 in 12**; 600 and 800 dpi score *below* 400; detector-box widening scores 0 of 10. Ruling: repair the prefix when digits, digit width, separator and suffix match the confirmed format exactly and only a near-miss prefix differs — **and only when the matter carries exactly one confirmed prefix.** On a multi-prefix production, refuse outright and flag as today. The third condition is the ruling: it makes the wrong-series failure **structurally impossible** rather than merely unlikely, and the risk is concrete rather than theoretical — Track F found the MNFV set carries three prefix renderings, and a page filed under the wrong series is a locator an expert cites verbatim and cannot defend. Normalization is **disclosed, never silent**: §4's "flagged, not silently corrected" stands as the rule and this is a narrow ruled exception, so every repaired locator is recorded and distinguishable from a directly-read one. **Consequence to state rather than bury: if MNFV's acceptance subset is multi-prefix, D-28 refuses on it and criterion 4 remains NOT MET on the acceptance corpus** — the criterion would then be met on single-series matters and open on the hard case. D-19 was considered and not reopened; Tesseract stays written off, and the "never benchmarked against an alternative" liability recorded in D-19 now has its **first concrete page-level cost** on the record. | 2026-08-02 |
+
+### OUTCOME of D-28 — built as ruled; the gate decides the acceptance corpus (2026-08-02)
+
+D-28 is implemented in `dociq.identify.bates` with all three ruled conditions
+plus a fourth that follows from where the damage comes from, and the whole thing
+is reachable only through `apply_bates_reported`, which returns the disclosure.
+
+**The distance rule, written so an expert can apply it by hand.** A read prefix
+is a near miss of the confirmed prefix when EXACTLY ONE of these holds:
+
+* **substitution** — same length, differing at exactly one position, and the two
+  characters there are in the same stated confusable group (`jiCON` for
+  `iiCON`; the first group is thin verticals `i I j J l L 1 | ! t T f r`,
+  which is the class this corpus produced);
+* **a doubled character read as single** — the read is the confirmed prefix with
+  one character deleted, and that character was identical to its neighbour
+  (`iCON` for `iiCON`);
+* **a single character read as doubled** — the same in the other direction.
+
+Refused: two or more edits; any edit touching a **digit** (with a separator-less
+format the prefix abuts the number, and collapsing `iiCON0` to `iiCON` would
+move a digit out of a seven-digit number and produce a locator for a page that
+does not exist); an insertion or deletion that is not a doubling; and **a pure
+case change** — `iiCON` and `IICON` are two formats by deliberate rule elsewhere
+in this module, and repair must not fold them back together through a side door.
+
+**Three defects were found by writing the tests.** The case-only acceptance
+above was one. The second: a caller that streams documents one at a time — the
+acceptance harness does, to bound memory — silently asked the single-prefix gate
+about ONE DOCUMENT rather than the matter, which is exactly how a partial view
+reports "one prefix" for a matter that has four; the census is now an explicit
+parameter and the harness computes it over the whole sample. The third: the
+census uses the same grammar as detection, and that grammar reads `sheet 137` as
+prefix `sheet`, so ordinary numbered page text can register as a second
+"prefix" and switch repair off. That is the conservative direction and it is
+left as it is, but it is recorded because an operator reading the refusal should
+not be surprised by a prefix that is an English word.
+
+**The gate is what decides the acceptance corpus, and the answer is measured
+rather than argued** — see `docs/verification/bates_d25_2026-08-01.md` §3 for
+the census over the MNFV subset and what criterion 4 does as a result.
 
 ## Acceptance criteria 1 and 8 — DISCHARGED on the real corpus (2026-08-02)
 
