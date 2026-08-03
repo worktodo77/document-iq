@@ -55,7 +55,7 @@ from pathlib import Path
 
 from ..contracts import ExtractionError, PageKind, PageRecord, ProcessingStatus
 from ..identify.bates import FOOTER_BLOCK_MAX_LINES
-from .pagemodel import make_page, synthetic_pages
+from .pagemodel import M_OCR_BLANK, make_page, synthetic_pages
 
 # Tier 1 (§3) — extracted page by page.
 TIER1_EXTENSIONS = {
@@ -161,6 +161,18 @@ M_ATTACH_SKIPPED = "attachment content was not brought in"
 FINAL_MARKERS: tuple[str, ...] = (
     M_EML_PARSE,
     M_ATTACH_SKIPPED,
+    # Routed to OCR, engine ran, nothing came back. Defined in
+    # :mod:`dociq.ingest.pagemodel` and imported here so it is classified with
+    # the rest of the vocabulary rather than living outside it — the class
+    # assertion in the extraction tests is what surfaced the omission.
+    #
+    # FINAL, not transient: the same bytes through the same engine reach the
+    # same wall, and a corpus of blank scans would otherwise spend the whole
+    # serial-retry budget proving it. It is the one marker whose meaning is
+    # ambiguous per page and unambiguous in bulk — one page is an unreadable
+    # scan, every page is a dead engine — which is exactly what
+    # :func:`ocr_yield` is for.
+    M_OCR_BLANK,
 )
 
 
@@ -322,13 +334,93 @@ def ocr_models_present() -> tuple[bool, str]:
 
 
 def ocr_available() -> bool:
-    """True when the local OCR stack is importable AND its models are on disk."""
+    """True when the local OCR stack is importable AND its models are on disk.
+
+    **A PRESENCE check, not a capability check — the name overstates it and the
+    docstring is where that stops.** It imports two modules and stats three
+    ``.onnx`` files. It never constructs the engine and never runs inference,
+    so an engine that imports cleanly, finds its models and then produces
+    nothing on every page passes it. That is where the Sprint-2 burn happened:
+    *inside* inference, under :func:`_ocr_pdf_pages`'s per-page
+    ``except Exception``, where a totally dead engine and a few bad pages look
+    identical page by page.
+
+    The real capability check is :func:`dociq.selftest`'s cold-construction
+    probe, which builds the engine and OCRs a synthetic image — and
+    ``build.py --skip-verify`` bypasses it. The run-level backstop for a build
+    that shipped anyway is :func:`ocr_yield`, whose whole subject is the case
+    this function cannot see.
+    """
     try:
         import fitz  # noqa: F401  (pymupdf)
         import rapidocr_onnxruntime  # noqa: F401
     except Exception:
         return False
     return ocr_models_present()[0]
+
+
+OCR_DEAD_ENGINE = (
+    "OCR produced no text on ANY of the {attempted:,} page(s) it was run on in "
+    "this run. A single page that recovers nothing is ordinary — a blank or "
+    "unreadable scan — but every page recovering nothing is what a dead OCR "
+    "engine looks like from the outside, and the per-page notes offer the "
+    "innocent explanation first. Before relying on this corpus, run "
+    "`dociq selftest` (it builds the engine and OCRs a test image); if that "
+    "passes, these pages really are unreadable and the run stands."
+)
+"""The run-level alarm §4's per-page notes structurally cannot raise.
+
+Per-document notes say "N page(s) routed to OCR recovered no text" and are read
+one document at a time, where "some bad scans" is the natural reading and is
+usually right. Nothing was looking at the whole run, which is the only scale at
+which "every attempt, without exception" is visible — and that is the shape of
+a dead engine rather than of bad pages.
+"""
+
+
+def ocr_yield(documents) -> tuple[int, int]:
+    """``(pages OCR was attempted on, pages that recovered text)`` for a corpus.
+
+    Reconstructed from the final page records rather than from a counter, so it
+    describes the deliverable — including after a serial retry replaced a
+    document's records wholesale.
+
+    A page counts as ATTEMPTED on the DISCLOSURE, not on the kind. A page routed
+    to OCR that recovers nothing is re-labelled ``EMPTY`` by
+    :func:`dociq.ingest.pagemodel.make_page` (``EMPTY`` is the only kind the
+    contract lets carry no ``ocr_conf``), and page 1 of a photo-only document is
+    re-labelled ``PHOTO`` before that. Counting kinds would therefore have
+    counted zero attempts on precisely the run this exists to catch — measured,
+    not reasoned: a dead-engine walk over the scanned fixture yielded one PHOTO
+    page and one EMPTY page and no ``PageKind.OCR`` at all. The three
+    disclosures below survive both relabellings, which is why they are the
+    thing counted:
+
+    * :data:`~dociq.ingest.pagemodel.M_OCR_BLANK` — routed to OCR, recovered
+      nothing;
+    * :data:`M_OCR_PAGE` — could not even be rasterized or read;
+    * ``PageKind.OCR`` — recovered text, i.e. the attempts that worked.
+    """
+    attempted = recovered = 0
+    for doc in documents:
+        for page in doc.pages:
+            worked = page.kind is PageKind.OCR and page.text.strip()
+            blank = any(n.startswith(M_OCR_BLANK) or n.startswith(M_OCR_PAGE)
+                        for n in page.notes)
+            if not (worked or blank):
+                continue
+            attempted += 1
+            if worked:
+                recovered += 1
+    return attempted, recovered
+
+
+def ocr_yield_warning(documents) -> str | None:
+    """:data:`OCR_DEAD_ENGINE`, filled in, when a run recovered nothing at all."""
+    attempted, recovered = ocr_yield(documents)
+    if attempted and not recovered:
+        return OCR_DEAD_ENGINE.format(attempted=attempted)
+    return None
 
 
 def ocr_engine_version() -> str:
@@ -1109,6 +1201,14 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
             text = (photo + "\n" + text) if has_read_text else photo
             if not has_read_text:
                 kind, confs = PageKind.PHOTO, None
+                # The relabelling loses the fact that this page WAS routed to
+                # OCR and recovered nothing — ``make_page`` only adds that note
+                # for a page handed to it as OCR. Disclosed here instead, so the
+                # record still says what happened and :func:`ocr_yield` can
+                # count the attempt. Without it, a corpus of photo-only PDFs run
+                # against a dead engine reports zero attempts and no alarm.
+                if got is not None and not got.failed:
+                    page_notes = page_notes + (M_OCR_BLANK,)
         pages.append(make_page(i + 1, text, kind, confidences=confs,
                                conf_threshold=opt.conf_threshold, notes=page_notes))
     if n_ocr_failed:

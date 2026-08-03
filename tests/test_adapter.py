@@ -79,7 +79,8 @@ def _write(library: Path, profile: FormatProfile) -> Path:
 
 
 def _request(tmp_path, name="out", profile=None, index=None) -> RunRequest:
-    return RunRequest(str(FIXTURES), str(tmp_path / name), profile, index)
+    return RunRequest(str(FIXTURES), str(tmp_path / name),
+                      profile=profile, master_index_path=index)
 
 
 def _run(pipe, request, cancel=lambda: False):
@@ -820,3 +821,150 @@ def test_the_handoff_SCREEN_drives_the_real_adapter_end_to_end(real_run):
         )
     finally:
         window.close()
+
+
+# --- B6: a partly-dropped section must not render as fully KEPT -------------
+#
+# ``_plan`` set ``engaged = dropped == pages`` and always carried the WHOLE
+# section's figures. A section with some pages dropped and some kept therefore
+# drew as KEEP with its entire token weight counted as still present, so
+# ``remaining_tokens`` overstated and the waterfall disagreed with
+# ``tokens_after``.
+#
+# CONSTRUCTED AND CONFIRMED BEFORE IT WAS FIXED, and reachable through an
+# ordinary valid profile: ``FormatProfile.validate`` enforces uniqueness on
+# ``rule_id`` only, and Stage 4 keys a page's section on
+# ``rule.label or matched_text`` — so one DROP rule and one KEEP rule sharing a
+# label put dropped and kept pages under the same section name. Not a phantom.
+
+
+def _partial_section_docs():
+    from tests.fixtures import document, page
+
+    pages = (
+        page(1, "PHOTO LOG\n" + "alpha bravo charlie delta " * 40,
+             section="Photo logs", disposition=Disposition.DROP, drop_rule="r1"),
+        page(2, "PHOTO LOG\n" + "echo foxtrot golf hotel " * 40,
+             section="Photo logs"),
+        page(3, "NARRATIVE\n" + "india juliet kilo " * 40, section="Narrative"),
+    )
+    return document("a.pdf", pages, doc_id="LI-1"), pages
+
+
+def _plan_for(doc, pages):
+    from dociq.gui.pipeline import TokenEstimate
+    from dociq.verify import tokens as vt
+
+    class _Result:
+        documents = (doc,)
+
+    total = sum(vt.measure(p.text).pretokens for p in pages)
+    return adapter._plan(_Result, TokenEstimate(
+        chars=0, ratio_low=3.3, ratio_high=3.6, structural_tokens=total))
+
+
+def test_a_partly_dropped_section_is_not_drawn_as_kept():
+    """FAIL-BEFORE: ``engaged`` False, ``pages`` 2, ``tokens`` 328 — the row
+    said the whole section survived, and one of its pages had not."""
+    doc, pages = _partial_section_docs()
+    lever = next(le for le in _plan_for(doc, pages).levers
+                 if le.key == "Photo logs")
+    assert lever.engaged, "a section with dropped pages is dropping"
+    assert lever.pages == 1, "the lever removes the DROPPED pages, not all of them"
+    assert "part" in lever.label and "1 of 2 pages" in lever.label
+
+
+def test_the_waterfall_agrees_with_what_the_run_actually_published():
+    """The consequence, asserted as arithmetic rather than as wording.
+
+    FAIL-BEFORE: 451 remaining against 287 actually published — the screen
+    overstated the corpus by a whole dropped page."""
+    from dociq.verify import tokens as vt
+
+    doc, pages = _partial_section_docs()
+    plan = _plan_for(doc, pages)
+    published = sum(vt.measure(p.text).pretokens for p in pages
+                    if p.disposition is not Disposition.DROP)
+    assert plan.remaining_tokens == published
+
+
+def test_a_wholly_dropped_and_a_wholly_kept_section_are_unchanged():
+    """The fix must not move the two cases that were already right, and the
+    label must stay clean for them — "(part — 2 of 2)" on a full drop would be
+    noise that trains the reader to skip the marker."""
+    doc, pages = _partial_section_docs()
+    levers = {le.key: le for le in _plan_for(doc, pages).levers}
+    kept = levers["Narrative"]
+    assert not kept.engaged and kept.pages == 1 and kept.label == "Narrative"
+
+    from tests.fixtures import document, page
+
+    both_dropped = (
+        page(1, "PHOTO LOG\nx " * 30, section="Photo logs",
+             disposition=Disposition.DROP, drop_rule="r1"),
+        page(2, "PHOTO LOG\ny " * 30, section="Photo logs",
+             disposition=Disposition.DROP, drop_rule="r1"),
+    )
+    d2 = document("b.pdf", both_dropped, doc_id="LI-2")
+    lev = _plan_for(d2, both_dropped).levers[0]
+    assert lev.engaged and lev.pages == 2 and lev.label == "Photo logs"
+
+
+def test_the_partial_case_is_reachable_from_a_valid_profile():
+    """Reachability, not a claim about it. Two rules sharing a label and
+    disagreeing about disposition — a profile that ``validate`` accepts."""
+    from dociq.profiles.apply import apply_profiles
+    from tests.fixtures import document, page
+
+    profile = FormatProfile(
+        profile_id="mpr", version="1", display_name="MPR",
+        header_patterns=("MONTHLY PROGRESS",),
+        section_rules=(
+            SectionRule(rule_id="drop_photos", pattern="^PHOTO LOG",
+                        disposition=Disposition.DROP, label="Appendices",
+                        notes="Photo logs dropped per J. Long, 2026-08-01"),
+            SectionRule(rule_id="keep_drawings", pattern="^DRAWING LIST",
+                        disposition=Disposition.KEEP, label="Appendices"),
+        ),
+    )
+    profile.validate()
+    doc = document("m.pdf", (
+        page(1, "MONTHLY PROGRESS REPORT"),
+        page(2, "PHOTO LOG\nsite photos"),
+        page(3, "DRAWING LIST\ndrawings"),
+    ), doc_id="LI-1")
+    out = apply_profiles((doc,), (profile,)).documents[0]
+    sections = {(p.section, p.disposition) for p in out.pages if p.section}
+    assert ("Appendices", Disposition.DROP) in sections
+    assert ("Appendices", Disposition.KEEP) in sections
+
+
+# --- B5: UploadPackage.missing must not be dropped on the floor -------------
+
+
+def test_the_adapter_holds_the_missing_doc_ids_the_seam_cannot_carry(real_run):
+    """STOP THE LINE. ``PackageResult`` has no ``missing`` field and its module
+    is frozen, so the value is held on the adapter — where a screen can reach it
+    the moment the seam grows the field — rather than discarded.
+
+    FAIL-BEFORE: ``build_upload_package`` computed ``missing`` and the adapter
+    read nothing off the package, so a package one document short of the scope
+    its own statement claims was indistinguishable from a complete one."""
+    outcome, _events, _root = real_run
+    pipe = adapter.RealPipeline()
+    assert pipe.last_package_missing == ()
+
+    real = tuple(d.doc_id for d in outcome.result.documents)[:1]
+    # A Doc ID with no clean_text file, alongside one that has it. The scope
+    # asks for two documents and the folder can only hold one.
+    result = pipe.build_package(outcome, real + ("LI-99999",), "SCOPE\n")
+    assert result.doc_count == 1
+    assert pipe.last_package_missing == ("LI-99999",), (
+        "the adapter dropped the emit layer's own report of what the package "
+        "could not include"
+    )
+
+    # And it is reset by the next call, not accumulated — a stale name beside a
+    # complete package is the same defect pointing the other way.
+    pipe.build_package(outcome, real, "SCOPE\n")
+    assert pipe.last_package_missing == ()

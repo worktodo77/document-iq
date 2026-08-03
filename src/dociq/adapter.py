@@ -70,7 +70,8 @@ __all__ = [
 # The one built-in profile
 # ---------------------------------------------------------------------------
 
-NO_PROFILE = ProfileInfo("none", "-", "No profile — keep every page", 0)
+NO_PROFILE = ProfileInfo("none", "-", "No profile — keep every page",
+                         section_rules=0)
 """The choice that drops nothing, always offered and always last.
 
 It is the only profile DocIQ ships, and that is a decision rather than an
@@ -216,6 +217,47 @@ def _reconciliation(result: RunResult) -> Reconciliation | None:
     )
 
 
+def _section_lever(
+    name: str, tokens: int, pages: int, dropped_tokens: int, dropped_pages: int
+) -> ReductionLever:
+    """One waterfall row for one section, whatever fraction of it was dropped.
+
+    **The defect this shape exists to prevent, confirmed before it was fixed.**
+    The engaged flag used to be ``dropped == pages`` and the lever always
+    carried the WHOLE section's figures. A section with some pages dropped and
+    some kept therefore drew as KEEP, and its entire token weight counted as
+    still present: on a three-page reproduction the waterfall reported 451
+    tokens remaining where the run had actually published 287. The waterfall and
+    ``tokens_after`` disagreed, and the row said the opposite of what happened.
+
+    **It is reachable through an ordinary valid profile.** Only ``rule_id`` is
+    checked for uniqueness (:meth:`dociq.profiles.model.FormatProfile.validate`);
+    ``label`` is not, and Stage 4 keys a page's section on
+    ``rule.label or matched_text``. So one DROP rule and one KEEP rule sharing a
+    label — in one profile, or in two profiles claiming different documents —
+    put dropped and kept pages under the same section name. Constructed and run
+    before this was changed; it is not a phantom.
+
+    A lever means "what this removes when engaged", so a partly-dropped section
+    carries the DROPPED part's figures and is engaged. A section nothing was
+    dropped from carries the whole section's figures and is not engaged: that is
+    the projection "if you dropped this too". Both readings are then consistent
+    with ``ReductionPlan.remaining_tokens``.
+
+    The label says when a row is partial. ``ReductionLever`` has no field for it
+    and the seam is frozen; the label is the string every screen already renders
+    for a lever, so it is the one place the fact cannot be lost.
+    """
+    if dropped_pages == 0:
+        return ReductionLever(key=name, label=name, tokens=tokens, pages=pages,
+                              kind=LEVER_EXPERT, engaged=False, estimated=False)
+    label = name if dropped_pages == pages else (
+        f"{name} (part — {dropped_pages:,} of {pages:,} pages)")
+    return ReductionLever(key=name, label=label, tokens=dropped_tokens,
+                          pages=dropped_pages, kind=LEVER_EXPERT,
+                          engaged=True, estimated=False)
+
+
 def _plan(result: RunResult, before: TokenEstimate) -> ReductionPlan | None:
     """The D-14 waterfall, from figures this run counted.
 
@@ -239,31 +281,24 @@ def _plan(result: RunResult, before: TokenEstimate) -> ReductionPlan | None:
     for exactly this reason; the real adapter shows nothing rather than
     inheriting it. See the verification note for the two ways out.
     """
+    # Four running totals per section, not three: the whole section's tokens and
+    # pages, AND the dropped part's. See below — the dropped part is what the
+    # lever removes, and it is not always all of the section.
     sections: dict[str, list[int]] = {}
     for doc in result.documents:
         for page in doc.pages:
             if not page.section:
                 continue
-            row = sections.setdefault(page.section, [0, 0, 0])
-            row[0] += vt.measure(page.text).pretokens
+            row = sections.setdefault(page.section, [0, 0, 0, 0])
+            tok = vt.measure(page.text).pretokens
+            row[0] += tok
             row[1] += 1
-            row[2] += 1 if page.disposition is Disposition.DROP else 0
+            if page.disposition is Disposition.DROP:
+                row[2] += tok
+                row[3] += 1
 
-    levers = tuple(
-        ReductionLever(
-            key=name,
-            label=name,
-            tokens=tok,
-            pages=pages,
-            kind=LEVER_EXPERT,
-            # Engaged means "currently dropping". A section is dropping when its
-            # pages are dropped — read off the run rather than off the profile,
-            # because the run is what happened.
-            engaged=dropped == pages,
-            estimated=False,
-        )
-        for name, (tok, pages, dropped) in sorted(sections.items())
-    )
+    levers = tuple(_section_lever(name, *totals)
+                   for name, totals in sorted(sections.items()))
     if not levers:
         return None
     return ReductionPlan(
@@ -293,6 +328,26 @@ class RealPipeline:
         profile the run did not use must not enter ``RunResult.warnings``, which
         is hashed content. So it is recorded here, and the coordinator is asked
         for a way to put it on screen; see the verification note."""
+
+        self.last_package_missing: tuple[str, ...] = ()
+        """Doc IDs the last :meth:`build_package` call asked for and the matter
+        folder had no ``clean_text`` file for.
+
+        **STOP THE LINE.** ``UploadPackage.missing`` is computed by the emit
+        layer precisely so a short package is *reported rather than silently
+        skipped* — its docstring says "the operator is the only one who can say
+        whether it matters". :class:`~dociq.gui.pipeline.PackageResult` has no
+        field to carry it and that module is frozen, so the adapter cannot put
+        it on screen by itself. Dropping the value is the one outcome that must
+        not stand while the seam is extended, so it is held here — the same
+        treatment :attr:`library_issues` gets — and the field the seam needs is
+        written up in the verification note:
+
+            ``PackageResult.missing: tuple[str, ...] = ()``
+
+        A package whose scope statement claims N documents and whose folder
+        holds N-1 is the D-20 failure in miniature, and it is the one the
+        operator would never see."""
 
     # -- the API ------------------------------------------------------------
 
@@ -565,6 +620,10 @@ class RealPipeline:
             scope_statement=scope_statement,
             unsupported=len(outcome.result.unsupported),
         )
+        # Read off the package, not recomputed: what the emit layer could not
+        # find is the only authority on what the folder does not hold. See the
+        # attribute's docstring — this is a STOP-THE-LINE hold, not a home.
+        self.last_package_missing = package.missing
         return PackageResult(
             root=str(package.root),
             file_count=package.check.file_count,
