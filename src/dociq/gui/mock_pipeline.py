@@ -131,9 +131,11 @@ MPRs and a folder of 40 emails are not the same job. Replaced by a measured rate
 once Sprint 2 has a timed end-to-end run."""
 
 PROFILES: tuple[ProfileInfo, ...] = (
-    ProfileInfo("modec-mpr", "1.3", "MODEC monthly progress report", 4),
-    ProfileInfo("petrobras-cer", "1.0", "Petrobras change/extension request", 2),
-    ProfileInfo("none", "-", "No profile — keep every page", 0),
+    ProfileInfo("modec-mpr", "1.3", "MODEC monthly progress report",
+                section_rules=4),
+    ProfileInfo("petrobras-cer", "1.0", "Petrobras change/extension request",
+                section_rules=2),
+    ProfileInfo("none", "-", "No profile — keep every page", section_rules=0),
 )
 
 # (section, plain label, dropped by default under the MPR profile)

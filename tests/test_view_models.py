@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from dociq.contracts import Disposition, PageKind  # noqa: E402
@@ -226,7 +228,8 @@ def _view_with(estimate: TokenEstimate) -> object:
     )
     return build_summary(
         RunOutcome(outcome.result, estimate, estimate,
-                   outcome.reconciliation, outcome.output_root, plan),
+                   reconciliation=outcome.reconciliation,
+                   output_root=outcome.output_root, plan=plan),
     )
 
 
@@ -375,30 +378,69 @@ def test_toggling_preserves_every_lever_field_except_engaged():
     assert plan.with_toggled("photo_logs").with_toggled("photo_logs") == plan
 
 
-def test_no_lever_rebuild_site_lists_fields_positionally():
-    """The CLASS, not the repro.
+SEAM_MODULE = "dociq.gui.pipeline"
+FROZEN_SEAM_SOURCE = Path("src") / "dociq" / "gui" / "pipeline.py"
 
-    Four sites rebuilt a ``ReductionLever`` from its parts; each was a place a
-    later field could vanish. They now use ``dataclasses.replace``. This asserts
-    no new one reappears, in the product AND in the tests — a lossy rebuild
-    inside a fixture produces a passing test of the wrong record.
+
+def _seam_records() -> dict[str, int]:
+    """Every frozen presentation record the seam DEFINES, and how many fields
+    each one requires.
+
+    Generated from the module, so a record added to the seam tomorrow is
+    policed the moment it exists. Records the seam merely re-exports
+    (``RunConfig`` and ``RunResult`` from :mod:`dociq.contracts`,
+    ``RunTermination`` from :mod:`dociq.runstate`) are excluded: they belong to
+    the contract layer, which has its own rules and its own freeze.
+    """
+    import dataclasses
+    import importlib
+
+    mod = importlib.import_module(SEAM_MODULE)
+    out: dict[str, int] = {}
+    for name in dir(mod):
+        obj = getattr(mod, name)
+        if not (isinstance(obj, type) and dataclasses.is_dataclass(obj)):
+            continue
+        if getattr(obj, "__module__", "") != SEAM_MODULE:
+            continue
+        out[name] = sum(
+            1 for f in dataclasses.fields(obj)
+            if f.default is dataclasses.MISSING
+            and f.default_factory is dataclasses.MISSING
+        )
+    return out
+
+
+def _positional_rebuild_sites() -> list[str]:
+    """Sites passing a seam record an OPTIONAL field positionally.
+
+    Parsed, not pattern-matched. The first version of this probe used a regex
+    and MISSED the very rebuild that motivated it — the offending call was
+    ``ReductionLever(lever.key, ...)`` and the pattern stopped at the dot. A
+    regex over source is a guess about syntax; the AST is the syntax.
+
+    **Why "beyond the required fields" is the right line, rather than "any
+    positional argument".** A record's required fields must be supplied at every
+    call site, so a new REQUIRED field breaks every one of them loudly and can
+    never vanish silently. Every field added to a frozen record after it ships
+    carries a default — and a default is exactly what a rebuild that stopped
+    listing fields falls back to. So the arguments that can silently take a
+    stale or default value are the optional ones, and passing those by position
+    is the defect. This also lets ``TokenEstimate(chars, low, high)`` stand as
+    the plain three-argument construction it is, instead of forcing keywords on
+    call sites that carry no risk.
     """
     import ast
 
-    # Parsed, not pattern-matched. The first version of this probe used a
-    # regex, and it MISSED the very rebuild that motivated it — the offending
-    # call was ``ReductionLever(lever.key, ...)`` and the pattern stopped at the
-    # dot. A regex over source is a guess about syntax; the AST is the syntax.
+    required = _seam_records()
     root = Path(__file__).resolve().parents[1]
-    offenders = []
+    offenders: list[str] = []
     for path in sorted((root / "src").rglob("*.py")) + sorted(
         (root / "tests").rglob("*.py")
     ):
-        if path.name == Path(__file__).name:
-            continue  # this file constructs one deliberately, by keyword
         tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and node.args):
+            if not isinstance(node, ast.Call):
                 continue
             # Both `ReductionLever(...)` and `pipeline.ReductionLever(...)`.
             # The first version matched only ast.Name and would have missed
@@ -411,11 +453,189 @@ def test_no_lever_rebuild_site_lists_fields_positionally():
                 else func.attr if isinstance(func, ast.Attribute)
                 else None
             )
-            if name == "ReductionLever":
-                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+            if name in required and len(node.args) > required[name]:
+                rel = path.relative_to(root).as_posix()
+                offenders.append(
+                    f"{rel}:{node.lineno} {name} "
+                    f"({len(node.args)} positional, {required[name]} required)"
+                )
+    return offenders
+
+
+def test_the_probe_polices_every_seam_record_not_just_the_reported_one():
+    """The class-fix claim, asserted rather than stated.
+
+    A-11b said "fix the class" and the probe it shipped named exactly one
+    record. This asserts the enumeration is derived, so it cannot be one record
+    behind the seam again.
+    """
+    records = _seam_records()
+    assert "ReductionLever" in records and "ReductionPlan" in records
+    assert "RunOutcome" in records and "ProgressEvent" in records
+    assert len(records) >= 12, records
+    # And nothing the seam only re-exports.
+    assert "RunResult" not in records and "RunTermination" not in records
+
+
+def test_no_seam_record_is_rebuilt_with_optional_fields_positionally():
+    """The CLASS, not the repro.
+
+    Every frozen presentation record in the seam, in the product AND in the
+    tests — a lossy rebuild inside a fixture produces a passing test of the
+    wrong record, which is worse than one in the product because it also hides
+    the product's.
+
+    The seam module itself is excluded here and asserted separately below; see
+    that test for why.
+    """
+    offenders = [o for o in _positional_rebuild_sites()
+                 if not o.startswith(FROZEN_SEAM_SOURCE.as_posix())]
     assert not offenders, (
-        "ReductionLever built or rebuilt with positional fields at "
-        + ", ".join(offenders)
-        + " — use dataclasses.replace() or keywords, so a field added later "
-          "cannot be silently dropped"
+        "a frozen seam record is built with an optional field passed by "
+        "position at " + "; ".join(offenders)
+        + " — use keywords (or dataclasses.replace() when rebuilding), so a "
+          "field added later cannot be silently dropped"
     )
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "STOP THE LINE: src/dociq/gui/pipeline.py is frozen and shared with two "
+    "agents working in parallel, so the one offending site in it — "
+    "ReductionPlan.with_toggled rebuilding ReductionPlan positionally at ~:256, "
+    "inside the very method that was fixed to stop rebuilding ReductionLever "
+    "positionally — is REPORTED, not edited. It is lossless today at 4 of 4 "
+    "fields and silently lossy on the next one. strict=True, so this turns RED "
+    "the moment the seam owner fixes it and this marker must then be removed."
+))
+def test_the_frozen_seam_module_has_no_positional_rebuild():
+    offenders = [o for o in _positional_rebuild_sites()
+                 if o.startswith(FROZEN_SEAM_SOURCE.as_posix())]
+    assert not offenders, "; ".join(offenders)
+
+
+# ---------------------------------------------------------------------------
+# B1: an aggregate sentence may never report a PROJECTED figure as a counted
+# one — least of all a projected ZERO.
+#
+# ``ChecklistRow.scale()`` already appends "(projected, not counted)"; the
+# aggregate summaries did not. ``RealPipeline.profile_rules`` returns
+# ``tokens=0, pages=0, estimated=True`` for every row, so the sentence that
+# GATES APPROVAL read "3 section types left out on your approval: 0 pages,
+# about 0 tokens." An expert reads "these drops cost nothing", approves, and
+# the run drops real pages.
+#
+# Enumeration of every aggregate over levers in this module — all four are
+# asserted below, not just the one that was reported:
+#   ProfileChecklistView.drop_summary        (the approval sentence)
+#   ProfileChecklistView.automatic_summary
+#   SummaryView.split_line                   (both halves)
+#   SummaryView.drops_line                   (already carried a marker)
+
+
+def _projected_checklist(n: int = 3):
+    """The shape ``RealPipeline.profile_rules`` actually returns."""
+    from dociq.gui.pipeline import LEVER_EXPERT, ProfileInfo, ReductionLever
+    from dociq.gui.view_models import build_profile_checklist
+
+    profile = ProfileInfo(profile_id="mpr", version="1", label="MPR",
+                          section_rules=n)
+    levers = tuple(
+        ReductionLever(key=f"s{i}", label=f"Section {i}", tokens=0, pages=0,
+                       kind=LEVER_EXPERT, engaged=True, estimated=True)
+        for i in range(n)
+    )
+    return build_profile_checklist(profile, levers)
+
+
+def test_the_approval_sentence_never_reports_a_projected_zero_as_a_zero() -> None:
+    """FAIL-BEFORE: "3 section types left out on your approval: 0 pages, about
+    0 tokens." — a flat statement that the drops cost nothing, on the one line
+    approval is given against."""
+    summary = _projected_checklist().drop_summary()
+    assert "0 pages" in summary        # the figure is still shown
+    assert "projected, not counted" in summary, summary
+    assert "absence of a measurement" in summary, summary
+
+
+def test_the_projection_marker_matches_the_rows_own_wording() -> None:
+    """One vocabulary. A row saying "(projected, not counted)" and a summary
+    saying something else would read as two different qualifications."""
+    view = _projected_checklist()
+    assert "projected, not counted" in view.rows[0].scale()
+    assert "projected, not counted" in view.drop_summary()
+
+
+def test_a_mixed_checklist_says_how_many_of_the_figures_are_projected() -> None:
+    from dociq.gui.pipeline import LEVER_EXPERT, ProfileInfo, ReductionLever
+    from dociq.gui.view_models import build_profile_checklist
+
+    levers = (
+        ReductionLever(key="a", label="A", tokens=1000, pages=10,
+                       kind=LEVER_EXPERT, engaged=True, estimated=False),
+        ReductionLever(key="b", label="B", tokens=0, pages=0,
+                       kind=LEVER_EXPERT, engaged=True, estimated=True),
+    )
+    view = build_profile_checklist(
+        ProfileInfo(profile_id="p", version="1", label="P", section_rules=2),
+        levers)
+    summary = view.drop_summary()
+    assert "1 of these 2 are projected, not counted" in summary, summary
+    # The zero caveat belongs only where the whole figure is a projected zero.
+    assert "absence of a measurement" in summary
+
+
+def test_a_counted_checklist_carries_no_projection_marker() -> None:
+    """The marker must MEAN something: on a counted set it must be absent, or
+    it degrades into decoration nobody reads."""
+    from dociq.gui.pipeline import LEVER_EXPERT, ProfileInfo, ReductionLever
+    from dociq.gui.view_models import build_profile_checklist
+
+    levers = (ReductionLever(key="a", label="A", tokens=41_000, pages=612,
+                             kind=LEVER_EXPERT, engaged=True, estimated=False),)
+    view = build_profile_checklist(
+        ProfileInfo(profile_id="p", version="1", label="P", section_rules=1),
+        levers)
+    assert "projected" not in view.drop_summary()
+
+
+def test_every_aggregate_over_levers_marks_a_projection() -> None:
+    """The CLASS, not the reported instance.
+
+    Four sentences add levers up. Each one is built here with an all-projected
+    set and required to say so — so a fifth aggregate written later fails this
+    test by omission rather than shipping an unmarked projection.
+    """
+    from dociq.gui.pipeline import (
+        LEVER_AUTOMATIC,
+        LEVER_EXPERT,
+        ProfileInfo,
+        ReductionLever,
+        ReductionPlan,
+    )
+    from dociq.gui.view_models import build_profile_checklist
+
+    expert = ReductionLever(key="e", label="E", tokens=0, pages=0,
+                            kind=LEVER_EXPERT, engaged=True, estimated=True)
+    auto = ReductionLever(key="a", label="A", tokens=0, pages=0,
+                          kind=LEVER_AUTOMATIC, engaged=True, estimated=True)
+
+    checklist = build_profile_checklist(
+        ProfileInfo(profile_id="p", version="1", label="P", section_rules=1),
+        (expert, auto))
+    outcome = _outcome()
+    view = build_summary(
+        outcome,
+        ReductionPlan(full_tokens=1_000_000, levers=(expert, auto)),
+    )
+
+    sentences = {
+        "ProfileChecklistView.drop_summary": checklist.drop_summary(),
+        "ProfileChecklistView.automatic_summary": checklist.automatic_summary(),
+        "SummaryView.split_line": view.split_line(),
+        "SummaryView.drops_line": view.drops_line(),
+    }
+    for name, text in sentences.items():
+        assert "project" in text, (
+            f"{name} adds projected levers up and does not say the figure is a "
+            f"projection: {text!r}"
+        )
