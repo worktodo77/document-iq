@@ -218,6 +218,41 @@ def compact(value: int) -> str:
     return f"{value:,}"
 
 
+def _projection_note(rows) -> str:
+    """The aggregate's version of :meth:`ChecklistRow.scale`'s marker.
+
+    A row that says "(projected, not counted)" beside a summary line that does
+    not is the same defect one level up — and the summary is the sentence
+    approval is given against, so it is the one that must not read as a count.
+
+    The dangerous case is a projected ZERO. ``RealPipeline.profile_rules``
+    returns ``tokens=0, pages=0, estimated=True`` for every row, because before
+    a run there is nothing to count. Unmarked, the approval sentence reads
+    "3 section types left out on your approval: 0 pages, about 0 tokens" — an
+    expert reads "these drops cost nothing", approves, and the run drops real
+    pages. So the zero is named as an absence of measurement, not a saving.
+
+    Takes the levers themselves, so every aggregate over levers — the
+    checklist's two summaries and the summary screen's split line — gets the
+    same marker from the same place rather than each growing its own version of
+    it, or, as here, not growing one at all.
+    """
+    rows = tuple(rows)
+    estimated = [r for r in rows if r.estimated]
+    if not estimated:
+        return ""
+    if len(estimated) == len(rows):
+        note = " Both figures are projected, not counted."
+    else:
+        note = (f" The figures for {len(estimated)} of these {len(rows)} are "
+                "projected, not counted.")
+    if not any(r.pages or r.tokens for r in estimated):
+        note += (" A zero here is the absence of a measurement, not a saving of "
+                 "nothing: no page of this matter has been counted against "
+                 "these rules yet.")
+    return note
+
+
 @dataclass(frozen=True, slots=True)
 class SummaryView:
     """Everything the summary screen paints."""
@@ -384,7 +419,11 @@ class SummaryView:
             if auto else
             "Removed mechanically by the tool: nothing"
         )
-        return f"{left}.   {right}."
+        # The marker goes AFTER each half's full stop, not inside the clause:
+        # it qualifies the figure that was just given, and it must not turn one
+        # sentence into two run together.
+        return (f"{left}.{_projection_note(expert)}"
+                f"   {right}.{_projection_note(auto)}")
 
     def drops_line(self) -> str:
         """What the expert left out, named — D-21's "what was dropped and why".
@@ -693,7 +732,7 @@ class ProfileChecklistView:
         tokens = sum(r.lever.tokens for r in rows)
         return (f"{len(rows)} section type{'' if len(rows) == 1 else 's'} left "
                 f"out on your approval: {pages:,} pages, about "
-                f"{compact(tokens)} tokens.")
+                f"{compact(tokens)} tokens.{_projection_note(r.lever for r in rows)}")
 
     def automatic_summary(self) -> str:
         rows = self.automatic_rows
@@ -703,7 +742,8 @@ class ProfileChecklistView:
         tokens = sum(r.lever.tokens for r in rows)
         return (f"Separately, DocIQ removes {pages:,} pages / about "
                 f"{compact(tokens)} tokens mechanically. That is the tool's "
-                "doing, not yours, and it is never added to the figure above.")
+                "doing, not yours, and it is never added to the figure above."
+                f"{_projection_note(r.lever for r in rows)}")
 
     def basis_note(self) -> str:
         """The pipeline's own words about where these figures came from."""

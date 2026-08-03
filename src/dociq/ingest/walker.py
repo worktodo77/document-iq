@@ -1468,6 +1468,15 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
     n_pages = sum(len(d.pages) for d in documents)
     n_ocr_pages = sum(1 for d in documents for p in d.pages
                       if p.kind is PageKind.OCR)
+    # The run-level OCR alarm. Computed HERE, over the final corpus, because
+    # this is the only scale at which "every attempt recovered nothing" is
+    # visible: per-document notes say "N page(s) routed to OCR recovered no
+    # text", which reads as a few bad scans one document at a time and is
+    # usually right. A dead engine looks exactly like that, document by
+    # document, and looks like nothing else across the whole run.
+    dead_ocr = ex.ocr_yield_warning(documents)
+    if dead_ocr:
+        warnings.append(dead_ocr)
     emit_progress("")
     # Stamped, not defaulted — and this is the site Codex's F-1 probe did NOT
     # reach, found by enumerating the class rather than the repro. The two

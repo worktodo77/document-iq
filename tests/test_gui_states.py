@@ -43,8 +43,9 @@ def window(app):
 
 def _request(with_index: bool = True) -> RunRequest:
     mp = MockPipeline()
-    return RunRequest(r"D:\m", r"D:\m\out", mp.profiles()[0],
-                      r"D:\m\index.xlsx" if with_index else None)
+    return RunRequest(
+        r"D:\m", r"D:\m\out", profile=mp.profiles()[0],
+        master_index_path=r"D:\m\index.xlsx" if with_index else None)
 
 
 def test_every_font_role_returns_a_font(app) -> None:
@@ -159,7 +160,8 @@ def test_a_second_run_leaves_none_of_the_first_on_screen(window) -> None:
     window.show_outcome(pipeline.run(_request(True), lambda _e: None, lambda: False))
     assert len(window.summary.findChildren(Chip)) == 3
 
-    plain = RunRequest(r"D:\m", r"D:\m\out", pipeline.profiles()[2], None)
+    plain = RunRequest(r"D:\m", r"D:\m\out", profile=pipeline.profiles()[2],
+                       master_index_path=None)
     window.show_outcome(pipeline.run(plain, lambda _e: None, lambda: False))
     QApplication.processEvents()
     keys = {c.key for c in window.summary.findChildren(Chip)

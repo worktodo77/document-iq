@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -701,3 +702,127 @@ def test_the_subset_filter_keys_on_doc_ids_not_file_stems(tmp_path, monkeypatch)
         "the filter dropped every row — it is keyed on the file name, not the ID"
     )
     assert pkg.missing == ()
+
+
+# --- A3: a subset package may never ship the WHOLE matter's manifest --------
+#
+# The recovery branch reintroduced a fallback: when filtering failed for any
+# reason, ``build_upload_package`` copied the whole matter's ``sources.json``
+# and ``document_index.csv`` into the scoped package. The §8 content check
+# cannot see it — ``sources.json`` is a sanctioned *name*, and the file that
+# ships is correctly named and wrong inside.
+#
+# Enumeration of the fallback's triggers, all five of them, each asserted below:
+#   sources.json        OSError (a lock — antivirus, or an open handle)
+#   sources.json        invalid JSON
+#   sources.json        a payload whose top level is not a dict
+#   document_index.csv  OSError
+#   document_index.csv  empty file (no header row)
+# They were the ONLY paths in the package builder that could substitute whole
+# content for scoped content: the ``.txt`` copies are per-selected-file, the
+# README is generated, and the tree is rebuilt from empty every time.
+
+
+def _subset_call(layout, docs):
+    return lambda: build_upload_package(
+        layout, doc_ids=(docs[0].doc_id,), document_count=1,
+        scope_statement="S\n")
+
+
+@pytest.mark.parametrize("break_it,fragment", [
+    (lambda l: l.sources_json.write_bytes(b"{not json"), "sources.json"),
+    (lambda l: l.sources_json.write_text("[1, 2]", encoding="utf-8"),
+     "sources.json"),
+    (lambda l: l.index_csv.write_text("", encoding="utf-8"),
+     "document_index.csv"),
+])
+def test_an_unfilterable_manifest_refuses_it_never_copies_the_whole_one(
+        tmp_path, break_it, fragment):
+    """FAIL-BEFORE: each of these returned ``None`` from the filter and the
+    caller fell through to ``shutil.copyfile`` — a 10-document manifest inside a
+    1-document package, with no exception raised."""
+    layout, docs = full_matter(tmp_path)
+    break_it(layout)
+    with pytest.raises(PackageContentError) as exc:
+        _subset_call(layout, docs)()
+    assert fragment in str(exc.value)
+    assert "SUBSET" in str(exc.value)
+    # And nothing unfiltered was left behind for someone to drag into a Project.
+    root = layout.upload_package
+    if (root / fragment).is_file():
+        assert docs[1].doc_id not in (root / fragment).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("attr", ["sources_json", "index_csv"])
+def test_a_locked_manifest_refuses_rather_than_copying(tmp_path, attr, monkeypatch):
+    """The realistic trigger on this machine: antivirus holding a lock, i.e. an
+    ``OSError`` from ``read_text``. Simulated at the read, because a real lock
+    is not portable — the code path exercised is the same one."""
+    layout, docs = full_matter(tmp_path)
+    target = getattr(layout, attr)
+    real = Path.read_text
+
+    def locked(self, *a, **kw):
+        if self == target:
+            raise PermissionError(13, "The process cannot access the file")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", locked)
+    with pytest.raises(PackageContentError) as exc:
+        _subset_call(layout, docs)()
+    assert "could not be read" in str(exc.value)
+
+
+def test_no_manifest_may_name_a_document_the_package_does_not_hold(tmp_path):
+    """The CLASS guard, independent of how the wrong manifest got there.
+
+    ``assert_only_sanctioned`` polices file NAMES; this polices what is inside
+    them. It runs on every package, subset or whole, so a future writer that
+    reintroduces a whole-matter manifest by some other route is caught by the
+    property rather than by a test of the route.
+    """
+    from dociq.emit.handoff import _assert_manifest_matches_folder
+
+    root = tmp_path / "pkg"
+    root.mkdir()
+    (root / "LI-00001.txt").write_text("x", encoding="utf-8")
+    (root / "sources.json").write_text(
+        json.dumps({"LI-00001": "LI-00001.txt", "LI-00002": "LI-00002.txt"}),
+        encoding="utf-8")
+    with pytest.raises(PackageContentError) as exc:
+        _assert_manifest_matches_folder(root, {"LI-00001"}, check_index=True)
+    assert "LI-00002" in str(exc.value)
+    _assert_manifest_matches_folder(root, {"LI-00001", "LI-00002"}, check_index=True)
+
+
+def test_a_subset_package_never_copies_a_manifest_at_all(tmp_path, monkeypatch):
+    """FAIL-BEFORE at the mechanism rather than at a trigger.
+
+    The three triggers above are the ones that exist today. This one holds
+    however the code is rearranged: while a package is scoped, no manifest is
+    copied — it is written from filtered content or the build refuses. A new
+    fallback would have to call ``copyfile`` to be a fallback.
+    """
+    import shutil as _sh
+
+    from dociq.emit import handoff as mod
+
+    import contextlib
+
+    layout, docs = full_matter(tmp_path)
+    layout.sources_json.write_bytes(b"{not json")
+    layout.index_csv.write_text("", encoding="utf-8")
+
+    sources = []
+    real = _sh.copyfile
+
+    def watched(src, dst, *a, **kw):
+        sources.append(Path(src).name)
+        return real(src, dst, *a, **kw)
+
+    monkeypatch.setattr(mod.shutil, "copyfile", watched)
+    with contextlib.suppress(PackageContentError):
+        _subset_call(layout, docs)()
+    assert "sources.json" not in sources and "document_index.csv" not in sources, (
+        f"a scoped package copied {sources} — a manifest reached it whole"
+    )

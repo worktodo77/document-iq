@@ -918,6 +918,167 @@ class ProfileChecklistScreen(QWidget):
             self.profile_accepted.emit(self._view.profile)
 
 
+class BatesConfirmScreen(QWidget):
+    """§4 Stage 3 — the detected Bates format, put to the operator.
+
+    **This screen is the finding.** Sprint 2 shipped without it, so the format
+    never reached CONFIRMED, so a Bates-stamped production came out of DocIQ
+    with no locators at all — while the acceptance harness measured 92.130%
+    through a decision built in Python that the product could not produce
+    (rehearsal A4). Everything below exists because the pipeline is BLOCKED on
+    this screen: a run is standing still on a worker thread until one of three
+    buttons is pressed.
+
+    What it shows is chosen so an operator can actually rule on it. A regex is
+    not confirmable and neither is a percentage on its own; a locator the
+    operator recognizes from the production, next to how much of the record it
+    covers, is. So the example leads, in the mono face, at size — it is the
+    evidence, not a caption on the pattern.
+
+    **Multi-series productions are named, not decided.** When
+    :attr:`~dociq.gui.pipeline.BatesProposal.alternatives` is non-empty, D-28
+    refuses prefix repair on this matter, and the operator is the one who has to
+    know that: confirming one series here means the others keep whatever their
+    pages read. The block says so in those words rather than leaving the
+    operator to infer it from a list.
+
+    That field must be **D-28's own census** and nothing else — the adapter
+    fills it from ``identify.bates.matter_prefixes``, not from the detector's
+    runner-up shapes, which carry no threshold and on a real single-series
+    production include stray lines like ``Check 0001``. This screen states the
+    D-28 consequence as fact, so a looser source would make it a false statement
+    about the record at the exact moment the operator is asked to rule.
+
+    One forward action (D-16), named for its outcome: "Use this Bates format".
+    The other two are not variants of it — declining is a ruling the run
+    records, and stopping is not a ruling at all.
+    """
+
+    confirmed = Signal()
+    declined = Signal()
+    stop_requested = Signal()
+
+    def __init__(self, theme: Theme, parent=None) -> None:
+        super().__init__(parent)
+        self._theme = theme
+        page, lay = _page(theme)
+
+        title = QLabel("Confirm this document set's Bates format")
+        title.setFont(theme.title(16))
+        title.setStyleSheet(f"color: {theme.palette.navy};")
+        lay.addWidget(title)
+        lay.addWidget(_muted(
+            "The run is paused here. DocIQ read a stamp format off the pages "
+            "and will not write a single locator until you say it is this "
+            "production's. You are asked once per document set.", theme, 10))
+        lay.addSpacing(UNIT)
+
+        lay.addWidget(SectionLabel("A locator read off a page", theme))
+        lay.addWidget(Rule(theme, strong=True))
+        self._example = QLabel("")
+        self._example.setFont(theme.mono(20))
+        self._example.setStyleSheet(f"color: {theme.palette.navy};")
+        self._example.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self._example)
+        self._pattern = _muted("", theme, 9)
+        lay.addWidget(self._pattern)
+        lay.addSpacing(UNIT)
+
+        figures = QHBoxLayout()
+        figures.setSpacing(UNIT * 6)
+        self._documents = StatFigure("0", "Documents", theme)
+        self._pages = StatFigure("0", "Pages stamped", theme)
+        self._coverage = StatFigure("0%", "Of pages sampled", theme)
+        for fig in (self._documents, self._pages, self._coverage):
+            figures.addWidget(fig)
+        figures.addStretch(1)
+        lay.addLayout(figures)
+        lay.addSpacing(UNIT)
+
+        # The multi-series disclosure. Word-wrapped, in the warn color when it
+        # fires, directly above the actions — it is the last thing read before
+        # a format is confirmed, because it changes what confirming means.
+        self._alternatives = QLabel("")
+        self._alternatives.setFont(theme.body(9))
+        self._alternatives.setWordWrap(True)
+        lay.addWidget(self._alternatives)
+        lay.addStretch(1)
+        lay.addWidget(Rule(theme))
+
+        foot = QHBoxLayout()
+        stop = _button("Stop this run", theme, "link")
+        stop.clicked.connect(self.stop_requested.emit)
+        foot.addWidget(stop)
+        foot.addStretch(1)
+        decline = _button("Do not use it", theme, "secondary")
+        decline.clicked.connect(self.declined.emit)
+        foot.addWidget(decline)
+        self._accept = _button("Use this Bates format", theme, "primary")
+        self._accept.setFont(theme.body_strong(10))
+        self._accept.clicked.connect(self.confirmed.emit)
+        foot.addWidget(self._accept)
+        lay.addLayout(foot)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(page)
+
+    # -- rendering ----------------------------------------------------------
+
+    def show_proposal(self, proposal) -> None:
+        """Render a :class:`dociq.gui.pipeline.BatesProposal`.
+
+        A proposal with no example is rendered as exactly that, and the forward
+        action is DISABLED. The screen's whole claim is "here is a locator from
+        your production" — with nothing to show, confirming would be the
+        operator approving a pattern sight unseen, which is the state this
+        screen was built to end.
+        """
+        self._example.setText(proposal.example or "(no example locator)")
+        self._pattern.setText(
+            f"Format: {proposal.pattern}"
+            if proposal.pattern else "The pipeline named no format.")
+        self._documents.set_value(f"{proposal.documents:,}")
+        self._pages.set_value(f"{proposal.pages:,}")
+        self._coverage.set_value(f"{proposal.coverage_pct:.0f}%")
+
+        self._alternatives.setText(self._alternatives_text(proposal))
+        self._alternatives.setStyleSheet(
+            f"color: {self._theme.palette.warn if proposal.alternatives else self._theme.palette.ink_muted};"
+        )
+        usable = bool(proposal.example)
+        self._accept.setEnabled(usable)
+        self._accept.setToolTip(
+            "" if usable
+            else "No example locator came back with this format, so there is "
+                 "nothing here to confirm it against.")
+
+    def _alternatives_text(self, proposal) -> str:
+        if not proposal.alternatives:
+            return (
+                "One stamp series was found in this matter. Numbers that do "
+                "not match the confirmed format are flagged, never corrected "
+                "silently.")
+        listed = ", ".join(proposal.alternatives)
+        return (
+            f"THIS MATTER CARRIES MORE THAN ONE STAMP SERIES — DocIQ also "
+            f"read: {listed}. Confirming the format above applies it to the "
+            f"pages that match it and leaves the rest as they read. Because "
+            f"the matter is multi-series, D-28 REFUSES to repair a near-miss "
+            f"prefix anywhere in it: DocIQ cannot tell a genuine second series "
+            f"from a misreading of the first, so it will not guess. Every "
+            f"mismatch is flagged for you instead.")
+
+    # -- what the tests and the window read ---------------------------------
+
+    def example_text(self) -> str:
+        return self._example.text()
+
+    def alternatives_text(self) -> str:
+        return self._alternatives.text()
+
+
 class HandoffScreen(QWidget):
     """§8 / acceptance criterion 8 — "Analyze in Claude", Paths B and A.
 

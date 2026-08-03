@@ -89,8 +89,9 @@ def window(app):
 
 def _request(profile_index: int = 0, with_index: bool = True) -> RunRequest:
     mp = MockPipeline()
-    return RunRequest(r"D:\m", r"D:\m\out", mp.profiles()[profile_index],
-                      r"D:\m\index.xlsx" if with_index else None)
+    return RunRequest(
+        r"D:\m", r"D:\m\out", profile=mp.profiles()[profile_index],
+        master_index_path=r"D:\m\index.xlsx" if with_index else None)
 
 
 @lru_cache(maxsize=None)
@@ -753,7 +754,8 @@ def test_the_provenance_is_the_pipelines_words_verbatim(window) -> None:
 
 def test_a_conditional_inconsistency_stays_conditional(window) -> None:
     outcome = _outcome()
-    basis = TokenBasis("counted from the text", True, ratio_refuted=True)
+    basis = TokenBasis(provenance="counted from the text", is_structural=True,
+                       ratio_refuted=True)
     window.show_outcome(outcome)
     window.summary.plan_changed.emit(replace(outcome.plan, basis=basis))
     QApplication.processEvents()

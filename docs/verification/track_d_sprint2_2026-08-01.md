@@ -226,6 +226,24 @@ or (b) withdraw the claim from the UI (see §5.5).
 
 ## 5. STOP THE LINE — seam and coordination items
 
+> **STOP-THE-LINE §5.1 IS CLOSED (2026-08-03).** This section describes the
+> missing §4 Stage-3 Bates confirmation in the present tense; it was built and
+> merged. Amendment A-14 put `BatesProposal` / `BatesConfirm` on the seam and
+> `confirm_bates` on `PipelineAPI.run`, and the confirmation screen now asks.
+>
+> Track D was right to raise it and right not to work around it. The cost of
+> its going unapplied is recorded rather than smoothed over: for the length of
+> the sprint the shipped GUI produced **0.000%** Bates coverage on a genuinely
+> stamped production while the pipeline warned, in every run, that a format had
+> been detected and not applied. Measured after the fix on the same material:
+> **88.889%**, 328 of 369 pages.
+>
+> The general lesson is not about Bates. **Raising an amendment is not adopting
+> one**, and nothing in the process was watching the gap between those two —
+> the same failure hit A-12, which two tracks raised and neither applied. See
+> `docs/verification/bates_confirmation_2026-08-03.md`.
+
+
 **Cross-track note, discovered late:** `build/sprint-2` moved while this branch
 was building — Track E merged at `8c3953b`, raising A-11, A-12 and A-13. None of
 them touches `gui/pipeline.py`'s types, so **there is no conflict on the seam**.

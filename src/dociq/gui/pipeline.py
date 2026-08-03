@@ -247,13 +247,23 @@ class ReductionPlan:
         record is a defect waiting for the next field; ``replace`` cannot have
         that failure mode. ``tests/test_view_models.py`` asserts the property
         over every field rather than over the two this amendment happened to
-        add."""
+        add.
+
+        **And the fix missed its own method.** The amendment claimed all four
+        rebuild sites were corrected; the return statement below rebuilt
+        ``ReductionPlan`` positionally, inside the very method whose lesson was
+        that positional reconstruction of a frozen record is a defect waiting
+        for the next field. Lossless at 4 of 4 fields and silently lossy on the
+        fifth. Found by the rehearsal review, not by the probe written to catch
+        exactly this — which is why the probe now enumerates every frozen
+        presentation record in this module rather than the one record that
+        happened to fail first."""
         levers = tuple(
             lever if (lever.key != key or lever.locked)
             else replace(lever, engaged=not lever.engaged)
             for lever in self.levers
         )
-        return ReductionPlan(self.full_tokens, levers, self.capacity, self.basis)
+        return replace(self, levers=levers)
 
     @property
     def engaged(self) -> tuple[ReductionLever, ...]:
@@ -345,8 +355,17 @@ class BatesProposal:
     ``auto_confirm_bates`` is False for a GUI run, so the format never reached
     CONFIRMED, so ``apply_bates_reported`` returned every document unchanged and
     **a Bates-stamped production produced no locators at all**. The acceptance
-    harness measured 92.130% because it constructs the confirmed decision
-    directly — a code path the product could not reach.
+    harness reached criterion 4's headline figure at all only because it
+    constructs the confirmed decision directly — a code path the product could
+    not reach.
+
+    That figure is **92.130%, and it is a PROJECTION** (D-29): 568 native from
+    an earlier full-corpus measurement plus 29 OCR'd measured on a subset. The
+    last end-to-end **measured** full-corpus number is **91.512%**. Stated here
+    because this docstring is where a reader meets the number, and an earlier
+    draft of this very paragraph called it "measured" — the same defect the
+    rehearsal review had just caught in the decision register, reintroduced in
+    the commit that fixed it.
 
     The record is deliberately not just the pattern. An operator cannot confirm
     a regex; they can confirm *"iiCON000123, on 15 of 33 pages across 20
@@ -404,6 +423,16 @@ class PackageResult:
     total_bytes: int
     scope_statement: str
     doc_count: int = 0
+
+    missing: tuple[str, ...] = ()
+    """Doc IDs the operator asked for that have no ``clean_text`` file (B5).
+
+    ``build_upload_package`` has always computed this, with a docstring saying
+    it is "reported rather than silently skipped… the operator is the only one
+    who can say whether it matters" — and then it reached no screen, because
+    there was nowhere on the seam to put it. A package quietly missing
+    documents the operator selected is the same failure class as a subset that
+    does not say it is a subset: the recipient cannot tell."""
 
 
 @dataclass(frozen=True, slots=True)

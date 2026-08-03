@@ -292,35 +292,56 @@ def _text_files(layout: OutputLayout) -> list[Path]:
     )
 
 
-def _filtered_sources(layout: OutputLayout, keep: set[str]) -> str | None:
-    """``sources.json`` restricted to ``keep``, or ``None`` if unreadable.
+def _filtered_sources(layout: OutputLayout, keep: set[str]) -> str:
+    """``sources.json`` restricted to ``keep``. Raises if it cannot be filtered.
 
     A subset package that carried the whole matter's ``sources.json`` would hand
     the reader a manifest naming documents the package does not contain — and
     §7 makes ``sources.json`` the thing Expert Assist reads to find text, so
     every one of those names is a path that resolves to nothing. Filtering keeps
     the manifest true of the folder it sits in.
+
+    **Every failure raises; none returns a value the caller can fall back from.**
+    This function used to return ``None`` on ``OSError``, on invalid JSON and on
+    a non-dict payload, and the caller then copied the whole matter's manifest
+    into the subset package — the exact failure this function exists to prevent,
+    reached by the ordinary path on this machine (antivirus holding a lock on
+    ``sources.json`` is an ``OSError``). :func:`assert_only_sanctioned` cannot
+    catch it either, because ``sources.json`` is a sanctioned *name*: the file
+    that would be uploaded is correctly named and wrong inside.
     """
     import json
 
     try:
-        payload = json.loads(layout.sources_json.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+        raw = layout.sources_json.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PackageContentError(_UNFILTERABLE.format(
+            name="sources.json", why=f"it could not be read ({exc})")) from exc
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise PackageContentError(_UNFILTERABLE.format(
+            name="sources.json", why=f"it is not valid JSON ({exc})")) from exc
     if not isinstance(payload, dict):
-        return None
+        raise PackageContentError(_UNFILTERABLE.format(
+            name="sources.json",
+            why=f"its top level is {type(payload).__name__}, not an object "
+                "keyed by Doc ID"))
     return canonical_json(
         {k: v for k, v in payload.items() if k in keep}
     ) + "\n"
 
 
-def _filtered_index_csv(layout: OutputLayout, keep: set[str]) -> str | None:
+def _filtered_index_csv(layout: OutputLayout, keep: set[str]) -> str:
     """``document_index.csv`` restricted to ``keep``, header preserved.
 
     Rows are matched on column 0 (``Doc ID``), which is
     :data:`dociq.emit.indexbook.INDEX_COLUMNS`\\ [0] — asserted below rather than
     assumed, because a column reorder would otherwise filter on ``Filename`` and
     quietly produce an empty index.
+
+    Raises rather than returning ``None``, for the reason given in
+    :func:`_filtered_sources`.
     """
     assert INDEX_COLUMNS[0] == "Doc ID"
     import csv
@@ -328,11 +349,15 @@ def _filtered_index_csv(layout: OutputLayout, keep: set[str]) -> str | None:
 
     try:
         text = layout.index_csv.read_text(encoding="utf-8")
-    except OSError:
-        return None
+    except OSError as exc:
+        raise PackageContentError(_UNFILTERABLE.format(
+            name="document_index.csv",
+            why=f"it could not be read ({exc})")) from exc
     rows = list(csv.reader(io.StringIO(text, newline="")))
     if not rows:
-        return None
+        raise PackageContentError(_UNFILTERABLE.format(
+            name="document_index.csv",
+            why="it is empty, so it carries no header to preserve"))
     header, body = rows[0], rows[1:]
     kept = [r for r in body if r and r[0] in keep]
     out = io.StringIO(newline="")
@@ -340,6 +365,66 @@ def _filtered_index_csv(layout: OutputLayout, keep: set[str]) -> str | None:
     writer.writerow(header)
     writer.writerows(kept)
     return out.getvalue()
+
+
+_UNFILTERABLE = (
+    "This package covers a SUBSET of the matter, so {name} has to be filtered "
+    "to match it — and it cannot be, because {why}. DocIQ refuses rather than "
+    "copying the whole matter's {name} into a scoped package: the recipient "
+    "would get a manifest naming documents the folder does not contain, and "
+    "every one of those names is a citation that resolves to nothing. Fix the "
+    "file (or release whatever is holding it) and build the package again."
+)
+
+
+def _assert_manifest_matches_folder(
+    root: Path, expected: set[str], *, check_index: bool
+) -> None:
+    """Every Doc ID named by the package's manifests is a file in the package.
+
+    The class-level guard, not the instance one. It does not care *how* a wrong
+    manifest got there — a fallback copy, a future writer, a stale file left by
+    something else — it asserts the property that makes a package citable: what
+    the manifest names, the folder holds.
+
+    ``sources.json`` is checked always: §7 makes it the thing Expert Assist
+    reads to FIND text, so a name in it that has no file is a citation that
+    resolves to nothing.
+
+    ``document_index.csv`` is checked only for a SUBSET package
+    (``check_index``), and the asymmetry is deliberate rather than a weakening.
+    A whole-record index legitimately carries a row for every §5 *unsupported*
+    file — inventoried, hashed, given a Doc ID and marked Unsupported so the
+    production stays complete — and those files have no ``clean_text`` by
+    definition. Asserting over it would flag the §5 rule as a defect. A subset's
+    index is filtered to the selected Doc IDs, so there the property holds and
+    is worth asserting.
+    """
+    import csv
+    import io
+    import json
+
+    named: set[str] = set()
+    sources = root / "sources.json"
+    if sources.is_file():
+        payload = json.loads(sources.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            named |= set(payload)
+    index = root / "document_index.csv"
+    if check_index and index.is_file():
+        rows = list(csv.reader(io.StringIO(
+            index.read_text(encoding="utf-8"), newline="")))
+        named |= {r[0] for r in rows[1:] if r and r[0]}
+
+    phantom = sorted(named - expected)
+    if phantom:
+        raise PackageContentError(
+            f"{len(phantom)} document(s) are named by this package's manifests "
+            f"but are not in it: {', '.join(phantom[:10])}"
+            + (" …" if len(phantom) > 10 else "")
+            + ". §7 makes sources.json the thing Expert Assist reads to FIND "
+              "text, so each of those names is a path that resolves to nothing."
+        )
 
 
 def build_upload_package(
@@ -412,17 +497,23 @@ def build_upload_package(
         shutil.copyfile(src, dst)
         record(dst.name, dst.stat().st_size)
 
-    for src, filtered in (
-        (layout.sources_json, _filtered_sources(layout, keep) if subset else None),
-        (layout.index_csv, _filtered_index_csv(layout, keep) if subset else None),
+    # A subset package's manifests are FILTERED or the package is not built.
+    # There is deliberately no `filtered is None` branch here any more: the one
+    # that existed fell back to copying the whole matter's manifest whenever
+    # filtering failed for any reason, which is the failure the filtering exists
+    # to prevent, shipped under a sanctioned filename where the §8 content check
+    # cannot see it. The filter functions raise instead.
+    for src, filterer in (
+        (layout.sources_json, _filtered_sources),
+        (layout.index_csv, _filtered_index_csv),
     ):
         if not src.is_file():
             continue
         dst = target / src.name
-        if filtered is None:
-            shutil.copyfile(src, dst)
+        if subset:
+            write_text_deterministic(dst, filterer(layout, keep))
         else:
-            write_text_deterministic(dst, filtered)
+            shutil.copyfile(src, dst)
         record(dst.name, dst.stat().st_size)
 
     if estimate is None:
@@ -452,6 +543,14 @@ def build_upload_package(
     # exactly when something else put a file there, which is the case worth
     # catching.
     assert_only_sanctioned(target)
+
+    # …and §7's "the manifest is true of the folder" rule, checked the same way.
+    # ``assert_only_sanctioned`` polices file NAMES and cannot police contents,
+    # so a whole-matter ``sources.json`` inside a two-document package passes it
+    # cleanly. This is the check that does not.
+    _assert_manifest_matches_folder(
+        target, keep if subset else {p.stem for p in selected},
+        check_index=subset)
 
     unenforced: list[str] = []
     if lim.max_files == 0:

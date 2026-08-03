@@ -892,4 +892,38 @@ Two probes, both watched RED under perturbation before being trusted:
   **missed the very rebuild that motivated it**: the call was
   `ReductionLever(lever.key, ...)` and the pattern stopped at the dot. Recorded
   because it is the general lesson — a regex over source is a guess about
-  syntax, and this probe's whole value is that it cannot be fooled by one.
+  syntax.
+
+#### Correction, 2026-08-03 — both claims above were overstated
+
+Withdrawn rather than quietly patched, because the wrong part is the *claim*,
+not only the code.
+
+1. **"All four now use `dataclasses.replace`" understated the scope of the
+   defect.** Four `ReductionLever` sites were fixed. The class was
+   "a frozen presentation record rebuilt by listing its fields", and it was
+   never only `ReductionLever` — `ReductionPlan.with_toggled` rebuilds
+   **`ReductionPlan`** positionally in the very method that was fixed, and
+   `tests/test_view_models.py` rebuilt **`RunOutcome`** from six of its eight
+   fields, a lossy rebuild inside a fixture of exactly the kind the paragraph
+   above calls worse than one in the product. Neither was seen.
+2. **"cannot be fooled by one [a regex]" claimed too much.** The AST probe
+   named a single record. A probe that polices one of thirteen frozen records
+   in the seam is not un-foolable; it is narrow, and its narrowness is invisible
+   from its name.
+
+Both are now closed by construction. `test_no_seam_record_is_rebuilt_with_
+optional_fields_positionally` enumerates the frozen presentation records from
+`dociq.gui.pipeline` itself — every record the seam *defines*, so one added
+tomorrow is policed the moment it exists — and flags any positional argument
+**beyond a record's required fields**. That is the precise line: required fields
+must be supplied at every call site, so a new required field breaks them loudly;
+every field added to a shipped frozen record carries a default, and a default is
+what a rebuild that stopped listing fields silently falls back to.
+
+`ReductionPlan.with_toggled` is **not fixed here**. `src/dociq/gui/pipeline.py`
+is frozen and shared with parallel work, so the site is REPORTED: it is covered
+by `test_the_frozen_seam_module_has_no_positional_rebuild`, marked
+`xfail(strict=True)` so that the day the seam owner fixes it the test turns red
+and the marker must be removed. It is lossless today at 4 of 4 fields and
+silently lossy on the next one.

@@ -35,6 +35,8 @@ from dociq import pipeline as core
 from dociq.contracts import Disposition, RunResult
 from dociq.gui.pipeline import (
     LEVER_EXPERT,
+    BatesConfirm,
+    BatesProposal,
     FolderPreview,
     ProfileInfo,
     ProgressEvent,
@@ -72,7 +74,8 @@ __all__ = [
 # The one built-in profile
 # ---------------------------------------------------------------------------
 
-NO_PROFILE = ProfileInfo("none", "-", "No profile — keep every page", 0)
+NO_PROFILE = ProfileInfo("none", "-", "No profile — keep every page",
+                         section_rules=0)
 """The choice that drops nothing, always offered and always last.
 
 It is the only profile DocIQ ships, and that is a decision rather than an
@@ -276,6 +279,47 @@ def _reconciliation(result: RunResult) -> Reconciliation | None:
     )
 
 
+def _section_lever(
+    name: str, tokens: int, pages: int, dropped_tokens: int, dropped_pages: int
+) -> ReductionLever:
+    """One waterfall row for one section, whatever fraction of it was dropped.
+
+    **The defect this shape exists to prevent, confirmed before it was fixed.**
+    The engaged flag used to be ``dropped == pages`` and the lever always
+    carried the WHOLE section's figures. A section with some pages dropped and
+    some kept therefore drew as KEEP, and its entire token weight counted as
+    still present: on a three-page reproduction the waterfall reported 451
+    tokens remaining where the run had actually published 287. The waterfall and
+    ``tokens_after`` disagreed, and the row said the opposite of what happened.
+
+    **It is reachable through an ordinary valid profile.** Only ``rule_id`` is
+    checked for uniqueness (:meth:`dociq.profiles.model.FormatProfile.validate`);
+    ``label`` is not, and Stage 4 keys a page's section on
+    ``rule.label or matched_text``. So one DROP rule and one KEEP rule sharing a
+    label — in one profile, or in two profiles claiming different documents —
+    put dropped and kept pages under the same section name. Constructed and run
+    before this was changed; it is not a phantom.
+
+    A lever means "what this removes when engaged", so a partly-dropped section
+    carries the DROPPED part's figures and is engaged. A section nothing was
+    dropped from carries the whole section's figures and is not engaged: that is
+    the projection "if you dropped this too". Both readings are then consistent
+    with ``ReductionPlan.remaining_tokens``.
+
+    The label says when a row is partial. ``ReductionLever`` has no field for it
+    and the seam is frozen; the label is the string every screen already renders
+    for a lever, so it is the one place the fact cannot be lost.
+    """
+    if dropped_pages == 0:
+        return ReductionLever(key=name, label=name, tokens=tokens, pages=pages,
+                              kind=LEVER_EXPERT, engaged=False, estimated=False)
+    label = name if dropped_pages == pages else (
+        f"{name} (part — {dropped_pages:,} of {pages:,} pages)")
+    return ReductionLever(key=name, label=label, tokens=dropped_tokens,
+                          pages=dropped_pages, kind=LEVER_EXPERT,
+                          engaged=True, estimated=False)
+
+
 def _plan(result: RunResult, before: TokenEstimate) -> ReductionPlan | None:
     """The D-14 waterfall, from figures this run counted.
 
@@ -299,31 +343,24 @@ def _plan(result: RunResult, before: TokenEstimate) -> ReductionPlan | None:
     for exactly this reason; the real adapter shows nothing rather than
     inheriting it. See the verification note for the two ways out.
     """
+    # Four running totals per section, not three: the whole section's tokens and
+    # pages, AND the dropped part's. See below — the dropped part is what the
+    # lever removes, and it is not always all of the section.
     sections: dict[str, list[int]] = {}
     for doc in result.documents:
         for page in doc.pages:
             if not page.section:
                 continue
-            row = sections.setdefault(page.section, [0, 0, 0])
-            row[0] += vt.measure(page.text).pretokens
+            row = sections.setdefault(page.section, [0, 0, 0, 0])
+            tok = vt.measure(page.text).pretokens
+            row[0] += tok
             row[1] += 1
-            row[2] += 1 if page.disposition is Disposition.DROP else 0
+            if page.disposition is Disposition.DROP:
+                row[2] += tok
+                row[3] += 1
 
-    levers = tuple(
-        ReductionLever(
-            key=name,
-            label=name,
-            tokens=tok,
-            pages=pages,
-            kind=LEVER_EXPERT,
-            # Engaged means "currently dropping". A section is dropping when its
-            # pages are dropped — read off the run rather than off the profile,
-            # because the run is what happened.
-            engaged=dropped == pages,
-            estimated=False,
-        )
-        for name, (tok, pages, dropped) in sorted(sections.items())
-    )
+    levers = tuple(_section_lever(name, *totals)
+                   for name, totals in sorted(sections.items()))
     if not levers:
         return None
     return ReductionPlan(
@@ -331,6 +368,109 @@ def _plan(result: RunResult, before: TokenEstimate) -> ReductionPlan | None:
         levers=levers,
         basis=TokenBasis.of(before),
     )
+
+
+# ---------------------------------------------------------------------------
+# §4 Stage 3 — the operator's confirmation, across the seam (A-14)
+# ---------------------------------------------------------------------------
+
+
+def _proposal_for_gui(proposal, other_prefixes: tuple[str, ...] = ()) -> BatesProposal:
+    """``identify.bates.BatesProposal`` → the seam's presentation record.
+
+    A translation, not a pass-through, and the seam requires it: the detector's
+    proposal carries a :class:`~dociq.identify.bates.BatesFormat`, and a format
+    object on the GUI side would be a pipeline internal crossing the seam.
+
+    What the operator is shown is chosen here rather than in a widget for the
+    same reason every other figure is: **the operator cannot confirm a regex.**
+    They can confirm "IICON 000123 — 1,842 of 1,910 pages, across 20
+    documents", so :attr:`~dociq.gui.pipeline.BatesProposal.example` is a real
+    locator read off a real page (``samples[0]``), never a rendering of the
+    pattern. If the detector proposed a format it never saw an instance of,
+    the example is empty and the screen says so rather than inventing one.
+    """
+    return BatesProposal(
+        pattern=proposal.format.label,
+        example=proposal.samples[0] if proposal.samples else "",
+        documents=proposal.documents_matched,
+        pages=proposal.pages_matched,
+        coverage_pct=float(proposal.coverage_pct),
+        # D-28's OWN CENSUS, and emphatically NOT `proposal.alternatives`.
+        #
+        # The seam says this field means "other prefixes seen in the same
+        # matter" and that a non-empty value means the production is
+        # multi-series — the condition D-28 refuses prefix repair on. Only
+        # `identify.bates.matter_prefixes` answers that question: it applies the
+        # same two bars a proposal has to clear. `BatesProposal.alternatives` is
+        # `ranked[1:4]` with NO bar at all, and on the real MNFV production it
+        # comes back as `Check 0001` and `retained 90095 49 00001` — two stray
+        # lines in a single-series production. Rendering those as "this
+        # production carries more than one stamp series" would be a false
+        # statement about the record, made on the screen where the operator is
+        # being asked to rule on exactly that. Measured, not reasoned: the first
+        # draft of this adapter did it, and the client-corpus run is what caught
+        # it.
+        alternatives=other_prefixes,
+    )
+
+
+def _translate(confirm: BatesConfirm | None):
+    """Wrap a seam-side confirmation so the PIPELINE never sees the GUI's type.
+
+    ``None`` in, ``None`` out — and that is load-bearing. A wrapper that turned
+    "no operator" into a callable would make every headless run look attended,
+    which is the failure mode this whole finding is about, inverted.
+    """
+    if confirm is None:
+        return None
+
+    def ask(proposal, other_prefixes: tuple[str, ...] = ()) -> bool:
+        return bool(confirm(_proposal_for_gui(proposal, other_prefixes)))
+
+    return ask
+
+
+def stored_bates_pattern(output_root: str | Path | None) -> str | None:
+    """The Bates format this matter's LAST run confirmed, or ``None``.
+
+    §4 says the format is "confirmed once per document set, then applied
+    automatically". Without this the second half of that sentence was false
+    through the GUI: :func:`dociq.gui.pipeline.config_from` builds a
+    ``RunConfig`` from the setup screen alone, which carries no
+    ``bates_pattern``, so every re-run of a matter would put the same question
+    to the same operator again — and a tool that re-asks a ruling it was already
+    given teaches the operator to click past it.
+
+    Read from ``processing_log.json`` in the output root, which is where the
+    completed run recorded its effective configuration. The same folder and the
+    same precedent as ``PipelineOptions.previous_ledger``: what a matter carries
+    is what its last complete run left in its output folder.
+
+    Every failure is silent and returns ``None`` — a missing, unreadable or
+    older log means "not confirmed yet", which re-asks. That is the safe
+    direction: the cost of failing to read it is one dialog, and the cost of
+    guessing is a locator regime nobody approved. A pattern that is present but
+    unreadable is NOT swallowed here; :func:`dociq.pipeline.run` raises on it,
+    because a stored confirmation that cannot be enforced must stop the run.
+    """
+    if not output_root:
+        return None
+    log = Path(output_root) / "processing_log.json"
+    try:
+        import json
+
+        raw = json.loads(log.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    for section in (raw.get("content"), raw):
+        if isinstance(section, dict):
+            config = section.get("config")
+            if isinstance(config, dict) and config.get("bates_pattern"):
+                return str(config["bates_pattern"])
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +493,26 @@ class RealPipeline:
         profile the run did not use must not enter ``RunResult.warnings``, which
         is hashed content. So it is recorded here, and the coordinator is asked
         for a way to put it on screen; see the verification note."""
+
+        self.last_package_missing: tuple[str, ...] = ()
+        """Doc IDs the last :meth:`build_package` call asked for and the matter
+        folder had no ``clean_text`` file for.
+
+        **STOP THE LINE.** ``UploadPackage.missing`` is computed by the emit
+        layer precisely so a short package is *reported rather than silently
+        skipped* — its docstring says "the operator is the only one who can say
+        whether it matters". :class:`~dociq.gui.pipeline.PackageResult` has no
+        field to carry it and that module is frozen, so the adapter cannot put
+        it on screen by itself. Dropping the value is the one outcome that must
+        not stand while the seam is extended, so it is held here — the same
+        treatment :attr:`library_issues` gets — and the field the seam needs is
+        written up in the verification note:
+
+            ``PackageResult.missing: tuple[str, ...] = ()``
+
+        A package whose scope statement claims N documents and whose folder
+        holds N-1 is the D-20 failure in miniature, and it is the one the
+        operator would never see."""
 
     # -- the API ------------------------------------------------------------
 
@@ -495,10 +655,18 @@ class RealPipeline:
                                            ocr_enabled=self._ocr_enabled),
         )
 
-    def run(self, request: RunRequest, on_progress, should_cancel) -> RunOutcome:
+    def run(
+        self,
+        request: RunRequest,
+        on_progress,
+        should_cancel,
+        confirm_bates: BatesConfirm | None = None,
+    ) -> RunOutcome:
         """One real run of §4's six stages, reported as the GUI reads it."""
         profiles = self._profiles_for(request)
         config = config_from(self._without_sentinel(request))
+        config = replace(
+            config, bates_pattern=stored_bates_pattern(request.output_root))
         emitter = _Progress(on_progress)
 
         outcome = core.run(
@@ -513,27 +681,17 @@ class RealPipeline:
                 matter_name=Path(request.source_root).name,
                 master_index_path=request.master_index_path or None,
                 profiles=profiles,
-                # NOT auto-confirmed. §4 Stage 3 requires the detected Bates
-                # format to be confirmed with the operator. Setting this True
-                # would be the machine confirming on the expert's behalf and
-                # recording that it had done so, which is worse than the gap: the
-                # format is detected, NOT applied, and the run says so in its
-                # warnings.
-                #
-                # THE SEAM NOW HAS A CALLBACK AND THIS ADAPTER DOES NOT TAKE IT.
-                # Amendment A-14 is applied — `PipelineAPI.run` carries an
-                # optional `confirm_bates: BatesConfirm | None`, and
-                # `BatesProposal` crosses the seam. `RealPipeline.run` still has
-                # the pre-A-14 signature, so a GUI run remains exactly as
-                # unattended as a headless one and a Bates-stamped production
-                # still produces no locators through the product. The claim that
-                # "the seam has no callback with which to ask" was true before
-                # A-14 and is withdrawn here; the gap it described is not, and it
-                # is NOT closed by correcting the sentence. Wiring it needs
-                # `PipelineOptions` to carry the callable and the GUI to supply
-                # one, which spans files this package does not own — reported to
-                # the coordinator rather than half-built, because a middle wired
-                # to no end is the A-14 failure again.
+                # §4 Stage 3's confirmation, carried across the seam (A-14,
+                # rehearsal A4). Until this existed the GUI had no way to ask,
+                # so every GUI run left the decision PENDING and a Bates-stamped
+                # production produced NO LOCATORS AT ALL — while the acceptance
+                # harness reported 92.130% through a hand-built decision the
+                # product could not reach.
+                confirm_bates=_translate(confirm_bates),
+                # Still False, and now for the ordinary reason. `confirm_bates`
+                # takes precedence when it is supplied; when it is not, nobody
+                # was asked, and a machine confirmation recorded as one is the
+                # honest fallback the headless harnesses already use.
                 auto_confirm_bates=False,
             ),
         )
@@ -644,6 +802,10 @@ class RealPipeline:
             scope_statement=scope_statement,
             unsupported=len(outcome.result.unsupported),
         )
+        # Read off the package, not recomputed: what the emit layer could not
+        # find is the only authority on what the folder does not hold. See the
+        # attribute's docstring — this is a STOP-THE-LINE hold, not a home.
+        self.last_package_missing = package.missing
         return PackageResult(
             root=str(package.root),
             file_count=package.check.file_count,
