@@ -1,0 +1,22 @@
+{
+  "generated": "2026-08-02T09:18:12",
+  "method": "D-23: whole-set continuity + sampled page-level comparison against the production's load files",
+  "negative_control": {
+    "label": "negative control \u2014 unstamped corpus",
+    "pages_compared": 17732,
+    "correct": 17732,
+    "wrong": [],
+    "missed": [],
+    "false_positive": [],
+    "documents": 298,
+    "seconds": 3300.7936047999974,
+    "proposal": "(none proposed \u2014 CORRECT; 450 stamp-shaped line(s) seen, none clearing the 50% per-document bar)",
+    "notes": [],
+    "matter_prefixes": [],
+    "normalization_available": false,
+    "refused_reason": "",
+    "normalized": [],
+    "by_kind": {},
+    "accuracy_pct": 100.0
+  }
+}

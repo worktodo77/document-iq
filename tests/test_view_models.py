@@ -398,12 +398,20 @@ def test_no_lever_rebuild_site_lists_fields_positionally():
             continue  # this file constructs one deliberately, by keyword
         tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "ReductionLever"
-                and node.args  # any positional argument at all
-            ):
+            if not (isinstance(node, ast.Call) and node.args):
+                continue
+            # Both `ReductionLever(...)` and `pipeline.ReductionLever(...)`.
+            # The first version matched only ast.Name and would have missed
+            # every qualified call — a probe blind to half the call sites it
+            # claims to police, which is the same defect one level up from the
+            # one it was written to catch.
+            func = node.func
+            name = (
+                func.id if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute)
+                else None
+            )
+            if name == "ReductionLever":
                 offenders.append(f"{path.relative_to(root)}:{node.lineno}")
     assert not offenders, (
         "ReductionLever built or rebuilt with positional fields at "

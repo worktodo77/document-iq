@@ -277,7 +277,7 @@ cause is unidentified, the right value is unknown, and it is a hashed
 run-identity input under A-04, so it is a ruling rather than a side effect of an
 acceptance note.
 
-| D-29 | Acceptance criterion 4 — final disposition for Sprint 2 | **SHIP AS NOT MET, carried into Codex review #2 as a known open item (Alex, 2026-08-03).** Every avenue short of changing the OCR engine has now been built and measured. Final: **597/648 = 92.130%** projected full-corpus (from a subset provably containing every page that can move), against a ≥99% bar — **native-text pages 100.000% (568/568), OCR'd pages 36.250% (29/80)**, and throughout, across every variant tried, **0 wrong and 0 false positives**. D-25's band pass recovered 4 pages. D-28's repair **refused on the acceptance corpus exactly as its gate was designed to** — MNFV carries three proposable prefixes (`iCON`, `iiCON`, `jiCON`), so repairing would risk filing a page into the wrong series. The limitation is therefore precisely characterized rather than vague: **on a scanned production, an expert gets a locator on roughly a third of OCR'd pages, and never a wrong one.** D-19's Tesseract benchmark was offered and declined a second time; the register's "never benchmarked against an alternative" liability stands, now with a measured page-level cost attached to it. | 2026-08-03 |
+| D-29 | Acceptance criterion 4 — final disposition for Sprint 2 | **SHIP AS NOT MET, carried into Codex review #2 as a known open item (Alex, 2026-08-03).** Every avenue short of changing the OCR engine has been built and run. **Read the composition of the headline figure before quoting it:** **597/648 = 92.130% is a PROJECTION, not a measurement.** It is `568 + 29`, where **568/568 native is Track F's earlier full-corpus measurement** and **29/80 OCR'd = 36.250% is measured** in `docs/verification/artifacts/bates_after_2026-08-02.json` over a deliberately OCR-heavy 61-document / 122-page subset (whose own headline accuracy is 58.197% and is **not** comparable to a full-corpus figure). The subset carries every page that can move — its OCR denominator, 80, equals the full corpus's — which is what makes the arithmetic sound, and it is still arithmetic. The last end-to-end **measured** full-corpus number remains Track F's **593/648 = 91.512%**. Constant across every variant: **0 wrong, 0 false positives.** D-25's band pass recovered 4 pages. D-28's repair **refused on the acceptance corpus exactly as its gate was designed to** — MNFV carries three proposable prefixes (`iCON`, `iiCON`, `jiCON`). The limitation: **on a scanned production an expert gets a locator on roughly a third of OCR'd pages, and never a wrong one.** ⚠️ **And see A4 below: through the shipped GUI the figure is 0%, because nothing confirms a Bates format.** D-19's Tesseract benchmark was offered and declined twice; the "never benchmarked" liability stands with a measured page-level cost attached. | 2026-08-03 |
 
 ## Bates: the negative control, and what closed the merge gate (2026-08-03)
 
@@ -288,6 +288,16 @@ corpus, **298 documents / 17,732 pages**: `(none proposed — CORRECT; 450
 stamp-shaped lines seen, none clearing the 50% per-document bar)`,
 **0 false positives, 100.0%**. That is the property §4's "absence is normal, not
 an error" depends on, and it survived both changes.
+
+**Evidence, committed rather than asserted.** Both runs' machine output is in
+the repository: `docs/verification/artifacts/bates_negative_control_2026-08-02.json`
+and `bates_after_2026-08-02.json`. An earlier version of these two sections
+stated the results while the JSON sat untracked in a worktree and the
+verification note still read "did not complete" — so the register asserted
+figures the repository could not support. The numbers were real and the
+evidence was not landed, which is indistinguishable from the numbers being
+invented by anyone reading the repo. Caught by the rehearsal review in one
+grep, which is exactly how the external reviewer would have found it.
 
 **D-28's gate fired on real material rather than in a test.** A near-miss prefix
 counts toward the single-prefix census — twenty one-page documents misread as

@@ -1,0 +1,346 @@
+{
+  "generated": "2026-08-02T09:18:19",
+  "method": "D-23: whole-set continuity + sampled page-level comparison against the production's load files",
+  "continuity": [
+    {
+      "label": "load file 20240510 Initial Discl.OPT",
+      "documents": 2138,
+      "pages": 11561,
+      "checks": [
+        "single prefix 'iiCON'",
+        "digit widths present: {6: 11561}",
+        "strictly increasing in file order: yes",
+        "contiguous across the whole production: yes",
+        "every document's own pages are a gapless run: yes",
+        "document ranges do not overlap: yes"
+      ],
+      "findings": []
+    },
+    {
+      "label": "combined PDFs (filename ranges)",
+      "documents": 16,
+      "pages": 2963,
+      "checks": [
+        "digit widths in the names: {4: 7, 5: 9}",
+        "named range length equals the PDF's page count: yes",
+        "named ranges tile the production without gap or overlap: no"
+      ],
+      "findings": [
+        "overlapping named ranges: MNFV 2836-2899 and MNFV 2890-2953"
+      ]
+    }
+  ],
+  "accuracy": [
+    {
+      "label": "page-level vs 20240510 Initial Discl.OPT",
+      "pages_compared": 122,
+      "correct": 71,
+      "wrong": [],
+      "missed": [
+        [
+          "images/0001/iiCON002292.pdf",
+          4,
+          "iiCON002295"
+        ],
+        [
+          "images/0001/iiCON003947.pdf",
+          1,
+          "iiCON003947"
+        ],
+        [
+          "images/0001/iiCON004926.pdf",
+          1,
+          "iiCON004926"
+        ],
+        [
+          "images/0001/iiCON004938.pdf",
+          1,
+          "iiCON004938"
+        ],
+        [
+          "images/0001/iiCON004973.pdf",
+          1,
+          "iiCON004973"
+        ],
+        [
+          "images/0001/iiCON004975.pdf",
+          1,
+          "iiCON004975"
+        ],
+        [
+          "images/0001/iiCON004992.pdf",
+          1,
+          "iiCON004992"
+        ],
+        [
+          "images/0001/iiCON004994.pdf",
+          1,
+          "iiCON004994"
+        ],
+        [
+          "images/0001/iiCON005000.pdf",
+          1,
+          "iiCON005000"
+        ],
+        [
+          "images/0001/iiCON005012.pdf",
+          1,
+          "iiCON005012"
+        ],
+        [
+          "images/0001/iiCON005017.pdf",
+          1,
+          "iiCON005017"
+        ],
+        [
+          "images/0001/iiCON005022.pdf",
+          1,
+          "iiCON005022"
+        ],
+        [
+          "images/0001/iiCON005034.pdf",
+          1,
+          "iiCON005034"
+        ],
+        [
+          "images/0001/iiCON005049.pdf",
+          1,
+          "iiCON005049"
+        ],
+        [
+          "images/0001/iiCON005067.pdf",
+          1,
+          "iiCON005067"
+        ],
+        [
+          "images/0001/iiCON005082.pdf",
+          1,
+          "iiCON005082"
+        ],
+        [
+          "images/0001/iiCON005096.pdf",
+          1,
+          "iiCON005096"
+        ],
+        [
+          "images/0001/iiCON005098.pdf",
+          1,
+          "iiCON005098"
+        ],
+        [
+          "images/0001/iiCON005113.pdf",
+          1,
+          "iiCON005113"
+        ],
+        [
+          "images/0001/iiCON005139.pdf",
+          1,
+          "iiCON005139"
+        ],
+        [
+          "images/0001/iiCON005149.pdf",
+          1,
+          "iiCON005149"
+        ],
+        [
+          "images/0001/iiCON005151.pdf",
+          1,
+          "iiCON005151"
+        ],
+        [
+          "images/0001/iiCON005164.pdf",
+          1,
+          "iiCON005164"
+        ],
+        [
+          "images/0001/iiCON005207.pdf",
+          1,
+          "iiCON005207"
+        ],
+        [
+          "images/0001/iiCON005208.pdf",
+          1,
+          "iiCON005208"
+        ],
+        [
+          "images/0001/iiCON005223.pdf",
+          1,
+          "iiCON005223"
+        ],
+        [
+          "images/0001/iiCON005241.pdf",
+          1,
+          "iiCON005241"
+        ],
+        [
+          "images/0001/iiCON005301.pdf",
+          1,
+          "iiCON005301"
+        ],
+        [
+          "images/0001/iiCON005310.pdf",
+          1,
+          "iiCON005310"
+        ],
+        [
+          "images/0001/iiCON005323.pdf",
+          1,
+          "iiCON005323"
+        ],
+        [
+          "images/0001/iiCON005326.pdf",
+          1,
+          "iiCON005326"
+        ],
+        [
+          "images/0001/iiCON005328.pdf",
+          1,
+          "iiCON005328"
+        ],
+        [
+          "images/0001/iiCON005338.pdf",
+          1,
+          "iiCON005338"
+        ],
+        [
+          "images/0001/iiCON005354.pdf",
+          1,
+          "iiCON005354"
+        ],
+        [
+          "images/0002/iiCON005770.pdf",
+          1,
+          "iiCON005770"
+        ],
+        [
+          "images/0002/iiCON005877.pdf",
+          1,
+          "iiCON005877"
+        ],
+        [
+          "images/0002/iiCON006088.pdf",
+          1,
+          "iiCON006088"
+        ],
+        [
+          "images/0002/iiCON006089.pdf",
+          1,
+          "iiCON006089"
+        ],
+        [
+          "images/0002/iiCON006090.pdf",
+          1,
+          "iiCON006090"
+        ],
+        [
+          "images/0002/iiCON006102.pdf",
+          1,
+          "iiCON006102"
+        ],
+        [
+          "images/0002/iiCON006109.pdf",
+          1,
+          "iiCON006109"
+        ],
+        [
+          "images/0002/iiCON006514.pdf",
+          1,
+          "iiCON006514"
+        ],
+        [
+          "images/0002/iiCON006566.pdf",
+          3,
+          "iiCON006568"
+        ],
+        [
+          "images/0002/iiCON006962.pdf",
+          4,
+          "iiCON006965"
+        ],
+        [
+          "images/0002/iiCON006981.pdf",
+          1,
+          "iiCON006981"
+        ],
+        [
+          "images/0002/iiCON007141.pdf",
+          3,
+          "iiCON007143"
+        ],
+        [
+          "images/0002/iiCON007141.pdf",
+          11,
+          "iiCON007151"
+        ],
+        [
+          "images/0002/iiCON007141.pdf",
+          12,
+          "iiCON007152"
+        ],
+        [
+          "images/0002/iiCON007141.pdf",
+          17,
+          "iiCON007157"
+        ],
+        [
+          "images/0002/iiCON007714.pdf",
+          1,
+          "iiCON007714"
+        ],
+        [
+          "images/0002/iiCON009915.pdf",
+          5,
+          "iiCON009919"
+        ]
+      ],
+      "false_positive": [],
+      "documents": 61,
+      "seconds": 1890.0157223999995,
+      "proposal": "iiCON000001 \u2014 proposed from 20 document(s): 15 of 33 page(s) matched, best document coverage 100%",
+      "notes": [
+        "footer re-OCR (D-25): ON",
+        "--only-ocr-docs: 89 sampled document(s) have no page DocIQ must OCR and were not re-measured; the footer re-OCR cannot reach them",
+        "sampled 61 of 2107 eligible document(s) (seed 20240529); 31 document(s) skipped for exceeding --max-mb 15.0",
+        "skipped: images/0001/iiCON000021.pdf (143 MB, 77 pages)",
+        "skipped: images/0001/iiCON000098.pdf (72 MB, 83 pages)",
+        "skipped: images/0001/iiCON000181.pdf (27 MB, 71 pages)",
+        "skipped: images/0001/iiCON000252.pdf (77 MB, 77 pages)",
+        "skipped: images/0001/iiCON000329.pdf (26 MB, 70 pages)",
+        "skipped: images/0001/iiCON000399.pdf (126 MB, 526 pages)",
+        "skipped: images/0001/iiCON001126.pdf (46 MB, 279 pages)",
+        "skipped: images/0001/iiCON001683.pdf (33 MB, 64 pages)",
+        "skipped: images/0001/iiCON001747.pdf (20 MB, 277 pages)",
+        "skipped: images/0001/iiCON002775.pdf (27 MB, 3 pages)",
+        "skipped: images/0001/iiCON002778.pdf (23 MB, 3 pages)",
+        "skipped: images/0001/iiCON002783.pdf (25 MB, 3 pages)",
+        "skipped: images/0001/iiCON003996.pdf (15 MB, 7 pages)",
+        "skipped: images/0001/iiCON004025.pdf (37 MB, 6 pages)",
+        "skipped: images/0001/iiCON005684.pdf (16 MB, 21 pages)",
+        "skipped: images/0002/iiCON005921.pdf (16 MB, 17 pages)",
+        "skipped: images/0002/iiCON005988.pdf (19 MB, 2 pages)",
+        "skipped: images/0002/iiCON006135.pdf (278 MB, 101 pages)",
+        "skipped: images/0002/iiCON006477.pdf (16 MB, 36 pages)",
+        "skipped: images/0002/iiCON006584.pdf (150 MB, 57 pages)"
+      ],
+      "matter_prefixes": [
+        "iCON",
+        "iiCON",
+        "jiCON"
+      ],
+      "normalization_available": false,
+      "refused_reason": "prefix repair (D-28) is REFUSED on this matter: it carries 3 proposable Bates prefixes ('iCON', 'iiCON', 'jiCON'), and a page repaired into the wrong series is a locator an expert cannot defend",
+      "normalized": [],
+      "by_kind": {
+        "native": [
+          42,
+          42
+        ],
+        "ocr": [
+          80,
+          29
+        ]
+      },
+      "accuracy_pct": 58.19672131147541
+    }
+  ]
+}

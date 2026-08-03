@@ -613,17 +613,39 @@ def test_the_capacity_row_is_a_named_sourced_reference_not_a_target(window):
 
 def test_the_capacity_literal_appears_in_exactly_one_place() -> None:
     """``DIRECT_CONTEXT_TOKENS``' docstring: "the literal appears nowhere else,
-    and no screen may inline it"."""
+    and no screen may inline it".
+
+    **This test used to scan everything and then assert about ``gui/`` only.**
+    It collected offenders across all of ``src/dociq`` and filtered them down
+    before the assertion, so its name — "in exactly one place" — described a
+    check it was not making: a second inlined capacity figure anywhere outside
+    the GUI would have passed. The scan is now the assertion, with the one
+    legitimate exception named rather than a whole subtree silently exempt.
+    """
+    import re
+
+    # Word-boundary, not substring: "200000" in "1200000" is True, so the old
+    # form both over-matched unrelated numbers and read as if it were exact.
+    literal = re.compile(r"(?<![\d_])200_?000(?![\d_])")
+
+    # The ONE place the figure may be spelled out, and why. emit/handoff.py's
+    # ProjectLimits is an operator-configurable upload limit that happens to
+    # share the value; it is not the capacity line and does not derive from it.
+    ALLOWED = {"gui/pipeline.py", "emit/handoff.py"}
+
     src = Path(__file__).resolve().parents[1] / "src" / "dociq"
     offenders = []
     for path in sorted(src.rglob("*.py")):
+        rel = path.relative_to(src).as_posix()
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if ("200_000" in line or "200000" in line) and "DIRECT_CONTEXT" not in line:
-                offenders.append(f"{path.relative_to(src)}:{n}: {line.strip()}")
-    # emit/handoff.py's ProjectLimits carries its own operator-configurable
-    # default and is Track D's file, not the GUI's; the GUI must have none.
-    gui = [o for o in offenders if o.startswith("gui")]
-    assert not gui, gui
+            if literal.search(line) and "DIRECT_CONTEXT" not in line:
+                if rel in ALLOWED:
+                    continue
+                offenders.append(f"{rel}:{n}: {line.strip()}")
+    assert not offenders, (
+        "the capacity figure is inlined outside the one constant that owns it: "
+        + "; ".join(offenders)
+    )
 
 
 def test_an_estimated_expert_lever_is_marked_in_the_same_column(window):

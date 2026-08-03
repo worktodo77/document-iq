@@ -196,16 +196,33 @@ def test_an_interrupted_swap_is_rolled_forward_by_the_next_run(tmp_path):
 def test_the_roll_forward_happens_before_the_next_run_reads_anything(tmp_path):
     """It is the first statement of :func:`dociq.pipeline.run` for a reason: the
     ledger the D-04 renumbering check reads lives in the folder a pending swap is
-    still replacing."""
+    still replacing.
+
+    **This test used to pass with recovery switched off.** A rehearsal review
+    replaced ``recover_pending``'s call site with ``recovered = ()`` — nothing
+    rolled forward at all — and it stayed green. Two reasons, both in the setup:
+    it staged a single bogus ``sources.json`` and called ``mark_ready`` with an
+    EMPTY superseded list, so there was nothing for recovery to move; and it
+    asserted only that a disclosure APPEARED, which is gated on a marker having
+    been present at start rather than on recovery having done anything. A run
+    that recovered nothing and then simply succeeded on its own was
+    indistinguishable from a run that rolled a swap forward.
+
+    It now stages a complete set the way the sibling test above does, and
+    asserts the disclosure NAMES what was rolled forward."""
     out = tmp_path / "matter"
     _run(out)
     layout = OutputLayout.at(out)
 
-    staging = OutputLayout(
-        out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
-    ).ensure()
-    (staging.root / "sources.json").write_text("{}\n", encoding="utf-8", newline="")
-    emit_paths.mark_ready(layout, ())
+    # A complete set from a real run, staged and marked ready — so recovery has
+    # something real to move, and its absence is observable.
+    second_out = tmp_path / "second"
+    _run(second_out)
+    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
+    shutil.copytree(second_out, staging, ignore=shutil.ignore_patterns(".dociq"))
+    superseded = ("document_index.csv",)
+    emit_paths.mark_ready(layout, superseded)
+    assert emit_paths.pending_swap(layout)
 
     second = _run(out)
     assert second.published
@@ -215,6 +232,19 @@ def test_the_roll_forward_happens_before_the_next_run_reads_anything(tmp_path):
     )
     payload = json.loads((out / "processing_log.json").read_text(encoding="utf-8"))
     assert "recovered_swap" in payload["run"]
+
+    # The load-bearing part: the disclosure must name what was actually rolled
+    # forward. With recovery disabled this is empty, and the test goes red.
+    rolled = payload["run"]["recovered_swap"]
+    assert rolled, (
+        "the run disclosed a recovered swap that moved nothing — the "
+        "disclosure is gated on a marker being present, not on recovery "
+        "having happened, so this must assert what moved"
+    )
+    assert any(name in json.dumps(rolled) for name in superseded), (
+        f"the recovery disclosure does not name the superseded deliverables "
+        f"{superseded} it completed: {rolled!r}"
+    )
     assert "recovered_swap" not in json.dumps(payload["content"]), (
         "an invocation fact reached the hashed content"
     )
