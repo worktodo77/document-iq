@@ -65,7 +65,7 @@ def stamped_corpus(tmp_path) -> Path:
 
 
 def _request(src: Path, out: Path) -> RunRequest:
-    return RunRequest(str(src), str(out), None, None)
+    return RunRequest(str(src), str(out), profile=None, master_index_path=None)
 
 
 def _locators(outcome) -> list[str]:
@@ -394,7 +394,7 @@ def test_the_confirmation_crosses_the_thread_boundary(app, answer, tmp_path):
     pipe = _SlowConfirmPipeline()
     window = MainWindow(pipeline=pipe)
     try:
-        window.start_run(RunRequest(str(tmp_path), str(tmp_path / "out"), None, None))
+        window.start_run(RunRequest(str(tmp_path), str(tmp_path / "out"), profile=None, master_index_path=None))
         assert _pump(app, lambda: window.stack.currentIndex() == BATES), \
             "the confirmation screen never appeared — the prompt did not cross"
         assert window.bates.example_text() == "IICON 000001"
@@ -418,7 +418,7 @@ def test_cancelling_while_the_prompt_is_open_aborts_rather_than_declining(
 
     pipe = _SlowConfirmPipeline()
     window = MainWindow(pipeline=pipe)
-    window.start_run(RunRequest(str(tmp_path), str(tmp_path / "out"), None, None))
+    window.start_run(RunRequest(str(tmp_path), str(tmp_path / "out"), profile=None, master_index_path=None))
     assert _pump(app, lambda: window.stack.currentIndex() == BATES)
 
     window.close()
@@ -435,7 +435,7 @@ def test_stopping_from_the_prompt_screen_aborts(app, tmp_path):
     pipe = _SlowConfirmPipeline()
     window = MainWindow(pipeline=pipe)
     try:
-        window.start_run(RunRequest(str(tmp_path), str(tmp_path / "out"), None, None))
+        window.start_run(RunRequest(str(tmp_path), str(tmp_path / "out"), profile=None, master_index_path=None))
         assert _pump(app, lambda: window.stack.currentIndex() == BATES)
         window.bates.stop_requested.emit()
         assert _pump(app, pipe.done.is_set)
@@ -455,7 +455,7 @@ def test_the_prompt_names_a_multi_series_production(app, tmp_path):
         pages=306, coverage_pct=94.0, alternatives=("CP", "MNFV")))
     window = MainWindow(pipeline=pipe)
     try:
-        window.start_run(RunRequest(str(tmp_path), str(tmp_path / "out"), None, None))
+        window.start_run(RunRequest(str(tmp_path), str(tmp_path / "out"), profile=None, master_index_path=None))
         assert _pump(app, lambda: window.stack.currentIndex() == BATES)
         text = window.bates.alternatives_text()
         assert "more than one" in text.lower() or "multi" in text.lower()
