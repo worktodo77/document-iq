@@ -277,6 +277,31 @@ cause is unidentified, the right value is unknown, and it is a hashed
 run-identity input under A-04, so it is a ruling rather than a side effect of an
 acceptance note.
 
+| D-29 | Acceptance criterion 4 — final disposition for Sprint 2 | **SHIP AS NOT MET, carried into Codex review #2 as a known open item (Alex, 2026-08-03).** Every avenue short of changing the OCR engine has now been built and measured. Final: **597/648 = 92.130%** projected full-corpus (from a subset provably containing every page that can move), against a ≥99% bar — **native-text pages 100.000% (568/568), OCR'd pages 36.250% (29/80)**, and throughout, across every variant tried, **0 wrong and 0 false positives**. D-25's band pass recovered 4 pages. D-28's repair **refused on the acceptance corpus exactly as its gate was designed to** — MNFV carries three proposable prefixes (`iCON`, `iiCON`, `jiCON`), so repairing would risk filing a page into the wrong series. The limitation is therefore precisely characterized rather than vague: **on a scanned production, an expert gets a locator on roughly a third of OCR'd pages, and never a wrong one.** D-19's Tesseract benchmark was offered and declined a second time; the register's "never benchmarked against an alternative" liability stands, now with a measured page-level cost attached to it. | 2026-08-03 |
+
+## Bates: the negative control, and what closed the merge gate (2026-08-03)
+
+The merge gate on the Bates work was never the accuracy number — it was whether
+raising footer OCR resolution and permitting prefix repair would start
+**inventing** stamps on unstamped material. Measured over the full Petrobras
+corpus, **298 documents / 17,732 pages**: `(none proposed — CORRECT; 450
+stamp-shaped lines seen, none clearing the 50% per-document bar)`,
+**0 false positives, 100.0%**. That is the property §4's "absence is normal, not
+an error" depends on, and it survived both changes.
+
+**D-28's gate fired on real material rather than in a test.** A near-miss prefix
+counts toward the single-prefix census — twenty one-page documents misread as
+`jiCON…` register as a *second* prefix — so a matter that OCR has confused into
+looking multi-series refuses repair. That is the ruling working, not an
+oversight, and it is the reason the repair could never have quietly closed the
+gap on this corpus.
+
+Three defects were found while writing the tests for it, one of which is worth
+keeping: **the single-prefix gate initially asked its question about ONE
+DOCUMENT**, which reports "one prefix" for a matter carrying four. The safety
+condition would have been decoration precisely where it mattered. The census is
+now computed matter-wide and passed in explicitly.
+
 ## Sprint-1 verification log
 
 **Track B master-index robustness (2026-07-30).** The Track B critic found a
