@@ -35,6 +35,8 @@ from dociq import pipeline as core
 from dociq.contracts import Disposition, RunResult
 from dociq.gui.pipeline import (
     LEVER_EXPERT,
+    BatesConfirm,
+    BatesProposal,
     FolderPreview,
     ProfileInfo,
     ProgressEvent,
@@ -274,6 +276,100 @@ def _plan(result: RunResult, before: TokenEstimate) -> ReductionPlan | None:
 
 
 # ---------------------------------------------------------------------------
+# §4 Stage 3 — the operator's confirmation, across the seam (A-14)
+# ---------------------------------------------------------------------------
+
+
+def _proposal_for_gui(proposal) -> BatesProposal:
+    """``identify.bates.BatesProposal`` → the seam's presentation record.
+
+    A translation, not a pass-through, and the seam requires it: the detector's
+    proposal carries a :class:`~dociq.identify.bates.BatesFormat`, and a format
+    object on the GUI side would be a pipeline internal crossing the seam.
+
+    What the operator is shown is chosen here rather than in a widget for the
+    same reason every other figure is: **the operator cannot confirm a regex.**
+    They can confirm "IICON 000123 — 1,842 of 1,910 pages, across 20
+    documents", so :attr:`~dociq.gui.pipeline.BatesProposal.example` is a real
+    locator read off a real page (``samples[0]``), never a rendering of the
+    pattern. If the detector proposed a format it never saw an instance of,
+    the example is empty and the screen says so rather than inventing one.
+    """
+    return BatesProposal(
+        pattern=proposal.format.label,
+        example=proposal.samples[0] if proposal.samples else "",
+        documents=proposal.documents_matched,
+        pages=proposal.pages_matched,
+        coverage_pct=float(proposal.coverage_pct),
+        # The RUNNER-UP FORMATS, deliberately — not `matter_prefixes`. The
+        # question the screen puts to the operator is "did DocIQ pick the right
+        # series?", and the answer is the other series it saw. `alternatives`
+        # already clears the same two bars `propose_format` uses, so a stray
+        # line cannot make a single-series production look multi-series.
+        alternatives=tuple(
+            label for label, _pages in proposal.alternatives),
+    )
+
+
+def _translate(confirm: BatesConfirm | None):
+    """Wrap a seam-side confirmation so the PIPELINE never sees the GUI's type.
+
+    ``None`` in, ``None`` out — and that is load-bearing. A wrapper that turned
+    "no operator" into a callable would make every headless run look attended,
+    which is the failure mode this whole finding is about, inverted.
+    """
+    if confirm is None:
+        return None
+
+    def ask(proposal) -> bool:
+        return bool(confirm(_proposal_for_gui(proposal)))
+
+    return ask
+
+
+def stored_bates_pattern(output_root: str | Path | None) -> str | None:
+    """The Bates format this matter's LAST run confirmed, or ``None``.
+
+    §4 says the format is "confirmed once per document set, then applied
+    automatically". Without this the second half of that sentence was false
+    through the GUI: :func:`dociq.gui.pipeline.config_from` builds a
+    ``RunConfig`` from the setup screen alone, which carries no
+    ``bates_pattern``, so every re-run of a matter would put the same question
+    to the same operator again — and a tool that re-asks a ruling it was already
+    given teaches the operator to click past it.
+
+    Read from ``processing_log.json`` in the output root, which is where the
+    completed run recorded its effective configuration. The same folder and the
+    same precedent as ``PipelineOptions.previous_ledger``: what a matter carries
+    is what its last complete run left in its output folder.
+
+    Every failure is silent and returns ``None`` — a missing, unreadable or
+    older log means "not confirmed yet", which re-asks. That is the safe
+    direction: the cost of failing to read it is one dialog, and the cost of
+    guessing is a locator regime nobody approved. A pattern that is present but
+    unreadable is NOT swallowed here; :func:`dociq.pipeline.run` raises on it,
+    because a stored confirmation that cannot be enforced must stop the run.
+    """
+    if not output_root:
+        return None
+    log = Path(output_root) / "processing_log.json"
+    try:
+        import json
+
+        raw = json.loads(log.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    for section in (raw.get("content"), raw):
+        if isinstance(section, dict):
+            config = section.get("config")
+            if isinstance(config, dict) and config.get("bates_pattern"):
+                return str(config["bates_pattern"])
+    return None
+
+
+# ---------------------------------------------------------------------------
 # The adapter
 # ---------------------------------------------------------------------------
 
@@ -429,10 +525,18 @@ class RealPipeline:
             estimated_minutes=_minutes_for(total, sized),
         )
 
-    def run(self, request: RunRequest, on_progress, should_cancel) -> RunOutcome:
+    def run(
+        self,
+        request: RunRequest,
+        on_progress,
+        should_cancel,
+        confirm_bates: BatesConfirm | None = None,
+    ) -> RunOutcome:
         """One real run of §4's six stages, reported as the GUI reads it."""
         profiles = self._profiles_for(request)
         config = config_from(self._without_sentinel(request))
+        config = replace(
+            config, bates_pattern=stored_bates_pattern(request.output_root))
         emitter = _Progress(on_progress)
 
         outcome = core.run(
@@ -447,14 +551,17 @@ class RealPipeline:
                 matter_name=Path(request.source_root).name,
                 master_index_path=request.master_index_path or None,
                 profiles=profiles,
-                # NOT auto-confirmed. §4 Stage 3 requires the detected Bates
-                # format to be confirmed with the operator, and the seam has no
-                # callback with which to ask — so a GUI run behaves exactly as
-                # every other unattended run does: the format is detected, NOT
-                # applied, and the run says so in its warnings. Setting this True
-                # here would be the machine confirming on the expert's behalf and
-                # recording that it had done so, which is worse than the gap.
-                # Raised as a seam change; see the verification note.
+                # §4 Stage 3's confirmation, carried across the seam (A-14,
+                # rehearsal A4). Until this existed the GUI had no way to ask,
+                # so every GUI run left the decision PENDING and a Bates-stamped
+                # production produced NO LOCATORS AT ALL — while the acceptance
+                # harness reported 92.130% through a hand-built decision the
+                # product could not reach.
+                confirm_bates=_translate(confirm_bates),
+                # Still False, and now for the ordinary reason. `confirm_bates`
+                # takes precedence when it is supplied; when it is not, nobody
+                # was asked, and a machine confirmation recorded as one is the
+                # honest fallback the headless harnesses already use.
                 auto_confirm_bates=False,
             ),
         )
