@@ -150,8 +150,8 @@ in `_bates_decision`, unchanged.
 ### 3.1 Suite
 
 `PYTHONPATH=src python -m pytest -q` — **1,131 tests**, green on every run.
-**Eight full-suite runs on the final tree (`5dfae48`)**, plus four on each of
-the two earlier commits as they landed.
+**Ten full-suite runs on the final source tree**, byte-identical output on
+every one, plus four on each of the two earlier commits as they landed.
 
 The threading round trip, the cancel-during-prompt path and the multi-series
 disclosure were then run **30 times** on their own (`-k "thread or cancel or
