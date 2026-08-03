@@ -935,11 +935,19 @@ class BatesConfirmScreen(QWidget):
     covers, is. So the example leads, in the mono face, at size — it is the
     evidence, not a caption on the pattern.
 
-    **Multi-series productions are named, not decided.** When the detector saw
-    other series, D-28 refuses prefix repair on this matter, and the operator is
-    the one who has to know that: confirming one series here means the others
-    keep whatever their pages read. The alternatives block says so in those
-    words rather than leaving the operator to infer it from a list.
+    **Multi-series productions are named, not decided.** When
+    :attr:`~dociq.gui.pipeline.BatesProposal.alternatives` is non-empty, D-28
+    refuses prefix repair on this matter, and the operator is the one who has to
+    know that: confirming one series here means the others keep whatever their
+    pages read. The block says so in those words rather than leaving the
+    operator to infer it from a list.
+
+    That field must be **D-28's own census** and nothing else — the adapter
+    fills it from ``identify.bates.matter_prefixes``, not from the detector's
+    runner-up shapes, which carry no threshold and on a real single-series
+    production include stray lines like ``Check 0001``. This screen states the
+    D-28 consequence as fact, so a looser source would make it a false statement
+    about the record at the exact moment the operator is asked to rule.
 
     One forward action (D-16), named for its outcome: "Use this Bates format".
     The other two are not variants of it — declining is a ruling the run
@@ -1054,7 +1062,7 @@ class BatesConfirmScreen(QWidget):
                 "silently.")
         listed = ", ".join(proposal.alternatives)
         return (
-            f"THIS PRODUCTION CARRIES MORE THAN ONE STAMP SERIES — DocIQ also "
+            f"THIS MATTER CARRIES MORE THAN ONE STAMP SERIES — DocIQ also "
             f"read: {listed}. Confirming the format above applies it to the "
             f"pages that match it and leaves the rest as they read. Because "
             f"the matter is multi-series, D-28 REFUSES to repair a near-miss "

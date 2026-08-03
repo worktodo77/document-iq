@@ -134,6 +134,69 @@ def test_the_proposal_carries_what_an_operator_can_judge(stamped_corpus, tmp_pat
     assert proposal.alternatives == ()
 
 
+def test_the_alternatives_are_d28s_census_not_the_runner_up_shapes(tmp_path):
+    """FOUND ON REAL CLIENT DATA, not reasoned.
+
+    The screen states, as fact, that a non-empty ``alternatives`` means the
+    matter is multi-series and D-28 therefore refuses prefix repair. Only
+    ``identify.bates.matter_prefixes`` answers that: it applies the same two
+    bars a proposal must clear. ``BatesProposal.alternatives`` is ``ranked[1:4]``
+    with **no** bar, and on the MNFV production it came back as ``Check 0001``
+    and ``retained 90095 49 00001`` — two stray lines in a single-series
+    production. The first draft of the adapter passed those through and would
+    have told the operator, on screen, that their production was multi-series.
+    """
+    from dociq.identify.bates import matter_prefixes, propose_format
+    from tests.fixtures import page as _page, document as _document
+
+    # One real series, plus a stray line that parses as a locator and clears
+    # NEITHER bar. This is the shape the client corpus had.
+    real = _document("production/vol1.pdf", tuple(
+        _page(i, f"Body {i}.\nMNFV {str(2635 + i).zfill(5)}")
+        for i in range(1, 9)))
+    noise = _document("production/vol2.pdf", (
+        _page(1, "Cover.\nCheck 0001"),
+        _page(2, "Body with no stamp at all."),
+        _page(3, "More body with no stamp."),
+        _page(4, "Still no stamp."),
+    ))
+    docs = (real, noise)
+
+    proposal = propose_format(docs)
+    assert proposal is not None and proposal.format.prefix == "MNFV"
+    assert proposal.alternatives, "the fixture no longer has a runner-up shape"
+    assert matter_prefixes(docs) == ("MNFV",), "the fixture is really multi-series"
+
+    from dociq.adapter import _proposal_for_gui
+
+    census = tuple(p for p in matter_prefixes(docs) if p != proposal.format.prefix)
+    assert _proposal_for_gui(proposal, census).alternatives == (), (
+        "a stray line was rendered to the operator as a second stamp series")
+
+
+def test_a_genuinely_multi_series_matter_reaches_the_screen(tmp_path):
+    """The other direction: two REAL series must arrive as alternatives, or the
+    screen would silently drop the one disclosure D-28 depends on."""
+    from dociq.identify.bates import matter_prefixes, propose_format
+    from tests.fixtures import page as _page, document as _document
+
+    a = _document("production/a.pdf", tuple(
+        _page(i, f"Body {i}.\nMNFV {str(i).zfill(5)}") for i in range(1, 7)))
+    b = _document("production/b.pdf", tuple(
+        _page(i, f"Body {i}.\nIICON {str(i).zfill(5)}") for i in range(1, 7)))
+    docs = (a, b)
+
+    assert set(matter_prefixes(docs)) == {"MNFV", "IICON"}
+    proposal = propose_format(docs)
+    assert proposal is not None
+
+    from dociq.adapter import _proposal_for_gui
+
+    others = tuple(p for p in matter_prefixes(docs) if p != proposal.format.prefix)
+    assert _proposal_for_gui(proposal, others).alternatives == others
+    assert len(others) == 1
+
+
 def test_declining_is_a_decision_not_an_absence(stamped_corpus, tmp_path):
     """An unstamped production and a stamped one whose format was declined are
     different facts about the record, and the log must be able to tell them

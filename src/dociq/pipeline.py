@@ -78,6 +78,7 @@ from dociq.identify.bates import (
     DecisionStatus,
     apply_bates_reported,
     document_ranges,
+    matter_prefixes,
     parse_pattern,
     propose_format,
     ranges_by_sort_key,
@@ -164,8 +165,19 @@ class PipelineOptions:
     master_index_path: str | None = None
     profiles: tuple[FormatProfile, ...] = ()
     bates_decision: BatesDecision | None = None
-    confirm_bates: Callable[[BatesProposal], bool] | None = None
+    confirm_bates: Callable[[BatesProposal, tuple[str, ...]], bool] | None = None
     """ASK the operator to confirm a detected Bates format (§4 Stage 3, A-14).
+
+    Called as ``confirm_bates(proposal, other_prefixes)``. The second argument
+    is **D-28's own census** — every OTHER prefix in this matter that clears the
+    same two bars a proposal has to clear — and it is a separate argument rather
+    than a field of ``proposal`` because ``BatesProposal.alternatives`` is not
+    it. Those are the runner-up *shapes*, ``ranked[1:4]``, with no threshold
+    applied at all: on the MNFV production they come back as ``Check 0001`` and
+    ``retained 90095 49 00001``, two stray lines. Telling an operator that the
+    production is multi-series — and that D-28 therefore refuses prefix repair —
+    on the strength of a stray line would be a false statement about the record
+    made in the one place the operator is being asked to rule.
 
     Sprint 2 shipped without this and the cost was total: the GUI had no way to
     ask, so every GUI run left :attr:`auto_confirm_bates` False, the decision
@@ -435,6 +447,7 @@ def _bates_decision(
     config: RunConfig,
     stamp: OperatorStamp,
     warnings: list[str],
+    prefix_census: Callable[[], tuple[str, ...]] | None = None,
 ) -> BatesDecision | None:
     """Stage 3's decision, or ``None`` for an unstamped set.
 
@@ -485,11 +498,18 @@ def _bates_decision(
     if proposal is None:
         return None
     if options.confirm_bates is not None:
+        # D-28's census, and only when there is something to ask about — it is
+        # a second full candidate sweep of the corpus and an unstamped matter
+        # must not pay for it. `others` is what makes the screen's multi-series
+        # sentence TRUE rather than plausible; see the field's docstring.
+        census = prefix_census() if prefix_census is not None \
+            else matter_prefixes(documents)
+        others = tuple(p for p in census if p != proposal.format.prefix)
         # §4 Stage 3, as written: the format is confirmed WITH THE OPERATOR on
         # first detection. The call may raise RunAborted; it is deliberately not
         # caught here, because "the operator walked away" is not a Bates
         # decision and this function's job is to return one. `run` catches it.
-        if options.confirm_bates(proposal):
+        if options.confirm_bates(proposal, others):
             warnings.append(
                 f"Bates format {proposal.format.label} was CONFIRMED BY THE "
                 f"OPERATOR ({stamp.username}) at §4 Stage 3 of this run, on "
@@ -951,8 +971,21 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # ---- Stage 3 -----------------------------------------------------------
     stage(3)
     t = time.monotonic()
+    # D-28's census, computed AT MOST ONCE per run and shared by the two places
+    # that need it — the confirmation prompt and the repair gate. It is a full
+    # candidate sweep of the corpus; two of them on an 18,000-page record is a
+    # measurable cost paid for nothing, and two INDEPENDENT ones would be two
+    # answers to "is this matter multi-series?" that could disagree.
+    _census: list[tuple[str, ...]] = []
+
+    def census() -> tuple[str, ...]:
+        if not _census:
+            _census.append(matter_prefixes(documents))
+        return _census[0]
+
     try:
-        decision = _bates_decision(documents, opts, config, stamp, warnings)
+        decision = _bates_decision(documents, opts, config, stamp, warnings,
+                                   census)
     except RunAborted as aborted:
         # The ONE place the pipeline blocks on a human, and therefore the one
         # place a cancellation cannot be a poll. It takes the ordinary abort
@@ -979,7 +1012,13 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             opts=opts,
             timings=timings,
         )
-    applied = apply_bates_reported(documents, decision)
+    applied = apply_bates_reported(
+        documents, decision,
+        # The census the prompt was answered against, when there was a prompt.
+        # `apply_bates_reported` computes its own when handed None, and that is
+        # still the right default — but a run that already asked the operator
+        # must gate the repair on the SAME census it showed them.
+        matter_prefix_census=_census[0] if _census else None)
     documents = applied.documents
     # D-28's repair is disclosed, never silent. §4 requires misses to be
     # flagged and never quietly corrected; prefix repair is a narrow ruled

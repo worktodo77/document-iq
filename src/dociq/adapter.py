@@ -280,7 +280,7 @@ def _plan(result: RunResult, before: TokenEstimate) -> ReductionPlan | None:
 # ---------------------------------------------------------------------------
 
 
-def _proposal_for_gui(proposal) -> BatesProposal:
+def _proposal_for_gui(proposal, other_prefixes: tuple[str, ...] = ()) -> BatesProposal:
     """``identify.bates.BatesProposal`` → the seam's presentation record.
 
     A translation, not a pass-through, and the seam requires it: the detector's
@@ -301,13 +301,22 @@ def _proposal_for_gui(proposal) -> BatesProposal:
         documents=proposal.documents_matched,
         pages=proposal.pages_matched,
         coverage_pct=float(proposal.coverage_pct),
-        # The RUNNER-UP FORMATS, deliberately — not `matter_prefixes`. The
-        # question the screen puts to the operator is "did DocIQ pick the right
-        # series?", and the answer is the other series it saw. `alternatives`
-        # already clears the same two bars `propose_format` uses, so a stray
-        # line cannot make a single-series production look multi-series.
-        alternatives=tuple(
-            label for label, _pages in proposal.alternatives),
+        # D-28's OWN CENSUS, and emphatically NOT `proposal.alternatives`.
+        #
+        # The seam says this field means "other prefixes seen in the same
+        # matter" and that a non-empty value means the production is
+        # multi-series — the condition D-28 refuses prefix repair on. Only
+        # `identify.bates.matter_prefixes` answers that question: it applies the
+        # same two bars a proposal has to clear. `BatesProposal.alternatives` is
+        # `ranked[1:4]` with NO bar at all, and on the real MNFV production it
+        # comes back as `Check 0001` and `retained 90095 49 00001` — two stray
+        # lines in a single-series production. Rendering those as "this
+        # production carries more than one stamp series" would be a false
+        # statement about the record, made on the screen where the operator is
+        # being asked to rule on exactly that. Measured, not reasoned: the first
+        # draft of this adapter did it, and the client-corpus run is what caught
+        # it.
+        alternatives=other_prefixes,
     )
 
 
@@ -321,8 +330,8 @@ def _translate(confirm: BatesConfirm | None):
     if confirm is None:
         return None
 
-    def ask(proposal) -> bool:
-        return bool(confirm(_proposal_for_gui(proposal)))
+    def ask(proposal, other_prefixes: tuple[str, ...] = ()) -> bool:
+        return bool(confirm(_proposal_for_gui(proposal, other_prefixes)))
 
     return ask
 
