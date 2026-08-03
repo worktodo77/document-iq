@@ -337,6 +337,53 @@ class RunOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class BatesProposal:
+    """A detected Bates format, put to the operator for confirmation (A-14).
+
+    §4 Stage 3 requires the format to be confirmed **with the operator** on
+    first detection. Sprint 2 shipped without this and the cost was total:
+    ``auto_confirm_bates`` is False for a GUI run, so the format never reached
+    CONFIRMED, so ``apply_bates_reported`` returned every document unchanged and
+    **a Bates-stamped production produced no locators at all**. The acceptance
+    harness measured 92.130% because it constructs the confirmed decision
+    directly — a code path the product could not reach.
+
+    The record is deliberately not just the pattern. An operator cannot confirm
+    a regex; they can confirm *"iiCON000123, on 15 of 33 pages across 20
+    documents"*, which is what :attr:`example` and the coverage fields are for.
+    """
+
+    pattern: str
+    """The detected format, in the pipeline's own words."""
+
+    example: str = ""
+    """A real locator read off a real page — the thing the operator recognizes."""
+
+    documents: int = 0
+    pages: int = 0
+    coverage_pct: float = 0.0
+    """Share of sampled pages the format matched. Shown because a format that
+    matched a third of pages and one that matched all of them are different
+    propositions, and the operator is the only one who can say which is
+    acceptable for the matter in hand."""
+
+    alternatives: tuple[str, ...] = ()
+    """Other prefixes seen in the same matter. Non-empty means the production is
+    multi-series, which is exactly the condition D-28 refuses prefix repair on —
+    so the operator must see it rather than have it decided for them."""
+
+
+BatesConfirm = Callable[[BatesProposal], bool]
+"""Ask the operator to confirm a detected Bates format. ``True`` confirms.
+
+``None`` means *nobody was asked*, which is NOT the same as a refusal and must
+not be recorded as one: a headless run records a machine confirmation and says
+so, because a machine-confirmed pattern and an expert-confirmed one are not the
+same evidentiary object.
+"""
+
+
+@dataclass(frozen=True, slots=True)
 class PackageResult:
     """What §8 Path A actually wrote (amendment A-12).
 
@@ -401,7 +448,22 @@ class PipelineAPI(Protocol):
         request: RunRequest,
         on_progress: ProgressCallback,
         should_cancel: CancelCheck,
+        confirm_bates: "BatesConfirm | None" = None,
     ) -> RunOutcome:
+        """Run the pipeline.
+
+        ``confirm_bates`` carries §4 Stage 3's operator confirmation across the
+        seam (A-14). It is **optional with a None default** so that every
+        existing caller — the tests, the headless harnesses, the self-test —
+        keeps working unchanged; adding it as a required parameter would have
+        broken the only implementations that can demonstrate the seam holds.
+
+        ``None`` means no operator is available, and the pipeline then records a
+        *machine* confirmation in the run's warnings. It must never be recorded
+        as an operator confirmation, and a refusal must never be silently
+        treated as "no Bates present" — an unstamped production and a stamped
+        one whose format was declined are different facts about the record.
+        """
         ...
 
     def profile_rules(
@@ -533,6 +595,8 @@ __all__ = [
     "ReconciliationRow",
     "Reconciliation",
     "PackageResult",
+    "BatesProposal",
+    "BatesConfirm",
     "RunOutcome",
     "RunRequest",
     "ProgressEvent",
