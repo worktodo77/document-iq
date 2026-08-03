@@ -498,16 +498,18 @@ def test_no_seam_record_is_rebuilt_with_optional_fields_positionally():
     )
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "STOP THE LINE: src/dociq/gui/pipeline.py is frozen and shared with two "
-    "agents working in parallel, so the one offending site in it — "
-    "ReductionPlan.with_toggled rebuilding ReductionPlan positionally at ~:256, "
-    "inside the very method that was fixed to stop rebuilding ReductionLever "
-    "positionally — is REPORTED, not edited. It is lossless today at 4 of 4 "
-    "fields and silently lossy on the next one. strict=True, so this turns RED "
-    "the moment the seam owner fixes it and this marker must then be removed."
-))
 def test_the_frozen_seam_module_has_no_positional_rebuild():
+    """CLOSED 2026-08-03. This carried a ``strict=True`` xfail while the seam
+    was frozen mid-sprint: ``ReductionPlan.with_toggled`` rebuilt
+    ``ReductionPlan`` positionally, inside the very method that had been fixed
+    to stop rebuilding ``ReductionLever`` positionally — lossless at 4 of 4
+    fields and silently lossy on the fifth.
+
+    The seam owner applied ``replace(self, levers=levers)``, the strict marker
+    turned red exactly as it was designed to, and it is removed here. The
+    mechanism is worth keeping in mind: a strict xfail is how a reported-but-
+    unfixable finding stays visible without blocking, and how it announces its
+    own closure instead of being forgotten."""
     offenders = [o for o in _positional_rebuild_sites()
                  if o.startswith(FROZEN_SEAM_SOURCE.as_posix())]
     assert not offenders, "; ".join(offenders)
