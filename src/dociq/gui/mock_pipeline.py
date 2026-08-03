@@ -629,7 +629,22 @@ class MockPipeline:
                          / 1e9 * MINUTES_PER_GIGABYTE)),
         )
 
-    def run(self, request: RunRequest, on_progress, should_cancel) -> RunOutcome:
+    def run(self, request: RunRequest, on_progress, should_cancel,
+            confirm_bates=None) -> RunOutcome:
+        """``confirm_bates`` is ACCEPTED AND NEVER CALLED, deliberately.
+
+        The mock's corpus is unstamped — every page carries ``bates=None`` — and
+        §4 Stage 3 says an unstamped set produces no proposal, no prompt and no
+        warning. A mock that invented a proposal so the confirmation screen
+        could be seen would be showing the operator a locator that is not in any
+        production, which is the single thing the stand-in must never do.
+
+        The parameter is present because the seam declares it (A-14) and the
+        window now always passes it: an implementation that dropped it would
+        raise ``TypeError`` inside the worker and surface as "run failed".
+        ``tests/test_bates_confirmation.py`` asserts every implementation
+        carries it.
+        """
         profile = request.profile
         apply_profile = bool(profile and profile.profile_id != "none")
         total = len(_CORPUS) + len(_UNSUPPORTED)

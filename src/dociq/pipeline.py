@@ -73,10 +73,12 @@ from dociq.emit.summary import build_summary_data, write_run_summary
 from dociq.identify.bates import (
     BatesDecision,
     BatesPatternError,
+    BatesProposal,
     BatesRange,
     DecisionStatus,
     apply_bates_reported,
     document_ranges,
+    matter_prefixes,
     parse_pattern,
     propose_format,
     ranges_by_sort_key,
@@ -89,7 +91,9 @@ from dociq.runstate import (
     COMPLETED,
     INCOMPLETE_DIR,
     STATUS_FILENAME,
+    RunAborted,
     RunTermination,
+    TerminalStatus,
 )
 from dociq.verify import accounting, manifest as mf
 from dociq.verify.tokens import TokenEstimate as MeasuredEstimate
@@ -161,15 +165,55 @@ class PipelineOptions:
     master_index_path: str | None = None
     profiles: tuple[FormatProfile, ...] = ()
     bates_decision: BatesDecision | None = None
+    confirm_bates: Callable[[BatesProposal, tuple[str, ...]], bool] | None = None
+    """ASK the operator to confirm a detected Bates format (§4 Stage 3, A-14).
+
+    Called as ``confirm_bates(proposal, other_prefixes)``. The second argument
+    is **D-28's own census** — every OTHER prefix in this matter that clears the
+    same two bars a proposal has to clear — and it is a separate argument rather
+    than a field of ``proposal`` because ``BatesProposal.alternatives`` is not
+    it. Those are the runner-up *shapes*, ``ranked[1:4]``, with no threshold
+    applied at all: on the MNFV production they come back as ``Check 0001`` and
+    ``retained 90095 49 00001``, two stray lines. Telling an operator that the
+    production is multi-series — and that D-28 therefore refuses prefix repair —
+    on the strength of a stray line would be a false statement about the record
+    made in the one place the operator is being asked to rule.
+
+    Sprint 2 shipped without this and the cost was total: the GUI had no way to
+    ask, so every GUI run left :attr:`auto_confirm_bates` False, the decision
+    stayed PENDING, and ``apply_bates_reported`` returned every document
+    unchanged. **A Bates-stamped production came out of the product with no
+    locators at all** while the acceptance harness measured 92.130% coverage
+    through a code path — a hand-built CONFIRMED decision — the product could not
+    reach. Rehearsal finding A4.
+
+    Three outcomes, and they are three, not two:
+
+    * returns ``True``  — the OPERATOR confirmed. Recorded as theirs.
+    * returns ``False`` — the operator DECLINED. A ruling, recorded as one; an
+      unstamped production and a stamped one whose format was declined are
+      different facts about the record.
+    * ``None`` (this field unset) — *nobody was asked*. The run falls through to
+      :attr:`auto_confirm_bates`, exactly as before.
+
+    Raising :class:`~dociq.runstate.RunAborted` from it abandons the run: the
+    prompt is the one place the pipeline blocks on a human, so it is the one
+    place that needs a way out that is not a ruling.
+
+    It takes precedence over :attr:`auto_confirm_bates`. A caller that supplies
+    both has an operator, and an operator's answer is never overridden by a
+    machine's.
+    """
+
     auto_confirm_bates: bool = False
     """Accept the detected Bates format without asking.
 
     §4 Stage 3 says the format is confirmed with the operator on first
-    detection, and the GUI will do exactly that. This exists for the headless
-    paths — the acceptance harness and the self-test — which have no operator to
-    ask. It is recorded in the run's warnings whenever it fires, because a
-    machine-confirmed pattern and an expert-confirmed one are not the same
-    evidentiary object."""
+    detection, and :attr:`confirm_bates` is how the GUI does that. This remains
+    for the genuinely headless paths — the acceptance harness and the self-test
+    — which have no operator to ask. It is recorded in the run's warnings
+    whenever it fires, because a machine-confirmed pattern and an expert-
+    confirmed one are not the same evidentiary object."""
 
     stamp: OperatorStamp | None = None
     previous_ledger: str | Path | None = None
@@ -403,6 +447,7 @@ def _bates_decision(
     config: RunConfig,
     stamp: OperatorStamp,
     warnings: list[str],
+    prefix_census: Callable[[], tuple[str, ...]] | None = None,
 ) -> BatesDecision | None:
     """Stage 3's decision, or ``None`` for an unstamped set.
 
@@ -452,6 +497,50 @@ def _bates_decision(
     proposal = propose_format(documents)
     if proposal is None:
         return None
+    if options.confirm_bates is not None:
+        # D-28's census, and only when there is something to ask about — it is
+        # a second full candidate sweep of the corpus and an unstamped matter
+        # must not pay for it. `others` is what makes the screen's multi-series
+        # sentence TRUE rather than plausible; see the field's docstring.
+        census = prefix_census() if prefix_census is not None \
+            else matter_prefixes(documents)
+        others = tuple(p for p in census if p != proposal.format.prefix)
+        # §4 Stage 3, as written: the format is confirmed WITH THE OPERATOR on
+        # first detection. The call may raise RunAborted; it is deliberately not
+        # caught here, because "the operator walked away" is not a Bates
+        # decision and this function's job is to return one. `run` catches it.
+        if options.confirm_bates(proposal, others):
+            warnings.append(
+                f"Bates format {proposal.format.label} was CONFIRMED BY THE "
+                f"OPERATOR ({stamp.username}) at §4 Stage 3 of this run, on "
+                f"{proposal.coverage_pct}% page coverage "
+                f"({proposal.pages_matched} of {proposal.pages_scanned} pages "
+                f"across {proposal.documents_matched} document(s))."
+            )
+            return BatesDecision(
+                DecisionStatus.CONFIRMED,
+                proposal.format,
+                f"operator ({stamp.username})",
+                stamp.saved_at,
+            )
+        # A refusal is a DECISION, and the run has to be able to say so. It is
+        # not "no Bates present": DocIQ read the stamps, put them to the
+        # operator, and was told not to use them. Recording that as an unstamped
+        # matter would erase the ruling and the evidence both.
+        warnings.append(
+            f"Bates format {proposal.format.label} was DETECTED on "
+            f"{proposal.coverage_pct}% of pages and DECLINED by the operator "
+            f"({stamp.username}) at §4 Stage 3. No locators were written. This "
+            "matter is NOT unstamped — the stamps are on the pages and were "
+            "read; they were ruled not to be this production's format."
+        )
+        return BatesDecision(
+            DecisionStatus.REJECTED,
+            proposal.format,
+            f"operator ({stamp.username})",
+            stamp.saved_at,
+            note="declined at §4 Stage 3",
+        )
     if not options.auto_confirm_bates:
         warnings.append(
             f"Bates format {proposal.format.label} was detected on "
@@ -882,8 +971,54 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # ---- Stage 3 -----------------------------------------------------------
     stage(3)
     t = time.monotonic()
-    decision = _bates_decision(documents, opts, config, stamp, warnings)
-    applied = apply_bates_reported(documents, decision)
+    # D-28's census, computed AT MOST ONCE per run and shared by the two places
+    # that need it — the confirmation prompt and the repair gate. It is a full
+    # candidate sweep of the corpus; two of them on an 18,000-page record is a
+    # measurable cost paid for nothing, and two INDEPENDENT ones would be two
+    # answers to "is this matter multi-series?" that could disagree.
+    _census: list[tuple[str, ...]] = []
+
+    def census() -> tuple[str, ...]:
+        if not _census:
+            _census.append(matter_prefixes(documents))
+        return _census[0]
+
+    try:
+        decision = _bates_decision(documents, opts, config, stamp, warnings,
+                                   census)
+    except RunAborted as aborted:
+        # The ONE place the pipeline blocks on a human, and therefore the one
+        # place a cancellation cannot be a poll. It takes the ordinary abort
+        # path — nothing published, the previous run's deliverables untouched,
+        # incomplete_run/ written — rather than a new one: a run abandoned at
+        # Stage 3 is not a different kind of aborted run from one abandoned at
+        # Stage 1, and a second publication rule is a second chance to get
+        # publication wrong (Codex B-1).
+        walk_notes.termination = RunTermination(
+            TerminalStatus.CANCELLED,
+            f"the run was stopped at §4 Stage 3, while the Bates format was "
+            f"waiting to be confirmed: {aborted.reason}",
+        )
+        walk_notes.invocation.append(
+            "CANCELLED at the Bates confirmation: the format was detected and "
+            "no ruling was made on it."
+        )
+        return _abort(
+            config=walk_config,
+            walked=walked,
+            walk_notes=walk_notes,
+            layout=layout,
+            stamp=stamp,
+            opts=opts,
+            timings=timings,
+        )
+    applied = apply_bates_reported(
+        documents, decision,
+        # The census the prompt was answered against, when there was a prompt.
+        # `apply_bates_reported` computes its own when handed None, and that is
+        # still the right default — but a run that already asked the operator
+        # must gate the repair on the SAME census it showed them.
+        matter_prefix_census=_census[0] if _census else None)
     documents = applied.documents
     # D-28's repair is disclosed, never silent. §4 requires misses to be
     # flagged and never quietly corrected; prefix repair is a narrow ruled
@@ -1235,6 +1370,15 @@ def _bates_note(
     stamped = sum(r.pages_with_bates for r in ranges.values())
     if decision is None:
         return "No Bates stamps detected — absence is normal (§4 Stage 3)."
+    if decision.status is DecisionStatus.REJECTED:
+        # NOT the same sentence as PENDING. "Not yet confirmed" and "the
+        # operator declined it" are different facts about the record, and the
+        # summary an expert forwards must not blur them into one.
+        label = decision.format.label if decision.format else "the format"
+        return (
+            f"A Bates format ({label}) was detected and DECLINED by the "
+            "operator (§4 Stage 3); no locators were written."
+        )
     if not decision.applies:
         return (
             "A Bates format was detected but not applied: the operator has not "

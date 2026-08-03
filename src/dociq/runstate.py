@@ -44,10 +44,42 @@ from .contracts import RunResult, TerminalStatus
 __all__ = [
     "TerminalStatus",
     "RunTermination",
+    "RunAborted",
     "COMPLETED",
     "INCOMPLETE_DIR",
     "STATUS_FILENAME",
 ]
+
+
+class RunAborted(Exception):
+    """The operator abandoned the run from inside a callback the pipeline made.
+
+    Stage 1's cancellation is polled — :class:`~dociq.ingest.walker.WalkOptions`
+    carries a ``cancelled`` check and the walk asks it between files. Stage 3's
+    Bates confirmation cannot work that way: the pipeline is *blocked inside the
+    operator's answer*, and there is no later poll to reach. Closing the window
+    while that prompt is open therefore needs a way out of the callback, and it
+    must not be a return value — ``BatesConfirm`` returns ``bool``, and every
+    bool it can return is a ruling. "The operator walked away" is not a ruling,
+    and recording it as a refusal would put a decision in the log that nobody
+    made.
+
+    It lives here, in the module that owns how a run ENDS, for two reasons. It
+    is the vocabulary of termination, not of Bates — any future mid-run question
+    needs the same escape. And the GUI may raise it: Track C may not import
+    ``identify``, ``ingest`` or ``emit``, but it already imports this module for
+    :class:`RunTermination`, so the exception is reachable from both sides of
+    the seam without widening the import rule by one package.
+
+    :mod:`dociq.pipeline` catches it and takes the ORDINARY cancellation path —
+    nothing published, the previous run's deliverables untouched,
+    ``incomplete_run/`` written. It is not a crash and must never be reported as
+    one.
+    """
+
+    def __init__(self, reason: str = "") -> None:
+        super().__init__(reason or "the operator stopped the run")
+        self.reason = reason or "the operator stopped the run"
 
 INCOMPLETE_DIR = "incomplete_run"
 """Sub-directory of the output root where an aborted run records itself.
