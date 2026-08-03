@@ -26,7 +26,7 @@ an expert can **read before the run** and recognize afterwards in the log.
 
 Two consequences follow, and they are binding on the build:
 
-- **No classifier, no model, no scoring.** A recognizer whose behaviour cannot be
+- **No classifier, no model, no scoring.** A recognizer whose behavior cannot be
   stated as a rule cannot be approved in advance, and cannot be explained in
   cross-examination.
 - **Recognition failures must fail toward KEEP.** A section the recognizer misses
@@ -128,6 +128,14 @@ because a template named after a matter implies decisions taken on that matter.
 **Risk** is the forensic cost of dropping it wrongly, and it is deliberately *not*
 correlated with size. The most dangerous categories in this table are among the
 smallest.
+
+**"Default" is a DESIGN INTENT, not a description of the shipped build** (noted
+2026-08-03). In particular **nothing marked `automatic` is implemented**: DocIQ
+detects exact-hash duplicates (§4 Stage 1) and *warns* about them, and it removes
+neither duplicates nor page furniture — every page of every copy is extracted,
+written to `clean_text/` and counted in the accounting identity. See
+`adapter._plan`, which emits no automatic lever for exactly this reason. Read this
+column as what an approved profile would do, never as what a run does today.
 
 ### Progress reports (monthly / weekly)
 

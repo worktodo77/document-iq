@@ -189,6 +189,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="dociq.selftest")
     ap.add_argument("--runs", type=int, default=8,
                     help="determinism repetitions (default 8)")
+    ap.add_argument("--concurrency", type=int, default=1,
+                    help="how many determinism repetitions run AT ONCE "
+                         "(default 1 = sequential). Above 1 exercises the "
+                         "contended regime the 2026-08-02 acceptance run "
+                         "documented as behaving differently; the default stays "
+                         "sequential so the gate's wall clock is unchanged")
     ap.add_argument("--keep", action="store_true", help="keep the work directory")
     args = ap.parse_args(argv)
 
@@ -470,8 +476,15 @@ def main(argv: list[str] | None = None) -> int:
                    "; ".join(f"{k}" for k in sorted(man.excluded)))
 
         print("\nPrinciple 5 — determinism (over the REAL emit layer)")
-        det = determinism.prove(src, runs=args.runs, workdir=work / "det")
-        chk.expect(det.ok, f"outputs byte-identical over {args.runs} runs",
+        det = determinism.prove(src, runs=args.runs, workdir=work / "det",
+                                concurrency=args.concurrency)
+        # The regime is named in the check text, not only in the detail line: a
+        # gate that reports "byte-identical over 8 runs" without saying the runs
+        # were sequential is a claim wider than the thing measured.
+        regime = ("sequential" if args.concurrency <= 1
+                  else f"{args.concurrency} at a time, CONTENDED")
+        chk.expect(det.ok,
+                   f"outputs byte-identical over {args.runs} runs ({regime})",
                    det.render().splitlines()[0])
         if not det.ok:
             print(det.render())

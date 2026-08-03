@@ -444,9 +444,15 @@ def test_readme_states_original_pagination():
 
 
 def test_the_scope_statement_is_the_very_first_thing_in_the_readme(tmp_path):
-    """FAIL-BEFORE: with the statement appended, or placed under the "368
-    documents, 18,521 pages" headline, it is read *after* the belief it exists to
-    prevent has already formed. D-20 makes position part of the requirement."""
+    """FAIL-BEFORE: with the statement appended, or placed under the
+    "368 documents, N pages" headline, it is read *after* the belief it exists to
+    prevent has already formed. D-20 makes position part of the requirement.
+
+    The headline's page count is left as N on purpose: it is an illustration of
+    where the reader's eye lands, not a measurement, and the literal that used to
+    stand here (18,521) was superseded by the acceptance run's 18,556.
+    ``emit/handoff.py``'s ``render_readme`` docstring still carries the stale
+    literal; that file is owned elsewhere and the correction is reported."""
     layout, docs = full_matter(tmp_path)
     scope = default_scope_statement(1, "P495")
     pkg = build_upload_package(

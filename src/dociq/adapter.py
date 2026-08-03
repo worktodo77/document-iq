@@ -61,8 +61,10 @@ from dociq.verify import tokens as vt
 __all__ = [
     "RealPipeline",
     "NO_PROFILE",
-    "MEASURED_SECONDS_PER_GB",
-    "MEASURED_BASIS",
+    "SECONDS_PER_GB_OCR_ON",
+    "SECONDS_PER_GB_OCR_OFF",
+    "seconds_per_gb",
+    "measured_basis",
     "ESTIMABLE_EXTENSIONS",
 ]
 
@@ -87,43 +89,96 @@ run it, the honest library is empty and the honest picker offers this.
 
 
 # ---------------------------------------------------------------------------
-# The one measured throughput figure
+# The measured throughput figures — one per OCR setting
 # ---------------------------------------------------------------------------
 
-MEASURED_SECONDS = 3046.7
 MEASURED_GIGABYTES = 2.6
-MEASURED_SECONDS_PER_GB = MEASURED_SECONDS / MEASURED_GIGABYTES
-"""≈1,172 s/GB — the ONLY wall-clock rate DocIQ has measured end to end.
+"""The D-12 corpus, to two significant figures — the denominator of both rates
+below. "GB" is not stated as decimal or binary, which is about 7% of ambiguity
+before anything else."""
 
-From the decision register, "§10 restated against a completed full-corpus run
-(2026-07-31)": the D-12 corpus, **OCR disabled, from scratch, idle machine,
-3,046.7 s**. Deliberately not the 2,848.5 s OCR-on figure, which resumed 62
-documents from an interrupted attempt and is therefore not a from-scratch rate at
-all; the register says so and refuses to restate ≈100 minutes as anything but an
-upper bound.
+MEASURED_SECONDS_OCR_ON = 6182.4
+MEASURED_SECONDS_OCR_OFF = 3046.7
 
-Three things this rate cannot do, stated here because the field it feeds is a
-single integer with nowhere to carry a caveat:
+SECONDS_PER_GB_OCR_ON = MEASURED_SECONDS_OCR_ON / MEASURED_GIGABYTES
+"""≈2,378 s/GB — the rate for the SHIPPED DEFAULT, which is OCR on.
 
-* **It cannot see OCR.** The measured run did none. The register puts OCR at
-  ≈2.0–2.3× extraction on a corpus that was 2.6% scanned; a folder of scanned
-  productions could take twice this or worse, and nothing knowable before the
-  walk distinguishes the two. The estimate is therefore optimistic by
-  construction on scanned material.
-* **Its denominator is 2.6 GB to two significant figures** (D-12), and "GB" there
-  is not stated as decimal or binary — about 7% of ambiguity before anything else.
-* **It is one run on one machine.** A second measurement does not exist.
+From the decision register, "§10 measured again, from scratch, WITH OCR
+(2026-08-02)": the D-12 corpus, **OCR enabled, from scratch, not resumed,
+through** :class:`RealPipeline` **itself — 6,182.4 s = 103.0 min** for 368
+documents / 18,556 pages.
+
+**Why this replaced the OCR-off rate.** :class:`RealPipeline` constructs with
+``ocr_enabled=True``, so until 2026-08-03 the figure beside the primary action
+was derived from a run that did no OCR: ≈51 minutes for the corpus whose one
+measured OCR-on run took 103. The old docstring's "the ONLY wall-clock rate
+DocIQ has measured end to end" was true when it was written and stopped being
+true when the acceptance run landed. Both statements are corrected here rather
+than one number being swapped under the other.
+
+**It is one run on one machine, and the machine was BUSY.** The register is
+explicit: another agent's OCR job and repeated ``pytest`` processes ran
+throughout, sampled CPU load was 100% for most of the window, and 103.0 minutes
+therefore *corroborates* the ≈100-minute upper bound rather than establishing an
+idle-machine rate. The estimate this feeds is consequently pessimistic on an idle
+machine and roughly right on a working one — the opposite direction of error from
+the one it replaced, and the safer one to be wrong in beside a button the
+operator is about to press.
+
+**The scanned share is 2.2%, and that is what "OCR on" cost here.** A folder of
+scanned productions puts a far larger share of pages through OCR at ≈2.0–2.3×
+extraction, and nothing knowable before the walk distinguishes the two. This rate
+is still optimistic by construction on heavily scanned material — less so than
+the OCR-off rate was, not immune.
 
 Which is why :func:`RealPipeline.preview_folder` returns 0 — "no estimate", and
-the screen then says nothing — for any folder outside the shape this was measured
-on, rather than extrapolating a number it cannot defend.
+the screen then says nothing — for any folder outside the shape these were
+measured on, rather than extrapolating a number it cannot defend.
 """
 
-MEASURED_BASIS = (
-    "one measured run: the full MODEC/Petrobras corpus, OCR disabled, from "
-    "scratch on an idle machine — 3,046.7 s for 2.6 GB (decision register, §10 "
-    "restated 2026-07-31). OCR is not in this rate."
-)
+SECONDS_PER_GB_OCR_OFF = MEASURED_SECONDS_OCR_OFF / MEASURED_GIGABYTES
+"""≈1,172 s/GB — the rate when OCR is turned OFF.
+
+The same corpus, OCR disabled, from scratch, on an **idle** machine: 3,046.7 s
+(decision register, "§10 restated against a completed full-corpus run",
+2026-07-31). Kept rather than deleted because ``RealPipeline(ocr_enabled=False)``
+is a supported construction and applying the OCR-on rate to it would overstate
+the wait by a factor of two — the same defect as the one being fixed, pointing
+the other way.
+
+The two rates are **not** two measurements of one quantity and must never be
+averaged or reconciled: they time different work. Their ratio, 2.03, is
+independently consistent with the register's ≈2.0–2.3× figure for OCR's share of
+extraction over the identical first 62 documents.
+"""
+
+
+def seconds_per_gb(ocr_enabled: bool) -> float:
+    """The measured rate for the run that is actually about to happen.
+
+    A function rather than a module constant because there is no single answer:
+    the two rates time different work, and picking one for both settings is what
+    made the shipped estimate ~2× low. The caller passes the setting the run will
+    use, so the branch cannot drift from the run.
+    """
+    return SECONDS_PER_GB_OCR_ON if ocr_enabled else SECONDS_PER_GB_OCR_OFF
+
+
+def measured_basis(ocr_enabled: bool) -> str:
+    """Where the rate in use came from, in one sentence, for display."""
+    if ocr_enabled:
+        return (
+            "one measured run: the full MODEC/Petrobras corpus, OCR enabled, "
+            "from scratch through RealPipeline — 6,182.4 s for 2.6 GB "
+            "(decision register, §10 measured again 2026-08-02). The machine was "
+            "under load throughout, so this corroborates the ≈100-minute upper "
+            "bound rather than establishing an idle-machine rate."
+        )
+    return (
+        "one measured run: the full MODEC/Petrobras corpus, OCR disabled, from "
+        "scratch on an idle machine — 3,046.7 s for 2.6 GB (decision register, "
+        "§10 restated 2026-07-31). OCR is not in this rate."
+    )
 
 ESTIMABLE_EXTENSIONS = frozenset({".pdf", ".docx", ".pptx", ".doc"})
 """The formats the measured corpus was made of (D-12: 298 PDF / 53 DOCX / 17
@@ -142,12 +197,17 @@ rather than a confident one. Not a silent cap: the screen shows nothing, which i
 the documented meaning of zero."""
 
 
-def _minutes_for(total_bytes: int, sized: dict[str, int]) -> int:
-    """Wall clock for this folder under :data:`MEASURED_SECONDS_PER_GB`, or 0.
+def _minutes_for(total_bytes: int, sized: dict[str, int], *,
+                 ocr_enabled: bool = True) -> int:
+    """Wall clock for this folder under :func:`seconds_per_gb`, or 0.
+
+    ``ocr_enabled`` defaults to True because :class:`RealPipeline` does; a
+    default of False here would reintroduce the ~2×-low estimate for every
+    caller who did not think about it.
 
     Zero is the seam's documented "no estimate", and it is returned for every
-    folder this rate was not measured on. See :data:`MEASURED_SECONDS_PER_GB` for
-    what the rate does and does not cover.
+    folder neither rate was measured on. See :data:`SECONDS_PER_GB_OCR_ON` for
+    what the rates do and do not cover.
     """
     if total_bytes <= 0:
         return 0
@@ -157,7 +217,7 @@ def _minutes_for(total_bytes: int, sized: dict[str, int]) -> int:
     covered = sum(b for ext, b in sized.items() if ext in ESTIMABLE_EXTENSIONS)
     if covered / total_bytes < ESTIMABLE_SHARE:
         return 0
-    return round(gigabytes * MEASURED_SECONDS_PER_GB / 60)
+    return round(gigabytes * seconds_per_gb(ocr_enabled) / 60)
 
 
 # ---------------------------------------------------------------------------
@@ -338,13 +398,15 @@ class RealPipeline:
         """§6's checklist: which rules this profile carries, and where they came
         from. Amendment A-11's shape, implemented.
 
-        Not part of :class:`~dociq.gui.pipeline.PipelineAPI` — A-11 is raised and
-        not yet applied, so Track E asks for it by an optional ``getattr`` hook
-        and renders a loud empty state when it is absent. Absent is exactly what
-        it would be here: the real adapter without this method leaves the §6
-        profiling checklist permanently unapprovable, which disables the whole
-        workflow the screen exists for. It returns only types that already cross
-        the seam, so adopting A-11 later changes nothing here but the Protocol.
+        **A-11 is APPLIED** (``docs/contracts/amendments.md``, 2026-08-01) and
+        this method is on :class:`~dociq.gui.pipeline.PipelineAPI`. The previous
+        docstring said it was "raised and not yet applied" and that Track E
+        reached it only through an optional ``getattr`` hook; that was true when
+        this module was written and stopped being true when the seam was
+        amended. Track E's hook still probes rather than calling the Protocol
+        method directly, because the loud empty state it renders is the right
+        behavior for a stand-in that cannot supply the rules — but absence is
+        no longer the expected case, and it is not the case here.
 
         **Every row is `estimated=True` and carries no figures**, because before
         a run there is nothing to count: these are the profile's rules, not this
@@ -426,7 +488,11 @@ class RealPipeline:
             file_count=len(files),
             total_bytes=total,
             by_extension=tuple(sorted(by_ext.items())),
-            estimated_minutes=_minutes_for(total, sized),
+            # The rate that matches THIS pipeline's OCR setting, read off the
+            # instance rather than assumed — the estimate and the run are then
+            # the same configuration by construction.
+            estimated_minutes=_minutes_for(total, sized,
+                                           ocr_enabled=self._ocr_enabled),
         )
 
     def run(self, request: RunRequest, on_progress, should_cancel) -> RunOutcome:
@@ -448,13 +514,26 @@ class RealPipeline:
                 master_index_path=request.master_index_path or None,
                 profiles=profiles,
                 # NOT auto-confirmed. §4 Stage 3 requires the detected Bates
-                # format to be confirmed with the operator, and the seam has no
-                # callback with which to ask — so a GUI run behaves exactly as
-                # every other unattended run does: the format is detected, NOT
-                # applied, and the run says so in its warnings. Setting this True
-                # here would be the machine confirming on the expert's behalf and
-                # recording that it had done so, which is worse than the gap.
-                # Raised as a seam change; see the verification note.
+                # format to be confirmed with the operator. Setting this True
+                # would be the machine confirming on the expert's behalf and
+                # recording that it had done so, which is worse than the gap: the
+                # format is detected, NOT applied, and the run says so in its
+                # warnings.
+                #
+                # THE SEAM NOW HAS A CALLBACK AND THIS ADAPTER DOES NOT TAKE IT.
+                # Amendment A-14 is applied — `PipelineAPI.run` carries an
+                # optional `confirm_bates: BatesConfirm | None`, and
+                # `BatesProposal` crosses the seam. `RealPipeline.run` still has
+                # the pre-A-14 signature, so a GUI run remains exactly as
+                # unattended as a headless one and a Bates-stamped production
+                # still produces no locators through the product. The claim that
+                # "the seam has no callback with which to ask" was true before
+                # A-14 and is withdrawn here; the gap it described is not, and it
+                # is NOT closed by correcting the sentence. Wiring it needs
+                # `PipelineOptions` to carry the callable and the GUI to supply
+                # one, which spans files this package does not own — reported to
+                # the coordinator rather than half-built, because a middle wired
+                # to no end is the A-14 failure again.
                 auto_confirm_bates=False,
             ),
         )

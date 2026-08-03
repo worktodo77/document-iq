@@ -116,11 +116,21 @@ STAGES: tuple[tuple[int, str], ...] = (
 
 Named here rather than in a screen because the stage a run is in is the
 pipeline's fact, not the GUI's — and because the measured reality makes the
-numbering load-bearing rather than decorative. The register's §10 restatement
-measured Stages 1-2 at **99.1% of run time** and everything after them at 25.7
-seconds combined; a progress bar driven only by the walk therefore sits at 99%
-for the whole of the rest of the run, which reads as a hang. Stages 3-6 are
+numbering load-bearing rather than decorative. The acceptance run of 2026-08-02
+— from scratch, OCR on, through the shipped adapter — measured Stages 1-2 at
+**99.70% of run time** and everything after them at **18.5 seconds combined**
+(0.30% of the run); a progress bar driven only by the walk therefore sits at
+99.7% for the whole of the rest of the run, which reads as a hang. Stages 3-6 are
 short, and they still have to say they are happening.
+
+The register's earlier §10 restatement (2026-07-31) put the same two figures at
+99.1% and 25.7 s, from a run that resumed 62 documents from an interrupted
+attempt. That pair is superseded, not reconciled: **why the post-extraction work
+took 25.7 s once and 18.5 s once over the same corpus is not established** — the
+two runs differ in resumption, in machine load and in 35 pages, and no
+measurement separates them. What both runs agree on, which is all this docstring
+needs, is that the tail is under 1% of the wall clock. Optimizing anything but
+extraction is optimizing under 1% of the run.
 """
 
 
@@ -181,8 +191,11 @@ class PipelineOptions:
     """Called once as each of §4's stages begins, and once when the run ends.
 
     :class:`~dociq.ingest.walker.WalkOptions` already carries a within-stage
-    progress hook, and it covers Stage 1 — which is 99.1% of the wall clock and
-    0% of the remaining five stages. Without this, every GUI progress bar stops
+    progress hook, and it covers Stages 1-2 — which are **99.70% of the wall
+    clock** (acceptance run, 2026-08-02) and 0% of the remaining four stages.
+    The figure here read "Stage 1 … 99.1%" and was wrong twice over: 99.1% is the
+    superseded 2026-07-31 pair, and it was the combined Stages **1-2** figure in
+    the register even then, not Stage 1's. Without this, every GUI progress bar stops
     at the walk's last tick and stays there while Bates detection, identifier
     assignment, reconciliation, classification, all of §7's emit and the
     accounting and manifest gates run. Reporting only: nothing here reaches

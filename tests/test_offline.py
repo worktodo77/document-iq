@@ -78,7 +78,12 @@ def test_a_clean_block_reports_clean():
     with offline.no_network() as guard:
         pass
     assert guard.clean
-    assert "no outbound attempt" in guard.render()
+    assert "no outbound or child-process attempt" in guard.render()
+    # The count in the sentence must be the count of things actually guarded,
+    # not a literal that drifts as the guarded set grows.
+    total = (len(offline.enumerate_guarded_entry_points())
+             + len(offline.enumerate_child_process_entry_points()))
+    assert f"{total} guarded entry points" in guard.render()
 
 
 @pytest.mark.parametrize("call", [
@@ -311,3 +316,91 @@ def test_absent_models_fail_loudly_and_never_reach_for_a_download():
             os.environ.pop("DOCIQ_OCR_MODEL_DIR", None)
         else:
             os.environ["DOCIQ_OCR_MODEL_DIR"] = saved_env
+
+
+# ---------------------------------------------------------------------------
+# The child-process class — the scope hole, closed (C5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("call, entry_point", [
+    pytest.param(lambda: __import__("subprocess").run([sys.executable, "-c", ""]),
+                 "subprocess.Popen", id="subprocess.run"),
+    pytest.param(lambda: __import__("subprocess").Popen([sys.executable, "-c", ""]),
+                 "subprocess.Popen", id="subprocess.Popen"),
+    pytest.param(lambda: __import__("subprocess").check_output(
+        [sys.executable, "-c", ""]), "subprocess.Popen", id="check_output"),
+    pytest.param(lambda: os.system("cmd /c echo hi"), "os.system", id="os.system"),
+    pytest.param(lambda: os.popen("cmd /c echo hi"), "os.popen", id="os.popen"),
+])
+def test_creating_a_child_process_is_recorded_and_refused(call, entry_point):
+    """FAIL-BEFORE, watched RED: with the child-process targets removed from
+    ``NetworkGuard.__enter__`` every one of these spawns happily and
+    ``guard.clean`` stays True — which is the defect. A guard scoped to one
+    interpreter proves nothing about a program that starts another.
+
+    ``subprocess.run`` / ``check_output`` are here to demonstrate the helpers
+    are covered BY Popen rather than needing their own rebinds; the recorded
+    entry point is ``subprocess.Popen`` for all three, which is the assertion
+    that the coverage is structural and not a list of names.
+    """
+    with offline.no_network() as guard:
+        with pytest.raises(offline.ProcessSpawnAttempted):
+            call()
+    assert not guard.clean
+    assert [a.entry_point for a in guard.attempts] == [entry_point]
+    # A subclass of NetworkAttempted, so any existing handler still catches it.
+    assert issubclass(offline.ProcessSpawnAttempted, offline.NetworkAttempted)
+
+
+def test_every_child_process_entry_point_is_restored_on_exit():
+    """The guard must not leave the process unable to spawn. ``verify.determinism``
+    spawns a subprocess per repetition immediately after a guarded block runs in
+    the same interpreter, so a leaked raiser would break the determinism proof
+    rather than the offline one."""
+    import subprocess
+
+    before = {name: getattr(sys.modules[name.split(".")[0]], name.split(".")[1])
+              for name in offline.enumerate_child_process_entry_points()}
+    with offline.no_network():
+        pass
+    after = {name: getattr(sys.modules[name.split(".")[0]], name.split(".")[1])
+             for name in offline.enumerate_child_process_entry_points()}
+    assert before == after
+    assert subprocess.run([sys.executable, "-c", "print(1)"],
+                          capture_output=True, text=True).stdout.strip() == "1"
+
+
+def test_the_child_process_class_has_no_unaccounted_siblings():
+    """Global class assertion, read off the LIVE modules rather than a list
+    written once — the same shape as ``audit_siblings`` for sockets. A spawner a
+    future CPython adds to ``os`` or ``subprocess`` shows up here."""
+    assert offline.audit_child_process_siblings() == ()
+    points = offline.enumerate_child_process_entry_points()
+    assert "subprocess.Popen" in points
+    assert "os.system" in points and "os.popen" in points
+    # Platform-split families, guarded by existence rather than by assumption.
+    assert any(p.startswith("os.exec") for p in points)
+    assert any(p.startswith("os.spawn") for p in points)
+    if hasattr(os, "startfile"):
+        assert "os.startfile" in points, (
+            "gui/main_window.py hands a path to the Windows shell; the shell can "
+            "start a browser, which is an outbound action")
+    if hasattr(os, "fork"):
+        assert "os.fork" in points
+
+
+def test_a_swallowed_spawn_is_still_a_finding():
+    """The counting property, for the child-process class. Code that wraps its
+    spawn in ``except Exception`` passes a blocking-only guard in silence; the
+    attempt is still recorded here, and ``clean`` is still False."""
+    import subprocess
+
+    with offline.no_network() as guard:
+        try:
+            subprocess.Popen([sys.executable, "-c", ""])
+        except Exception:
+            pass
+    assert not guard.clean, (
+        "a spawn swallowed by the caller left no trace — the guard is blocking "
+        "rather than counting")

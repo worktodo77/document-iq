@@ -559,9 +559,15 @@ def test_the_checklist_is_reachable_from_the_setup_screen(window) -> None:
 
 
 def test_a_pipeline_with_no_profile_rules_hook_renders_the_absence(app) -> None:
-    """The seam has no ``profile_rules`` (stop-the-line A-11). A pipeline that
-    does not offer the optional hook must produce the loud empty state, not a
-    crash and not a confident blank."""
+    """A pipeline that does not offer ``profile_rules`` must produce the loud
+    empty state, not a crash and not a confident blank.
+
+    The docstring used to say "the seam has no ``profile_rules`` (stop-the-line
+    A-11)". **A-11 was applied on 2026-08-01** and the method is on
+    ``PipelineAPI``, so that sentence became false; the test is not, and is worth
+    more now than it was. A Protocol is structural typing — a stand-in that omits
+    the method still type-checks in practice — so the screen must still survive
+    its absence, and this is what proves it does."""
     class _NoRules(MockPipeline):
         profile_rules = None
 
@@ -883,8 +889,15 @@ def test_an_empty_scope_refuses_to_build(app) -> None:
 
 
 def test_a_pipeline_with_no_package_builder_says_why(window) -> None:
-    """The seam has no package builder (stop-the-line A-13). The refusal is
-    stated; a greyed button with no reason is read as "not for me"."""
+    """A pipeline that omits ``build_package`` must state the refusal; a greyed
+    button with no reason is read as "not for me".
+
+    Two claims withdrawn from this docstring. It said "the seam has no package
+    builder (stop-the-line A-13)": the package builder is **A-12**, not A-13
+    (A-13 is the ``DIRECT_CONTEXT_TOKENS`` docstring), and **A-12 was applied on
+    2026-08-01** — ``build_package`` is on ``PipelineAPI``. The amendment
+    explicitly allows an adapter that does not offer Path A to OMIT the method
+    rather than return an empty result, which is exactly the case under test."""
     _drive_handoff(window, "all")
     assert not window.handoff._view.package_available
     assert PATH_A_UNAVAILABLE in _all_text(window.handoff)
