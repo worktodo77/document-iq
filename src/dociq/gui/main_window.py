@@ -331,11 +331,15 @@ class MainWindow(QMainWindow):
     def show_profile_checklist(self, profile: ProfileInfo) -> None:
         """Show what a profile keeps and drops, before a run commits to it.
 
-        The section rules come over the seam. ``PipelineAPI`` has no method for
-        them yet (stop-the-line A-11), so they are asked for by an OPTIONAL
-        adapter hook and their absence is a state the screen renders rather
-        than a crash: an empty checklist that says it is empty is safe, an
-        empty checklist that looks complete is not.
+        The section rules come over the seam. **A-11 is APPLIED** —
+        ``PipelineAPI.profile_rules`` is on the Protocol — and this docstring
+        said otherwise for two days after it landed.
+
+        The ``getattr`` below is nonetheless kept deliberately, and its reason
+        has changed: not "the seam cannot carry this yet" but "an adapter may
+        legitimately not offer it". Their absence stays a state the screen
+        renders rather than a crash, because an empty checklist that says it is
+        empty is safe and an empty checklist that looks complete is not.
         """
         rules = getattr(self._pipeline, "profile_rules", None)
         levers, basis, source = (), None, ""

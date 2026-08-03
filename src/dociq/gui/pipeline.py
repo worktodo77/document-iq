@@ -38,8 +38,29 @@ to retrieval mode — the reference row at the foot of the reduction waterfall.
 ruled to keep, rendered as a named, sourced reference line — "Claude Project
 direct context" — and never as a budget or a target (D-15: over-capacity is the
 expected state). It has NOT been confirmed against Anthropic's published limits.
-It is a single named constant precisely so that confirming it is a one-line
-change — the literal appears nowhere else, and no screen may inline it.
+It is a single named constant so that a screen never inlines it, and
+``tests/test_gui_screen_states.py`` asserts no ``200_000`` appears anywhere
+under ``dociq/gui/``.
+
+**Confirming the figure is NOT a one-line change, and an earlier version of
+this docstring said it was.** Two further literals hold the same number for
+different jobs: ``verify.tokens.DIRECT_CONTEXT_TOKENS``, the default limit
+``TokenEstimate.capacity()`` falls back to, and
+``emit.handoff.ProjectLimits.direct_context_tokens``, the limit an upload
+package is checked against. They are deliberately separate — the seam's is a
+*display reference line*, the emit layer's is an *operator-configurable package
+constraint*, and collapsing them would let a caller's override of one silently
+move the other. Unifying them by importing this constant into ``verify`` and
+``emit`` would invert the dependency direction the pagemodel freeze protects,
+so the duplication is kept and disclosed rather than removed.
+
+But it means confirming 200,000 against Anthropic's published limits means
+changing three — and it once meant a package telling its operator *"Fits
+directly in a Claude Project"* while telling the recipient, in the README they
+actually read, *"About 181–197% of direct-context capacity — the Project will
+operate in retrieval (RAG) mode."* That defect is fixed in ``emit/handoff.py``
+(one verdict, one limit, regression-tested); this note exists so the next
+person to touch the figure knows how many places it lives in.
 
 Amendment A-13. The previous docstring said the threshold was unruled, which
 D-21 made false; the sentence was corrected rather than deleted, because what

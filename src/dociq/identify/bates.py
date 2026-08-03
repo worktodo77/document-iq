@@ -589,7 +589,10 @@ MIN_DOCUMENT_COVERAGE_PCT = 50
 """How much of one document a format must stamp before it is proposed.
 
 An absolute page count cannot carry this decision. Measured on the real
-Petrobras record (368 documents, 18,521 pages): two stray lines that parse as
+Petrobras record as it stood on the 2026-07-31 run (368 documents, 18,521
+pages; a later run of the same corpus emitted 18,556 — the observation belongs
+to the run that made it and is attributed rather than restated): two stray
+lines that parse as
 ``CP0001`` were enough to propose a Bates format for the whole corpus, on a set
 D-13 designates as the *negative* case — detection there must come back empty.
 Two pages in eighteen thousand is not a production.
