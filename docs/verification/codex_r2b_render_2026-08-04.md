@@ -242,8 +242,68 @@ a pointer to the test that asserts it against the disk.
 - **The two new modules: 30 consecutive green runs**, 40 tests each, no
   ordering, temp-directory or retry flakiness observed. 30 rather than 8 because
   every test here is temp-directory and retry-loop sensitive.
-- **Full suite: 8 consecutive green runs** (see the run log below).
+- **Full suite: 8 consecutive green runs** at `ceaa8f5`. Run log:
+
+<!-- FULL-SUITE RUN LOG -->
+
 - `tests/test_amendments.py` green and untouched.
+
+### Found in passing and DIAGNOSED, not fixed: the offline probe's intermittent
+
+`tests/test_offline.py::test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN`
+has carried a disclosure that it "fails intermittently under concurrent load"
+and that "its failure was not diagnosable" and "has never reproduced on demand".
+It failed in both of this branch's first two full-suite runs, so it was chased
+rather than waved through.
+
+**It reproduces on demand and the cause is CPython's, not DocIQ's.** All seven
+recorded attempts are `subprocess.Popen('ver', shell=True)`. On Windows
+`platform.system()` shells out to `ver` the first time the OS version is asked
+for; `onnxruntime/capi/_pybind_state.py` calls `platform.system()` at import;
+DocIQ imports `rapidocr_onnxruntime` **lazily**, from `extract.ocr_model_dir()`
+via `walker.effective_limits` — so with OCR off that import happens **inside**
+the guard. `platform.uname()` memoizes, so whether the spawn lands inside or
+outside the guard depends on whether anything asked first. The other six are the
+OCR page pool's worker threads racing the same cold cache.
+
+| Condition | Result |
+|---|---|
+| 6 concurrent probes, unmodified | **5 of 6** `ATTEMPTS=7` |
+| 6 concurrent probes, unmodified (second round) | **6 of 6** `ATTEMPTS=7` |
+| 12 concurrent probes, `platform.uname()` called before the guard | **12 of 12** `ATTEMPTS=0` |
+| 1 probe in isolation, unmodified | `ATTEMPTS=0` |
+
+**The guard is right**: a whole pipeline run does create child processes.
+
+**Not fixed here.** It is outside A-3/A-4, it is in files this agent was not
+given, and the fix is a ruling rather than a patch — warm `platform.uname()` at
+start-up so the count is about DocIQ; or attribute `platform._syscmd_ver` the
+way `offline.TRANSPORT_MODULES` already attributes stdlib transport; or accept
+it and restate what the shipped `--offline-probe` tells law-firm IT. All three
+change a claim made to a client.
+
+**What IS done here:** the false half of the disclosure is withdrawn. The
+docstring in `tests/test_offline.py` now carries the diagnosis, the intervention
+that confirms it, and the three options — and no longer says the failure could
+not be diagnosed or reproduced.
+
+### One aborted run series, disclosed
+
+The first attempt at the 8-run series was **stopped and discarded**, not
+reported. Its run 1 went red on two tests:
+
+1. `tests/test_gui_states.py::test_the_chrome_is_us_english` — the A-3 prose in
+   `runstate.py` used the en-GB spelling "recognised". A real defect in this
+   change; fixed in `36eb016`, and the sweep for the other en-GB words the test
+   looks for came back empty.
+2. `tests/test_offline.py::test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN`
+   — the **already-disclosed** intermittent, whose docstring records 2 failures
+   in 24 concurrent jobs and states that its cause is not diagnosed. Nothing in
+   this change touches the offline guard, subprocess probe or any import path
+   it inspects. The disclosure is repeated here rather than recast as closed.
+
+The series was restarted from scratch after the spelling fix rather than
+counting the surviving runs, because the tree changed underneath them.
 
 ## Limitations, disclosed and still disclosed
 
@@ -261,3 +321,10 @@ a pointer to the test that asserts it against the disk.
 - Windows file-lock behavior is simulated by monkeypatching, not by taking a
   real exclusive lock. The retry loops are therefore exercised for their control
   flow, not against a real antivirus scanner.
+- One branch of `_publish_package` is **not covered**: the double failure where
+  the superseded package cannot be removed *and* cannot be renamed back. Its
+  message is asserted only by reading the source. The single-failure branch on
+  either side of it is covered.
+- `tests/test_offline.py::test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN`
+  remains intermittent under concurrent load, as its own docstring discloses.
+  This change does not touch it and does not close it.

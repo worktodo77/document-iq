@@ -198,11 +198,52 @@ def test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN():
     reported with attribution (see ``offline.TRANSPORT_MODULES``) and the
     guard's zero-attempt count is the assurance there.
 
-    **This test fails intermittently under concurrent load, and its failure was
-    not diagnosable.** Observed 2 failures in 24 concurrent jobs during the
-    claims sweep, then 2 in 6 immediately after the A-15 commit — while a
-    ``git push`` and other agents were running — then **15 consecutive full-suite
-    runs green**, and 6/6 green in isolation. It has never reproduced on demand.
+    **DIAGNOSED 2026-08-04 (Codex review #2 fix round). The claim that its
+    failure "was not diagnosable" is WITHDRAWN, and so is "it has never
+    reproduced on demand" — it reproduces on demand, every time, and the cause
+    is named below.**
+
+    The intermittent failure is ``ATTEMPTS=7``, and all seven are
+    ``subprocess.Popen('ver', shell=True)``. They are **CPython's**, not
+    DocIQ's: on Windows, :func:`platform.system` calls
+    :func:`platform.uname`, which shells out to ``ver`` to read the OS version
+    the first time it is asked. ``onnxruntime/capi/_pybind_state.py`` calls
+    ``platform.system()`` at import, and DocIQ imports
+    ``rapidocr_onnxruntime`` **lazily** — from ``extract.ocr_model_dir()``,
+    reached through ``walker.effective_limits`` — so with OCR off that import
+    happens INSIDE the guard. ``platform.uname()`` memoizes, so whether the
+    ``ver`` spawn lands inside or outside the guard is decided by whether
+    anything asked for the OS version first. The extra six are the OCR page
+    pool's worker threads racing the same cold cache; ``platform`` does not
+    lock around it.
+
+    That is why load changes the answer and why nothing about it looked like a
+    product bug: **the guard is right**, a whole pipeline run does create child
+    processes, and the entry point is a third-party import pulling on a lazy
+    stdlib call.
+
+    Reproduced on demand and confirmed by intervention, on this branch:
+
+    * 6 concurrent probes, unmodified — **5 of 6** reported ``ATTEMPTS=7``;
+    * 6 more, same conditions — **6 of 6** reported ``ATTEMPTS=7``;
+    * 12 concurrent probes with one line added before the guard,
+      ``platform.uname()`` — **12 of 12** reported ``ATTEMPTS=0``;
+    * 1 probe in isolation, unmodified — ``ATTEMPTS=0``.
+
+    **Not fixed here, and deliberately so.** The fix is a ruling, not a patch:
+    warm ``platform.uname()`` at DocIQ start-up so the guard's count is about
+    DocIQ rather than about CPython's lazy OS-version probe; or attribute
+    ``platform._syscmd_ver`` the way :data:`~dociq.verify.offline.
+    TRANSPORT_MODULES` already attributes stdlib transport; or accept it and
+    restate what the shipped ``--offline-probe`` claims. All three change what
+    DocIQ tells law-firm IT. The historical rate figures below are left in
+    place because they are the observations, and they are now explained rather
+    than merely recorded.
+
+    Previously observed: 2 failures in 24 concurrent jobs during the claims
+    sweep, then 2 in 6 immediately after the A-15 commit — while a ``git push``
+    and other agents were running — then **15 consecutive full-suite runs
+    green**, and 6/6 green in isolation.
 
     The three ways this test can fail are not equally serious and the summary
     line does not distinguish them:
