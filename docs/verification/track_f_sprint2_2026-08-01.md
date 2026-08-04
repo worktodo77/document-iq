@@ -23,7 +23,7 @@ measurement it says so, in the same sentence as the claim.
 | deliverable | state |
 |---|---|
 | F-1 packaging (D-22) | **done and verified on the artifact** — one folder, one zip, both executables launched, self-test green from inside the exe |
-| F-2 offline proof (criterion 6) | **substantially done, one gap** — zero outbound attempts proven in-process and corroborated at OS level; a genuinely adapter-disabled run is **not** executed (see §3.4) |
+| F-2 offline proof (criterion 6) | **substantially done, one gap** — zero outbound attempts proven in-process and corroborated at OS level; a genuinely adapter-disabled run is **not** executed (see §3.4). ⚠️ **§3.4(5)'s "the cost is zero" was corrected 2026-08-04**: a run does spawn one child process, ruled D-30 and permitted by name — the claim as it now stands is in **§3.5** |
 | F-3 Bates acceptance (criterion 4) | **run. Criterion 4 is MET on native-text pages (100.000% / 568 pages, authoritative ground truth) and NOT met on OCR'd pages (31.250% / 80). Zero wrong, zero false positives.** Two defects found and fixed on the way — see §4 |
 | F-4 criterion 1 | not attempted, per instruction |
 
@@ -255,11 +255,31 @@ including the swallowed-attempt case. Re-enabled: all green.
    Guarding was chosen over disclosure alone because an imported
    `urllib.request` is inert until called, whereas a spawned child is an
    execution the guard can no longer observe, and the conservative treatment of
-   an unobservable thing is to refuse it rather than note it. The cost is zero:
-   nothing DocIQ does *inside* a guarded block spawns anything — the determinism
-   probe and the launcher both spawn outside the guard, and a pipeline run uses
-   a thread pool, not a process pool — so this closes a hole without
-   constraining the product.
+   an unobservable thing is to refuse it rather than note it. ~~The cost is
+   zero: nothing DocIQ does *inside* a guarded block spawns anything — the
+   determinism probe and the launcher both spawn outside the guard, and a
+   pipeline run uses a thread pool, not a process pool — so this closes a hole
+   without constraining the product.~~
+
+   > **⚠️ CORRECTED 2026-08-04 — "the cost is zero" was false, and it was
+   > measured false.** A pipeline run *does* spawn a child inside the guard, and
+   > this document asserted otherwise on reasoning ("a thread pool, not a
+   > process pool") rather than on measurement. What was missed is that the
+   > spawn is not DocIQ's own call: `extract.ocr_model_dir()` imports
+   > `rapidocr_onnxruntime`, which imports `onnxruntime`, which calls
+   > `platform.system()` at import time — and on Windows `platform.uname()`
+   > probes the OS version by running `ver` through the shell, once per
+   > interpreter. Measured 2026-08-04, 75 probe runs across three concurrent
+   > loops: **12 tripped, 84 spawn attempts, all of them that one call, and 0
+   > socket attempts in any run.**
+   >
+   > This is exactly why "the corpus doesn't exercise it" and "nothing we do
+   > spawns" are the same argument, and why the guard was worth having: the
+   > thing it caught was not in anybody's model of the product.
+   >
+   > Ruled **D-30** (Alex, 2026-08-04): permit that one call by identity, keep
+   > every other spawn raising, record it with its stack every time it fires.
+   > See §3.5 for the claim as it now stands.
 
    Guarded, recorded then raised as `ProcessSpawnAttempted` (a subclass of
    `NetworkAttempted`, so existing handlers still catch it): `subprocess.Popen`
@@ -285,6 +305,45 @@ including the swallowed-attempt case. Re-enabled: all green.
    child's attempt count). And a C extension that spawns through the Win32 API
    rather than through `os`/`subprocess` is invisible for the same reason as
    residue (2) above.
+
+### 3.5 The criterion-6 claim, as it now stands (added 2026-08-04, ruling D-30)
+
+Everything above §3.4(5) was written against the claim "makes no outbound
+connections". That claim is **not withdrawn and not weakened** — no run has ever
+been observed to attempt one, and the measurement that produced D-30 confirms it
+on 75 further runs. What changed is that the claim was **incomplete**: it said
+nothing about process creation, and a whole pipeline run creates exactly one
+child process.
+
+The claim is now a single value in the code, `dociq.verify.offline.CRITERION_6_CLAIM`,
+so this document and the enforcement cannot drift apart:
+
+> A DocIQ run makes **NO outbound network attempt** — no socket, no resolver, no
+> TLS handshake — and creates **NO child process, with exactly one named
+> exception**: the Windows version probe `ver` that the standard library's
+> `platform._syscmd_ver` runs when `platform.uname()` is first called, which a
+> dependency's import triggers. That exception is permitted by identity (ruling
+> D-30), is recorded with its stack every time it occurs, and reaches no
+> network.
+
+This is **more specific than the sentence it replaces, not more permissive.**
+The previous wording would have been read as covering process creation and did
+not; this one states the single exception by name, with the command, the caller
+and the file, and with the reason attached to the exemption in code
+(`offline.PERMITTED_SPAWNS`, `enumerate_permitted_spawns()`).
+
+**What keeps it from widening.** The exemption matches on six components —
+entry point, exact command string, `shell=True`, caller function name, caller
+file, and how close the caller is on the stack. `tests/test_offline.py` removes
+each one in turn and proves the call is then refused, so a future change that
+loosens any component fails a test rather than silently permitting a class.
+Rejected shapes are named in the code and in D-30: "spawns during import",
+"short commands", "anything from site-packages".
+
+**What is still not proven** is unchanged: residues (1) and (2) above stand, and
+the adapter-disabled run remains the last step. D-30 adds no residue of its own
+beyond the exempted call itself, which is disclosed here, in the decision
+register, in the guard's own report, and in the probe's output.
 
 ---
 

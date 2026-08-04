@@ -160,12 +160,24 @@ def _check_no_network(chk: _Check) -> None:
             text, confs = ex._ocr_array(arr)
         except Exception as exc:  # pragma: no cover — engine-level failure
             failure = f"{type(exc).__name__}: {exc}"
+    # The permitted spawns are named on a PASS as well as a failure (ruling
+    # D-30). Reporting only `render()`'s first line would print "no outbound or
+    # child-process attempt" and silently drop the fact that one child process
+    # WAS permitted — and an exemption an operator cannot see in the selftest
+    # output is indistinguishable, to that operator, from a hole. This is the
+    # same defect one layer up that produced D-30: a check that reports a status
+    # and discards what the status was about.
+    permitted = ""
+    if guard.exempted:
+        names = sorted({e.exemption.describe() for e in guard.exempted})
+        permitted = (f" — {len(guard.exempted)} PERMITTED spawn(s) under a "
+                     f"named exemption: " + "; ".join(names))
     chk.expect(guard.clean,
                "ZERO outbound attempts during cold OCR engine construction "
                "and inference" + (" (engine was warm; reset for this check)"
                                   if was_warm else ""),
-               guard.render().splitlines()[0])
-    if not guard.clean:
+               guard.render().splitlines()[0] + permitted)
+    if not guard.clean or guard.exempted:
         print(guard.render())
     if failure:
         chk.fail("OCR ran under the network guard", failure)

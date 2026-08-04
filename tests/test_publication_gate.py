@@ -119,7 +119,16 @@ def _force_unclassified(monkeypatch):
 
 
 def _force_out_of_order(monkeypatch):
-    monkeypatch.setattr("dociq.pipeline.corpus_sort_check", lambda result: False)
+    # Patches the function the gate actually READS. It used to patch
+    # `corpus_sort_check`, the boolean; the gate now reads
+    # `corpus_sort_disagreements`, because a refusal that cannot name the
+    # documents it refused over is unactionable at 9,000 of them (the class
+    # D-30 came out of). A stub that returned a bare False would have gone on
+    # passing against a gate that no longer consulted it.
+    monkeypatch.setattr(
+        "dociq.pipeline.corpus_sort_disagreements",
+        lambda result: ("position 3: 'DIQ-000009' is here, canonical order "
+                        "puts 'DIQ-000004'",))
 
 
 GATES = {
@@ -889,3 +898,85 @@ def test_every_outcome_field_of_a_refused_run_has_a_durable_home(
         assert value is not None, (
             f"{name} is declared durable but the quarantined log records it as "
             "null -- the in-memory outcome is the only place it exists")
+
+
+def test_a_corpus_order_refusal_names_the_documents_it_refused_over(
+    tmp_path, monkeypatch
+):
+    """FAIL-BEFORE: `corpus_sort_check` returned a bare bool, so the refusal
+    said only that the corpus was out of order.
+
+    Enumerated with the D-30 class — a probe that reports a status and discards
+    the evidence behind it. This one gates PUBLICATION, so the discarded
+    evidence is what an operator holding a refused matter folder needs in order
+    to do anything at all: which two documents, at which position.
+
+    Real disorder, not a stub: the run's own documents are reversed inside the
+    check, so what reaches the log is what
+    `corpus_sort_disagreements` actually produces.
+    """
+    real = pipeline.corpus_sort_disagreements
+    monkeypatch.setattr(
+        "dociq.pipeline.corpus_sort_disagreements",
+        lambda result: real(_reversed(result)))
+
+    out = tmp_path / "matter"
+    refused = _run(out)
+    assert not refused.published
+    assert refused.incomplete_dir is not None
+
+    log = json.loads(
+        (refused.incomplete_dir / "processing_log.json").read_text(encoding="utf-8"))
+    detail = "\n".join(
+        d["detail"] for d in log["run"]["accounting_gate"]["discrepancies"]
+        if d["kind"] == "refused-corpus-order")
+    assert detail, "the corpus-order gate did not reach the durable record"
+    assert "position " in detail, (
+        "the refusal does not name a position — 'the corpus is not in canonical "
+        "order' over 9,000 documents is unactionable")
+    ids = [d.doc_id for d in refused.result.documents if d.doc_id]
+    assert any(doc_id in detail for doc_id in ids), (
+        "the refusal names no document; the operator cannot find the disorder")
+
+
+def _reversed(result):
+    """The same result with its documents reversed — genuine disorder."""
+    import dataclasses
+
+    return dataclasses.replace(result, documents=tuple(reversed(result.documents)))
+
+
+def test_the_order_evidence_is_capped_out_loud_not_silently(tmp_path):
+    """A fully reversed corpus must not produce one discrepancy per document,
+    and the cap must SAY it is a cap.
+
+    A silent truncation is the same defect as a discarded stack: the reader
+    cannot tell "these are the problems" from "these are the first ten
+    problems". No silent caps.
+    """
+    out = tmp_path / "matter"
+    good = _run(out)
+    disordered = _reversed(good.result)
+    entries = pipeline.corpus_sort_disagreements(disordered)
+
+    # The number of positions that genuinely disagree, computed here rather
+    # than taken from the function under test.
+    from dociq.contracts import document_sort_key
+
+    canonical = sorted(disordered.documents, key=document_sort_key)
+    disagreeing = sum(1 for a, b in zip(disordered.documents, canonical) if a is not b)
+    assert disagreeing > 10, (
+        "the fixture corpus is too small to exercise the cap — this test would "
+        "pass without ever reaching it")
+
+    assert entries, "reversing the corpus produced no disagreement"
+    assert len(entries) <= 11, "the cap did not hold"
+    assert "further position(s)" in entries[-1] and f"{disagreeing} in all" in entries[-1], (
+        f"{disagreeing} positions disagree and the list stops at {len(entries)} without "
+        f"saying so — a silent cap is the same defect as a discarded stack: "
+        f"the reader cannot tell 'these are the problems' from 'these are the "
+        f"first ten problems'")
+    assert pipeline.corpus_sort_check(good.result) is True
+    assert pipeline.corpus_sort_check(disordered) is False, (
+        "the boolean and the evidence disagree about whether the corpus is "
+        "ordered")

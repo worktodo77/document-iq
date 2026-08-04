@@ -1521,7 +1521,9 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     report_acc = accounting.check(result)
     man = mf.build(stage_out.root, config=effective)
     mf.write(stage_out.root, man)
-    ordered = corpus_sort_check(result)
+    # The disagreements, not the boolean. A refusal that cannot name the
+    # documents it refused over is the class D-30 came out of.
+    disorder = corpus_sort_disagreements(result)
     mark("verify", t)
 
     # ---- The gate ----------------------------------------------------------
@@ -1574,11 +1576,12 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             f"hashed, so the byte-identical claim would be published missing "
             f"half of what it claims",
         ))
-    if not ordered:
+    if disorder:
         refusals.append((
             "corpus-order",
             "the corpus is not in canonical order, so the run's identity and "
-            "its Doc ID assignment do not agree on the sequence of documents",
+            "its Doc ID assignment do not agree on the sequence of documents: "
+            + "; ".join(disorder),
         ))
     if refusals:
         return _refuse_publication(
@@ -1671,8 +1674,48 @@ def ocr_page_count(result: RunResult) -> int:
     )
 
 
+def corpus_sort_disagreements(result: RunResult) -> tuple[str, ...]:
+    """WHERE the corpus departs from canonical order — not merely that it does.
+
+    Found by enumerating the class D-30 came out of: a probe that reports a
+    tally, a boolean or a status and discards the evidence behind it. This one
+    returned a bare ``bool``, and it gates PUBLICATION — so a run could be
+    refused with "the corpus is not in canonical order" over nine thousand
+    documents and nothing on disk saying which two were the wrong way round.
+    "Accounting failed is unactionable at 9,000 documents" is the reasoning
+    :mod:`dociq.verify.accounting` was built on; this check was the same shape
+    and had not had it applied.
+
+    Each entry names the position, the Doc ID found there, and the Doc ID
+    canonical order puts there. Capped at the first ten with the total stated,
+    because a fully reversed corpus would otherwise produce a discrepancy per
+    document — and the cap is disclosed in the text rather than being a silent
+    truncation.
+    """
+    ordered = sorted(result.documents, key=document_sort_key)
+    out: list[str] = []
+    total = 0
+    for i, (found, want) in enumerate(zip(result.documents, ordered)):
+        if found is want:
+            continue
+        total += 1
+        if len(out) < 10:
+            out.append(
+                f"position {i}: {found.doc_id or found.rel_path!r} is here, "
+                f"canonical order puts {want.doc_id or want.rel_path!r}")
+    if total > len(out):
+        out.append(f"... and {total - len(out)} further position(s) "
+                   f"({total} in all)")
+    return tuple(out)
+
+
 def corpus_sort_check(result: RunResult) -> bool:
     """Documents are in canonical order. Cheap, and it catches an emitter that
-    sorted its own way."""
-    ordered = sorted(result.documents, key=document_sort_key)
-    return list(result.documents) == ordered
+    sorted its own way.
+
+    Kept as the boolean the gate reads; :func:`corpus_sort_disagreements` is
+    the evidence the refusal quotes. Derived from that function rather than
+    reimplementing the comparison, so the two cannot disagree about whether the
+    corpus is ordered.
+    """
+    return not corpus_sort_disagreements(result)

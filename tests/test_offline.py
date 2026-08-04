@@ -48,6 +48,9 @@ _net = [a for a in guard.attempts if a.entry_point not in _child]
 print('ATTEMPTS=' + str(len(guard.attempts)))
 print('ATTEMPTS_NET=' + str(len(_net)))
 print('ATTEMPTS_SPAWN=' + str(len(_spawn)))
+print('EXEMPTED=' + str(len(guard.exempted)))
+print('EXEMPTIONS=' + ';'.join(
+    e.exemption.describe() for e in guard.exempted))
 print('FETCH=' + ','.join(offline.audit_model_fetch_imports()))
 print('TRANSPORT=' + ','.join(offline.audit_transport_imports()))
 if guard.attempts:
@@ -325,6 +328,20 @@ def test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN():
     assert out["ATTEMPTS"] == "0", _detail(
         f"the guard recorded {out['ATTEMPTS']} attempt(s) that the split above "
         f"did not account for — the classification and the guard disagree")
+    # Ruling D-30. Whether the exemption FIRES in any given run depends on
+    # whether `platform.uname()`'s cache was already warm, so a count is not
+    # asserted — that would be asserting a cache state. What is asserted is that
+    # anything permitted is permitted BY NAME: an exemption that fired without
+    # saying which one it was would be the hole this ruling was careful not to
+    # open.
+    permitted = int(out.get("EXEMPTED", "0"))
+    named = [d for d in out.get("EXEMPTIONS", "").split(";") if d]
+    assert len(named) == permitted, _detail(
+        f"{permitted} spawn(s) were permitted but {len(named)} were named")
+    for description in named:
+        assert description in offline.enumerate_permitted_spawns(), _detail(
+            f"a spawn was permitted under an exemption this build does not "
+            f"declare: {description!r}")
     fetch = [m for m in out.get("FETCH", "").split(",") if m]
     assert fetch == [], _detail(
         f"a whole pipeline run loaded fetch clients {fetch} — THIS IS A "
@@ -524,3 +541,202 @@ def test_a_swallowed_spawn_is_still_a_finding():
     assert not guard.clean, (
         "a spawn swallowed by the caller left no trace — the guard is blocking "
         "rather than counting")
+
+
+# ---------------------------------------------------------------------------
+# D-30 — the one permitted spawn, narrow and by name
+# ---------------------------------------------------------------------------
+#
+# Alex's ruling, 2026-08-04, on the finding that three review rounds had
+# reported as an outbound-network risk and that turned out to be
+# `platform.uname()` running `ver` through the shell during a dependency's
+# import. Permitted BY IDENTITY, refused by every other shape.
+#
+# The tests below are the "must fail, not widen" half of the ruling. Each one
+# removes exactly one component of the identity and proves the call is refused,
+# because an exemption that is only ever exercised on the happy path is an
+# exemption nobody has established the edges of.
+
+
+def _platform_frame(name="_syscmd_ver", filename=None):
+    """A stack frame that looks like the permitted caller."""
+    import traceback as _tb
+    import platform as _pl
+
+    return _tb.FrameSummary(filename or _pl.__file__, 1, name)
+
+
+def _other_frame(name="check_output"):
+    import traceback as _tb
+
+    return _tb.FrameSummary(__file__, 1, name)
+
+
+def test_the_permitted_spawn_is_enumerated_not_described():
+    """The exemption is a value a reviewer can diff, like every other set here.
+
+    A permission that exists only inside an ``if`` is a permission nobody can
+    review, which is the same objection this module already makes to describing
+    the guarded set in prose.
+    """
+    described = offline.enumerate_permitted_spawns()
+    assert len(described) == 1, (
+        "the permitted-spawn set changed size; a second exemption is a ruling, "
+        "not a code change")
+    assert len(offline.PERMITTED_SPAWNS) == 1
+    only = offline.PERMITTED_SPAWNS[0]
+    assert only.ruling.startswith("D-30")
+    assert only.caller_function == "_syscmd_ver"
+    assert only.entry_point == "subprocess.Popen"
+    assert "ver" in only.commands
+    assert only.reason, "an exemption without its reason is a hole with a name"
+    assert "_syscmd_ver" in described[0] and "D-30" in described[0]
+
+
+def test_no_exemption_may_be_a_socket():
+    """The exemption is scoped to the child-process class and cannot escape it.
+
+    Criterion 6's network half is not weakened by D-30 and this is the assertion
+    that keeps it that way: every declared exemption names a child-process entry
+    point, and none names anything the socket guard covers.
+    """
+    sockets = set(offline.enumerate_guarded_entry_points())
+    children = set(offline.enumerate_child_process_entry_points())
+    for exemption in offline.PERMITTED_SPAWNS:
+        assert exemption.entry_point in children
+        assert exemption.entry_point not in sockets
+
+
+def test_the_platform_version_probe_runs_and_is_recorded():
+    """FAIL-BEFORE: without D-30 this raises ``ProcessSpawnAttempted``.
+
+    Three things at once, and all three are the ruling: the call actually RUNS
+    (a blocked probe would make DocIQ report ``models-unavailable`` for its OCR
+    engine identity whenever the guard was the first thing to touch
+    ``platform.uname()``), the guard stays ``clean``, and the permission is
+    RECORDED with its stack rather than allowed silently.
+    """
+    import platform
+
+    with offline.no_network() as guard:
+        result = platform._syscmd_ver()
+
+    assert result and result[0], (
+        "the permitted probe was allowed but produced nothing — it was blocked "
+        "in some other way")
+    assert guard.clean, "a permitted spawn was filed as a refusal"
+    assert guard.attempts == []
+    assert len(guard.exempted) >= 1, (
+        "the spawn was permitted and NOT recorded — a permission nobody can "
+        "see is indistinguishable from a hole")
+    record = guard.exempted[0]
+    assert record.exemption.ruling.startswith("D-30")
+    assert "_syscmd_ver" in record.stack, (
+        "the retained evidence does not name the caller it permitted")
+    rendered = guard.render()
+    assert "PERMITTED" in rendered and "_syscmd_ver" in rendered, (
+        "a clean report did not disclose what it let through")
+
+
+def test_the_same_command_from_a_different_caller_is_refused():
+    """The identity is the caller too, not just the command.
+
+    ``ver`` through the shell is exactly the permitted command. From anywhere
+    but the standard library's own version probe it is refused, because
+    "allow this command" is a CATEGORY and the ruling is by identity.
+    """
+    import subprocess
+
+    with offline.no_network() as guard:
+        with pytest.raises(offline.ProcessSpawnAttempted):
+            subprocess.Popen("ver", shell=True)
+
+    assert not guard.clean
+    assert guard.exempted == []
+    assert len(guard.attempts) == 1
+
+
+def _syscmd_ver():
+    """An impostor: the permitted FUNCTION NAME, in a file that is not the
+    standard library's ``platform``. Used by the test below."""
+    import subprocess
+
+    return subprocess.Popen("ver", shell=True)
+
+
+def test_an_impostor_with_the_permitted_name_is_refused():
+    """A caller that borrows the name does not borrow the permission.
+
+    The match is on the defining FILE as well as the function name, so code that
+    defines its own ``_syscmd_ver`` — accidentally or otherwise — is refused.
+    Without the file check this test passes while the exemption means nothing.
+    """
+    with offline.no_network() as guard:
+        with pytest.raises(offline.ProcessSpawnAttempted):
+            _syscmd_ver()
+
+    assert guard.exempted == [], "an impostor caller was permitted"
+    assert len(guard.attempts) == 1
+
+
+@pytest.mark.parametrize(
+    "entry_point,args,kwargs,stack,why",
+    [
+        ("subprocess.Popen", ("cmd /c whoami",), {"shell": True},
+         [_platform_frame()], "a different command"),
+        ("subprocess.Popen", ("ver",), {"shell": False},
+         [_platform_frame()], "not through the shell"),
+        ("subprocess.Popen", (), {"shell": True},
+         [_platform_frame()], "no command at all"),
+        ("os.system", ("ver",), {"shell": True},
+         [_platform_frame()], "a different entry point"),
+        ("subprocess.Popen", ("ver",), {"shell": True},
+         [_platform_frame(name="uname")], "a different function in platform.py"),
+        ("subprocess.Popen", ("ver",), {"shell": True},
+         [_platform_frame(filename=__file__)], "the right name, the wrong file"),
+        ("subprocess.Popen", ("ver",), {"shell": True},
+         [_platform_frame()] + [_other_frame() for _ in range(5)],
+         "the permitted caller too far up the stack"),
+        ("subprocess.Popen", ("ver",), {"shell": True}, [],
+         "no stack to identify a caller with"),
+    ],
+)
+def test_every_component_of_the_identity_is_load_bearing(
+    entry_point, args, kwargs, stack, why
+):
+    """Remove one component, and the call is refused.
+
+    This is the matrix behind "if the exemption ever stops matching it must
+    fail, not widen". Each row is a single-axis perturbation of the one
+    permitted call, and every one of them must return ``None`` — the value that
+    means "refuse". A row that passed here would name a way to obtain the
+    permission without being the thing it was granted to.
+    """
+    assert offline._permitted_spawn(entry_point, args, kwargs, stack) is None, (
+        f"the exemption matched despite {why}")
+
+
+def test_the_exact_permitted_call_still_matches():
+    """The other half of the matrix: the unperturbed call DOES match.
+
+    Without this, every row above would pass against a function that always
+    returns ``None``, and the matrix would prove nothing at all.
+    """
+    matched = offline._permitted_spawn(
+        "subprocess.Popen", ("ver",), {"shell": True}, [_platform_frame()])
+    assert matched is not None
+    assert matched.ruling.startswith("D-30")
+
+
+def test_criterion_6_is_claimed_in_one_place():
+    """The claim is a value, so the code and the documents cannot drift.
+
+    Criterion 6 was asserted as "no outbound connections" in several documents
+    while the probe that checked it was measuring something else entirely. The
+    sentence now lives here, states the exemption, and is what the documents
+    quote.
+    """
+    claim = offline.CRITERION_6_CLAIM
+    assert "no outbound network attempt" in claim.lower() or "NO outbound" in claim
+    assert "D-30" in claim, "the claim does not name the ruling that narrowed it"
+    assert "_syscmd_ver" in claim, "the claim does not name the exception"
