@@ -113,6 +113,21 @@ adopted_in = "18f4d65"
 wired_in = { "src/dociq/gui/pipeline.py" = ["profile_rules"], "src/dociq/adapter.py" = ["profile_rules"] }
 tests = ["tests/test_gui_screen_states.py", "tests/test_adapter.py"]
 
+# A-11b was invisible to `tools/check_amendments.py` for a reason worth writing
+# down: its reference pattern is `\bA-(\d{2})\b`, and "A-11b" does not match it.
+# So the one amendment in the register with a letter suffix was the one nothing
+# checked -- and it is the one that turned out to be declared on the seam and
+# populated by no adapter and rendered by no screen, for the length of the
+# sprint. `adopted_in` is the commit that actually wired it, not the one that
+# declared it.
+[amendment.A-11b]
+status = "applied"
+title = "the checklist attributes a DROP by rule identity and never shows what it matches or who approved it"
+raised_by = "Track E, which proposed both fields and declined to apply them"
+adopted_in = "91fed8d"
+wired_in = { "src/dociq/adapter.py" = ["_section_rules", "_rule_text"], "src/dociq/gui/view_models.py" = ["matched_by", "expert_note"], "src/dociq/gui/screens.py" = ["ProfileChecklistScreen"] }
+tests = ["tests/test_seam_population.py", "tests/test_view_models.py"]
+
 [amendment.A-12]
 status = "applied"
 title = "the seam cannot carry the section 8 handoff"

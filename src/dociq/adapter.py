@@ -280,7 +280,8 @@ def _reconciliation(result: RunResult) -> Reconciliation | None:
 
 
 def _section_lever(
-    name: str, tokens: int, pages: int, dropped_tokens: int, dropped_pages: int
+    name: str, tokens: int, pages: int, dropped_tokens: int, dropped_pages: int,
+    rules: dict[str, list],
 ) -> ReductionLever:
     """One waterfall row for one section, whatever fraction of it was dropped.
 
@@ -309,18 +310,58 @@ def _section_lever(
     The label says when a row is partial. ``ReductionLever`` has no field for it
     and the seam is frozen; the label is the string every screen already renders
     for a lever, so it is the one place the fact cannot be lost.
+
+    ``rule`` and ``note`` are the profile's own pattern and the expert's own
+    stated reason (A-11b). They are populated HERE from the rule that decided
+    the section, and they were populated nowhere before Codex review #2's
+    seam-population probe enumerated every field of every presentation record
+    and found them empty at every construction site in this module — the same
+    shape as B-3, one amendment older.
     """
+    rule, note = _rule_text(name, rules)
     if dropped_pages == 0:
         return ReductionLever(key=name, label=name, tokens=tokens, pages=pages,
-                              kind=LEVER_EXPERT, engaged=False, estimated=False)
+                              kind=LEVER_EXPERT, engaged=False,
+                              estimated=False, rule=rule, note=note)
     label = name if dropped_pages == pages else (
         f"{name} (part — {dropped_pages:,} of {pages:,} pages)")
     return ReductionLever(key=name, label=label, tokens=dropped_tokens,
                           pages=dropped_pages, kind=LEVER_EXPERT,
-                          engaged=True, estimated=False)
+                          engaged=True, estimated=False, rule=rule, note=note)
 
 
-def _plan(result: RunResult, before: TokenEstimate) -> ReductionPlan | None:
+def _section_rules(profiles: tuple[FormatProfile, ...]) -> dict[str, list]:
+    """Section name → every rule that could have produced it.
+
+    A LIST, not a rule. Stage 4 keys a page's section on ``rule.label or
+    matched_text`` and only ``rule_id`` is checked for uniqueness, so two rules
+    can share a section name — the documented partial case. Attributing one
+    rule's pattern and one expert's note to pages the other rule decided would
+    put words in an expert's mouth about an omission they did not approve, so
+    an ambiguous name yields nothing rather than a guess.
+    """
+    found: dict[str, list] = {}
+    for profile in profiles:
+        for rule in profile.section_rules:
+            found.setdefault(rule.label or rule.rule_id, []).append(rule)
+    return found
+
+
+def _rule_text(name: str, rules: dict[str, list]) -> tuple[str, str]:
+    """The verbatim pattern and note for a section, or ``("", "")``.
+
+    Empty is a state the checklist renders — "the profile stated no reason" —
+    and never a silent blank: an omission with no stated reason and an omission
+    whose reason was lost on the way to the screen must not look the same.
+    """
+    found = rules.get(name, ())
+    if len(found) != 1:
+        return "", ""
+    return found[0].pattern, found[0].notes or ""
+
+
+def _plan(result: RunResult, before: TokenEstimate,
+          profiles: tuple[FormatProfile, ...] = ()) -> ReductionPlan | None:
     """The D-14 waterfall, from figures this run counted.
 
     One lever per section a profile ruled on, and the lever's saving is the
@@ -359,13 +400,20 @@ def _plan(result: RunResult, before: TokenEstimate) -> ReductionPlan | None:
                 row[2] += tok
                 row[3] += 1
 
-    levers = tuple(_section_lever(name, *totals)
+    rules = _section_rules(profiles)
+    levers = tuple(_section_lever(name, *totals, rules=rules)
                    for name, totals in sorted(sections.items()))
     if not levers:
         return None
     return ReductionPlan(
         full_tokens=before.structural_tokens,
         levers=levers,
+        # ``capacity`` is deliberately left at its default, and the probe in
+        # tests/test_seam_population.py records that as a declared exemption
+        # rather than an oversight: DIRECT_CONTEXT_TOKENS is D-21's ruled
+        # reference line and the adapter has no second, run-specific figure to
+        # put here. Passing the same constant explicitly would create a second
+        # place the number lives (see its docstring — there are already three).
         basis=TokenBasis.of(before),
     )
 
@@ -494,25 +542,15 @@ class RealPipeline:
         is hashed content. So it is recorded here, and the coordinator is asked
         for a way to put it on screen; see the verification note."""
 
-        self.last_package_missing: tuple[str, ...] = ()
-        """Doc IDs the last :meth:`build_package` call asked for and the matter
-        folder had no ``clean_text`` file for.
-
-        **STOP THE LINE.** ``UploadPackage.missing`` is computed by the emit
-        layer precisely so a short package is *reported rather than silently
-        skipped* — its docstring says "the operator is the only one who can say
-        whether it matters". :class:`~dociq.gui.pipeline.PackageResult` has no
-        field to carry it and that module is frozen, so the adapter cannot put
-        it on screen by itself. Dropping the value is the one outcome that must
-        not stand while the seam is extended, so it is held here — the same
-        treatment :attr:`library_issues` gets — and the field the seam needs is
-        written up in the verification note:
-
-            ``PackageResult.missing: tuple[str, ...] = ()``
-
-        A package whose scope statement claims N documents and whose folder
-        holds N-1 is the D-20 failure in miniature, and it is the one the
-        operator would never see."""
+        # There WAS a ``last_package_missing`` holding attribute here, carrying
+        # the emit layer's report of what a package could not include. It is
+        # GONE (Codex review #2, B-3), and so is the claim it was written under
+        # — that it lived "where a screen can reach it". No screen ever reached
+        # it. ``PackageResult.missing`` is on the seam now and is the only home:
+        # a private attribute beside the seam is a place the GUI does not look,
+        # and the test that guarded it asserted the attribute rather than the
+        # returned record, so it passed while the user-visible path stayed
+        # wrong.
 
     # -- the API ------------------------------------------------------------
 
@@ -602,6 +640,15 @@ class RealPipeline:
                     kind=LEVER_EXPERT,
                     engaged=rule.disposition is Disposition.DROP,
                     estimated=True,
+                    # A-11b's two fields, populated at last. This is the screen
+                    # the amendment was written for — §6's checklist, where an
+                    # expert approves an omission before the run commits to it —
+                    # and until Codex review #2's seam-population probe both
+                    # were left at their defaults here, so the checklist could
+                    # show only that a DROP rule existed, never what it catches
+                    # or who approved it.
+                    rule=rule.pattern,
+                    note=rule.notes or "",
                 )
             )
 
@@ -711,7 +758,8 @@ class RealPipeline:
             # describe what an expert dropped from a corpus, and a cancelled run
             # has no corpus — the numbers would describe the fraction that
             # happened to be read before the operator pressed stop.
-            plan=_plan(result, before) if outcome.published else None,
+            plan=(_plan(result, before, profiles) if outcome.published
+                  else None),
             termination=outcome.termination,
             published=outcome.published,
         )
@@ -802,10 +850,6 @@ class RealPipeline:
             scope_statement=scope_statement,
             unsupported=len(outcome.result.unsupported),
         )
-        # Read off the package, not recomputed: what the emit layer could not
-        # find is the only authority on what the folder does not hold. See the
-        # attribute's docstring — this is a STOP-THE-LINE hold, not a home.
-        self.last_package_missing = package.missing
         return PackageResult(
             root=str(package.root),
             file_count=package.check.file_count,
@@ -817,6 +861,12 @@ class RealPipeline:
             # what the recipient will read.
             scope_statement=package.scope_statement,
             doc_count=package.doc_count,
+            # Read off the package, not recomputed: what the emit layer could
+            # not find is the only authority on what the folder does not hold.
+            # Omitting this keyword — which is exactly what this call site did
+            # for the length of the sprint — silently defaults the field to ()
+            # and tells the operator a short package is complete.
+            missing=package.missing,
         )
 
     # -- internals ----------------------------------------------------------
