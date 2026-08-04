@@ -1021,3 +1021,76 @@ and shared with `apply_bates_reported`'s own gate. **Found by running against
 the real production, not by reasoning about the code** — and the seam docstring
 for that field already explained why it mattered while the wiring behind it was
 wrong.
+
+---
+
+## A-15 — `TerminalStatus.BLOCKED` enumerates three ways in; the gate refusal is a fourth
+
+**Raised by:** the Codex review #2 fix round (B-1), 2026-08-04
+**Affects:** `dociq/contracts.py` — `TerminalStatus.BLOCKED` docstring, and
+optionally a new `TerminalStatus.REFUSED` member
+**Proposed severity:** TRIVIAL as a docstring correction; MINOR as a new member
+**Status:** RAISED, NOT APPLIED. The behaviour it describes has shipped; the
+frozen module is unchanged.
+
+### The case
+
+Codex B-1 found that §4 Stage 6 computed its checks and published regardless.
+The fix refuses publication when page accounting is red, when the manifest
+carries an unclassified output, or when the corpus is out of canonical order —
+`dociq.pipeline._refuse_publication`.
+
+A refused run has to END somehow, and the vocabulary for that is
+`TerminalStatus`. It is recorded as `BLOCKED`, which is defensible on the value's
+own prose — "the run never established a corpus it could publish" is precisely
+what happened — and which produces exactly the right operator sentence:
+
+> RUN BLOCKED — NO DELIVERABLES WERE WRITTEN and the previous run's outputs in
+> this folder were left exactly as they were.
+
+But the docstring then says **"Three ways in: the disk preflight refused, the
+source root was not reachable, or the inventory could not be enumerated."** That
+enumeration is now short by one, and an enumeration that is quietly short is the
+`fix-the-class` failure this project keeps re-finding: a reader auditing every
+route into `BLOCKED` would audit three of four.
+
+The alternative considered and rejected was leaving the termination `COMPLETED`
+and carrying the refusal only in `PipelineOutcome.published=False`. The walk
+*did* complete, so that is arguable — but `RunTermination.headline()` would then
+print "Run status: completed — the walk covered every file found." at the top of
+a refused run's `run_status.json` and its summary PDF, and
+`RunTermination.as_jsonable()` would write `"published": true` into the log of a
+run that published nothing. A status that reads correctly to a machine and lies
+to the operator is the worse of the two.
+
+### Proposed wording — the minimum
+
+Add a fourth item to `TerminalStatus.BLOCKED`'s docstring:
+
+> ...or — added by A-15 — **§4 Stage 6 refused to publish**: the walk completed
+> and a full set was built in staging, and that set failed its own gates
+> (page-accounting discrepancy, an output the byte-identical claim does not
+> classify, or a corpus out of canonical order). The staged set is discarded and
+> the folder's existing deliverables are untouched, which is why this is a
+> *blocked* run and not a completed one.
+
+### Proposed wording — the better shape
+
+A distinct member, so the four routes stop sharing one word:
+
+```python
+REFUSED = "refused"
+"""The run built a complete set and its own Stage-6 gates rejected it."""
+```
+
+`RunTermination.complete` and `.publishable` are already derived from
+`status is COMPLETED`, so a new member is correct by construction on both. The
+cost is every consumer that switches on the enum — `RunTermination.headline`,
+the GUI's failure state, the summary banner — which is why it is raised rather
+than taken during a merge-gate fix round on a frozen, shared module.
+
+### Why it is raised, not applied
+
+`src/dociq/contracts.py` is frozen and was being edited by a parallel track
+during this fix round. Applying it here would have been a conflict on a module
+whose whole point is that it does not move under people.

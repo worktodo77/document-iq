@@ -20,14 +20,18 @@ softened.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from ..contracts import DocIQError
 
 __all__ = [
     "OutputLayout",
     "write_text_deterministic",
+    "replace_text_deterministic",
     "safe_component",
     "STATE_DIRNAME",
     "STAGING_DIRNAME",
@@ -38,6 +42,7 @@ __all__ = [
     "commit_staging",
     "recover_pending",
     "pending_swap",
+    "PendingSwapUnreadable",
 ]
 
 _UNSAFE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -140,6 +145,49 @@ def write_text_deterministic(path: Path, text: str) -> Path:
     return path
 
 
+def replace_text_deterministic(path: Path, text: str) -> Path:
+    """:func:`write_text_deterministic`, but the file never exists half-written.
+
+    The bytes go to a sibling temporary name and are then moved onto ``path``
+    with :func:`os.replace`, which is atomic on NTFS and on POSIX alike. A
+    process that dies at any instant leaves either the previous file or the new
+    one — never a prefix of the new one.
+
+    This exists because of Codex review #2, finding B-2. The swap's readiness
+    marker was written with the plain writer, so a crash inside that single
+    ``fh.write`` could leave a marker holding truncated JSON. The marker's
+    *existence* is what authorises deleting the previous run's deliverables, so
+    a marker that exists and cannot be read is the one state in this module
+    where "exists" and "says" disagree — and the recovery had to guess. Making
+    the write atomic removes the state rather than handling it.
+
+    The temporary name is derived from the target and removed on failure, so a
+    dead run cannot leave litter that a later ``rglob`` would move into the
+    matter folder. It is only ever used inside ``.dociq/``, which the manifest
+    excludes; a caller that pointed it at a deliverable would still be safe,
+    because the temporary is gone before this returns either way.
+    """
+    if "\r" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".partial")
+    try:
+        with tmp.open("w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        # Including KeyboardInterrupt: a cancelled run must not leave a
+        # `.partial` beside the marker it failed to write.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Staging and the swap
 # ---------------------------------------------------------------------------
@@ -169,7 +217,120 @@ MARKER_NAME = "staging_ready.json"
 """Written when staging is COMPLETE and the swap may begin; removed when the
 swap has finished. Its presence is the only thing that authorizes moving files
 into the matter folder, and it is what makes an interrupted swap recoverable —
-see :func:`commit_staging`."""
+see :func:`commit_staging`.
+
+Written by :func:`replace_text_deterministic`, so it is never observed
+half-written: the marker either does not exist or holds the whole document. A
+marker that nonetheless cannot be parsed is corruption or a hand edit, and
+:func:`commit_staging` refuses to act on it rather than guessing — see
+:class:`PendingSwapUnreadable`."""
+
+
+class PendingSwapUnreadable(DocIQError):
+    """A readiness marker exists and cannot be trusted to say what it means.
+
+    Codex review #2, finding B-2. The marker used to be read permissively: an
+    ``OSError`` or a ``ValueError`` was absorbed and the swap proceeded with an
+    EMPTY supersede list. That reads as conservative and is the opposite.
+
+    Run 1 publishes 100 clean-text files. Run 2 legitimately produces 80, stages
+    them, and dies while writing the marker. Under the permissive read the next
+    run moves run 2's 80 files over the destination, leaves run 1's other 20
+    beside them, and deletes the marker — so the matter folder becomes a
+    hundred-file set carrying an eighty-file manifest, with no marker left to say
+    that anything happened. Those twenty stale exhibits are indistinguishable
+    from current evidence, and the state that would have disclosed them was
+    deleted by the recovery that created it.
+
+    So an unreadable marker FAILS CLOSED. Nothing moves, nothing is deleted, the
+    marker and the staged set are both left exactly as they are, and the run
+    stops with this error. The complete staged set is not lost — it is in
+    ``.dociq/staging/``, named in the message, and a repaired or removed marker
+    puts the folder back on a road the code can reason about. That is a worse
+    Tuesday than a silent roll-forward and a better one than an evidence set
+    nobody can tell is mixed.
+
+    Note the asymmetry that decides it: the permissive branch's cost is a wrong
+    answer that looks right, and this one's cost is a run that stops and says
+    why. Only one of those is discoverable by the person holding the folder.
+    """
+
+
+def _validate_superseded_entry(rel: object) -> str:
+    """A supersede entry names a file INSIDE the matter folder, or it is refused.
+
+    The entries drive ``unlink`` and ``rmtree``, and before this they were joined
+    to the matter root and acted on unchecked. ``..\\..\\Windows`` or ``C:/`` in
+    a hand-edited or corrupt marker was a delete outside the output root. That is
+    the same finding as B-2 one layer down — state read from disk deciding a
+    destructive act — so it is checked where the state is parsed rather than
+    trusted because "we wrote it".
+    """
+    if not isinstance(rel, str) or not rel:
+        raise ValueError(f"superseded entry is not a non-empty string: {rel!r}")
+    pure = PurePosixPath(rel.replace("\\", "/"))
+    if pure.is_absolute() or ":" in rel or rel.startswith("/"):
+        raise ValueError(f"superseded entry is not relative: {rel!r}")
+    if any(part in ("..", "") for part in pure.parts):
+        raise ValueError(f"superseded entry escapes the matter folder: {rel!r}")
+    return rel
+
+
+def _read_marker(marker: Path) -> tuple[str, ...]:
+    """The supersede list a readiness marker declares, or fail closed.
+
+    Every deviation is fatal, including ones a permissive reader would shrug at
+    (a missing ``superseded`` key, a non-list, a non-string entry): the marker is
+    written by exactly one function, atomically, so anything this cannot parse is
+    corruption or a hand edit, and neither is a state to guess through.
+    """
+    try:
+        raw = marker.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PendingSwapUnreadable(_UNREADABLE.format(
+            marker=marker, why=f"it could not be read ({exc})",
+            staging=marker.parent / STAGING_DIRNAME)) from exc
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise PendingSwapUnreadable(_UNREADABLE.format(
+            marker=marker, why=f"it is not valid JSON ({exc})",
+            staging=marker.parent / STAGING_DIRNAME)) from exc
+    if not isinstance(payload, dict):
+        raise PendingSwapUnreadable(_UNREADABLE.format(
+            marker=marker,
+            why=f"its top level is {type(payload).__name__}, not an object",
+            staging=marker.parent / STAGING_DIRNAME))
+    if "superseded" not in payload:
+        raise PendingSwapUnreadable(_UNREADABLE.format(
+            marker=marker, why="it names no `superseded` list",
+            staging=marker.parent / STAGING_DIRNAME))
+    entries = payload["superseded"]
+    if not isinstance(entries, list):
+        raise PendingSwapUnreadable(_UNREADABLE.format(
+            marker=marker,
+            why=f"`superseded` is {type(entries).__name__}, not a list",
+            staging=marker.parent / STAGING_DIRNAME))
+    try:
+        return tuple(_validate_superseded_entry(e) for e in entries)
+    except ValueError as exc:
+        raise PendingSwapUnreadable(_UNREADABLE.format(
+            marker=marker, why=str(exc),
+            staging=marker.parent / STAGING_DIRNAME)) from exc
+
+
+_UNREADABLE = (
+    "REFUSING to complete an interrupted swap: the readiness marker at "
+    "{marker} exists but {why}.\n"
+    "Nothing has been moved or deleted — this folder is exactly as the "
+    "interrupted run left it.\n"
+    "A COMPLETE set of deliverables is waiting in {staging}. The marker says "
+    "which of this folder's files that set replaces, and without it a "
+    "roll-forward would leave the ones it cannot name beside the new set, with "
+    "nothing recording the mixture.\n"
+    "To go on: either restore a readable marker, or move {staging} aside and "
+    "delete the marker to re-run from the source documents."
+)
 
 
 def _state_dir(destination: OutputLayout) -> Path:
@@ -218,7 +379,9 @@ def mark_ready(destination: OutputLayout, superseded: tuple[str, ...] = ()) -> P
     """
     marker = _marker_path(destination)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    write_text_deterministic(
+    for rel in superseded:
+        _validate_superseded_entry(rel)
+    replace_text_deterministic(
         marker,
         json.dumps(
             {
@@ -275,16 +438,11 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     marker = _marker_path(destination)
     if not marker.is_file():
         return ()
-    try:
-        payload = json.loads(marker.read_text(encoding="utf-8"))
-        superseded = tuple(str(p) for p in payload.get("superseded", ()))
-    except (OSError, ValueError):
-        # A marker we cannot read still means "staging is complete" — that is
-        # what its existence records. Rolling the swap forward with an empty
-        # supersede list moves the new deliverables into place and leaves any
-        # stale ones, which is recoverable; refusing to move would leave the
-        # complete set stranded in a hidden directory, which is not.
-        superseded = ()
+    # Read and validated BEFORE anything moves or is deleted. An unreadable
+    # marker raises :class:`PendingSwapUnreadable` from here, with the folder
+    # untouched — see that class for why the permissive read this replaces was
+    # the more dangerous of the two options (Codex review #2, B-2).
+    superseded = _read_marker(marker)
 
     root = destination.root
     removed: list[str] = []
@@ -312,7 +470,15 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
 
 
 def recover_pending(destination: OutputLayout) -> tuple[str, ...]:
-    """Finish an interrupted swap, if there is one. Safe to call always."""
+    """Finish an interrupted swap, if there is one.
+
+    Safe to call always, in the sense that it does nothing when no swap is
+    pending. It is NOT total: a marker that exists and cannot be parsed raises
+    :class:`PendingSwapUnreadable` and leaves the folder untouched, which is the
+    B-2 fix. :func:`dociq.pipeline.run` calls this as its first statement and
+    turns that into a blocked run with the ordinary ``incomplete_run/`` record,
+    so an operator sees the reason rather than a traceback.
+    """
     if not pending_swap(destination):
         return ()
     return commit_staging(destination)

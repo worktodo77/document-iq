@@ -136,3 +136,9 @@ raised_by = "Track D, as a stop-the-line, and left unapplied for the length of t
 adopted_in = "3a44f2e"
 wired_in = { "src/dociq/gui/pipeline.py" = ["BatesProposal", "BatesConfirm", "confirm_bates"], "src/dociq/pipeline.py" = ["confirm_bates"], "src/dociq/gui/screens.py" = ["BatesConfirmScreen"] }
 tests = ["tests/test_bates_confirmation.py"]
+
+[amendment.A-15]
+status = "raised"
+title = "TerminalStatus.BLOCKED enumerates three ways in; the Stage-6 gate refusal is a fourth"
+raised_by = "the Codex review #2 fix round (B-1), on a frozen and concurrently-edited module"
+tests = ["tests/test_publication_gate.py"]
