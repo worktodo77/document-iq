@@ -429,14 +429,11 @@ def test_the_estimate_is_absent_for_the_fixture_corpus():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def real_run(tmp_path_factory):
-    out = tmp_path_factory.mktemp("adapter")
-    pipe = adapter.RealPipeline(ocr_enabled=False)
-    events: list = []
-    outcome = pipe.run(RunRequest(str(FIXTURES), str(out / "matter")),
-                       events.append, lambda: False)
-    return outcome, events, out / "matter"
+# ``real_run`` is now a SESSION fixture in ``tests/conftest.py``. It moved
+# because the seam-population probe and the GUI's rendered-state tests must
+# assert against the same real run this file does — a second, separately
+# constructed run would let the two disagree about what the pipeline produced,
+# which is exactly the disagreement B-3 was.
 
 
 def test_a_real_run_publishes_and_says_so(real_run):
@@ -1038,29 +1035,37 @@ def test_the_partial_case_is_reachable_from_a_valid_profile():
 # --- B5: UploadPackage.missing must not be dropped on the floor -------------
 
 
-def test_the_adapter_holds_the_missing_doc_ids_the_seam_cannot_carry(real_run):
-    """STOP THE LINE. ``PackageResult`` has no ``missing`` field and its module
-    is frozen, so the value is held on the adapter — where a screen can reach it
-    the moment the seam grows the field — rather than discarded.
+def test_the_seam_result_carries_the_missing_doc_ids(real_run):
+    """Codex review #2, B-3. The value must be on the RETURNED RECORD.
 
-    FAIL-BEFORE: ``build_upload_package`` computed ``missing`` and the adapter
-    read nothing off the package, so a package one document short of the scope
-    its own statement claims was indistinguishable from a complete one."""
+    **What this test used to assert, and why that was worthless.** It read
+    ``RealPipeline.last_package_missing`` — a private attribute the GUI never
+    touched — and passed, for the whole sprint, while ``build_package`` built its
+    ``PackageResult`` without ``missing=`` and every consumer of the declared
+    seam saw an empty tuple. The docstring claimed the value was held "where a
+    screen can reach it"; no screen ever did. Both the claim and the attribute
+    are withdrawn.
+
+    FAIL-BEFORE: with ``missing=package.missing`` removed from the construction
+    in :meth:`RealPipeline.build_package`, the assertion below reads ``()`` for a
+    scope that asked for a document the matter folder does not hold.
+    """
     outcome, _events, _root = real_run
     pipe = adapter.RealPipeline()
-    assert pipe.last_package_missing == ()
+    assert not hasattr(pipe, "last_package_missing"), (
+        "the private holding attribute is back; the seam field is the only home"
+    )
 
     real = tuple(d.doc_id for d in outcome.result.documents)[:1]
     # A Doc ID with no clean_text file, alongside one that has it. The scope
     # asks for two documents and the folder can only hold one.
     result = pipe.build_package(outcome, real + ("LI-99999",), "SCOPE\n")
     assert result.doc_count == 1
-    assert pipe.last_package_missing == ("LI-99999",), (
-        "the adapter dropped the emit layer's own report of what the package "
+    assert result.missing == ("LI-99999",), (
+        "the seam dropped the emit layer's own report of what the package "
         "could not include"
     )
 
-    # And it is reset by the next call, not accumulated — a stale name beside a
+    # And a complete package says so on the same field — a stale name beside a
     # complete package is the same defect pointing the other way.
-    pipe.build_package(outcome, real, "SCOPE\n")
-    assert pipe.last_package_missing == ()
+    assert pipe.build_package(outcome, real, "SCOPE\n").missing == ()

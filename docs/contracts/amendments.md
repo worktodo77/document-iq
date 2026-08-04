@@ -850,6 +850,28 @@ cannot explain in their own words is an omission they cannot defend, and the
 alternative — a widget paraphrasing the rationale — is the tool putting words
 in the expert's mouth about evidence. Both fields are carried verbatim.
 
+> **CORRECTION, 2026-08-04 — "APPLIED" was true of the seam and false of the
+> product.** `rule` and `note` were added to `ReductionLever`, documented,
+> preserved across `with_toggled`, and covered by two probes — and **no adapter
+> ever populated them and no screen ever rendered them.** All three
+> construction sites in `adapter.py` left both at `""`, including
+> `profile_rules`, which is the §6 checklist path this amendment exists for. So
+> the checklist could show that a DROP rule existed and never what it catches or
+> who approved it — the exact gap the paragraph above says is the difference
+> between shipping and defending.
+>
+> Found by the seam-population probe built for Codex review #2's B-3
+> (`tests/test_seam_population.py`), which enumerates every field of every seam
+> presentation record and requires each to be named at every construction site
+> in the adapter or ruled exempt. **This is the same failure as A-12, A-14 and
+> B-3 — the fourth instance in one sprint** — and it is the reason the probe
+> enumerates rather than checking the field that happened to be reported.
+>
+> Now populated (`rule=rule.pattern`, `note=rule.notes`, and from the run's own
+> profiles for the post-run waterfall) and rendered by
+> `ProfileChecklistScreen._row_widget` through `ChecklistRow.matched_by()` and
+> `ChecklistRow.expert_note()`. Both watched RED before the fix.
+
 **A-12 — APPLIED as proposed**, plus `PackageResult` as a presentation record
 in the seam (`root`, `file_count`, `total_bytes`, `scope_statement`,
 `doc_count`), the same treatment `Reconciliation` already gets.

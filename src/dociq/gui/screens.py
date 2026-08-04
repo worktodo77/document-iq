@@ -370,9 +370,26 @@ class SetupScreen(QWidget):
 
 
 class ProgressScreen(QWidget):
-    """Per-document status while a run is in flight."""
+    """Per-document status while a run is in flight — and when it has stopped.
+
+    **A settled run is a different screen from a running one** (Codex review #2,
+    A-2). It used to be the same one: a failed run appended a flagged row saying
+    "Run failed" and the worker thread quit, leaving Cancel as the only control
+    on screen — a button whose entire job was to stop a thread that had already
+    stopped. There was no back, no retry, and no new run, so the only recovery
+    from an ordinary exception (an unreadable stored Bates pattern, a full disk,
+    an emit error) was closing and reopening DocIQ.
+
+    So the screen has two states. While a run is in flight, Cancel is live and
+    it is the only action. Once the run has SETTLED — completed, failed, or
+    cancelled — Cancel is disabled, because a control that cannot do what it
+    says is worse than no control, and on failure the error is preserved in full
+    beside two actions that work.
+    """
 
     cancel_requested = Signal()
+    back_requested = Signal()
+    retry_requested = Signal()
 
     def __init__(self, theme: Theme, parent=None) -> None:
         super().__init__(parent)
@@ -409,22 +426,122 @@ class ProgressScreen(QWidget):
                                    QSizePolicy.Policy.Expanding)
         lay.addWidget(self._scroll, 1)
 
+        # The failure banner sits between the list and the actions, so the
+        # reason is read on the way to the button. Cleared and hidden while a
+        # run is in flight.
+        self._error = QLabel("")
+        self._error.setFont(theme.body(10))
+        self._error.setWordWrap(True)
+        self._error.setStyleSheet(f"color: {theme.palette.warn};")
+        self._error.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self._error)
+
         foot = QHBoxLayout()
         foot.addStretch(1)
-        cancel = _button("Cancel", theme)
-        cancel.clicked.connect(self.cancel_requested.emit)
-        foot.addWidget(cancel)
+        self._back = _button("← Back to setup", theme)
+        self._back.clicked.connect(self.back_requested.emit)
+        foot.addWidget(self._back)
+        self._retry = _button("Try this run again", theme, "primary")
+        self._retry.clicked.connect(self.retry_requested.emit)
+        foot.addWidget(self._retry)
+        self._cancel = _button("Cancel", theme)
+        self._cancel.clicked.connect(self.cancel_requested.emit)
+        foot.addWidget(self._cancel)
         lay.addLayout(foot)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(page)
 
+        self._settled = False
+        self.reset()
+
+    # -- states ---------------------------------------------------------------
+
     def reset(self) -> None:
+        """Back to the in-flight state. Called before every run, including a
+        RETRY — a second attempt that still showed the first one's error would
+        be reporting a failure that has not happened yet."""
         clear_layout(self._rows_lay, keep_trailing=1)  # keep the stretch
         self._bar.setValue(0)
         self._count.setText("")
         self._title.setText("Reading the folder…")
+        self._error.setText("")
+        self._error.setVisible(False)
+        self._settled = False
+        self._cancel.setEnabled(True)
+        for button in (self._back, self._retry):
+            button.setVisible(False)
+
+    def settle(self) -> None:
+        """The worker thread has stopped, however it stopped.
+
+        Cancel is disabled here rather than hidden: the operator pressed a
+        button a moment ago and a control that disappears reads as a screen that
+        moved on without them. Disabled, it still says what it was for.
+        """
+        self._settled = True
+        self._cancel.setEnabled(False)
+
+    def fail(self, message: str) -> None:
+        """A settled run that did NOT produce deliverables.
+
+        The pipeline's own text is shown verbatim and in full. It is the only
+        specific thing the operator has, and it is what they will paste into a
+        message to whoever maintains this.
+        """
+        self._settled_state(
+            "This run failed",
+            (message.strip() or "The pipeline reported no reason.")
+            + "\n\nNo deliverables were written for this run. Any files in the "
+              "output folder are from an EARLIER run — check their dates before "
+              "relying on them.",
+        )
+
+    def stopped(self, reason: str) -> None:
+        """A settled run the OPERATOR ended. Not a failure, and not worded as
+        one — the screen must not tell someone their deliberate act went wrong —
+        but it is the same dead end if it offers no way out, so it settles and
+        offers the same two actions."""
+        self._settled_state(
+            "This run was stopped",
+            (reason.strip() or "The run was stopped before it finished.")
+            + "\n\nNothing was published. The output folder holds whatever an "
+              "earlier run left there.",
+        )
+
+    def _settled_state(self, title: str, message: str) -> None:
+        self.settle()
+        self._title.setText(title)
+        self._error.setText(message)
+        self._error.setVisible(True)
+        for button in (self._back, self._retry):
+            button.setVisible(True)
+
+    # -- what a test reads ---------------------------------------------------
+
+    def failed(self) -> bool:
+        return self._error.text() != ""
+
+    def error_text(self) -> str:
+        return self._error.text()
+
+    def title_text(self) -> str:
+        return self._title.text()
+
+    def cancel_enabled(self) -> bool:
+        return self._cancel.isEnabled()
+
+    def recovery_offered(self) -> bool:
+        """Whether the screen offers a way out that actually does something.
+
+        ``isHidden`` and not ``isVisible``: under the offscreen platform no
+        top-level window is shown, so ``isVisible()`` is False for every widget
+        on every screen. ``isHidden()`` reports the explicit hide these buttons
+        are controlled by.
+        """
+        return not self._back.isHidden() and not self._retry.isHidden()
 
     def append(self, event: ProgressEvent) -> None:
         self._title.setText("Processing documents")
@@ -443,6 +560,13 @@ class ProgressScreen(QWidget):
         name.setWordWrap(True)
         status = QLabel(event.status)
         status.setFont(self._theme.body(9))
+        # Wrapped for the same reason the filename is, and found by the same
+        # probe: an unwrapped status sets the scrolled widget's minimum width,
+        # and the failure row's status is the pipeline's exception text — the
+        # longest string this list can ever hold. Adding the failed state to the
+        # screen-state grid made the whole screen scroll sideways at the
+        # product's minimum window.
+        status.setWordWrap(True)
         status.setStyleSheet(
             f"color: {self._theme.palette.warn if event.flagged else self._theme.palette.ink_muted};"
         )
@@ -911,6 +1035,25 @@ class ProfileChecklistScreen(QWidget):
         head.addWidget(scale)
         lay.addLayout(head)
         lay.addWidget(_muted(row.attribution(), self._theme, 9))
+        # A-11b's pattern and the expert's own note, rendered at last. The
+        # fields have been on the seam since A-11b and reached no screen and no
+        # adapter until Codex review #2's seam-population probe; the checklist
+        # could say a DROP rule existed and not what it catches or who approved
+        # it — "Rule X → section Y → DROP" and nothing more.
+        matched = row.matched_by()
+        if matched:
+            pattern = QLabel(matched)
+            pattern.setFont(self._theme.mono_plain(8))
+            pattern.setWordWrap(True)
+            pattern.setStyleSheet(f"color: {self._theme.palette.ink_muted};")
+            lay.addWidget(pattern)
+        note = row.expert_note()
+        if note:
+            reason = QLabel(note)
+            reason.setFont(self._theme.body(9))
+            reason.setWordWrap(True)
+            reason.setStyleSheet(f"color: {self._theme.palette.ink};")
+            lay.addWidget(reason)
         return w
 
     def _emit_accept(self) -> None:
@@ -1198,6 +1341,28 @@ class HandoffScreen(QWidget):
         self._build.clicked.connect(self._emit_build)
         foot.addWidget(self._build)
         lay.addLayout(foot)
+
+        # -- what the last build actually did (Codex #2, A-1) ----------------
+        # Hidden until there IS an outcome. An empty result panel standing
+        # permanently under the button is the same non-signal as no panel at
+        # all: the operator cannot tell it apart from a click that did nothing.
+        self._result_head = QLabel("")
+        self._result_head.setFont(theme.body_strong(11))
+        self._result_head.setWordWrap(True)
+        lay.addWidget(self._result_head)
+        self._result_lines = QLabel("")
+        self._result_lines.setFont(theme.mono_plain(9))
+        self._result_lines.setWordWrap(True)
+        self._result_lines.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self._result_lines)
+        self._result_missing = QLabel("")
+        self._result_missing.setFont(theme.body(9))
+        self._result_missing.setWordWrap(True)
+        self._result_missing.setStyleSheet(f"color: {theme.palette.warn};")
+        lay.addWidget(self._result_missing)
+        self._show_package(None)
+
         lay.addStretch(1)
 
         outer = QVBoxLayout(self)
@@ -1237,6 +1402,51 @@ class HandoffScreen(QWidget):
         self._date_from.setVisible(kind == SCOPE_DATES)
         self._date_to.setVisible(kind == SCOPE_DATES)
         self._doc_type.setVisible(kind == SCOPE_TYPES)
+
+        self._show_package(view.package)
+
+    def _show_package(self, package) -> None:
+        """Render what the last build did — or hide the panel entirely (A-1).
+
+        Hidden is a state, not an absence of one: it means *no build has been
+        attempted under the scope now on screen*, and it is reached by a scope
+        change as well as by a fresh visit. The alternative — leaving the
+        previous outcome up — would show "Upload package built" above a scope
+        statement describing a different set of documents.
+        """
+        shown = package is not None
+        for label in (self._result_head, self._result_lines,
+                      self._result_missing):
+            label.setVisible(shown)
+        if package is None:
+            self._result_head.setText("")
+            self._result_lines.setText("")
+            self._result_missing.setText("")
+            return
+        self._result_head.setText(package.headline)
+        self._result_head.setStyleSheet(
+            f"color: {self._theme.palette.navy if package.ok else self._theme.palette.warn};")
+        self._result_lines.setText("\n".join(package.lines))
+        note = package.missing_note()
+        self._result_missing.setText(note)
+        self._result_missing.setVisible(bool(note))
+
+    # -- what a test reads, since nobody has ever driven this with a mouse ---
+    #
+    # The text itself, NOT a widget-visibility query. Under the offscreen
+    # platform nothing has a shown top-level window, so ``isVisible()`` is False
+    # for every widget on every screen and an accessor built on it would report
+    # "" for a panel that is in fact rendering. The panel is CLEARED when there
+    # is no outcome, so "" means the same thing without depending on that.
+
+    def package_headline(self) -> str:
+        return self._result_head.text()
+
+    def package_lines(self) -> str:
+        return self._result_lines.text()
+
+    def package_missing_text(self) -> str:
+        return self._result_missing.text()
 
     def _reload_scope_choices(self, view: HandoffView) -> None:
         """Populate the date and type pickers from the run's own documents.

@@ -64,8 +64,22 @@ from dociq.gui.view_models import (  # noqa: E402
     build_handoff,
     build_profile_checklist,
     build_summary,
+    package_built,
+    package_failed,
 )
+from dociq.gui.pipeline import PackageResult  # noqa: E402
 from dociq.runstate import RunTermination, TerminalStatus  # noqa: E402
+
+_PACKAGE = PackageResult(
+    root=r"D:\m\out\upload_package",
+    file_count=14,
+    total_bytes=3_407_872,
+    scope_statement="SCOPE OF THIS PACKAGE — m\n" + "=" * 60 + "\n  ...\n",
+    doc_count=12,
+)
+"""A package result as the emit layer returns one. Shaped, not invented: every
+field is one ``build_upload_package`` populates, and ``tests/test_adapter.py``
+proves the real values against a real run."""
 
 MIN_WINDOW = (1040, 720)
 """The product's minimum window (``MainWindow.setMinimumSize``). Every state is
@@ -156,6 +170,13 @@ def _drive_progress(window, state: str) -> int:
             window.progress.append(event)
 
         pipeline.run(_request(), on_progress, lambda: False)
+    if state == "failed":
+        window._run_failed(
+            r"[WinError 32] The process cannot access the file because it is "
+            r"being used by another process: 'D:\\m\\out\\sources.json'")
+    elif state == "stopped":
+        window._run_aborted("the run was stopped while the Bates format was "
+                            "waiting to be confirmed")
     return PROGRESS
 
 
@@ -243,6 +264,21 @@ def _drive_handoff(window, state: str) -> int:
                                      doc_types=("Monthly progress report",)))
     elif state == "empty-scope":
         window._rescope(PackageScope(SCOPE_DATES, "1900-01-01", "1900-12-31"))
+    elif state == "built":
+        window.handoff.show_handoff(replace(
+            build_handoff(outcome, package_available=True),
+            package=package_built(_PACKAGE)))
+    elif state == "built-short":
+        window.handoff.show_handoff(replace(
+            build_handoff(outcome, package_available=True),
+            package=package_built(replace(
+                _PACKAGE, doc_count=11, missing=("LI-00042", "LI-00043")))))
+    elif state == "build-failed":
+        window.handoff.show_handoff(replace(
+            build_handoff(outcome, package_available=True),
+            package=package_failed(
+                r"[WinError 32] The process cannot access the file because it "
+                r"is being used by another process: 'D:\\m\\out\\sources.json'")))
     return HANDOFF
 
 
@@ -250,14 +286,16 @@ GRID: tuple[tuple[str, str, object], ...] = tuple(
     (screen, state, driver)
     for screen, states, driver in (
         ("setup", ("empty", "filled", "source-only"), _drive_setup),
-        ("progress", ("fresh", "part-way", "complete"), _drive_progress),
+        ("progress", ("fresh", "part-way", "complete", "failed", "stopped"),
+         _drive_progress),
         ("summary", ("plain", "toggled", "measured-scale", "nothing-dropped",
                      "everything-dropped", "no-profile", "no-plan", "cancelled",
                      "huge", "fits"), _drive_summary),
         ("detail", ("ocr", "reconciliation"), _drive_detail),
         ("checklist", ("complete", "two-rules", "keeps-everything",
                        "unavailable", "mismatch"), _drive_checklist),
-        ("handoff", ("all", "dates", "types", "empty-scope", "unpublished"),
+        ("handoff", ("all", "dates", "types", "empty-scope", "unpublished",
+                     "built", "built-short", "build-failed"),
          _drive_handoff),
     )
     for state in states
@@ -342,7 +380,11 @@ def test_every_button_kind_has_a_disabled_appearance(app) -> None:
 def test_the_grid_covers_every_screen() -> None:
     """A grid that quietly stopped covering a screen would pass forever."""
     assert {cell[0] for cell in GRID} == set(SCREENS)
-    assert len(GRID) == 28
+    # 28 → 33: Codex review #2 added a settled progress screen (failed,
+    # stopped) and three package outcomes on the handoff (built, built-short,
+    # build-failed). The count is asserted so a state cannot be dropped from
+    # the grid by an edit that only meant to reorder it.
+    assert len(GRID) == 33
 
 
 @pytest.mark.parametrize("screen,state,driver", GRID,

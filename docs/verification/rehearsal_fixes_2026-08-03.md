@@ -308,6 +308,21 @@ Once it exists, `adapter.py` sets it directly and
 statement claims N documents and whose folder holds N-1 is the D-20 failure in
 miniature, and it is the one the operator would never see.
 
+> **SUPERSEDED 2026-08-04 — Codex review #2, B-3. Read this before the section
+> above.** The field was added and the holding attribute was *not* removed, so
+> the two coexisted for the rest of the sprint and `build_package` populated
+> only the attribute. The GUI never read it, and the focused test asserted the
+> private attribute rather than the returned record — so it passed while the
+> user-visible path stayed wrong.
+>
+> The claim in the paragraph above — that the value was held "the same treatment
+> `library_issues` already gets" and was therefore *not dropped* — is
+> **withdrawn**. It was dropped, at the seam, for every consumer that reads the
+> declared contract. `RealPipeline.last_package_missing` no longer exists;
+> `PackageResult.missing` is populated from `package.missing`, rendered on the
+> handoff screen, and asserted on the returned record and on the rendered screen
+> text. See `docs/verification/codex_r2_uigap_2026-08-04.md`.
+
 ---
 
 ## B6 — a partially-dropped section rendered as fully KEPT

@@ -24,6 +24,7 @@ from dociq.gui.pipeline import (
     BatesProposal,
     PipelineAPI,
     ProfileInfo,
+    ProgressEvent,
     RunOutcome,
     RunRequest,
     get_pipeline,
@@ -39,11 +40,14 @@ from dociq.gui.screens import (
 )
 from dociq.gui.theme import Theme, build_theme, stylesheet
 from dociq.gui.view_models import (
+    PackageOutcomeView,
     PackageScope,
     SummaryView,
     build_handoff,
     build_profile_checklist,
     build_summary,
+    package_built,
+    package_failed,
 )
 from dociq.gui.widgets import DisclosureBar, HeaderBar, Rule, ICON_ICO
 from dociq.runstate import RunAborted
@@ -87,6 +91,7 @@ class _RunWorker(QObject):
     progressed = Signal(object)
     finished = Signal(object)
     failed = Signal(str)
+    aborted = Signal(str)          # RunAborted reached here — a stop, not a fault
     bates_asked = Signal(object)   # BatesProposal — queued to the GUI thread
     bates_settled = Signal()       # the prompt is over, however it ended
 
@@ -144,6 +149,14 @@ class _RunWorker(QObject):
                 lambda: self._cancelled,
                 confirm_bates=self.confirm_bates,
             )
+        except RunAborted as aborted:
+            # The real pipeline handles its own cancellation and returns a
+            # CANCELLED outcome, so this is the path a stand-in — or a future
+            # stage that lets the exception out — takes. Separated from the
+            # failure signal because the screen must not tell an operator that
+            # the run they deliberately stopped went wrong.
+            self.aborted.emit(str(aborted))
+            return
         except Exception as exc:  # a failed run must not take the window with it
             self.failed.emit(str(exc))
             return
@@ -163,6 +176,10 @@ class MainWindow(QMainWindow):
         self._view: SummaryView | None = None
         self._outcome: RunOutcome | None = None
         self._scope = PackageScope()
+        self._package: PackageOutcomeView | None = None
+        self._request: RunRequest | None = None
+        """The last run's request, kept so a FAILED run can be retried (A-2).
+        Without it the only recovery from a failure was closing the window."""
 
         self.setWindowTitle("LI Document IQ")
         self.setMinimumSize(1040, 720)
@@ -198,6 +215,11 @@ class MainWindow(QMainWindow):
         self.setup.source_chosen.connect(self._preview_folder)
         self.summary.plan_changed.connect(self._replan)
         self.progress.cancel_requested.connect(self.cancel_run)
+        # A-2. Both are only offered once the run has settled, and both must
+        # actually work from there — a dead-end screen was the finding.
+        self.progress.back_requested.connect(
+            lambda: self.stack.setCurrentIndex(SETUP))
+        self.progress.retry_requested.connect(self.retry_run)
         self.summary.flag_selected.connect(self.show_flag)
         self.summary.new_run_requested.connect(
             lambda: self.stack.setCurrentIndex(SETUP))
@@ -245,6 +267,18 @@ class MainWindow(QMainWindow):
         self.summary.mark_stale()
 
     def start_run(self, request: RunRequest) -> None:
+        if self.thread_running():
+            # A second run started over a live one would leave the first
+            # thread's signals wired to the same screens, and the operator would
+            # watch two runs interleave into one list.
+            return
+        if self._thread is not None:
+            # The previous thread has been asked to quit but may not have
+            # unwound yet — a retry pressed the instant the failure appeared.
+            # Joining it here is what keeps ``self._thread`` from naming a
+            # thread that is still finishing while a new one starts.
+            self._thread.wait(2000)
+        self._request = request
         self.progress.reset()
         self.stack.setCurrentIndex(PROGRESS)
 
@@ -257,8 +291,10 @@ class MainWindow(QMainWindow):
         worker.bates_settled.connect(self._bates_settled)
         worker.finished.connect(self._run_finished)
         worker.failed.connect(self._run_failed)
+        worker.aborted.connect(self._run_aborted)
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.aborted.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         self._thread, self._worker = thread, worker
         thread.start()
@@ -266,6 +302,17 @@ class MainWindow(QMainWindow):
     def cancel_run(self) -> None:
         if self._worker is not None:
             self._worker.cancel()
+
+    def retry_run(self) -> None:
+        """Run the SAME request again, from the failed screen (A-2).
+
+        The request is replayed rather than the operator being sent back to
+        re-enter it: the setup screen's fields are still populated, but a retry
+        that quietly ran something slightly different from what just failed
+        would make the second result impossible to compare with the first.
+        """
+        if self._request is not None:
+            self.start_run(self._request)
 
     # -- §4 Stage 3, across the thread boundary (A-14, rehearsal A4) ---------
 
@@ -308,15 +355,29 @@ class MainWindow(QMainWindow):
         return self._thread is not None and self._thread.isRunning()
 
     def _run_finished(self, outcome: RunOutcome) -> None:
+        # Settle first: the thread has stopped, so Cancel must stop claiming it
+        # can stop it. It matters even on the success path, because the summary
+        # screen has a "Back" of its own and the operator can return here.
+        self.progress.settle()
         self.show_outcome(outcome)
 
     def _run_failed(self, message: str) -> None:
-        # Failure is disclosed on the screen the operator is already looking at,
-        # not in a modal they will dismiss without reading.
+        """Failure is disclosed on the screen the operator is already looking
+        at, not in a modal they will dismiss without reading — and it is now a
+        STATE of that screen rather than one more row in a list (A-2).
+
+        The row is kept as well as the banner. It is where the failure sits in
+        the sequence of what the run had done by then, which is the first thing
+        anyone diagnosing it wants.
+        """
         self.progress.append(
-            type("_E", (), {"done": 1, "total": 1, "filename": "Run failed",
-                            "status": message, "flagged": True})()
+            ProgressEvent(done=1, total=1, filename="Run failed",
+                          status=message, flagged=True)
         )
+        self.progress.fail(message)
+
+    def _run_aborted(self, reason: str) -> None:
+        self.progress.stopped(reason)
 
     def show_outcome(self, outcome: RunOutcome) -> None:
         """Display a finished run. Separate from the worker path so a render
@@ -360,11 +421,20 @@ class MainWindow(QMainWindow):
 
     def show_handoff(self) -> None:
         self._scope = PackageScope()
+        self._package = None
         self._paint_handoff()
         self.stack.setCurrentIndex(HANDOFF)
 
     def _rescope(self, scope: PackageScope) -> None:
+        """A new scope invalidates the last build's result.
+
+        Not cosmetic. The success panel names a path, a document count and a
+        scope; leaving it up under a changed scope statement would tell the
+        operator that the package on disk covers the set now described on
+        screen, which is exactly the subset-confusion D-20 exists to prevent.
+        """
         self._scope = scope
+        self._package = None
         self._paint_handoff()
 
     def _paint_handoff(self) -> None:
@@ -377,6 +447,7 @@ class MainWindow(QMainWindow):
             scope=self._scope,
             package_available=builder is not None,
             layout_note=note(self._outcome) if note is not None else "",
+            package=self._package,
         ))
 
     def _build_package(self, scope: PackageScope) -> None:
@@ -385,6 +456,13 @@ class MainWindow(QMainWindow):
         Assembling ``upload_package/`` is emit-layer work (``emit/handoff.py``)
         and the GUI may not import it. What crosses the seam is the operator's
         scope and the scope statement that must travel inside the package.
+
+        **The returned record is RETAINED** (Codex review #2, A-1). It used to be
+        discarded and the same view repainted, so a successful build, a failed
+        build and a click that did nothing were the same pixels; the failure
+        branch called ``print()``, and the shipped GUI is a windowed executable
+        with no console for that text to reach. Both outcomes are now states of
+        this screen.
         """
         if self._outcome is None:
             return
@@ -393,12 +471,16 @@ class MainWindow(QMainWindow):
             return
         view = build_handoff(self._outcome, scope=scope, package_available=True)
         try:
-            builder(self._outcome,
-                    doc_ids=tuple(d.doc_id for d in view.selected()),
-                    scope_statement=view.scope_statement())
+            result = builder(self._outcome,
+                             doc_ids=tuple(d.doc_id for d in view.selected()),
+                             scope_statement=view.scope_statement())
         except Exception as exc:
-            print(f"[dociq] upload package not built: {exc}")
-            return
+            # Every exception, deliberately. The operator cannot act on a
+            # distinction between an OSError and a ValueError, and a class this
+            # does not name is the class that would go back to being silent.
+            self._package = package_failed(f"{exc}")
+        else:
+            self._package = package_built(result)
         self._paint_handoff()
 
     def show_flag(self, key: str) -> None:

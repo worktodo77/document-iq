@@ -21,6 +21,7 @@ from dociq.gui.pipeline import (
     DIRECT_CONTEXT_TOKENS,
     LEVER_AUTOMATIC,
     LEVER_EXPERT,
+    PackageResult,
     ProfileInfo,
     ReductionLever,
     ReductionPlan,
@@ -630,6 +631,33 @@ class ChecklistRow:
         return (f"Rule {where} → section “{self.lever.key}” → KEEP. Nothing is "
                 "left out under this rule.")
 
+    def matched_by(self) -> str:
+        """The profile's own matching pattern, verbatim (A-11b).
+
+        Attribution by rule IDENTITY — which :meth:`attribution` gives — is true
+        and tells the expert nothing about what a DROP actually catches. This is
+        the pattern itself. Empty when the pipeline supplied none, and the
+        emptiness is stated rather than left blank: a rule whose pattern did not
+        reach the screen and a rule with nothing to show must not look alike.
+        """
+        if self.locked:
+            return ""
+        if not self.lever.rule:
+            return "The pipeline did not supply this rule's matching pattern."
+        return f"Matches: {self.lever.rule}"
+
+    def expert_note(self) -> str:
+        """The profile's §6 notes for this section — why it is dropped and who
+        approved it, IN THE EXPERT'S OWN WORDS (A-11b).
+
+        Carried verbatim and never paraphrased. A GUI-authored rationale for an
+        evidentiary omission would be the tool putting words in the expert's
+        mouth, which is the one thing this screen exists to prevent.
+        """
+        if self.locked or not self.lever.note:
+            return ""
+        return f"“{self.lever.note}”"
+
 
 @dataclass(frozen=True, slots=True)
 class ProfileChecklistView:
@@ -870,6 +898,107 @@ class PackageScope:
         return f"{head}\n{'=' * 60}\n  {body}\n"
 
 
+def _bytes_phrase(total: int) -> str:
+    """A size a claims professional reads, from the byte count the emit layer
+    measured. Wording only — the number is the pipeline's."""
+    if total < 1024:
+        return f"{total:,} bytes"
+    if total < 1024 * 1024:
+        return f"{total / 1024:,.0f} KB"
+    return f"{total / (1024 * 1024):,.1f} MB"
+
+
+@dataclass(frozen=True, slots=True)
+class PackageOutcomeView:
+    """What pressing "Build the upload package" actually did (Codex #2, A-1).
+
+    The button used to discard :class:`~dociq.gui.pipeline.PackageResult` and
+    repaint the same view, so success, failure and an ignored click were the
+    same pixels. A failure went to ``print()`` — and the shipped GUI is a
+    windowed executable with no console attached, so that text reached nobody.
+
+    Both outcomes are records rather than screen strings for the reason the rest
+    of this module exists: the wording is then asserted without a QApplication,
+    and success and failure cannot drift into each other in a refactor.
+    """
+
+    ok: bool
+    headline: str
+    lines: tuple[str, ...] = ()
+    """The facts, one per line: where it was written, what is in it, how big."""
+
+    missing: tuple[str, ...] = ()
+    """Doc IDs the operator selected that the package could NOT include (B-3).
+
+    Never folded into :attr:`lines`. A package one document short of the scope
+    its own statement claims is a different fact from its size, and it is the
+    one the operator has to act on."""
+
+    root: str = ""
+    scope_statement: str = ""
+
+    def missing_note(self) -> str:
+        """Named and counted, never summarised away."""
+        if not self.missing:
+            return ""
+        shown = ", ".join(self.missing[:12])
+        more = (f" and {len(self.missing) - 12:,} more"
+                if len(self.missing) > 12 else "")
+        one = len(self.missing) == 1
+        return (
+            f"{len(self.missing):,} selected document{'' if one else 's'} "
+            f"{'is' if one else 'are'} NOT in this package — no clean text was "
+            f"found for {shown}{more}. The scope statement inside the package "
+            "still describes the set you asked for, so check "
+            "document_index.csv before sending it."
+        )
+
+
+def package_built(result: PackageResult) -> PackageOutcomeView:
+    """The success state, read off the record the pipeline returned.
+
+    Every figure is the emit layer's own: the path it wrote, the documents it
+    put in, the files it counted, the bytes it measured, and the scope statement
+    it actually carries. None of it is echoed back from the request — a screen
+    that repeats what it asked for cannot tell the operator what it got.
+    """
+    docs = result.doc_count
+    return PackageOutcomeView(
+        ok=True,
+        headline="Upload package built.",
+        lines=(
+            f"Written to: {result.root}",
+            f"{docs:,} document{'' if docs == 1 else 's'}, "
+            f"{result.file_count:,} file{'' if result.file_count == 1 else 's'}, "
+            f"{_bytes_phrase(result.total_bytes)}.",
+        ),
+        missing=tuple(result.missing),
+        root=result.root,
+        scope_statement=result.scope_statement,
+    )
+
+
+def package_failed(message: str) -> PackageOutcomeView:
+    """The failure state. The pipeline's exception text is carried VERBATIM.
+
+    Paraphrasing it would cost the operator the only specific thing they have —
+    "sources.json is locked by another process" is actionable and "the package
+    could not be built" is not. The sentence added around it says what did NOT
+    happen, because a half-written package and no package are different states
+    of the folder.
+    """
+    return PackageOutcomeView(
+        ok=False,
+        headline="The upload package was NOT built.",
+        lines=(
+            message.strip() or "The pipeline reported no reason.",
+            "Nothing was uploaded and no package folder was completed. Any "
+            "package already on disk is from an EARLIER build — check its date "
+            "before sending it.",
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class HandoffDocument:
     """One document, reduced to what scoping needs. Selection, not computation."""
@@ -908,6 +1037,16 @@ class HandoffView:
     layout_note: str = ""
     """The pipeline's own statement of what is in the matter folder and what to
     point Claude at. Rendered verbatim; empty means the pipeline did not say."""
+
+    package: "PackageOutcomeView | None" = None
+    """The result of the LAST build under THIS scope, or ``None`` (A-1).
+
+    Carried on the view rather than held in the screen because the screen is
+    repainted on every scope change, and a success banner that survived a repaint
+    would describe a package built under a scope the operator has since changed.
+    :meth:`MainWindow._rescope` therefore clears it; a stale "built" state beside
+    a different scope statement is the D-20 failure the screen exists to
+    prevent, wearing a reassuring green."""
 
     # -- Path B -------------------------------------------------------------
 
@@ -990,7 +1129,8 @@ class HandoffView:
 
 def build_handoff(outcome: RunOutcome, scope: PackageScope = PackageScope(),
                   package_available: bool = False,
-                  layout_note: str = "") -> HandoffView:
+                  layout_note: str = "",
+                  package: PackageOutcomeView | None = None) -> HandoffView:
     """Project a run outcome into the §8 handoff screen's model."""
     return HandoffView(
         output_root=outcome.output_root,
@@ -1014,6 +1154,7 @@ def build_handoff(outcome: RunOutcome, scope: PackageScope = PackageScope(),
                      if outcome.output_root else ""),
         package_available=package_available,
         layout_note=layout_note,
+        package=package,
     )
 
 
