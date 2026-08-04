@@ -42,9 +42,18 @@ with offline.no_network() as guard:
                                  matter_name='probe',
                                  stamp=OperatorStamp('p', '2026-08-01T00:00:00Z',
                                                      'p')))
+_child = set(offline.enumerate_child_process_entry_points())
+_spawn = [a for a in guard.attempts if a.entry_point in _child]
+_net = [a for a in guard.attempts if a.entry_point not in _child]
 print('ATTEMPTS=' + str(len(guard.attempts)))
+print('ATTEMPTS_NET=' + str(len(_net)))
+print('ATTEMPTS_SPAWN=' + str(len(_spawn)))
 print('FETCH=' + ','.join(offline.audit_model_fetch_imports()))
 print('TRANSPORT=' + ','.join(offline.audit_transport_imports()))
+if guard.attempts:
+    print('DETAIL_BEGIN')
+    print(guard.render())
+    print('DETAIL_END')
 """
 """Run in a SUBPROCESS so the answer is about a clean interpreter. In-process,
 pytest itself, the plugins, and every earlier test in the session have already
@@ -217,6 +226,47 @@ def test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN():
     self-explaining, because a rate estimate is not a diagnosis and this has now
     cost three attempts at one.
 
+    **2026-08-04 — the first occurrence that said anything.** Under two
+    full-suite runs racing each other on one host (an agent's launcher started
+    the same script twice; that is a harness fault, and it is stated because it
+    is the load condition, not the cause), the probe reported::
+
+        ATTEMPTS=7  FETCH=  TRANSPORT=http.client,urllib.request
+
+    ``returncode`` was 0 and no fetch client was loaded, so this was NOT the
+    harness failure the previous rounds assumed. Seven guarded entry points were
+    reached. Which ones, and from where, the probe did not say — it printed a
+    COUNT, and a count is the same shape of non-answer as the summary line this
+    docstring already complains about. ``NetworkGuard`` records the entry point,
+    the argument and the Python stack of every attempt, and the probe threw all
+    three away.
+
+    So the probe now prints ``guard.render()`` after a ``DETAIL_BEGIN`` marker
+    whenever the count is non-zero, and ``_detail`` carries it into the failure
+    message. It is still not retried and still not marked flaky, for the reason
+    below.
+
+    **And with the stacks, it reproduced on demand and was not what it said.**
+    Three concurrent probe loops, 75 runs: **12 tripped**, and all **84**
+    recorded attempts across those 12 were the same thing —
+    ``subprocess.Popen('ver', shell=True)``, raised by ``platform.uname()``
+    inside ``onnxruntime``'s import, reached from
+    ``dociq.ingest.extract.ocr_model_dir()`` during
+    ``walker.effective_limits(...)``. **Zero socket attempts, in any run.**
+    ``platform.uname()`` caches, so whether the spawn happens at all depends on
+    whether something warmed that cache before the guard opened — which is why
+    it looked like load-dependent noise for three rounds.
+
+    That makes the old single ``ATTEMPTS`` count the actual defect in this test:
+    it folded the socket guard and the child-process guard into one number and
+    then labelled the sum "outbound" and "A CRITERION 6 FINDING". Every
+    occurrence so far was mis-reported. The counts are split below, and each
+    half fails with what it actually means. **Neither half was weakened** — a
+    spawn inside the guard still fails the suite; whether DocIQ should tolerate
+    ``platform.uname()``'s ``cmd /c ver`` during an OCR-model import is a gate
+    question, and answering it by relaxing an assertion is not this test's to
+    make.
+
     Deliberately NOT retried and NOT marked flaky. A retry would convert the one
     signal that distinguishes a harness failure from a real one into silence.
     """
@@ -237,14 +287,44 @@ def test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN():
     assert proc.returncode == 0, _detail(
         "the offline probe SUBPROCESS did not complete — this is a harness "
         "failure, not evidence about the product, and it must be read as one")
-    out = dict(line.split("=", 1) for line in proc.stdout.strip().splitlines()
-               if "=" in line)
+    # Parse only the header lines. Everything from ``DETAIL_BEGIN`` on is the
+    # rendered attempts — entry point, argument and Python STACK for each — and a
+    # traceback line containing ``=`` must not be able to invent a key here.
+    header: list[str] = []
+    for line in proc.stdout.strip().splitlines():
+        if line.strip() == "DETAIL_BEGIN":
+            break
+        header.append(line)
+    out = dict(line.split("=", 1) for line in header if "=" in line)
     assert "ATTEMPTS" in out, _detail(
         "the probe ran but reported no ATTEMPTS line — its output is malformed, "
         "so this is a harness failure and NOT an offline finding")
+    # The count is split because the two halves are DIFFERENT claims and the
+    # single number said the wrong thing about every occurrence so far. Measured
+    # 2026-08-04: 12 of 75 probe runs under three concurrent loops tripped the
+    # guard, and all 84 recorded attempts across them were
+    # `subprocess.Popen('ver', shell=True)` — `platform.uname()` inside
+    # `onnxruntime`'s import, reached from `extract.ocr_model_dir()`. Not one
+    # socket was touched. The old message called every one of those "outbound"
+    # and "A CRITERION 6 FINDING", which is a false statement about the product
+    # printed by the test that exists to keep the product's statements true.
+    assert "ATTEMPTS_NET" in out and "ATTEMPTS_SPAWN" in out, _detail(
+        "the probe reported no split attempt counts — its output is malformed, "
+        "so this is a harness failure and NOT an offline finding")
+    assert out["ATTEMPTS_NET"] == "0", _detail(
+        f"a whole pipeline run made {out['ATTEMPTS_NET']} OUTBOUND attempt(s) "
+        f"on a socket or TLS entry point — THIS IS A CRITERION 6 FINDING, not "
+        f"a flake. The stack of each attempt is below.")
+    assert out["ATTEMPTS_SPAWN"] == "0", _detail(
+        f"a whole pipeline run spawned {out['ATTEMPTS_SPAWN']} CHILD "
+        f"PROCESS(es) inside the guard. This is NOT an outbound-network "
+        f"finding and must not be reported as one — no socket was touched. It "
+        f"is the child-process half of the guard, which exists because a child "
+        f"leaves the scope of every rebind in this interpreter. The stack of "
+        f"each attempt is below and names the caller.")
     assert out["ATTEMPTS"] == "0", _detail(
-        f"a whole pipeline run made {out['ATTEMPTS']} outbound attempt(s) — "
-        f"THIS IS A CRITERION 6 FINDING, not a flake")
+        f"the guard recorded {out['ATTEMPTS']} attempt(s) that the split above "
+        f"did not account for — the classification and the guard disagree")
     fetch = [m for m in out.get("FETCH", "").split(",") if m]
     assert fetch == [], _detail(
         f"a whole pipeline run loaded fetch clients {fetch} — THIS IS A "
