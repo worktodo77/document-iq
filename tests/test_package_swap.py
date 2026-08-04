@@ -81,6 +81,13 @@ def test_a_failure_after_files_are_written_leaves_the_earlier_package_intact(
     An enumeration rather than one repro: the README write is the site Codex
     reproduced, and the two validations are the other points after at least one
     file is on disk. A failure added between them has neighbours.
+
+    The failing rebuild is deliberately a **narrower scope** than the first
+    build. Against the old in-place code the two validation cases would
+    otherwise leave a directory whose contents happened to equal the previous
+    package's, and a fail-before that goes green for that reason proves
+    nothing — the folder would still have been rebuilt from scratch by a run
+    that failed.
     """
     layout, docs = full_matter(tmp_path)
     first = build_upload_package(layout, document_count=len(docs))
@@ -88,6 +95,7 @@ def test_a_failure_after_files_are_written_leaves_the_earlier_package_intact(
     before = _tree(layout.upload_package)
     assert any(n.endswith(".txt") for n in before), "nothing to protect"
     assert README_NAME in before
+    assert len(docs) > 1, "the narrower-scope rebuild needs something to narrow"
 
     def boom(*_a, **_k):
         raise OSError(LOCK_ERROR)
@@ -100,7 +108,8 @@ def test_a_failure_after_files_are_written_leaves_the_earlier_package_intact(
     monkeypatch.setattr(h, target, boom)
 
     with pytest.raises(OSError) as caught:
-        build_upload_package(layout, document_count=len(docs))
+        build_upload_package(layout, doc_ids=(docs[0].doc_id,),
+                             scope_statement="A NARROWER SCOPE\n")
     assert LOCK_ERROR in str(caught.value), "the reason was lost or paraphrased"
 
     after = _tree(layout.upload_package)
