@@ -1499,7 +1499,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # an in-memory caller who need never look. Observation is not a gate. The
     # heading said "the gates" and the relay said the set was "gated there,
     # marked, then swapped"; that claim was false and is withdrawn with the
-    # behaviour it described.
+    # behavior it described.
     #
     # `corpus_sort_check` joins them here rather than staying the module-level
     # function nothing called. It was written as a Stage-6 check, was reachable

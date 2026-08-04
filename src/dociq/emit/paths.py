@@ -156,7 +156,7 @@ def replace_text_deterministic(path: Path, text: str) -> Path:
     This exists because of Codex review #2, finding B-2. The swap's readiness
     marker was written with the plain writer, so a crash inside that single
     ``fh.write`` could leave a marker holding truncated JSON. The marker's
-    *existence* is what authorises deleting the previous run's deliverables, so
+    *existence* is what authorizes deleting the previous run's deliverables, so
     a marker that exists and cannot be read is the one state in this module
     where "exists" and "says" disagree — and the recovery had to guess. Making
     the write atomic removes the state rather than handling it.

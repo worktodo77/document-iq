@@ -156,7 +156,7 @@ def test_a_red_stage_6_gate_refuses_to_publish(tmp_path, monkeypatch, gate):
         f"last good deliverables must survive a refused run byte for byte")
     assert not emit_paths.pending_swap(OutputLayout.at(out)), (
         "a refused run wrote a readiness marker — the one thing that "
-        "authorises deleting the previous run's files")
+        "authorizes deleting the previous run's files")
     assert not (out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME).exists(), (
         "the refused set was left staged, where a later hand could mark it ready")
 
@@ -263,7 +263,7 @@ def test_a_crash_while_writing_the_marker_leaves_no_marker(tmp_path, monkeypatch
 
     state = out / emit_paths.STATE_DIRNAME
     assert not emit_paths.pending_swap(layout), (
-        "a half-written marker exists, and its existence authorises deletion")
+        "a half-written marker exists, and its existence authorizes deletion")
     litter = [p.name for p in state.glob("*") if p.is_file()]
     assert litter == [], f"the failed write left {litter} beside the marker"
 

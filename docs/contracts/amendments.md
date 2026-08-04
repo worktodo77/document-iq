@@ -1030,7 +1030,7 @@ wrong.
 **Affects:** `dociq/contracts.py` — `TerminalStatus.BLOCKED` docstring, and
 optionally a new `TerminalStatus.REFUSED` member
 **Proposed severity:** TRIVIAL as a docstring correction; MINOR as a new member
-**Status:** RAISED, NOT APPLIED. The behaviour it describes has shipped; the
+**Status:** RAISED, NOT APPLIED. The behavior it describes has shipped; the
 frozen module is unchanged.
 
 ### The case

@@ -156,7 +156,7 @@ to its pre-fix shape and the tests were watched going red, then restored.
 | `_read_marker` → `except (OSError, ValueError): superseded = ()` | **9 red**: 8 × `test_an_unreadable_marker_moves_and_deletes_nothing`, plus the shrinking-rerun test |
 | `mark_ready` → `write_text_deterministic`, validation removed | **2 red**: `test_a_crash_while_writing_the_marker_leaves_no_marker` (*"a half-written marker exists"*), `test_mark_ready_refuses_to_record_an_escaping_supersede_entry` |
 
-### The pre-fix behaviour, measured rather than reasoned
+### The pre-fix behavior, measured rather than reasoned
 
 **B-1, on the fixture corpus:**
 
@@ -226,7 +226,7 @@ the `run` section and in `incomplete_run/`, both outside the claim.
 
 * **`REFUSED` as a distinct terminal status.** Raised as A-15, not applied —
   `contracts.py` is frozen and was being edited in parallel. The shipped
-  behaviour is correct; the enum's docstring is one item short until A-15 lands.
+  behavior is correct; the enum's docstring is one item short until A-15 lands.
 * **The GUI's rendering of a refused run.** `dociq/gui/*` and `adapter.py` are
   the parallel agent's this round (A-1, A-2, B-3). A refusal is legible from the
   folder — `run_status.json`, the quarantined log, the summary banner — and
