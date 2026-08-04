@@ -207,7 +207,7 @@ class RunTermination:
 
         A **total** lookup in :data:`STATUS_PROSE`, not an ``if`` chain with a
         trailing ``else``. Codex review #2 fix round, finding A-3: this method
-        recognised ``COMPLETED`` and ``BLOCKED`` and let *every other* status
+        recognized ``COMPLETED`` and ``BLOCKED`` and let *every other* status
         fall through to the word ``CANCELLED``. Amendment A-15 added
         :attr:`~dociq.contracts.TerminalStatus.REFUSED` and did not touch this
         renderer, so a run whose complete corpus DocIQ itself rejected at its

@@ -1,6 +1,6 @@
 """Every terminal status is rendered as ITSELF — Codex review #2 fix round, A-3.
 
-``RunTermination.headline()`` recognised ``COMPLETED`` and ``BLOCKED`` and let
+``RunTermination.headline()`` recognized ``COMPLETED`` and ``BLOCKED`` and let
 every other member fall through a ternary to the word ``CANCELLED``. Amendment
 A-15 added :attr:`~dociq.contracts.TerminalStatus.REFUSED` and did not touch
 that renderer, so ``run_status.json`` was machine-readable as
@@ -350,7 +350,7 @@ ALLOWED_FLATTENINGS: frozenset[tuple[str, int]] = frozenset({
 
 One entry, and its justification: ``flagged=status is not
 ProcessingStatus.FULL`` on a :class:`~dociq.gui.pipeline.ProgressEvent` renders
-as a row COLOUR, not as a word. A new ``ProcessingStatus`` member arriving there
+as a row COLOR, not as a word. A new ``ProcessingStatus`` member arriving there
 is correctly flagged as not-plain, which is the true answer for any member that
 is not ``FULL``, and no member's name is printed in another member's place.
 

@@ -23,7 +23,7 @@ is untouched and green.
 
 ## A-3 — every terminal status is rendered as itself
 
-`RunTermination.headline()` recognised `COMPLETED` and `BLOCKED` and let every
+`RunTermination.headline()` recognized `COMPLETED` and `BLOCKED` and let every
 other member fall through a ternary to the word `CANCELLED`. Amendment A-15 added
 `REFUSED` and did not touch that renderer.
 
@@ -132,7 +132,7 @@ member added next year rather than printing the wrong word:
    the blind spot in (1), because the §6 case threw the enum away one layer
    earlier. Scans keyword-argument and assignment values for enum comparisons.
    `ALLOWED_FLATTENINGS` has **one** entry, `gui/mock_pipeline.py:699`, with its
-   justification written beside it: that bool becomes a row COLOUR, and
+   justification written beside it: that bool becomes a row COLOR, and
    "not `FULL`" is the correct answer for any member that is not `FULL`. Watched
    red against the pre-fix adapter.
 3. **`test_the_enum_list_this_probe_scans_for_is_complete`** — the scan's own
@@ -187,7 +187,7 @@ claim and that test are withdrawn**, not reworded.
 ### Fail-before coverage — `tests/test_package_swap.py`
 
 Every one watched red against the restored in-place build (9 of 13 red; the
-other four assert behaviour the old code also had, and are regression guards):
+other four assert behavior the old code also had, and are regression guards):
 
 - **Failure after at least one file is written**, parametrized over the three
   points where that is true: the README write (Codex's own site),
@@ -258,6 +258,6 @@ a pointer to the test that asserts it against the disk.
   reused from `dociq.emit.paths`, whose `_retry_io` is private and under
   concurrent revision for B-4. If B-4's fix promotes a shared helper, these
   should collapse into it.
-- Windows file-lock behaviour is simulated by monkeypatching, not by taking a
+- Windows file-lock behavior is simulated by monkeypatching, not by taking a
   real exclusive lock. The retry loops are therefore exercised for their control
   flow, not against a real antivirus scanner.
