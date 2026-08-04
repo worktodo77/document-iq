@@ -88,6 +88,65 @@ Registry now holds **17 entries, all applied ones wired**.
 
 ### One thing still open, and it is the criterion-6 probe
 
+> ## ⚠️ CORRECTED 2026-08-04 — THIS SECTION WAS WRONG, AND THE ERROR WAS OURS
+>
+> **Everything below the rule in this section is superseded.** It is left in
+> place, not deleted, because you were told it and are entitled to see exactly
+> what you were told. Read the correction first; the original follows it.
+>
+> **The probe was never a criterion-6 outbound risk.** It reported one because
+> it printed a COUNT of guard attempts and discarded the stack that
+> `NetworkGuard` records for every one. The count folded two different guards —
+> sockets and child processes — into a single number, and the assertion then
+> called that sum "outbound attempt(s)" and "A CRITERION 6 FINDING". So the one
+> thing that was actually happening was reported for three rounds as the one
+> thing that was not.
+>
+> **Measured, with the stacks retained.** 75 probe runs across three concurrent
+> loops: **12 tripped**, **84** attempts recorded across those 12, and
+> **every single one** was
+> `subprocess.Popen('ver', shell=True)` — `platform.uname()`'s
+> one-per-interpreter Windows version probe, reached from
+> `extract.ocr_model_dir()` → `import rapidocr_onnxruntime` → `import
+> onnxruntime` → `platform.system()` at import time.
+> **`ATTEMPTS_NET` was 0 in every one of the 75 runs. No socket was touched in
+> any of them.** `platform.uname()` caches its result, so whether the spawn
+> happens depends on whether something warmed that cache before the guard
+> opened — which is why it presented as load-dependent noise.
+>
+> **The sentence "a non-zero attempt count … means criterion 6 is not met" in
+> the paragraph below is false, and it is withdrawn.** A non-zero *socket*
+> count would mean that. A non-zero *spawn* count means something else, and the
+> probe could not tell you which it had.
+>
+> **Our rate claim is also corrected, without reconciling it in our favour.**
+> The "15 consecutive full-suite runs green" below was a real observation of
+> sequential runs on an idle machine. It is presented in that paragraph as
+> characterizing the flake, and it does not: isolated repeats of
+> `pytest tests/test_offline.py` measured **8 red of 12 at `5ab2a79`**, the very
+> commit this relay was written against. Both numbers are real and they measure
+> different things; the one we published is the flattering one and it should not
+> have been offered as the rate.
+>
+> **Disposition.** Ruled **D-30** (Alex, 2026-08-04): permit that one call as a
+> named exemption matched by identity — this entry point, this command,
+> `shell=True`, from `_syscmd_ver` in the standard library's own `platform.py` —
+> and keep every other process creation raising. It is recorded with its stack
+> every time it fires and named in the guard's report even on a clean run.
+> Criterion 6's claim is now **narrower and checkable** rather than weaker, and
+> lives as one value, `offline.CRITERION_6_CLAIM`:
+>
+> > no outbound network attempt of any kind, and no process creation except one
+> > named Windows version probe inside a dependency's import, disclosed by name.
+>
+> Six identity components, each proven load-bearing by perturbation in
+> `tests/test_offline.py`. Evidence:
+> `docs/verification/codex_r2b_spawn_2026-08-04.md`.
+
+---
+
+*Superseded — the original text, as you received it:*
+
 `test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN` has failed intermittently under concurrent load: **2 in 24** concurrent jobs during the claims sweep, **2 in 6** immediately after the A-15 commit (while a `git push` and other agents were running), then **15 consecutive full-suite runs green** and **6/6 green in isolation**. It has never reproduced on demand, and three attempts to characterize it produced three rate estimates and no cause.
 
 It is **not retried and not marked flaky** — a retry would convert the only signal separating a harness failure from a real one into silence. What changed is that its three failure modes are now distinguished in the assertion text, each carrying return code, stdout and stderr, and each stating which kind of finding it is: a subprocess that did not run is a harness problem; a non-zero attempt count or a loaded fetch client means **criterion 6 is not met**. The next occurrence explains itself.

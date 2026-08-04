@@ -75,6 +75,37 @@ saying why the reasoning differs from ``TRANSPORT_MODULES``. An imported
 guard can no longer see. The conservative treatment of an unobservable thing is
 to refuse it, not to note it.
 
+ONE CHILD PROCESS IS PERMITTED, BY NAME (ruling D-30, 2026-08-04)
+And it was found by this guard, which is the argument for having built it.
+``platform.uname()`` probes the Windows version by running ``ver`` through the
+shell, once per interpreter; ``onnxruntime`` calls ``platform.system()`` at
+import time; ``extract.ocr_model_dir()`` imports it. So a whole pipeline run
+creates a child process, the verification note asserted "the cost is zero:
+nothing DocIQ does inside a guarded block spawns anything" on reasoning rather
+than measurement, and the reasoning was wrong.
+
+For three review rounds that spawn was reported as an intermittent *outbound
+network* risk — because the probe printed a COUNT of ``attempts`` and discarded
+the stacks recorded on every one, so the socket guard and this one arrived as a
+single number that the assertion then called "outbound". Measured with the
+stacks kept: 84 occurrences over 75 runs, every one this call, and zero socket
+attempts in any of them.
+
+:data:`PERMITTED_SPAWNS` permits exactly it. **By identity, not by category** —
+this entry point, this exact command string, ``shell=True``, called from
+``_syscmd_ver`` in the standard library's own ``platform.py``, within four
+frames. "Allow spawns during import", "allow short commands" and "allow anything
+from site-packages" were each considered and refused: every one of them readmits
+the whole class this guard was added for. Everything above about a child being
+an execution the guard can no longer observe still holds, and every other spawn
+still raises for exactly that reason.
+
+A permitted spawn is **recorded** on :attr:`NetworkGuard.exempted` with its
+stack and named by :meth:`NetworkGuard.render` even on a clean report, because a
+permission nobody can see is indistinguishable from a hole.
+:data:`CRITERION_6_CLAIM` is the resulting claim as a single value, so the code
+and the documents that assert it cannot drift.
+
 WHAT THIS CANNOT PROVE, STATED PLAINLY
 1. A C extension that calls the Winsock API directly, without going through
    CPython's ``socket``/``_socket`` objects, is invisible here. Nothing in the
@@ -95,6 +126,7 @@ executed and which remains open.
 from __future__ import annotations
 
 import os as _os_mod
+import platform as _platform_mod
 import socket as _socket_mod
 import ssl as _ssl_mod
 import subprocess as _subprocess_mod
@@ -106,12 +138,17 @@ from types import ModuleType
 
 __all__ = [
     "Attempt",
+    "ExemptedSpawn",
+    "SpawnExemption",
     "NetworkAttempted",
     "ProcessSpawnAttempted",
     "NetworkGuard",
     "no_network",
     "enumerate_guarded_entry_points",
     "enumerate_child_process_entry_points",
+    "enumerate_permitted_spawns",
+    "PERMITTED_SPAWNS",
+    "CRITERION_6_CLAIM",
     "audit_siblings",
     "audit_child_process_siblings",
     "MODEL_FETCH_MODULES",
@@ -119,6 +156,25 @@ __all__ = [
     "audit_model_fetch_imports",
     "audit_transport_imports",
 ]
+
+CRITERION_6_CLAIM = (
+    "A DocIQ run makes NO outbound network attempt — no socket, no resolver, "
+    "no TLS handshake — and creates NO child process, with exactly one named "
+    "exception: the Windows version probe `ver` that the standard library's "
+    "`platform._syscmd_ver` runs when `platform.uname()` is first called, "
+    "which a dependency's import triggers. That exception is permitted by "
+    "identity (ruling D-30), is recorded with its stack every time it occurs, "
+    "and reaches no network."
+)
+"""The claim, as a value, so the wording cannot drift between the code that
+enforces it and the documents that assert it.
+
+Criterion 6 used to be stated as "no outbound connections". That was believed to
+be true and was never measured, because the probe that checked it counted socket
+attempts and process spawns in ONE number and then called the sum "outbound" —
+so for three review rounds the one thing actually happening was reported as the
+one thing that was not. The sentence above is longer and it is the first version
+of it that anyone has checked."""
 
 
 class NetworkAttempted(RuntimeError):
@@ -281,6 +337,135 @@ _CHILD_COVERED_INDIRECTLY = {
 }
 
 
+# ---------------------------------------------------------------------------
+# The one permitted spawn (ruling D-30, 2026-08-04)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class SpawnExemption:
+    """One child process this guard permits, identified rather than described.
+
+    Every field is part of the identity and every one is checked. A description
+    ("a version probe", "a short command", "something during an import") would
+    be a CATEGORY, and a category readmits the whole class the guard exists for:
+    "during an import" permits any dependency to run anything at import time,
+    "short command" permits ``curl x``, "from site-packages" permits every
+    dependency. So the match is: this entry point, this exact command string,
+    this shell flag, called from this function in this file.
+    """
+
+    entry_point: str
+    commands: tuple[str, ...]
+    shell: bool
+    caller_function: str
+    caller_file: str
+    caller_within_frames: int
+    ruling: str
+    reason: str
+
+    def describe(self) -> str:
+        return (
+            f"{self.entry_point}({' | '.join(self.commands)}, shell={self.shell}) "
+            f"from {self.caller_function} in {self.caller_file} "
+            f"[{self.ruling}]"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ExemptedSpawn:
+    """A permitted spawn that HAPPENED — with the stack that reached it.
+
+    Recorded rather than allowed silently, and this is the whole difference
+    between an exemption and a hole. The stack is retained for the same reason
+    :class:`Attempt` retains one: the defect that produced this ruling was a
+    probe that counted events and discarded the evidence of what they were, so
+    an exemption that reported only a tally would repeat it exactly.
+    """
+
+    exemption: SpawnExemption
+    detail: str
+    stack: str
+
+    def render(self) -> str:
+        return (f"PERMITTED {self.exemption.describe()}\n"
+                f"  reason: {self.exemption.reason}\n"
+                f"{self.detail}\n{self.stack}")
+
+
+_PLATFORM_FILE = _os_mod.path.normcase(
+    _os_mod.path.abspath(getattr(_platform_mod, "__file__", "") or ""))
+
+PERMITTED_SPAWNS: tuple[SpawnExemption, ...] = (
+    SpawnExemption(
+        entry_point="subprocess.Popen",
+        # The three strings `platform._syscmd_ver` tries, in its own order.
+        # Copied as literals rather than read from the stdlib at run time: a
+        # future CPython that changes them must fail this match and be looked
+        # at, not be permitted automatically because the exemption follows
+        # whatever the library now does.
+        commands=("ver", "command /c ver", "cmd /c ver"),
+        shell=True,
+        caller_function="_syscmd_ver",
+        caller_file=_PLATFORM_FILE,
+        # `_syscmd_ver` calls `subprocess.check_output`, which calls `run`,
+        # which constructs `Popen`. Three frames covers that chain and nothing
+        # further out — an arbitrary caller cannot qualify by having
+        # `_syscmd_ver` somewhere far up its stack.
+        caller_within_frames=4,
+        ruling="D-30 (Alex, 2026-08-04)",
+        reason=(
+            "`platform.uname()` probes the Windows version by running `ver` "
+            "through the shell, once per interpreter, and caches the result. "
+            "DocIQ reaches it transitively: `extract.ocr_model_dir()` imports "
+            "`rapidocr_onnxruntime`, which imports `onnxruntime`, which calls "
+            "`platform.system()` at import time. Measured 2026-08-04 over 75 "
+            "probe runs: 84 occurrences, all of them this, and ZERO socket "
+            "attempts in any run. It opens no socket and resolves no name."
+        ),
+    ),
+)
+"""The complete set. One entry, and it is meant to stay that way — a second one
+is a decision for the same gate that made this one, not a code change."""
+
+
+def enumerate_permitted_spawns() -> tuple[str, ...]:
+    """The exemptions as dotted descriptions, so a reviewer can diff the set.
+
+    Same reason as :func:`enumerate_guarded_entry_points`: a permission that
+    exists only inside an ``if`` is a permission nobody can review.
+    """
+    return tuple(e.describe() for e in PERMITTED_SPAWNS)
+
+
+def _permitted_spawn(entry_point: str, args: tuple, kwargs: dict,
+                     stack: list) -> SpawnExemption | None:
+    """The exemption this call matches, or ``None`` — which means it is refused.
+
+    Fails closed on every axis. An unmatched command, an unmatched shell flag,
+    a caller in a different file or too far up the stack, or a missing
+    ``platform.__file__`` all return ``None``, and ``None`` raises. The
+    exemption cannot widen by accident: there is no branch here that permits
+    anything on a partial match.
+    """
+    for exemption in PERMITTED_SPAWNS:
+        if entry_point != exemption.entry_point:
+            continue
+        if not args or args[0] not in exemption.commands:
+            continue
+        if kwargs.get("shell") is not exemption.shell:
+            continue
+        if not exemption.caller_file:  # pragma: no cover — a frozen stdlib
+            continue
+        for frame in stack[-exemption.caller_within_frames:]:
+            if frame.name != exemption.caller_function:
+                continue
+            if _os_mod.path.normcase(
+                    _os_mod.path.abspath(frame.filename)) == exemption.caller_file:
+                return exemption
+    return None
+
+
 def audit_child_process_siblings() -> tuple[str, ...]:
     """Process-creating names that are neither guarded nor accounted for.
 
@@ -353,6 +538,16 @@ class NetworkGuard:
     """
 
     attempts: list[Attempt] = field(default_factory=list)
+    exempted: list[ExemptedSpawn] = field(default_factory=list)
+    """Permitted spawns that OCCURRED, each with its stack (ruling D-30).
+
+    Separate from :attr:`attempts` because they are different findings, and
+    populated rather than skipped because a permission nobody can see is
+    indistinguishable from a hole. ``clean`` does not consult this list — the
+    ruling permits the call — but :meth:`render` always names what was
+    permitted, so no report can say "clean" without also saying what it let
+    through."""
+
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _saved: list[tuple[object, str, object]] = field(default_factory=list, repr=False)
 
@@ -369,12 +564,30 @@ class NetworkGuard:
             self.attempts.append(Attempt(entry_point, detail, stack))
 
     def _raiser(self, entry_point: str, exc=NetworkAttempted,
-                what: str = "outbound network attempted via"):
+                what: str = "outbound network attempted via",
+                original=None):
         def _blocked(*args, **kwargs):
             detail = ", ".join(
                 [repr(a)[:80] for a in args]
                 + [f"{k}={v!r}"[:80] for k, v in kwargs.items()]
             )
+            # Ruling D-30: exactly one child process is permitted, matched by
+            # identity. The check runs BEFORE the record-and-raise so that a
+            # permitted call is not filed as a refusal, and it is consulted only
+            # for the child-process class — no exemption exists, or may exist
+            # here, for a socket. The argument that put the child-process guard
+            # in this module is untouched: a spawned child is an execution this
+            # guard can no longer observe, and every spawn but this one still
+            # raises for exactly that reason.
+            if original is not None and exc is ProcessSpawnAttempted:
+                stack = traceback.extract_stack()[:-1]
+                exemption = _permitted_spawn(entry_point, args, kwargs, stack)
+                if exemption is not None:
+                    with self._lock:
+                        self.exempted.append(ExemptedSpawn(
+                            exemption, detail,
+                            "".join(traceback.format_stack()[:-1])))
+                    return original(*args, **kwargs)
             self._record(entry_point, detail)
             raise exc(
                 f"{what} {entry_point} — "
@@ -402,11 +615,19 @@ class NetworkGuard:
         # docstring, "THE OTHER WAY OUT".
         for mod_name, attr in _child_process_targets():
             mod = sys.modules[mod_name]
-            self._saved.append((mod, attr, getattr(mod, attr)))
+            original = getattr(mod, attr)
+            self._saved.append((mod, attr, original))
             setattr(mod, attr, self._raiser(
                 f"{mod_name}.{attr}",
                 ProcessSpawnAttempted,
                 "child process creation attempted via",
+                # Handed the real callable so the ONE permitted spawn can
+                # actually run (D-30). Blocking it instead would not be a
+                # stricter guard, it would be a different product: DocIQ would
+                # report `models-unavailable` for its OCR engine identity
+                # whenever the guard happened to be the first thing to touch
+                # `platform.uname()`.
+                original=original,
             ))
         return self
 
@@ -420,10 +641,20 @@ class NetworkGuard:
         total = (len(enumerate_guarded_entry_points())
                  + len(enumerate_child_process_entry_points()))
         if self.clean:
-            return (f"no outbound or child-process attempt on any of "
+            head = (f"no outbound or child-process attempt on any of "
                     f"{total} guarded entry points")
-        head = f"{len(self.attempts)} outbound/child-process attempt(s):"
-        return head + "\n" + "\n\n".join(a.render() for a in self.attempts)
+        else:
+            head = (f"{len(self.attempts)} outbound/child-process attempt(s):"
+                    + "\n" + "\n\n".join(a.render() for a in self.attempts))
+        # Always appended, including on a clean report. A guard that says
+        # "clean" without saying what it permitted is a guard whose reader
+        # cannot tell an exemption from a hole — which is the defect that
+        # produced D-30 in the first place, one layer down.
+        if self.exempted:
+            head += (f"\n\n{len(self.exempted)} PERMITTED spawn(s) under a "
+                     f"named exemption (not a failure):\n"
+                     + "\n\n".join(e.render() for e in self.exempted))
+        return head
 
 
 def no_network() -> NetworkGuard:
