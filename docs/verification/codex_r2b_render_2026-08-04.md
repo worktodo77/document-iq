@@ -242,9 +242,32 @@ a pointer to the test that asserts it against the disk.
 - **The two new modules: 30 consecutive green runs**, 40 tests each, no
   ordering, temp-directory or retry flakiness observed. 30 rather than 8 because
   every test here is temp-directory and retry-loop sensitive.
-- **Full suite: 8 consecutive green runs** at `ceaa8f5`. Run log:
+- **Full suite: 8 runs at `ee6be3a`.** Runs 1–2 fully green. Runs 3–8 each
+  reported **exactly one** failure, and it is the same one every time:
+  `tests/test_offline.py::test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN`,
+  diagnosed below and proven present on the base commit. **No test touched by
+  this change failed in any of the eight runs.**
 
-<!-- FULL-SUITE RUN LOG -->
+  ```
+  HEAD=ee6be3a420e2d53bcd46fc2f057a8516af12e5f3
+  FULL RUN 1 exit=0 :: 0 failed
+  FULL RUN 2 exit=0 :: 0 failed
+  FULL RUN 3 exit=1 (471s) :: 1 failed :: test_offline.py::…WHOLE_PIPELINE_RUN
+  FULL RUN 4 exit=1 (463s) :: 1 failed :: test_offline.py::…WHOLE_PIPELINE_RUN
+  FULL RUN 5 exit=1 (460s) :: 1 failed :: test_offline.py::…WHOLE_PIPELINE_RUN
+  FULL RUN 6 exit=1 (457s) :: 1 failed :: test_offline.py::…WHOLE_PIPELINE_RUN
+  FULL RUN 7 exit=1 (426s) :: 1 failed :: test_offline.py::…WHOLE_PIPELINE_RUN
+  FULL RUN 8 exit=1 (426s) :: 1 failed :: test_offline.py::…WHOLE_PIPELINE_RUN
+  ```
+
+  **Runs 1–2 ran on a quiet machine; runs 3–8 ran while another agent's own
+  8-full-suite-plus-30-repeat series was executing in a sibling worktree.** That
+  is stated because it is the variable, not as an excuse: the diagnosis below
+  explains exactly why load flips this test and nothing else.
+
+  **`8 of 8 green` is NOT claimed.** What is claimed is: 8 of 8 green on
+  everything this change touches, and one pre-existing, now-diagnosed,
+  load-dependent failure that is reproducible on the base commit.
 
 - `tests/test_amendments.py` green and untouched.
 
@@ -274,6 +297,22 @@ OCR page pool's worker threads racing the same cold cache.
 | 1 probe in isolation, unmodified | `ATTEMPTS=0` |
 
 **The guard is right**: a whole pipeline run does create child processes.
+
+**It is present on the base commit, proven by a controlled experiment.** A
+detached worktree was created at `5ab2a79` (the branch base) and the single
+offline test was run there and here **simultaneously**, eight pairs at once, so
+both sides saw identical machine load:
+
+| Commit | Failures |
+|---|---|
+| `5ab2a79` (base, before this change) | **3 of 8**, each `ATTEMPTS=7` |
+| `ee6be3a` (this branch) | **0 of 8** |
+
+An earlier, sequentially-interleaved round of the same comparison gave base 0/8
+and this branch 1/8. Pooled: base **3 of 16**, branch **1 of 16**. The defect is
+on both sides; its rate tracks load, not the commit. This change touches none of
+`ingest/extract.py`, `ingest/walker.py`, `verify/offline.py` or the OCR thread
+pool.
 
 **Not fixed here.** It is outside A-3/A-4, it is in files this agent was not
 given, and the fix is a ruling rather than a patch — warm `platform.uname()` at
