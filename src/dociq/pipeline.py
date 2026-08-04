@@ -85,7 +85,7 @@ from dociq.identify.bates import (
 )
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
-from dociq.profiles.apply import apply_profiles
+from dociq.profiles.apply import DropLogEntry, apply_profiles
 from dociq.profiles.model import FormatProfile, OperatorStamp, operator_stamp, write_matter_copy
 from dociq.runstate import (
     COMPLETED,
@@ -667,6 +667,10 @@ def _abort(
     reconciliation: ReconciliationReport | None = None,
     manifest: mf.Manifest | None = None,
     accounting_report: accounting.AccountingReport | None = None,
+    renumbering: Sequence[RenumberWarning] = (),
+    drops: Sequence[DropLogEntry] = (),
+    bates_decision: BatesDecision | None = None,
+    bates_ranges: dict[tuple[str, str, int], BatesRange] | None = None,
 ) -> PipelineOutcome:
     """End a run that did not complete, WITHOUT publishing anything.
 
@@ -755,13 +759,39 @@ def _abort(
         if p.disposition is Disposition.KEEP
     )
 
+    # Everything this run actually established goes into the quarantined log
+    # (Codex review #2 fix round, B-5). Before this, `_abort` accepted the
+    # assignment, the reconciliation, the manifest and the accounting report,
+    # returned all four on the in-memory outcome, and passed NONE of them here —
+    # so `incomplete_run/processing_log.json`, the durable record the handoff
+    # said preserves the diagnosis, serialized `doc_ids.assignments` as `[]` and
+    # `reconciliation` as `null` for a run that had assigned an identifier to
+    # every document, and carried no trace of the discrepancies that refused it.
+    #
+    # The split across the two sections is the determinism rule, not a
+    # preference: the assignment, the reconciliation, the drops, the profiles
+    # and the Bates section are facts about the INPUTS and belong in hashed
+    # `content`; the gate outcome, the manifest of the discarded staging set and
+    # the wall clock are facts about this INVOCATION and are handed to
+    # `build_log` as `run`-section arguments. A refused run and an unrefused run
+    # over the same corpus must still agree on `content_sha256`.
     bundle = build_log(
         config,
         documents,
         unsupported=walked.unsupported,
+        assignment=assignment,
+        reconciliation=reconciliation,
+        renumbering=renumbering,
+        drops=drops,
+        profiles=opts.profiles,
+        bates_decision=bates_decision,
+        bates_ranges=bates_ranges,
         token_estimate=after,
         warnings=list(walked.warnings),
         stamp=stamp,
+        accounting_report=report_acc,
+        manifest=manifest,
+        timings_s=timings,
         run_notes={
             **termination.as_jsonable(),
             "published": False,
@@ -868,6 +898,10 @@ def _refuse_publication(
     report_acc: accounting.AccountingReport,
     manifest: mf.Manifest,
     refusals: list[tuple[str, str]],
+    renumbering: Sequence[RenumberWarning] = (),
+    drops: Sequence[DropLogEntry] = (),
+    bates_decision: BatesDecision | None = None,
+    bates_ranges: dict[tuple[str, str, int], BatesRange] | None = None,
 ) -> PipelineOutcome:
     """Stage 6 went red: REFUSE to publish (Codex review #2, finding B-1).
 
@@ -933,6 +967,10 @@ def _refuse_publication(
         reconciliation=reconciliation,
         manifest=manifest,
         accounting_report=report_acc,
+        renumbering=renumbering,
+        drops=drops,
+        bates_decision=bates_decision,
+        bates_ranges=bates_ranges,
     )
 
 
@@ -1556,6 +1594,16 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             report_acc=report_acc,
             manifest=man,
             refusals=refusals,
+            # Everything else Stage 6 had in hand. A refused run walked the
+            # whole corpus: it has the renumbering comparison, the drop log, the
+            # Bates decision and its per-document ranges, and leaving them at
+            # this call site would put them in the same class as the assignment
+            # and the reconciliation B-5 found — established by the run, present
+            # in memory, absent from the record that outlives it.
+            renumbering=renumbering,
+            drops=applied.drops,
+            bates_decision=decision,
+            bates_ranges=ranges,
         )
 
     # ---- The swap ----------------------------------------------------------
