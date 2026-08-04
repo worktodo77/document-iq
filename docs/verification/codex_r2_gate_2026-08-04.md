@@ -200,6 +200,51 @@ finding in its own suites.
 
 ---
 
+## 5a. The defect the repetition found
+
+**Run 6 of 30** of this fix round's own suite went red on an ordinary run:
+
+```
+PermissionError: [Errno 13] Permission denied:
+  ...\matter\.dociq\staging_ready.json
+  src/dociq/emit/paths.py:288  _read_marker
+  src/dociq/pipeline.py:1574   commit_staging
+```
+
+DocIQ could not read the marker it had written one statement earlier. That is
+not corruption — it is a Windows on-access scanner holding a transient
+deny-write on a file the instant it changes, which is the ordinary condition on
+this machine (Carbonite; see the project's environment notes). The swap is a
+burst of metadata operations over every deliverable in the matter, so it is
+maximally exposed to it.
+
+**The defect is older than the B-2 fix, and worse than the flake.** Under the
+permissive read B-2 replaced, that same `PermissionError` was swallowed into
+`superseded = ()` — so an antivirus scan at the wrong moment produced B-2's
+mixed evidence set on a real matter folder, **with no crash involved at all**.
+The failure mode Codex reached by reasoning about a crash is reachable on an
+ordinary Tuesday. The fix made an invisible failure loud; `_retry_io` makes the
+loud one correct.
+
+`_retry_io` wraps the marker read, the supersede unlinks, the staged moves, the
+marker delete, and `mark_ready`'s `os.replace`: eight attempts, doubling
+backoff, ~5 s total, `OSError` only, and only where the operation is idempotent.
+**Corrupt JSON is never retried** — re-reading the same bytes cannot make them
+valid, and a retry there would be a five-second delay dressed up as a check.
+`test_corrupt_json_is_not_retried` asserts the read count, because the only
+visible symptom of getting that wrong is a slower suite.
+
+This is the standing rule earning its keep: the fix was green on its first run,
+green on the targeted slice, green on the full suite, and wrong.
+
+| | |
+|---|---|
+| before `_retry_io` | 29 / 30 |
+| after | **30 / 30** (`test_publication_gate` + `test_emit_atomicity` + `test_incomplete_runs`) |
+| fail-before | `_retry_io` removed from the marker read → `test_a_transient_lock_on_the_marker_is_retried_not_refused` red |
+
+---
+
 ## 6. Determinism (criterion 7)
 
 Nothing about a refusal reaches hashed content, asserted by
@@ -216,11 +261,15 @@ the `run` section and in `incomplete_run/`, both outside the claim.
 
 ## 7. Runs
 
-| | |
-|---|---|
-| `tests/test_publication_gate.py` (27 tests) | see §8 |
-| targeted slice: publication gate + emit atomicity + incomplete runs + verify + amendments + pipeline | green |
-| full suite | see §8 |
+| what | runs | result |
+|---|---|---|
+| `test_publication_gate` + `test_emit_atomicity` + `test_incomplete_runs` | **30** | 30 / 30 green (the swap is squarely temp-dir/ordering sensitive, so 30 rather than 8 — and the 30 earned it, see §5a) |
+| full suite | **8** | see the table below |
+| `tests/test_publication_gate.py` | 30 tests | green |
+
+One earlier full-suite run went red on `test_gui_states::test_the_chrome_is_us_english`
+— `behaviour` in a comment I had written. Fixed, and worth recording rather than
+quietly dropping: the en-GB guard is a real check and it caught a real slip.
 
 ## 8. What could not be proven here
 
