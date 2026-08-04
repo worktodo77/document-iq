@@ -20,8 +20,9 @@ mixed evidence set, and the checks described as Stage-6 gates do not actually
 prevent a red set from replacing the last good deliverables.
 
 Per the Alex-ratified calibration in the handoff, every A or B finding requires
-a fix round and re-review. The D finding is nonblocking by itself and may be
-batch-fixed with the hand-back.
+a fix round and re-review. D-1 was nonblocking and was closed after the reviewed
+tip by `56129c9`, before this verdict file was committed; it is retained below
+as a finding against `292e7197` and marked with that disposition.
 
 ## B-1 — Stage-6 checks do not gate publication
 
@@ -152,6 +153,10 @@ and add a GUI test driven through a pipeline implementation that raises.
 
 **Severity class:** D — process/documentation; nonblocking by itself.
 
+**Post-review disposition:** **CLOSED** by `56129c9` — A-14 was added to the
+prose register, a machine-readable amendment registry was added, and the suite
+now checks prose/registry completeness and claimed wiring.
+
 **Locations:** `docs/codex_reviews/sprint-2_2026-08-04_claude.md:36`,
 `docs/contracts/amendments.md:831-949`
 
@@ -207,5 +212,5 @@ review documents reference an absent or unapplied amendment.
 
 Fix A-1, A-2, and B-1 through B-3; add fail-before coverage for each corrected
 path; refresh the verification evidence; and request a fix-round review. D-1
-may be closed in the same hand-back and does not independently require another
+is already closed by `56129c9` and does not independently require another
 round.
