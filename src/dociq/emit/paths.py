@@ -176,7 +176,8 @@ def replace_text_deterministic(path: Path, text: str) -> Path:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        # Retried for the same reason the swap's moves are — see `_retry_io`.
+        _retry_io(lambda: os.replace(tmp, path))
     except BaseException:
         # Including KeyboardInterrupt: a cancelled run must not leave a
         # `.partial` beside the marker it failed to write.
@@ -256,6 +257,46 @@ class PendingSwapUnreadable(DocIQError):
     """
 
 
+def _retry_io(what, *, attempts: int = 8, delay: float = 0.02):
+    """Run ``what``, retrying an ``OSError`` with a short doubling backoff.
+
+    **Found by repetition, not by reasoning.** The B-2 fix made an unreadable
+    marker fail closed, and the thirtieth repeat of the fix round's own suite
+    then went red on an ordinary run: ``PermissionError`` reading the marker
+    DocIQ had written one statement earlier. That is not corruption. It is a
+    Windows file lock — antivirus and backup agents (Carbonite is documented in
+    this project's environment notes) hold a transient deny-write on a file the
+    instant it is created, and the swap touches every deliverable in the matter.
+
+    The defect it exposed is older than the fix. Under the permissive read this
+    replaced, that same ``PermissionError`` was swallowed into ``superseded =
+    ()`` — so on a real matter folder, an antivirus scan at the wrong moment
+    produced exactly B-2's mixed evidence set, with no crash needed. The fix
+    made an invisible failure loud, and this makes the loud one correct.
+
+    **Transient I/O and corrupt state are different things, and the difference
+    is the whole design.** Only ``OSError`` is retried, and only where the
+    operation is idempotent. A marker whose JSON does not parse is never
+    retried: re-reading the same bytes cannot make them valid, and a retry loop
+    there would be a delay dressed up as a check.
+
+    Roughly 5 s across the eight attempts, which is the order an on-access scan
+    takes; after that the caller's fail-closed path is the right answer.
+    """
+    import time
+
+    last: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            return what()
+        except OSError as exc:
+            last = exc
+            if attempt + 1 < attempts:
+                time.sleep(delay * (2 ** attempt))
+    assert last is not None
+    raise last
+
+
 def _validate_superseded_entry(rel: object) -> str:
     """A supersede entry names a file INSIDE the matter folder, or it is refused.
 
@@ -285,7 +326,7 @@ def _read_marker(marker: Path) -> tuple[str, ...]:
     corruption or a hand edit, and neither is a state to guess through.
     """
     try:
-        raw = marker.read_text(encoding="utf-8")
+        raw = _retry_io(lambda: marker.read_text(encoding="utf-8"))
     except OSError as exc:
         raise PendingSwapUnreadable(_UNREADABLE.format(
             marker=marker, why=f"it could not be read ({exc})",
@@ -444,12 +485,19 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     # the more dangerous of the two options (Codex review #2, B-2).
     superseded = _read_marker(marker)
 
+    # Every step below is wrapped in :func:`_retry_io` for the reason given
+    # there: on Windows the swap is a burst of metadata operations over files an
+    # on-access scanner has just seen change, and a transient lock in the middle
+    # of it is the ordinary case rather than the exotic one. Each step is
+    # idempotent, so a retry repeats work rather than doing something new — and
+    # the roll-forward that follows a genuine failure is idempotent for the same
+    # reason.
     root = destination.root
     removed: list[str] = []
     for rel in superseded:
         path = root / rel
         if path.is_file():
-            path.unlink()
+            _retry_io(path.unlink)
             removed.append(rel)
         elif path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
@@ -462,10 +510,10 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
                 continue
             dst = root / src.relative_to(staging)
             dst.parent.mkdir(parents=True, exist_ok=True)
-            src.replace(dst)
+            _retry_io(lambda s=src, d=dst: s.replace(d))
         shutil.rmtree(staging, ignore_errors=True)
 
-    marker.unlink(missing_ok=True)
+    _retry_io(lambda: marker.unlink(missing_ok=True))
     return tuple(sorted(removed))
 
 

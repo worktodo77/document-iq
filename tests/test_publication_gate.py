@@ -559,3 +559,120 @@ def test_the_swap_is_unreachable_without_passing_the_gate(tmp_path):
     assert gate < mark < commit, (
         f"the swap is not downstream of the gate: gate at statement {gate}, "
         f"mark_ready at {mark}, commit_staging at {commit}")
+
+
+# ---------------------------------------------------------------------------
+# The defect the repetition found
+# ---------------------------------------------------------------------------
+
+
+def test_a_transient_lock_on_the_marker_is_retried_not_refused(tmp_path):
+    """FOUND BY REPETITION, on run 6 of 30 of this very file.
+
+    An ordinary run went red with ``PermissionError`` reading the marker DocIQ
+    had written one statement earlier — a Windows on-access scanner holding a
+    transient deny-write, not corruption. The B-2 fix had turned that into a
+    blocked run.
+
+    The defect is older than the fix. Under the permissive read B-2 replaced,
+    that same ``PermissionError`` was swallowed into ``superseded = ()``, so an
+    antivirus scan at the wrong moment produced B-2's mixed evidence set on a
+    real matter folder with no crash involved at all. This is the finding
+    reached by the ordinary path.
+    """
+    out = tmp_path / "matter"
+    layout = OutputLayout.at(out).ensure()
+    (out / "document_index.csv").write_text("Doc ID\n", encoding="utf-8",
+                                            newline="")
+    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
+    (staging / "clean_text").mkdir(parents=True)
+    (staging / "sources.json").write_text("{}\n", encoding="utf-8", newline="")
+    emit_paths.mark_ready(layout, ("document_index.csv",))
+
+    real_read = emit_paths.Path.read_text
+    attempts = {"n": 0}
+
+    def locked_twice(self, *a, **kw):
+        if self.name == emit_paths.MARKER_NAME:
+            attempts["n"] += 1
+            if attempts["n"] <= 2:
+                raise PermissionError(13, "Permission denied", str(self))
+        return real_read(self, *a, **kw)
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(emit_paths.Path, "read_text", locked_twice)
+    try:
+        removed = emit_paths.commit_staging(layout)
+    finally:
+        mp.undo()
+
+    assert attempts["n"] == 3, "the transient lock was not retried"
+    assert removed == ("document_index.csv",)
+    assert (out / "sources.json").is_file(), "the swap did not complete"
+
+
+def test_a_lock_that_never_clears_still_fails_closed(tmp_path):
+    """The retry is a retry, not a way out. When the file genuinely cannot be
+    read, the refusal is the same one B-2 requires."""
+    out = tmp_path / "matter"
+    layout = OutputLayout.at(out).ensure()
+    (out / "document_index.csv").write_text("Doc ID\n", encoding="utf-8",
+                                            newline="")
+    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
+    staging.mkdir(parents=True)
+    (staging / "sources.json").write_text("{}\n", encoding="utf-8", newline="")
+    emit_paths.mark_ready(layout, ("document_index.csv",))
+    before = _deliverables(out)
+
+    real_read = emit_paths.Path.read_text
+
+    def always_locked(self, *a, **kw):
+        if self.name == emit_paths.MARKER_NAME:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read(self, *a, **kw)
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(emit_paths.Path, "read_text", always_locked)
+    try:
+        with pytest.raises(emit_paths.PendingSwapUnreadable):
+            emit_paths.commit_staging(layout)
+    finally:
+        mp.undo()
+
+    assert _deliverables(out) == before
+    assert (out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME).is_file()
+
+
+def test_corrupt_json_is_not_retried(tmp_path):
+    """Transient I/O and corrupt state are different things.
+
+    Re-reading the same bytes cannot make invalid JSON valid, so a retry there
+    would be a delay dressed up as a check — and a five-second one on every
+    hand-edited marker. Asserted by counting the reads, because the only visible
+    symptom of getting this wrong is that the suite is slower.
+    """
+    out = tmp_path / "matter"
+    layout = OutputLayout.at(out).ensure()
+    marker = out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text('{"superseded": ["clean', encoding="utf-8", newline="")
+
+    real_read = emit_paths.Path.read_text
+    reads = {"n": 0}
+
+    def counted(self, *a, **kw):
+        if self.name == emit_paths.MARKER_NAME:
+            reads["n"] += 1
+        return real_read(self, *a, **kw)
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(emit_paths.Path, "read_text", counted)
+    try:
+        with pytest.raises(emit_paths.PendingSwapUnreadable):
+            emit_paths.commit_staging(layout)
+    finally:
+        mp.undo()
+
+    assert reads["n"] == 1, (
+        f"a corrupt marker was read {reads['n']} times — content corruption is "
+        f"not transient and must not be retried")
