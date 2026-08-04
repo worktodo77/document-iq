@@ -445,9 +445,16 @@ def test_readme_states_original_pagination():
 
 
 def test_the_scope_statement_is_the_very_first_thing_in_the_readme(tmp_path):
-    """FAIL-BEFORE: with the statement appended, or placed under the "368
-    documents, 18,521 pages" headline, it is read *after* the belief it exists to
-    prevent has already formed. D-20 makes position part of the requirement."""
+    """FAIL-BEFORE: with the statement appended, or placed under the
+    "368 documents, N pages" headline, it is read *after* the belief it exists to
+    prevent has already formed. D-20 makes position part of the requirement.
+
+    The headline's page count is left as N on purpose: it is an illustration of
+    where the reader's eye lands, not a measurement, and the literal that used to
+    stand here (18,521) was superseded by the acceptance run's 18,556.
+    ``emit/handoff.py``'s ``render_readme`` docstring carried the same stale
+    literal and is now de-literalised too, the file having been released to this
+    package."""
     layout, docs = full_matter(tmp_path)
     scope = default_scope_statement(1, "P495")
     pkg = build_upload_package(
@@ -820,3 +827,66 @@ def test_a_subset_package_never_copies_a_manifest_at_all(tmp_path, monkeypatch):
     assert "sources.json" not in sources and "document_index.csv" not in sources, (
         f"a scoped package copied {sources} — a manifest reached it whole"
     )
+
+
+def test_the_README_and_the_mode_statement_cannot_disagree(tmp_path):
+    """C1, reproduced then closed.
+
+    ``build_upload_package`` computed its verdict against
+    ``ProjectLimits.direct_context_tokens`` while ``render_readme`` called the
+    bare ``estimate.capacity()``, which falls back to a DIFFERENT literal in
+    ``verify.tokens``. With any override the two disagreed, and one reproduced
+    package carried:
+
+        mode_statement : "Fits directly in a Claude Project without retrieval
+                          mode (about 20% of direct-context capacity...)"
+        README         : "About 181-197% of direct-context capacity - the
+                          Project will operate in retrieval (RAG) mode."
+
+    The recipient reads the README. This asserts the two are renderings of ONE
+    verdict rather than asserting they happen to coincide today, so it fails for
+    any future limit that reaches only one of them.
+
+    FAIL-BEFORE, watched RED: restoring the bare ``estimate.capacity()`` in
+    ``render_readme`` puts the RAG sentence in the file while the package
+    reports "Fits directly".
+    """
+    layout, docs = full_matter(tmp_path)
+
+    # An estimate ABOVE the 200,000 default, because the defect is invisible
+    # otherwise. The fixture matter measures ~500 tokens, so every limit says
+    # "fits" and both sides agree however wrong the wiring is — a test built on
+    # it would pass against the very defect it exists to catch. This measures a
+    # corpus-scale body of text instead, which is the regime a real matter is in.
+    big = ["The contractor issued a notice of delay on 15 March 2021 regarding "
+           "topside module fabrication sequencing. " * 60 for _ in range(240)]
+    estimate = estimate_for_texts(big)
+    assert estimate.low > 200_000, (
+        "the estimate must exceed the tokens.DIRECT_CONTEXT_TOKENS default, or "
+        "neither limit below can disagree with it")
+
+    # FITS under the package's limit; would NOT fit under the 200,000 default.
+    generous = build_upload_package(
+        layout, matter_name="P495", document_count=len(docs), estimate=estimate,
+        limits=ProjectLimits(direct_context_tokens=50_000_000),
+    )
+    text = generous.readme.read_text(encoding="utf-8")
+    assert generous.mode_statement in text, (
+        "the package's own capacity verdict is not the one the recipient "
+        f"reads.\n  package: {generous.mode_statement}\n  README has: "
+        + next((ln.strip() for ln in text.splitlines()
+                if "direct-context" in ln or "Fits directly" in ln), "<none>")
+    )
+    assert "Fits directly" in generous.mode_statement
+    assert "retrieval (RAG) mode" not in text
+
+    # And the other direction, so the test is not satisfied by a limit that
+    # makes every package fit.
+    tight = build_upload_package(
+        layout, matter_name="P495", document_count=len(docs), estimate=estimate,
+        # Does NOT fit, and at a percentage the 200,000 default cannot produce.
+        limits=ProjectLimits(direct_context_tokens=max(1, estimate.low // 10)),
+    )
+    tight_text = tight.readme.read_text(encoding="utf-8")
+    assert tight.mode_statement in tight_text
+    assert "retrieval (RAG) mode" in tight.mode_statement

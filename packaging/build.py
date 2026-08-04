@@ -132,7 +132,9 @@ def verify(app_dir: Path) -> list[str]:
     if walls:
         ordered = sorted(walls)
         # The FIRST run is reported separately and never folded into the
-        # median. On Windows the first execution of 388 MB of never-seen
+        # median. On Windows the first execution of the payload — measured at
+        # 393.1 MB across 939 files on 2026-08-01, see docs/build/packaging.md;
+        # this comment said 388 MB and cited nothing — of never-seen
         # binaries is dominated by the on-access antivirus scan, which is a
         # real cost a client pays exactly once and a completely misleading
         # figure for steady-state launch. Reporting one number for both would

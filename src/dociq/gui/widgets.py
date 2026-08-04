@@ -519,9 +519,18 @@ class ReductionWaterfall(QWidget):
             rows.append(WaterfallRow(
                 WaterfallRow.AUTOMATIC, lever.key, lever.label, running / full,
                 f"−{compact_tokens(lever.tokens)}  {note}", self._theme,
-                hint=("Removed mechanically — exact duplicates and page "
-                      "furniture. Not an expert decision, and recorded "
-                      "separately in the log."
+                # The hint names the CATEGORY, never a mechanism. It read
+                # "Removed mechanically — exact duplicates and page furniture",
+                # which asserts a behavior the pipeline withdraws: `adapter._plan`
+                # states that DocIQ *detects* exact-hash duplicates and warns
+                # about them and "removes neither them nor page furniture", so
+                # the real adapter emits no automatic lever at all and this
+                # string was unreachable-but-latent. Track D recorded it
+                # (track_d_sprint2 §5.6) and it survived; withdrawn here.
+                # Whatever a locked lever turns out to be, its own `label` says
+                # what it is — the hint's job is only to say who decided it.
+                hint=("Removed mechanically by the tool, not by an expert "
+                      "decision — and recorded separately in the log."
                       + (" This saving is projected, not counted."
                          if lever.estimated else "")),
             ))

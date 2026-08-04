@@ -156,8 +156,11 @@ def test_the_checklist_hook_lists_every_rule_the_profile_carries(library):
     """FAIL-BEFORE: without ``profile_rules`` the real adapter renders Track E's
     ``CHECKLIST_NO_RULES`` empty state, which **disables approval** — so §6's
     profiling workflow cannot be completed against the real pipeline at all.
-    Track E left the hook optional (amendment A-11, not yet applied); absent is
-    exactly what it would be here.
+    A-11 is now APPLIED (``docs/contracts/amendments.md``, 2026-08-01) and
+    ``profile_rules`` is on ``PipelineAPI``; Track E still reaches it through the
+    optional ``getattr`` hook, because the loud empty state is the right
+    behaviour for a stand-in that cannot supply the rules. Absent is no longer
+    the expected case — and it is not the case here.
     """
     _write(library, MPR)
     pipe = adapter.RealPipeline()
@@ -294,14 +297,106 @@ def test_the_estimate_is_the_measured_rate_and_nothing_else():
     ILLUSTRATIVE, and carrying it into the real adapter would put an invented
     number beside the operator's action.
 
-    The rate here is arithmetic on the register's single measured run, so this
-    test is allowed to restate it — if the constant is ever changed without a
-    new measurement, this is where the change has to be argued.
+    Each rate is arithmetic on one measured run, so this test is allowed to
+    restate them — if either constant is ever changed without a new measurement,
+    this is where the change has to be argued.
     """
     two_gb = 2_000_000_000
-    minutes = adapter._minutes_for(two_gb, {".pdf": two_gb})
-    assert minutes == round(2.0 * (3046.7 / 2.6) / 60)
-    assert minutes == 39
+    on = adapter._minutes_for(two_gb, {".pdf": two_gb}, ocr_enabled=True)
+    off = adapter._minutes_for(two_gb, {".pdf": two_gb}, ocr_enabled=False)
+    assert on == round(2.0 * (6182.4 / 2.6) / 60) == 79
+    assert off == round(2.0 * (3046.7 / 2.6) / 60) == 39
+
+
+def test_the_default_rate_is_the_ocr_on_one_because_the_default_run_is():
+    """The claim-accuracy defect this closes, stated as an assertion.
+
+    ``MEASURED_SECONDS_PER_GB`` was derived from the OCR-DISABLED run while
+    :class:`RealPipeline` constructs with ``ocr_enabled=True``, so the figure
+    beside the primary action read ~51 min for a corpus whose one measured
+    OCR-on run took 103. The rate and the run must be the same configuration.
+    """
+    two_gb = 2_000_000_000
+    assert adapter._minutes_for(two_gb, {".pdf": two_gb}) == \
+        adapter._minutes_for(two_gb, {".pdf": two_gb}, ocr_enabled=True)
+    assert adapter.seconds_per_gb(True) > adapter.seconds_per_gb(False)
+    # ≈2.0×, independently consistent with the register's ≈2.0–2.3× figure for
+    # OCR's share of extraction. Asserted as a band, not a literal: this is a
+    # cross-check between two runs, not a third measurement.
+    ratio = adapter.seconds_per_gb(True) / adapter.seconds_per_gb(False)
+    assert 1.9 <= ratio <= 2.4, ratio
+
+
+@pytest.mark.parametrize("ocr", [True, False])
+def test_the_previewed_estimate_follows_THIS_pipeline_s_ocr_setting(
+    tmp_path, monkeypatch, ocr
+):
+    """Not merely that two rates exist — that ``preview_folder`` READS the one
+    matching the run it is previewing.
+
+    Asserted through ``preview_folder`` itself, on a folder whose bytes are
+    faked to 1 GB, rather than by re-calling ``_minutes_for`` with the setting
+    the test already knows. A test that calls the helper directly passes whether
+    or not the caller is wired to it — which is the bug, not the fix.
+
+    FAIL-BEFORE, watched RED: with ``ocr_enabled=self._ocr_enabled`` deleted from
+    ``preview_folder``'s call, the ``ocr=False`` case reports 40 minutes instead
+    of 20.
+    """
+    (tmp_path / "a.pdf").write_bytes(b"%PDF-1.4\n")
+    one_gb = 1_000_000_000
+
+    real_stat = Path.stat
+
+    def fake_stat(self, *a, **k):
+        st = real_stat(self, *a, **k)
+        if self.suffix.lower() == ".pdf":
+            class _S:
+                st_size = one_gb
+            return _S()
+        return st
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+
+    preview = adapter.RealPipeline(ocr_enabled=ocr).preview_folder(str(tmp_path))
+    assert preview.total_bytes == one_gb
+    assert preview.estimated_minutes == round(
+        1.0 * adapter.seconds_per_gb(ocr) / 60
+    )
+    assert preview.estimated_minutes == (40 if ocr else 20)
+
+
+def test_the_shipped_default_is_ocr_on():
+    """The whole premise of the fix: the figure beside the primary action has to
+    describe the run the primary action starts."""
+    assert adapter.RealPipeline()._ocr_enabled is True
+
+
+def test_no_rate_constant_survives_that_hides_which_ocr_setting_it_timed():
+    """CLASS assertion, not the repro.
+
+    The defect was a module-level constant named as though it were the single
+    measured rate. Any future constant of that shape reintroduces it, so the
+    module must expose the two rates under names that say which is which, and
+    must not re-export an unqualified one.
+    """
+    assert not hasattr(adapter, "MEASURED_SECONDS_PER_GB")
+    assert not hasattr(adapter, "MEASURED_BASIS")
+    assert not hasattr(adapter, "MEASURED_SECONDS")
+    assert {"SECONDS_PER_GB_OCR_ON", "SECONDS_PER_GB_OCR_OFF",
+            "seconds_per_gb", "measured_basis"} <= set(adapter.__all__)
+    for name in adapter.__all__:
+        assert "SECONDS_PER_GB" not in name or name.endswith(("_ON", "_OFF")), \
+            f"{name} is a rate whose name does not say which OCR setting it timed"
+
+
+def test_the_basis_sentence_names_the_run_it_came_from():
+    """A rate on screen that cannot say which run produced it is a claim the
+    operator would have to defend without support."""
+    on, off = adapter.measured_basis(True), adapter.measured_basis(False)
+    assert "6,182.4 s" in on and "OCR enabled" in on and "2026-08-02" in on
+    assert "3,046.7 s" in off and "OCR disabled" in off and "2026-07-31" in off
+    assert on != off
 
 
 @pytest.mark.parametrize(
@@ -386,9 +481,10 @@ def test_progress_speaks_plain_language_about_pages(real_run):
 
 
 def test_the_last_four_stages_report_themselves(real_run):
-    """The register measures Stages 1-2 at 99.1% of the run. Without this, the
-    progress screen goes quiet for everything after the walk and a long emit
-    reads as a hang."""
+    """The acceptance run of 2026-08-02 measures Stages 1-2 at **99.70%** of the
+    run — 18.5 s for everything after them. (This said 99.1%, the superseded
+    2026-07-31 pair, in the present tense.) Without this, the progress screen
+    goes quiet for everything after the walk and a long emit reads as a hang."""
     _outcome, events, _root = real_run
     statuses = [e.status for e in events]
     for step in (3, 4, 5, 6):

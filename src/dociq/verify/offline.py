@@ -52,18 +52,52 @@ walks the live ``socket`` module and reports any *outbound-capable* public
 callable that is not guarded — so a sibling added by a future Python release
 fails a test rather than going unnoticed.
 
+THE OTHER WAY OUT: A CHILD PROCESS
+Every guard above is a rebind inside **this** interpreter, so the claim it
+supports is scoped to this interpreter. A process that spawns a child has left
+that scope: the child gets a pristine ``socket`` module, and the parent's
+``attempts == 0`` remains perfectly true while the child does whatever it likes.
+That is not a hypothetical shape for DocIQ — ``verify/determinism.py`` and
+``packaging/dociq_launcher.py`` both spawn subprocesses by design, and
+``gui/main_window.py`` calls ``os.startfile`` to open the output folder.
+
+So process creation is guarded on the same terms as the socket class: recorded,
+then raised. :func:`enumerate_child_process_entry_points` is the enumeration and
+:func:`audit_child_process_siblings` is the live-module audit, mirroring the
+socket pair above. Nothing DocIQ does *inside* a guarded block spawns anything —
+the determinism probe and the launcher both spawn outside the guard, and a
+pipeline run uses a thread pool, not a process pool — so this closes a hole
+rather than constraining the product.
+
+**Blocking, not merely counting, is the right default here** and it is worth
+saying why the reasoning differs from ``TRANSPORT_MODULES``. An imported
+``urllib.request`` is inert until called; a spawned child is an execution the
+guard can no longer see. The conservative treatment of an unobservable thing is
+to refuse it, not to note it.
+
 WHAT THIS CANNOT PROVE, STATED PLAINLY
-A C extension that calls the Winsock API directly, without going through
-CPython's ``socket``/``_socket`` objects, is invisible here. Nothing in the
-dependency set is known to do that, and "not known to" is not "does not". That
-residue is what an actual network-disabled run covers and this does not; see
-``docs/verification/track_f_sprint2_2026-08-01.md`` for which was executed.
+1. A C extension that calls the Winsock API directly, without going through
+   CPython's ``socket``/``_socket`` objects, is invisible here. Nothing in the
+   dependency set is known to do that, and "not known to" is not "does not".
+2. A child process spawned **outside** a guarded block is not covered by
+   anything in this module, and DocIQ spawns some. What each of those children
+   does is a separate claim, proven separately: the determinism runner's child
+   is the pipeline itself, and ``tests/test_offline.py`` runs a whole pipeline
+   run in a child *under its own guard* and reports that child's attempt count.
+3. A C extension that spawns a process through the Win32 API rather than through
+   the ``os``/``subprocess`` layer is invisible for the same reason as (1).
+
+That residue is what an actual network-disabled run covers and this does not;
+see ``docs/verification/track_f_sprint2_2026-08-01.md`` §3.4 for which was
+executed and which remains open.
 """
 
 from __future__ import annotations
 
+import os as _os_mod
 import socket as _socket_mod
 import ssl as _ssl_mod
+import subprocess as _subprocess_mod
 import sys
 import threading
 import traceback
@@ -73,10 +107,13 @@ from types import ModuleType
 __all__ = [
     "Attempt",
     "NetworkAttempted",
+    "ProcessSpawnAttempted",
     "NetworkGuard",
     "no_network",
     "enumerate_guarded_entry_points",
+    "enumerate_child_process_entry_points",
     "audit_siblings",
+    "audit_child_process_siblings",
     "MODEL_FETCH_MODULES",
     "TRANSPORT_MODULES",
     "audit_model_fetch_imports",
@@ -86,6 +123,16 @@ __all__ = [
 
 class NetworkAttempted(RuntimeError):
     """Raised at the guarded entry point, after the attempt is recorded."""
+
+
+class ProcessSpawnAttempted(NetworkAttempted):
+    """Raised when guarded code tries to create a child process.
+
+    A subclass of :class:`NetworkAttempted` so existing ``except`` clauses keep
+    catching it, and a distinct type because the two findings mean different
+    things: one is an outbound call, the other is code stepping outside the
+    scope in which "no outbound call" was proven.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +207,116 @@ _COVERED_INDIRECTLY = {
 }
 
 
+# ---------------------------------------------------------------------------
+# The child-process class
+# ---------------------------------------------------------------------------
+
+# Named rather than derived, for the entry points whose names carry no common
+# prefix. Every one of these creates or becomes another program.
+_CHILD_PROCESS_NAMED: tuple[tuple[str, str], ...] = (
+    # Everything in ``subprocess`` funnels through Popen — run, call,
+    # check_call, check_output, getoutput, getstatusoutput. Guarding the class
+    # guards the module; guarding the helpers would miss a direct construction,
+    # which is what ``verify/determinism.py`` would use if it ever needed one.
+    ("subprocess", "Popen"),
+    ("os", "system"),
+    ("os", "popen"),
+    # Windows shell-open. ``gui/main_window.py`` uses it for "open the output
+    # folder", and handing a path to the shell can start a browser — which is
+    # precisely an outbound action this module exists to rule out. The GUI never
+    # runs inside a guard, so guarding it costs nothing and closes the case.
+    ("os", "startfile"),
+    ("os", "fork"),
+    ("os", "forkpty"),
+)
+
+# Derived, so a name a future CPython adds to either family is covered the day
+# it appears rather than the day someone remembers to add it.
+_CHILD_PROCESS_PREFIXES = ("spawn", "exec", "posix_spawn")
+
+
+def _child_process_targets() -> tuple[tuple[str, str], ...]:
+    """The child-process entry points that EXIST in this interpreter.
+
+    Resolved live because the families are platform-split — ``os.fork`` and
+    ``os.posix_spawn`` are POSIX-only, ``os.startfile`` is Windows-only — and a
+    hard-coded list would either raise on the wrong platform or quietly guard
+    less than it claims on the right one.
+    """
+    found: list[tuple[str, str]] = []
+    for mod_name, attr in _CHILD_PROCESS_NAMED:
+        mod = sys.modules.get(mod_name)
+        if mod is not None and callable(getattr(mod, attr, None)):
+            found.append((mod_name, attr))
+    for name in dir(_os_mod):
+        if name.startswith("_") or not name.startswith(_CHILD_PROCESS_PREFIXES):
+            continue
+        if not callable(getattr(_os_mod, name, None)):
+            continue
+        if ("os", name) not in found:
+            found.append(("os", name))
+    return tuple(found)
+
+
+def enumerate_child_process_entry_points() -> tuple[str, ...]:
+    """Every process-creation entry point :class:`NetworkGuard` closes.
+
+    A value rather than prose, for the same reason as
+    :func:`enumerate_guarded_entry_points`: a reviewer can diff it and a test
+    can assert the class is covered.
+    """
+    return tuple(sorted(f"{m}.{a}" for m, a in _child_process_targets()))
+
+
+# Process-creating names this module deliberately does not rebind, each with the
+# reason. Anything in ``os`` or ``subprocess`` that spawns and is not here and
+# not guarded is a hole, and :func:`audit_child_process_siblings` says so.
+_CHILD_COVERED_INDIRECTLY = {
+    "subprocess.run": "constructs subprocess.Popen",
+    "subprocess.call": "constructs subprocess.Popen",
+    "subprocess.check_call": "constructs subprocess.Popen",
+    "subprocess.check_output": "constructs subprocess.Popen",
+    "subprocess.getoutput": "constructs subprocess.Popen",
+    "subprocess.getstatusoutput": "constructs subprocess.Popen",
+}
+
+
+def audit_child_process_siblings() -> tuple[str, ...]:
+    """Process-creating names that are neither guarded nor accounted for.
+
+    Empty is the passing value. Reads the live ``os`` and ``subprocess``
+    modules, so a spawner a future CPython adds shows up as a finding instead of
+    as a silent gap — the same global class assertion :func:`audit_siblings`
+    makes for sockets.
+    """
+    guarded = set(enumerate_child_process_entry_points())
+    holes: list[str] = []
+    for name in dir(_subprocess_mod):
+        if name.startswith("_"):
+            continue
+        dotted = f"subprocess.{name}"
+        obj = getattr(_subprocess_mod, name, None)
+        if not callable(obj):
+            continue
+        # The spawning surface of ``subprocess`` is Popen plus the helpers that
+        # construct it. Everything else in the module is an exception class, a
+        # constant, or a completed-process record.
+        if name != "Popen" and dotted not in _CHILD_COVERED_INDIRECTLY:
+            continue
+        if dotted not in guarded and dotted not in _CHILD_COVERED_INDIRECTLY:
+            holes.append(dotted)
+    for name in dir(_os_mod):
+        if name.startswith("_") or not callable(getattr(_os_mod, name, None)):
+            continue
+        looks_like_spawn = (
+            name.startswith(_CHILD_PROCESS_PREFIXES)
+            or name in {"system", "popen", "startfile", "fork", "forkpty"}
+        )
+        if looks_like_spawn and f"os.{name}" not in guarded:
+            holes.append(f"os.{name}")
+    return tuple(sorted(holes))
+
+
 def audit_siblings() -> tuple[str, ...]:
     """Outbound-capable ``socket`` names that are neither guarded nor
     explicitly accounted for. Empty is the passing value.
@@ -183,11 +340,16 @@ def audit_siblings() -> tuple[str, ...]:
 
 @dataclass
 class NetworkGuard:
-    """Records and blocks every outbound attempt for the duration of a block.
+    """Records and blocks every outbound and process-creating attempt.
 
     Re-entrant across threads: the OCR page pool fans work across ~16 threads
     and an attempt from any of them must be recorded, so ``attempts`` is
     appended under a lock.
+
+    ``attempts`` mixes both classes deliberately, and ``clean`` is the single
+    assertion: an outbound call and an escape from the process in which outbound
+    calls are being counted are both failures of the same claim. The entry-point
+    name on each :class:`Attempt` says which occurred.
     """
 
     attempts: list[Attempt] = field(default_factory=list)
@@ -206,15 +368,16 @@ class NetworkGuard:
         with self._lock:
             self.attempts.append(Attempt(entry_point, detail, stack))
 
-    def _raiser(self, entry_point: str):
+    def _raiser(self, entry_point: str, exc=NetworkAttempted,
+                what: str = "outbound network attempted via"):
         def _blocked(*args, **kwargs):
             detail = ", ".join(
                 [repr(a)[:80] for a in args]
                 + [f"{k}={v!r}"[:80] for k, v in kwargs.items()]
             )
             self._record(entry_point, detail)
-            raise NetworkAttempted(
-                f"outbound network attempted via {entry_point} — "
+            raise exc(
+                f"{what} {entry_point} — "
                 "DocIQ is offline by design (Principle 4)"
             )
 
@@ -233,6 +396,18 @@ class NetworkGuard:
         self._saved.append((_ssl_mod.SSLContext, "wrap_socket", original_wrap))
         _ssl_mod.SSLContext.wrap_socket = self._raiser(  # type: ignore[method-assign]
             "ssl.SSLContext.wrap_socket")
+        # Process creation, on the same terms: recorded, then refused. A child
+        # process is not an outbound call, it is an exit from the scope in which
+        # the absence of outbound calls is being proven — see the module
+        # docstring, "THE OTHER WAY OUT".
+        for mod_name, attr in _child_process_targets():
+            mod = sys.modules[mod_name]
+            self._saved.append((mod, attr, getattr(mod, attr)))
+            setattr(mod, attr, self._raiser(
+                f"{mod_name}.{attr}",
+                ProcessSpawnAttempted,
+                "child process creation attempted via",
+            ))
         return self
 
     def __exit__(self, *exc) -> None:
@@ -242,10 +417,12 @@ class NetworkGuard:
         self._saved.clear()
 
     def render(self) -> str:
+        total = (len(enumerate_guarded_entry_points())
+                 + len(enumerate_child_process_entry_points()))
         if self.clean:
-            return (f"no outbound attempt on any of "
-                    f"{len(enumerate_guarded_entry_points())} guarded entry points")
-        head = f"{len(self.attempts)} outbound attempt(s):"
+            return (f"no outbound or child-process attempt on any of "
+                    f"{total} guarded entry points")
+        head = f"{len(self.attempts)} outbound/child-process attempt(s):"
         return head + "\n" + "\n\n".join(a.render() for a in self.attempts)
 
 

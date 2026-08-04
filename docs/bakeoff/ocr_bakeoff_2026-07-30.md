@@ -1,11 +1,26 @@
-# D-01 OCR bake-off — rapidocr on the real MODEC/Petrobras MPR corpus
+# rapidocr characterization on the real MODEC/Petrobras MPR corpus
 
-**Date:** 2026-07-30 · **Track:** A (ingestion spine), Sprint 1
-**Decision under test:** D-01 — build on rapidocr, compare against Tesseract on
-~20 real scanned MPR pages, swap only if Tesseract wins decisively.
-**Acceptance criterion:** 9.
-**Status:** **rapidocr characterized; the comparison is NOT performed** — see
-§2. D-01 cannot be closed on this artifact alone.
+> **RETITLED 2026-08-03, as D-19 records.** This document was written as
+> "D-01 OCR bake-off". D-19 (2026-07-31) wrote Tesseract off — "D-01's
+> conditional swap and acceptance criterion 9's comparison are both **cancelled,
+> not deferred**" — and ruled that this artifact "stands as the methodology
+> artifact D-01 asked for, **retitled to what it is**". The retitling had not
+> been done, so a cancelled comparison went on being described here as pending
+> and §2 went on recommending an install to enable it. It is a **rapidocr
+> characterization**, and that is its final form.
+
+**Date:** 2026-07-30 (retitled 2026-08-03) · **Track:** A (ingestion spine),
+Sprint 1
+**Decision it was written under:** D-01 — build on rapidocr, compare against
+Tesseract on ~20 real scanned MPR pages, swap only if Tesseract wins decisively.
+**Decision that closed it:** D-19 — Tesseract written off; the comparison and
+acceptance criterion 9's head-to-head are **cancelled**. No future sprint owes
+one.
+**Status:** **rapidocr characterized. No comparison was made and none is
+outstanding.** The liability D-19 records — that the shipped engine was chosen on
+in-house familiarity and ONNX bundling convenience and never benchmarked against
+an alternative on this corpus — stands, and D-25/D-28/D-29 attach a measured
+page-level cost to it.
 
 ## 1. What was done
 
@@ -49,20 +64,27 @@ bake-off that changes the machine in order to run has measured something other
 than the machine.
 
 **Consequence, stated plainly.** This artifact characterizes rapidocr. It does
-**not** compare the two engines, so it cannot on its own discharge acceptance
-criterion 9 or close D-01. Two ways forward, for Alex's ruling:
+**not** compare the two engines.
 
-- **(a)** Install Tesseract 5 on the build machine and re-run the same harness
-  — it already has the Tesseract path wired and will pick the binary up from
-  `PATH`. Cost: one install, ~2 minutes of run time.
-- **(b)** Rule D-01 on the rapidocr characterization plus the hand-check, and
-  record that no head-to-head was performed. Defensible only if the hand-check
-  says rapidocr is good enough that a swap would not be considered anyway.
+**RULED, 2026-07-31 (D-19): option (b), and the comparison is cancelled.** Two
+ways forward were put to Alex when this was written — **(a)** install Tesseract 5
+on the build machine and re-run the same harness, or **(b)** rule D-01 on the
+rapidocr characterization alone and record that no head-to-head was performed.
+The recommendation was (a). **Alex ruled (b).** Tesseract is written off, D-01's
+conditional swap and acceptance criterion 9's comparison are cancelled rather
+than deferred, and no future sprint owes an install.
 
-Recommendation is (a): the D-01 ruling explicitly says "swap to Tesseract only
-if it wins decisively on the actual corpus", and that sentence needs a
-Tesseract number to be answerable. But the choice is Alex's, and the
-rapidocr-only characterization below is complete either way.
+The original text of this section carried recommendation (a) as a live
+recommendation for eight days after it was overruled — a standing instruction to
+enable a comparison that had been cancelled. It is recorded here rather than
+deleted, because what the ruling rejected is part of what the ruling means.
+
+**What the ruling costs, on the record.** D-19 states it and D-25, D-28 and D-29
+measure it: DocIQ ships an OCR engine never benchmarked against an alternative on
+this corpus, and criterion 4 is NOT MET on scanned productions — 31.250% of OCR'd
+pages carry a Bates locator (0 wrong, 0 false positives), against 100.000% on
+native-text pages. "Tesseract is the industry-recognizable name for law-firm IT
+review", the original argument for the bake-off, remains unaddressed.
 
 ## 3. rapidocr — measured
 
@@ -153,4 +175,8 @@ python tools/ocr_bakeoff.py --corpus "<corpus root>" --out "<dir outside the rep
 ```
 
 Defaults: `CER-1-145.pdf` and `CER-1-113.pdf`, 20 pages, 30 stability repeats.
-The harness picks up Tesseract automatically if it is ever installed.
+
+The harness still has the Tesseract path wired and would pick a binary up from
+`PATH`. That is a property of the code, **not an invitation**: D-19 cancelled the
+comparison, so an engine appearing in this harness's output would be an
+unrequested measurement, not a pending one.

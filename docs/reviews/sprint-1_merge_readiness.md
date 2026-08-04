@@ -81,7 +81,9 @@ If you would rather not merge until Codex review #2, that is equally defensible
    `get_pipeline()` is the whole swap).
 2. Profiling checklist UI live; the D-14 waterfall driven by real figures.
 3. Analyze-in-Claude Paths A and B.
-4. PyInstaller single executable with bundled ONNX models.
+4. PyInstaller single executable with bundled ONNX models. — **AMENDED by D-22
+   (2026-08-01), after this note was written: a one-folder build shipped as a
+   zip, not `--onefile`.**
 5. Offline verification with network interfaces disabled (criterion 6).
 6. Full MODEC end-to-end acceptance run (criterion 1), Bates acceptance on the
    MNFV production (criterion 4), handoff acceptance (criterion 8).

@@ -641,3 +641,52 @@ def test_every_aggregate_over_levers_marks_a_projection() -> None:
             f"{name} adds projected levers up and does not say the figure is a "
             f"projection: {text!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# C4 — no GUI string may assert a removal the pipeline withdraws
+# ---------------------------------------------------------------------------
+
+
+def test_no_gui_string_claims_DocIQ_removes_duplicates_or_page_furniture():
+    """CLASS assertion, not the one repro.
+
+    ``adapter._plan`` withdraws the behavior in terms: DocIQ *detects*
+    exact-hash duplicates and warns about them, and **removes neither them nor
+    page furniture**. Three GUI strings asserted the opposite anyway — the
+    locked ``ChecklistRow.attribution``, the waterfall row's tooltip in
+    ``widgets.py``, and the mock's ``AUTOMATIC_SAVING_SHARE`` docstring. Two of
+    them were unreachable under the real adapter, which is what let them survive
+    review: reachability is a property of this month's adapter, not of the
+    string, and these are strings an expert reads.
+
+    So the assertion is over the SOURCE of every GUI module, not over a rendered
+    widget — a rendering test only covers the branch it happens to reach.
+    """
+    import re
+    from pathlib import Path
+
+    gui = Path(__file__).resolve().parents[1] / "src" / "dociq" / "gui"
+    # "removes/removed ... duplicates" or "... page furniture" in one sentence.
+    claim = re.compile(
+        r"remove[sd]?\b[^.]{0,120}?(duplicate|page furniture)"
+        r"|(duplicate|page furniture)[^.]{0,60}?\bremov",
+        re.IGNORECASE | re.DOTALL,
+    )
+    offenders = []
+    for path in sorted(gui.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for match in claim.finditer(text):
+            snippet = match.group(0).replace("\n", " ")
+            # The withdrawal itself, and comments explaining it, are the whole
+            # point — they must be allowed to name what is NOT done.
+            window = text[max(0, match.start() - 260):match.end() + 120]
+            if re.search(r"removes neither|not\s+remove|never\s+remove|"
+                         r"NEVER A MECHANISM|NAMES THE CATEGORY|withdraw",
+                         window, re.IGNORECASE):
+                continue
+            line = text[:match.start()].count("\n") + 1
+            offenders.append(f"{path.name}:{line}: {snippet[:100]}")
+    assert not offenders, (
+        "GUI text asserts DocIQ removes duplicates or page furniture, which "
+        "adapter._plan withdraws:\n" + "\n".join(offenders))

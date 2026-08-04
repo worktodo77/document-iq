@@ -3,7 +3,12 @@
 **Prepared for:** Long International, Inc.
 **Owner:** Alex Bachowski, P.E.
 **Date:** July 30, 2026
-**Status:** Draft for developer handoff
+**Status:** **SUPERSEDED — historical draft. Do not quote a figure from this file.**
+Replaced the same day by `requirements_v1.1.md` (the ruled baseline), which has
+since been amended in place by D-19 through D-29. This draft still carries the
+withdrawn "3.4M tokens … after reduction the same record fits comfortably"
+motivating problem (§1), the unamended "single exe" packaging wording and the
+cancelled OCR bake-off criterion. Kept for provenance only.
 
 ## 1. Purpose and Positioning
 

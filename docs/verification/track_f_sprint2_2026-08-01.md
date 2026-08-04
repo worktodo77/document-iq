@@ -45,7 +45,7 @@ by looking exactly like the ordinary, healthy case.
 | `packaging/dociq_launcher.py` | frozen entry point — `--version`, `--selftest`, `--offline-probe`, `--diagnose`, `--determinism-run`, else the GUI |
 | `packaging/rthook_offline.py` | runtime hook: pins the bundled model directory and the ecosystem offline flags before any import |
 | `src/dociq/verify/offline.py` | the network guard that **counts** attempts, the guarded-entry-point enumeration, the live sibling audit, the fetch/transport module audits |
-| `tests/test_offline.py` | 18 tests, including the fail-before for every guarded entry point |
+| `tests/test_offline.py` | **26 tests** (18 at the time of writing; +8 for the child-process class added 2026-08-03, see §3.4(5)), including the fail-before for every guarded entry point |
 | `tools/bates_acceptance.py` | D-23 (a): continuity over the whole set; (b) machine half: page-level accuracy against the production's load files |
 | `tools/bates_handcheck.py` | D-23 (b) human half: renders a blind, stratified footer sample and scores a reader against a withheld key |
 | `docs/build/packaging.md` | how to build it, what is bundled and why, what is measured, what is not claimed |
@@ -187,7 +187,7 @@ than a hole. It returns empty.
 
 | probe | result |
 |---|---|
-| `tests/test_offline.py`, 18 tests | pass |
+| `tests/test_offline.py`, **26 tests** (18 when this table was written) | pass |
 | one case per guarded entry point, each of which *would* have gone out | all 8 recorded |
 | a swallowed attempt (`try/except Exception`) | **recorded** — the case the old probe missed |
 | 12 concurrent worker threads | all 12 recorded |
@@ -198,7 +198,7 @@ than a hole. It returns empty.
 | **OS-level**, packaged process observed for 40.7 s over 20 samples (`Get-NetTCPConnection`/`Get-NetUDPEndpoint` by owning PID) | **0 TCP endpoints, 0 UDP endpoints ever owned by the process** |
 
 **Fail-before, watched.** With attempt recording disabled — i.e. the Sprint-1
-blocking-only behaviour restored — **10 of the 17 tests then present went red**,
+blocking-only behavior restored — **10 of the 17 tests then present went red**,
 including the swallowed-attempt case. Re-enabled: all green.
 
 ### 3.4 What is NOT proven, plainly
@@ -238,6 +238,53 @@ including the swallowed-attempt case. Re-enabled: all green.
    shipped app. `socket.socketpair()` on Windows is a real AF_INET loopback
    pair and Qt uses one for its event notifier; a process-wide block would
    break the GUI to enforce a property the application does not violate.
+
+5. **CHILD PROCESSES — added to this list 2026-08-03, and now guarded.** Every
+   guard in `verify/offline.py` is a rebind inside *this* interpreter, so
+   `attempts == 0` is a statement about this process and nothing else. A child
+   process gets a pristine `socket` module and the parent's count stays honestly
+   at zero while the child does whatever it likes. **This was a gap in the
+   disclosure, not only in the code**: `subprocess` was unguarded and this
+   section did not name it, while the rest of the offline story was disclosed
+   candidly — and DocIQ genuinely spawns children (`verify/determinism.py` per
+   repetition, `packaging/dociq_launcher.py`, `gui/main_window.py` via
+   `os.startfile`, which can hand a path to the Windows shell and start a
+   browser).
+
+   **Chosen: guard it AND disclose the residue** — not one or the other.
+   Guarding was chosen over disclosure alone because an imported
+   `urllib.request` is inert until called, whereas a spawned child is an
+   execution the guard can no longer observe, and the conservative treatment of
+   an unobservable thing is to refuse it rather than note it. The cost is zero:
+   nothing DocIQ does *inside* a guarded block spawns anything — the determinism
+   probe and the launcher both spawn outside the guard, and a pipeline run uses
+   a thread pool, not a process pool — so this closes a hole without
+   constraining the product.
+
+   Guarded, recorded then raised as `ProcessSpawnAttempted` (a subclass of
+   `NetworkAttempted`, so existing handlers still catch it): `subprocess.Popen`
+   — which covers `run`/`call`/`check_call`/`check_output`/`getoutput`
+   structurally rather than by name — plus `os.system`, `os.popen`,
+   `os.startfile`, and every `os.exec*` / `os.spawn*` / `os.fork*` that exists on
+   the platform. `enumerate_child_process_entry_points()` is the enumeration as
+   a value; `audit_child_process_siblings()` is the live-module class assertion,
+   mirroring `audit_siblings()` for sockets. On this machine that is **16
+   child-process entry points** alongside the 8 socket/ssl ones — 24 in total,
+   which is the number `guard.render()` now reports.
+
+   Fail-before watched RED: with the child-process targets removed from
+   `NetworkGuard.__enter__`, 6 of the new tests go red, including the swallowed-
+   spawn case (a caller that wraps its spawn in `except Exception` leaves no
+   trace under a blocking-only guard).
+
+   **What remains open, stated rather than closed by the fix.** A child spawned
+   *outside* a guarded block is covered by nothing here, and DocIQ spawns some;
+   what each such child does is a separate claim proven separately (the
+   determinism runner's child is the pipeline itself, and `tests/test_offline.py`
+   runs a whole pipeline in a child *under its own guard* and reports that
+   child's attempt count). And a C extension that spawns through the Win32 API
+   rather than through `os`/`subprocess` is invisible for the same reason as
+   residue (2) above.
 
 ---
 

@@ -257,6 +257,22 @@ Each is reported with the exact shape proposed. None has been applied locally.
 
 ### 5.1 Bates confirmation has no callback (D-5, the item the brief flagged)
 
+> **See the CLOSED banner at the head of §5 — it is authoritative for this
+> section.** The paragraphs below describe the missing callback in the present
+> tense; "the seam has no way to ask" is false as of A-14 and the gap itself was
+> closed by the rehearsal A4 build (`RealPipeline.run` now takes `confirm_bates`
+> and passes it through).
+>
+> **A draft of this banner, written 2026-08-03 before that build was merged,
+> said "the gap it describes is not closed."** That was true when written and
+> false within the hour; it is corrected rather than deleted, because a note
+> claiming an open defect that has been fixed sends someone to build it twice.
+>
+> One thing worth carrying forward regardless: A-14's applied shape differs from
+> the proposal below. `BatesProposal` carries `pattern`, `example`, `documents`,
+> `pages`, `coverage_pct` and `alternatives` — not `label` / `coverage_pct` /
+> `sample_pages`. **Quote the seam, not this block.**
+
 §4 Stage 3 requires the detected Bates format to be confirmed **with the operator**
 on first detection. `PipelineOptions.auto_confirm_bates` exists for headless paths
 and records a warning when it fires. The seam has no way to ask, so the adapter
@@ -293,9 +309,11 @@ discharged through the GUI until this lands.**
 
 `ProgressEvent` counts files and the progress screen renders "N of M files", so
 once the walk finishes the bar is legitimately full while Stages 3-6 run and only
-the status line moves. The register measures those stages at 25.7 s against
-2,848.5 s, so this is a small window on the real corpus and a visible one on a
-small matter. Proposed:
+the status line moves. The register measured those stages at 25.7 s against
+2,848.5 s when this was written; **the 2026-08-02 acceptance run supersedes both
+figures — 18.5 s against 6,163.9 s, 0.30% of the run.** The conclusion is
+unchanged and slightly stronger: a small window on the real corpus and a visible
+one on a small matter. Proposed:
 
 ```python
     stage: int = 0        # §4's stage number, 0 when not stage-aware
@@ -349,6 +367,13 @@ frequency across a sample and average page count — needs a profiling run over 
 sample, which does not exist in either track.
 
 ### 5.6 A UI claim the build does not support (Track E's file — not edited)
+
+> **CLOSED 2026-08-03** (`docs/verification/claims_sweep_2026-08-03.md` §4). The
+> hint now names the category and not a mechanism — "Removed mechanically by the
+> tool, not by an expert decision — and recorded separately in the log." Recorded
+> here rather than only there because this finding was **written down on
+> 2026-08-01 and left unfixed for two days** while the string it describes stayed
+> in the product; "recorded, not fixed" is what let it survive.
 
 `src/dociq/gui/widgets.py:511` renders the hint *"Removed mechanically — exact
 duplicates and page furniture"*. DocIQ removes neither. With no automatic lever

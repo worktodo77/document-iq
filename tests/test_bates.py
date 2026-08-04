@@ -144,8 +144,17 @@ def test_two_stray_lines_in_a_large_unstamped_record_propose_nothing():
 
     D-13 designates that record as the NEGATIVE case: detection must come back
     empty. It did not — two lines that happened to parse as ``CP0001``, in a
-    368-document 18,521-page corpus, were enough to propose a format, because
-    the only bar was an absolute count of two pages.
+    368-document corpus of roughly eighteen thousand pages, were enough to
+    propose a format, because the only bar was an absolute count of two pages.
+
+    The page count is deliberately not stated exactly here. The run that exposed
+    this counted 18,521; the 2026-08-02 acceptance run over the same corpus
+    counts 18,556. Neither figure is load-bearing for the argument — "two pages
+    in eighteen thousand is not a production" is — and pinning one of them into a
+    test name would date the test to a run it does not depend on.
+    ``identify/bates.py``'s ``MIN_DOCUMENT_COVERAGE_PCT`` docstring still quotes
+    18,521 flatly; that file is owned elsewhere and the correction is reported
+    rather than made here.
     """
     noise = document(
         "reports/long.pdf",

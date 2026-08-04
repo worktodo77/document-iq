@@ -606,9 +606,22 @@ class ChecklistRow:
         no expert approved them.
         """
         if self.locked:
-            return ("Removed mechanically by DocIQ — exact-hash duplicates and "
-                    "page furniture. No expert approved this; it is recorded "
-                    "separately from the profile's drops in the processing log.")
+            # NAMES THE CATEGORY, NEVER A MECHANISM. This read "Removed
+            # mechanically by DocIQ — exact-hash duplicates and page furniture",
+            # which asserts a behavior the pipeline explicitly withdraws:
+            # `adapter._plan` states that DocIQ *detects* exact-hash duplicates
+            # and warns about them, and "removes neither them nor page
+            # furniture" — every page of every duplicate copy is extracted,
+            # written to clean_text/ and counted in the accounting identity. The
+            # real adapter therefore emits no automatic lever and this branch is
+            # unreachable today; reachability is a property of this month's
+            # adapter, not of the string, and this string is one an expert
+            # reads. Whatever a locked lever turns out to be, `self.lever.label`
+            # says what it is — this sentence's job is only to say who decided
+            # it and where it is recorded.
+            return (f"“{self.lever.label}” was removed mechanically by the "
+                    "tool. No expert approved this; it is recorded separately "
+                    "from the profile's drops in the processing log.")
         where = f"{self.profile.profile_id} v{self.profile.version}"
         if self.dropped:
             return (f"Rule {where} → section “{self.lever.key}” → DROP. Every "
