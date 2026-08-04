@@ -927,3 +927,97 @@ by `test_the_frozen_seam_module_has_no_positional_rebuild`, marked
 `xfail(strict=True)` so that the day the seam owner fixes it the test turns red
 and the marker must be removed. It is lossless today at 4 of 4 fields and
 silently lossy on the next one.
+
+---
+
+## A-14 — the seam cannot carry §4 Stage 3's Bates confirmation
+
+**Raised by:** Track D (Sprint 2), 2026-08-01, as a stop-the-line
+**Applied by:** the seam owner, 2026-08-03, at `3a44f2e`
+**Affects:** `dociq/gui/pipeline.py` — `PipelineAPI.run`, plus two new records
+**Severity:** MINOR (one additive record, one callable alias, one optional parameter)
+
+> **This entry was written on 2026-08-04, a day after the amendment was applied
+> and shipped.** For that day the register was the only place A-14 did not
+> exist: it was in the seam, in three commit messages, in the decision register,
+> and in the Codex relay — which pointed reviewers *here* for it. Codex found
+> the gap immediately. Recorded rather than backdated, because this is the
+> second-order instance of the exact failure A-14 itself is the first-order
+> instance of, and the pair is the argument for the registry in
+> `tools/check_amendments.py`.
+
+### The case
+
+§4 Stage 3 requires a detected Bates format to be confirmed **with the
+operator** on first detection. `PipelineOptions.auto_confirm_bates` existed for
+headless callers and recorded a warning when it fired, but nothing on the seam
+could ask a human. So `RealPipeline` passed `auto_confirm_bates=False`, no
+screen asked, `_bates_decision` returned `PENDING`, and `apply_bates_reported`
+returned every document unchanged.
+
+**Measured cost, on real MNFV production (10 documents / 369 pages) through
+`RealPipeline`:** `confirm_bates=None` — the shipped state — produced **0 of 369
+pages with a locator, with OCR on and with OCR off**. With an operator
+confirmation: **328 pages, 88.889%**. Both `None` runs warned that a format *was
+detected and not applied*. The pipeline could see the stamps the entire time.
+
+Acceptance criterion 4's 92.130% was measured through
+`tools/bates_acceptance.py`, which constructs `BatesDecision(status=CONFIRMED,
+…)` directly — a code path the product could not reach.
+
+### Applied shape
+
+```python
+@dataclass(frozen=True, slots=True)
+class BatesProposal:
+    pattern: str
+    example: str = ""          # a real locator off a real page
+    documents: int = 0
+    pages: int = 0
+    coverage_pct: float = 0.0
+    alternatives: tuple[str, ...] = ()
+
+BatesConfirm = Callable[[BatesProposal], bool]
+
+class PipelineAPI(Protocol):
+    def run(self, request, on_progress, should_cancel,
+            confirm_bates: "BatesConfirm | None" = None) -> RunOutcome: ...
+```
+
+Deliberately more than the pattern: **an operator cannot confirm a regex.** They
+can confirm *"MNFV 02636, on 15 of 33 pages across 20 documents"*.
+`alternatives` is present because a multi-series production is exactly the
+condition D-28 refuses prefix repair on, and the operator must see that rather
+than have it decided for them.
+
+`confirm_bates` is **optional with a `None` default** so every existing caller —
+the tests, the headless harnesses, the self-test — kept working; a required
+parameter would have broken the only implementations that can demonstrate the
+seam holds.
+
+### Three outcomes, kept apart
+
+`None` means **nobody was asked**, which is not a refusal. An operator
+confirmation records `decided_by="operator (username)"`; a refusal records
+status `REJECTED` with a warning stating *"This matter is NOT unstamped — the
+stamps are on the pages and were read"*; nobody-asked records the machine
+confirmation it always did. A machine-confirmed pattern and an expert-confirmed
+one are not the same evidentiary object, and an unstamped production and a
+stamped one whose format was declined are different facts about the record.
+
+An operator who walks away raises `runstate.RunAborted` rather than returning a
+`bool` — routed to the existing abort path, so nothing is published and the
+previous run's deliverables are untouched.
+
+### The defect the wiring uncovered
+
+`alternatives` was first fed the detector's runner-up **shapes** (`ranked[1:4]`,
+no threshold). On the client corpus that was `('retained 90095 49 00001',
+'Check 0001')` — so the screen would have told the operator, as fact, that their
+**single-series production was multi-series** and that D-28 therefore refused
+prefix repair on it. A confident, specific, wrong statement about their
+evidence. It now uses `identify.bates.matter_prefixes`, computed once per run
+and shared with `apply_bates_reported`'s own gate. **Found by running against
+the real production, not by reasoning about the code** — and the seam docstring
+for that field already explained why it mattered while the wiring behind it was
+wrong.
