@@ -16,7 +16,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
 
-from dociq.contracts import Disposition, PageKind, ProcessingStatus, RunResult
+from dociq.contracts import (
+    Disposition,
+    IdRegime,
+    PageKind,
+    ProcessingStatus,
+    RunResult,
+)
 from dociq.gui.pipeline import (
     DIRECT_CONTEXT_TOKENS,
     LEVER_AUTOMATIC,
@@ -286,19 +292,25 @@ class SummaryView:
         """The sentence the summary screen shows above everything else, or "".
 
         Empty for a completed run: a banner that appears every time is a banner
-        nobody reads. For a blocked or cancelled run it is the first thing on
-        the screen, and it says the two things the operator would otherwise get
-        wrong — that these figures cover only part of the record, and that the
-        output folder still holds the previous run's deliverables.
+        nobody reads. For every other status it is the first thing on the
+        screen, and it says the two things the operator would otherwise get
+        wrong — what these figures actually cover, and that the output folder
+        still holds the previous run's deliverables.
+
+        Both sentences now come from
+        :data:`dociq.runstate.STATUS_PROSE`, per status. This method used to
+        author the second one itself and append it to every non-complete
+        status: "the figures below describe only what was read before the run
+        stopped". That is true of a cancelled run and FALSE of a refused one,
+        which read and identified the complete corpus and was rejected at
+        DocIQ's own gate rather than cut short (Codex review #2 fix round,
+        finding A-3). The claim is withdrawn, not merely widened — a screen in
+        an evidentiary tool does not get to describe coverage it did not
+        measure.
         """
         if self.complete:
             return ""
-        return (
-            f"{self.termination.headline()} The figures below describe only "
-            "what was read before the run stopped. Nothing in the output "
-            "folder was changed; a full record of this attempt is in "
-            "incomplete_run/."
-        )
+        return f"{self.termination.headline()} {self.termination.coverage_note()}".strip()
 
     # -- the headline -------------------------------------------------------
 
@@ -486,6 +498,28 @@ class SummaryView:
         raise KeyError(key)
 
 
+_ID_REGIME_NOTE = {
+    IdRegime.NATIVE: lambda index: (
+        "No master index supplied — document IDs are DocIQ's own DIQ- numbers."
+    ),
+    IdRegime.MASTER_INDEX: lambda index: (
+        f"Document IDs taken from {index.filename} "
+        f"({index.row_count:,} rows)."
+        if index is not None else
+        "Document IDs taken from a master index."
+    ),
+}
+"""Every :class:`~dociq.contracts.IdRegime`, rendered explicitly."""
+
+_UNRENDERED_REGIMES = set(IdRegime) - set(_ID_REGIME_NOTE)
+if _UNRENDERED_REGIMES:  # pragma: no cover — import-time tripwire
+    raise AssertionError(
+        "IdRegime member(s) with no summary-screen sentence: "
+        + ", ".join(sorted(m.name for m in _UNRENDERED_REGIMES))
+    )
+del _UNRENDERED_REGIMES
+
+
 def build_summary(outcome: RunOutcome,
                   plan: ReductionPlan | None = None) -> SummaryView:
     """Project a run outcome into the summary screen's model.
@@ -499,13 +533,14 @@ def build_summary(outcome: RunOutcome,
     if recon is not None:
         groups.append(recon)
 
+    # Branched on the REGIME the run recorded, through a total map, rather than
+    # on `master_index is None`. Same two sentences today — `RunConfig.id_regime`
+    # is derived from exactly that field — but an `if/else` on a proxy for an
+    # enum is the A-3 shape: a third regime would silently print one of these
+    # two, and this one names the operator's ID scheme. See
+    # `dociq.runstate.STATUS_PROSE` for the same discipline on TerminalStatus.
     index = result.config.master_index
-    if index is None:
-        note = ("No master index supplied — document IDs are DocIQ's own "
-                "DIQ- numbers.")
-    else:
-        note = (f"Document IDs taken from {index.filename} "
-                f"({index.row_count:,} rows).")
+    note = _ID_REGIME_NOTE[result.config.id_regime](index)
 
     return SummaryView(
         documents=len(result.documents),
@@ -986,6 +1021,21 @@ def package_failed(message: str) -> PackageOutcomeView:
     could not be built" is not. The sentence added around it says what did NOT
     happen, because a half-written package and no package are different states
     of the folder.
+
+    **The second sentence is a load-bearing claim, and when it was written it
+    was false** (Codex review #2 fix round, finding A-4). ``upload_package/``
+    was built in place: a failure after the first copy left a CURRENT partial
+    folder under exactly the name this text was telling the operator held an
+    earlier build. It is true now, and it is true by construction rather than
+    by care — :func:`dociq.emit.handoff.build_upload_package` assembles in a
+    sibling directory and claims the published name only after every copy,
+    filter, README and validation has passed, so a failed build leaves either
+    the earlier package byte-for-byte or no package at all. Both satisfy this
+    sentence. ``tests/test_package_swap.py`` asserts the disk and this text
+    together, in one test, because the finding was that they disagreed.
+
+    The word "completed" carries the other half: a package that failed
+    validation is not a package, and the folder is never left in that state.
     """
     return PackageOutcomeView(
         ok=False,
