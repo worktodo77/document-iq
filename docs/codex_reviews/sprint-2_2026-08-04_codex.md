@@ -1,4 +1,196 @@
-# Codex review — DocIQ Sprint 2 (merge gate)
+# Codex fix-round review — DocIQ Sprint 2 (merge gate)
+
+**Repository:** `worktodo77/document-iq`
+**Branch:** `build/sprint-2`
+**Reviewed commit:** `a309b15`
+**Fix-round handoff:** `docs/codex_reviews/sprint-2_2026-08-04_claude_r2.md`
+**Review date:** 2026-08-04
+**Gate:** D-10, Codex review #2, fix round
+
+## Fix-round verdict
+
+**NOT PASSED — another fix round is required. Two A findings and two B
+findings.**
+
+The five original A/B findings are fixed at the sites named in the first
+verdict: Stage 6 now refuses publication on every enumerated red gate, the
+ready-marker reader fails closed, `PackageResult.missing` crosses the seam and
+renders, package success/failure is visible, and a failed run offers working
+back/retry actions. D-1 is closed.
+
+The merge remains held because the swap still has an ordinary path that can
+silently publish stale files, and the persistent log of a Stage-6 refusal drops
+the assignment, reconciliation, and failing accounting detail that the
+in-memory outcome preserves. In addition, the new `REFUSED` status is rendered
+to the operator as `CANCELLED`, and a failed Path-A build can leave a current
+partial package on disk while the GUI assures the operator that any package
+there is from an earlier build.
+
+## B-4 — A failed directory removal can still publish a mixed set
+
+**Severity class:** B — evidentiary-integrity; stale package exhibits can remain
+beside current ones after the recovery marker is deleted.
+
+**Locations:** `src/dociq/emit/paths.py:501-520`
+
+The new retry discipline is applied to file `unlink()` and staged-file moves,
+but a superseded directory is still removed with
+`shutil.rmtree(path, ignore_errors=True)`. A failure is therefore silently
+absorbed. The function records the directory as removed, moves the new files
+into the surviving directory, deletes the readiness marker, and returns
+success. This contradicts the adjacent guarantee that every destructive swap
+step is retried and roll-forward remains possible.
+
+**Failure scenario:** an ordinary rerun replaces `upload_package/` while an
+antivirus or backup agent holds one old package file open. `rmtree(...,
+ignore_errors=True)` leaves that stale file or subtree behind. The swap then
+moves the new package over it and removes `staging_ready.json`. The visible
+package is now a mixture of two builds, with no pending marker left to disclose
+or repair it. A direct reproduction in this review forced the directory
+removal to fail: the stale file and current file were both visible,
+`commit_staging()` returned `("upload_package",)`, and the marker was gone.
+
+Directory removal must fail closed or be retried with errors propagated; the
+marker must survive unless the named superseded directory is actually gone.
+Add a fail-before test that denies removal of one file inside a superseded
+directory and proves no mixed directory can be committed.
+
+## B-5 — The persisted refusal log drops the diagnosis it claims to preserve
+
+**Severity class:** B — evidentiary-integrity; the durable audit record silently
+diverges from the complete attempted corpus and its Stage-6 diagnosis.
+
+**Locations:** `src/dociq/pipeline.py:733-775`,
+`src/dociq/emit/log.py:158-175`, `src/dociq/emit/log.py:240-268`,
+`src/dociq/emit/log.py:382-389`
+
+`_abort()` now accepts and returns the real Stage-6 `assignment`,
+`reconciliation`, manifest, and accounting report. But its `build_log()` call
+does not pass the available assignment or reconciliation, and `build_log()` has
+no input for the failing accounting discrepancies. The fix-round test asserts
+only the in-memory `PipelineOutcome`, not the quarantined
+`processing_log.json` that remains after the process exits.
+
+**Failure scenario:** a complete run assigns all identifiers and reconciles the
+matter, then an accounting regression makes Stage 6 refuse publication. The
+operator later opens `incomplete_run/processing_log.json`, the durable record
+the handoff says preserves the diagnosis. In the direct reproduction here, the
+outcome carried 19 assignments and three accounting discrepancies, while the
+log serialized `doc_ids.assignments` as `[]` and `reconciliation` as `null`;
+the individual gate discrepancies existed only in memory. The record therefore
+silently omits facts the refused run actually established.
+
+Pass the real assignment and reconciliation into `build_log()` and give the
+quarantined log a serialized representation of the accounting discrepancies
+that refused publication. Add an on-disk assertion, not only an outcome
+assertion.
+
+## A-3 — `REFUSED` is shown as `CANCELLED`
+
+**Severity class:** A — real user-facing bug in ordinary internal use.
+
+**Locations:** `src/dociq/runstate.py:120-128`,
+`src/dociq/gui/view_models.py:294-300`, `src/dociq/emit/summary.py:202-205`,
+`src/dociq/pipeline.py:778-795`
+
+`RunTermination.headline()` recognizes only `COMPLETED` and `BLOCKED`; every
+other noncomplete status falls through to `CANCELLED`. A-15 added `REFUSED` but
+did not update that renderer. The GUI then adds a second false statement for
+all noncomplete statuses: that its figures cover only what was read before the
+run stopped. A refused run did not stop part-way; it read and identified the
+complete corpus and rejected publication at its gate.
+
+**Failure scenario:** a new emitter creates an unclassified output, so Stage 6
+correctly refuses the set. `run_status.json` is machine-readable as
+`terminal_status: "refused"`, but its headline says `RUN CANCELLED`; the
+quarantined summary PDF repeats that label, and the GUI says the figures cover
+only a partial read. The operator is told that somebody stopped the run rather
+than that DocIQ rejected a complete set for an integrity failure. The direct
+status-object reproduction printed exactly `RUN CANCELLED` for
+`TerminalStatus.REFUSED`.
+
+Render every terminal status explicitly, and give the summary view wording for
+a complete-but-refused corpus rather than reusing the partial-run explanation.
+Add assertions for the JSON headline, PDF/summary data, and GUI banner.
+
+## A-4 — A failed package build can leave a current partial folder while the GUI says it is old
+
+**Severity class:** A — real user-facing bug in ordinary internal use.
+
+**Locations:** `src/dociq/emit/handoff.py:480-483`,
+`src/dociq/emit/handoff.py:513-578`,
+`src/dociq/gui/view_models.py:981-999`
+
+`build_upload_package()` deletes the prior package, creates the final
+`upload_package/` directory, and writes files into it one by one. Any later
+copy, filtering, README, or validation exception leaves that current partial
+directory in place. The new GUI failure state nevertheless assures the operator
+that any package already on disk is from an earlier build.
+
+**Failure scenario:** the text and manifests copy successfully, then antivirus
+locks the README write. The GUI visibly reports the exception, but says any
+package on disk is an earlier build. In the direct reproduction here,
+`DIQ-1.txt` and `sources.json` from the failed current attempt remained in
+`upload_package/`; there was no README and no completed validation. An operator
+following the assurance can upload a partial current package as if it were the
+last complete one.
+
+Build Path A in a sibling staging directory and replace the visible package
+only after all validation passes, or remove the partial directory on every
+failure and report that cleanup result accurately. Add a fail-before test that
+raises after at least one package file is written and inspects disk as well as
+screen text.
+
+## D-2 — A-15 is simultaneously “raised” and “applied,” and `HEAD` passes as an adopting commit
+
+**Severity class:** D — process/documentation; nonblocking by itself.
+
+**Locations:** `docs/contracts/amendments.md:1049-1056`,
+`docs/contracts/amendments.toml:163-169`, `tools/check_amendments.py:171-176`
+
+The prose register still says A-15 is `RAISED, NOT APPLIED`, while the TOML
+registry says `applied`. Its `adopted_in` value is the symbolic name `HEAD`, so
+the checker accepts whichever commit happens to be checked out rather than
+preserving the immutable commit that adopted the amendment. The actual adopting
+commit is `b1eac7e`.
+
+**Failure scenario:** a reviewer follows the mandated read order and cannot
+determine whether A-15 is adopted; meanwhile the structural check remains green
+because `git cat-file -t HEAD` always names the current commit. Moving the
+branch changes what the recorded “adopting commit” means without changing the
+registry.
+
+Update the prose disposition, record `b1eac7e`, and reject symbolic refs where
+the registry requires a historical commit ID.
+
+## Fix-round verification performed
+
+- Fetched and checked out `build/sprint-2`; reviewed the clean remote tip at
+  `a309b15` and read the fix-round handoff from the branch.
+- **473 tests passed and 1 skipped** in focused and adjacent slices:
+  publication gate, seam population, GUI failures, atomic emit, incomplete-run
+  state, adapter, package emit, view models, GUI screen states, amendment checks,
+  and the disclosed whole-pipeline offline probe.
+- The offline probe passed in isolation. This review accepts the handoff's
+  disclosure that its intermittent concurrent-load cause remains open; it does
+  not recast that disclosure as closed.
+- Direct reproductions confirmed all four A/B findings above against the
+  reviewed tip.
+- `git diff --check e02c292...HEAD` passed.
+- No fresh full-suite run was attempted; the handoff reports about 20 minutes
+  per pass and 15 consecutive green runs. Those reported runs are not counted as
+  this review's independent verification.
+
+## Fix-round merge condition
+
+Fix A-3, A-4, B-4, and B-5 with fail-before coverage at the durable/user-visible
+boundary described above, refresh the verification evidence, and request the
+next fix-round review. D-2 should be batch-fixed and disclosed but does not
+independently hold the merge.
+
+---
+
+# Original verdict — DocIQ Sprint 2 (merge gate)
 
 **Repository:** `worktodo77/document-iq`
 **Branch:** `build/sprint-2`
