@@ -183,6 +183,24 @@ def measured_basis(ocr_enabled: bool) -> str:
         "§10 restated 2026-07-31). OCR is not in this rate."
     )
 
+_LEVER_ENGAGED: dict[Disposition, bool] = {
+    Disposition.KEEP: False,
+    Disposition.DROP: True,
+}
+"""Every :class:`~dociq.contracts.Disposition`, decided explicitly.
+
+The §6 checklist renders this bool back out as a WORD, so an unhandled member
+absorbed here becomes a wrong word on the expert's approval screen rather than
+a missing feature. Total by the tripwire below."""
+
+_UNMAPPED_DISPOSITIONS = set(Disposition) - set(_LEVER_ENGAGED)
+if _UNMAPPED_DISPOSITIONS:  # pragma: no cover — import-time tripwire
+    raise AssertionError(
+        "Disposition member(s) with no §6-checklist meaning: "
+        + ", ".join(sorted(m.name for m in _UNMAPPED_DISPOSITIONS))
+    )
+del _UNMAPPED_DISPOSITIONS
+
 ESTIMABLE_EXTENSIONS = frozenset({".pdf", ".docx", ".pptx", ".doc"})
 """The formats the measured corpus was made of (D-12: 298 PDF / 53 DOCX / 17
 PPTX / 7 DOC). A folder of ``.msg`` or ``.xlsx`` is a different job at the same
@@ -638,7 +656,15 @@ class RealPipeline:
                     tokens=0,
                     pages=0,
                     kind=LEVER_EXPERT,
-                    engaged=rule.disposition is Disposition.DROP,
+                    # A TOTAL lookup, not `is Disposition.DROP`. This is the
+                    # one place a Disposition is flattened into a bool that the
+                    # §6 checklist then renders as the WORD "DROP" or "KEEP"
+                    # (view_models.LeverRow.disposition_word). A third member
+                    # would arrive here as `False` and be printed to the expert
+                    # as "KEEP" — a rule they are signing off as harmless. Same
+                    # class as finding A-3; same discipline as
+                    # dociq.runstate.STATUS_PROSE.
+                    engaged=_LEVER_ENGAGED[rule.disposition],
                     estimated=True,
                     # A-11b's two fields, populated at last. This is the screen
                     # the amendment was written for — §6's checklist, where an

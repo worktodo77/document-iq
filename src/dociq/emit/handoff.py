@@ -29,10 +29,11 @@ counts, before the instruction block.
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from dociq.contracts import canonical_json
+from dociq.contracts import IdRegime, canonical_json
 from dociq.emit.indexbook import INDEX_COLUMNS
 from dociq.emit.paths import OutputLayout, safe_component, write_text_deterministic
 from dociq.verify.tokens import TokenEstimate
@@ -48,6 +49,7 @@ __all__ = [
     "expert_assist_layout",
     "assert_only_sanctioned",
     "PackageContentError",
+    "PackageSwapError",
     "README_NAME",
     "SANCTIONED_NAMES",
 ]
@@ -76,6 +78,66 @@ class PackageContentError(RuntimeError):
     is no step at which an operator inspects it file by file, so a warning about
     an extra file is a warning nobody acts on before the upload happens.
     """
+
+
+class PackageSwapError(RuntimeError):
+    """The package was assembled, or abandoned, but the FOLDER could not be put
+    into the state the screen is about to describe (Codex review #2 fix round,
+    finding A-4).
+
+    Distinct from :class:`PackageContentError`, which is about what a package
+    contains. This one is about what is on disk under
+    ``upload_package`` and its siblings after a build that did not go through,
+    and it exists because the alternative — absorbing a failed cleanup and
+    returning — is exactly how a partial folder came to be presented as a
+    complete one. Its message names the directory involved, because that is the
+    only thing the operator can act on.
+    """
+
+
+_INCOMING_SUFFIX = ".incoming"
+"""Where a package is ASSEMBLED. Never the folder an operator uploads."""
+
+_SUPERSEDED_SUFFIX = ".superseded"
+"""Where the previous package waits while the new one takes its name."""
+
+
+def _remove_tree(path: Path, *, attempts: int = 8, delay: float = 0.02) -> bool:
+    """Remove ``path`` if it is there. **Returns whether it is gone.**
+
+    ``shutil.rmtree(..., ignore_errors=True)`` on its own is the pattern Codex
+    named in B-4: the error is absorbed and the caller goes on to act as though
+    the directory were removed. Here the errors are still swallowed — retrying
+    is the right response to the Windows case this exists for, an on-access
+    scanner or backup agent holding one file open for a moment — but the
+    ANSWER is the state of the disk afterwards, not the absence of an
+    exception, and every caller below branches on it.
+
+    Deliberately local rather than reused from :mod:`dociq.emit.paths`, whose
+    ``_retry_io`` is private and under concurrent revision for B-4.
+    """
+    for attempt in range(attempts):
+        if not path.exists():
+            return True
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            return True
+        time.sleep(delay * (attempt + 1))
+    return not path.exists()
+
+
+def _retry_rename(src: Path, dst: Path, *, attempts: int = 8,
+                  delay: float = 0.02) -> None:
+    """Rename with the same retry discipline, and NO absorption: the last
+    :class:`OSError` propagates."""
+    for attempt in range(attempts):
+        try:
+            src.rename(dst)
+            return
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay * (attempt + 1))
 
 
 def assert_only_sanctioned(root: Path) -> tuple[str, ...]:
@@ -454,7 +516,7 @@ def build_upload_package(
     page_count: int = 0,
     estimate: TokenEstimate | None = None,
     has_bates: bool = False,
-    id_regime: str = "DIQ-native",
+    id_regime: str = IdRegime.NATIVE.value,
     limits: ProjectLimits | None = None,
     doc_ids: tuple[str, ...] | None = None,
     scope_statement: str = "",
@@ -475,13 +537,158 @@ def build_upload_package(
     ``scope_statement`` (D-20) is written into the README ahead of everything
     else. It is never optional in effect: an empty one is replaced by
     :func:`default_scope_statement`.
+
+    **The folder an operator uploads is never a work in progress** (Codex
+    review #2 fix round, finding A-4). This function used to delete the
+    previous package, create ``upload_package/`` and write into it file by
+    file, so any exception after the first copy — a locked README, a filter
+    that raised, a §7/§8 validation that failed — left a CURRENT, partial,
+    unvalidated package sitting under the name the operator drags into a
+    Project. The GUI's failure state told them, in terms, that any package on
+    disk was from an earlier build. Both statements could not be true and the
+    false one was the reassuring one.
+
+    So the assembly happens in a sibling ``upload_package.incoming/`` and the
+    published name is only claimed after **every** copy, filter, README and
+    validation has passed:
+
+    * any failure discards the sibling and leaves ``upload_package/``
+      byte-for-byte as the earlier build the screen says it is;
+    * the previous package is moved aside, not deleted, and is only removed
+      once the new one holds the name — so nothing is destroyed before its
+      replacement is in place, and a failed move restores it;
+    * every removal is checked for whether the directory is actually GONE, and
+      a failure raises :class:`PackageSwapError` naming the directory rather
+      than being absorbed.
     """
     lim = limits or ProjectLimits()
-    target = layout.upload_package
-    if target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=True)
+    published = layout.upload_package
+    staging = published.with_name(published.name + _INCOMING_SUFFIX)
+    superseded = published.with_name(published.name + _SUPERSEDED_SUFFIX)
 
+    # Residue from an earlier attempt that died between these same steps. It is
+    # removed BEFORE anything is assembled, and a failure to remove it stops the
+    # build: assembling into a directory that still holds another attempt's
+    # files is the mixed-set failure with a different name on it.
+    for leftover in (staging, superseded):
+        if not _remove_tree(leftover):
+            raise PackageSwapError(
+                f"{leftover} is left over from an earlier package build and "
+                f"could not be removed, so this build was not started. The "
+                f"package folder was NOT touched. Close anything holding files "
+                f"in that folder open and try again."
+            )
+
+    staging.mkdir(parents=True, exist_ok=False)
+    try:
+        assembled = _assemble_package(
+            layout, staging,
+            matter_name=matter_name, date_range=date_range,
+            document_count=document_count, page_count=page_count,
+            estimate=estimate, has_bates=has_bates, id_regime=id_regime,
+            lim=lim, doc_ids=doc_ids, scope_statement=scope_statement,
+            unsupported=unsupported,
+        )
+    except BaseException as exc:
+        # EVERY exception, including KeyboardInterrupt — a build abandoned by
+        # the operator leaves the same partial directory as one abandoned by an
+        # OSError, and the operator reads the same screen afterwards.
+        if _remove_tree(staging):
+            raise
+        raise PackageSwapError(
+            f"{exc} The partial package this attempt was assembling could "
+            f"also not be cleaned up: {staging} is still on disk. The package "
+            f"folder itself was NOT touched and still holds the earlier build "
+            f"— do NOT upload {staging.name}."
+        ) from exc
+
+    return _publish_package(assembled, staging, published, superseded)
+
+
+def _publish_package(assembled: UploadPackage, staging: Path, published: Path,
+                     superseded: Path) -> UploadPackage:
+    """Give the validated staging directory the published name, and only then
+    remove what it replaces.
+
+    The order is the guarantee: move the old package ASIDE (a metadata
+    operation that fails before anything is destroyed), move the new one into
+    place, remove the old. A failure at step one leaves the earlier package
+    exactly where it was; a failure at step two puts it back.
+    """
+    if published.exists():
+        try:
+            _retry_rename(published, superseded)
+        except OSError as exc:
+            _remove_tree(staging)
+            raise PackageSwapError(
+                f"The new package was built and validated but {published} "
+                f"could not be moved aside to make room for it: {exc}. Nothing "
+                f"was published and the package folder still holds the earlier "
+                f"build."
+            ) from exc
+
+    try:
+        _retry_rename(staging, published)
+    except OSError as exc:
+        restored = False
+        if superseded.exists():
+            try:
+                _retry_rename(superseded, published)
+                restored = True
+            except OSError:
+                restored = False
+        _remove_tree(staging)
+        raise PackageSwapError(
+            f"The new package was built and validated but could not be moved "
+            f"into {published}: {exc}. "
+            + (f"The earlier build was put back and is intact."
+               if restored
+               else f"The earlier build could NOT be put back and is now at "
+                    f"{superseded} — nothing at {published.name} is publishable.")
+        ) from exc
+
+    if not _remove_tree(superseded):
+        # The published package is correct and complete; what is wrong is that
+        # a folder full of the PREVIOUS package's files is sitting beside it
+        # under a name an operator could still upload. Reported, not absorbed —
+        # and reported as this failure rather than as a build failure, because
+        # saying "the package was NOT built" about a package that was built and
+        # validated is the same kind of false reassurance A-4 is about.
+        raise PackageSwapError(
+            f"The package at {published} was built, validated and published "
+            f"and is complete. The PREVIOUS package could not be removed and "
+            f"is still on disk at {superseded} — delete that folder; do not "
+            f"upload it."
+        )
+
+    return replace(assembled, root=published, readme=published / README_NAME)
+
+
+def _assemble_package(
+    layout: OutputLayout,
+    target: Path,
+    *,
+    matter_name: str,
+    date_range: str,
+    document_count: int,
+    page_count: int,
+    estimate: TokenEstimate | None,
+    has_bates: bool,
+    id_regime: str,
+    lim: ProjectLimits,
+    doc_ids: tuple[str, ...] | None,
+    scope_statement: str,
+    unsupported: int,
+) -> UploadPackage:
+    """Write and validate a complete package into ``target``.
+
+    Split out of :func:`build_upload_package` so that "assemble" and "publish"
+    are separable, and so the ONE caller that decides which directory this
+    writes into is the one that also owns cleaning it up. It writes into
+    whatever directory it is given and knows nothing about
+    ``upload_package/``; the returned :class:`UploadPackage` therefore names
+    the staging paths and is re-pointed by :func:`_publish_package`.
+    """
     available = _text_files(layout)
     if doc_ids is None:
         selected, missing, subset = available, (), False
