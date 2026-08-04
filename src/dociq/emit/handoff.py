@@ -607,13 +607,31 @@ def build_upload_package(
 
 def _publish_package(assembled: UploadPackage, staging: Path, published: Path,
                      superseded: Path) -> UploadPackage:
-    """Give the validated staging directory the published name, and only then
-    remove what it replaces.
+    """Give the validated staging directory the published name.
 
-    The order is the guarantee: move the old package ASIDE (a metadata
-    operation that fails before anything is destroyed), move the new one into
-    place, remove the old. A failure at step one leaves the earlier package
-    exactly where it was; a failure at step two puts it back.
+    Four steps, and the ORDER is the guarantee. Everything that can fail is
+    done while the earlier package can still be put back, and the last step —
+    the one with no recovery — is the cheapest operation available: renaming a
+    directory this function just created, in the same parent, onto a name
+    nothing occupies.
+
+    1. Move the earlier package ASIDE. A metadata operation; a failure here
+       destroys nothing and the folder still holds the earlier build.
+    2. REMOVE it, and check that it is gone. A failure here puts it back.
+    3. Rename staging onto the published name.
+    4. Nothing.
+
+    **Why the removal is step 2 and not step 4.** The obvious order — publish,
+    then tidy up — has one outcome this one does not: the new package holds the
+    published name, correct and complete, while a folder of the previous
+    package's files sits beside it under a name an operator could still upload.
+    Reporting that as a failure makes the GUI say *"The upload package was NOT
+    built"* about a package that was built, validated and published, which is a
+    false statement of exactly the kind finding A-4 is about; absorbing it
+    leaves the stray folder. Removing first means the only reachable states are
+    "the earlier build is intact and nothing was published" and "the new
+    package is published and it is the only one" — and both of those are states
+    the screen can describe truthfully.
     """
     if published.exists():
         try:
@@ -627,39 +645,36 @@ def _publish_package(assembled: UploadPackage, staging: Path, published: Path,
                 f"build."
             ) from exc
 
+        if not _remove_tree(superseded):
+            put_back = False
+            try:
+                _retry_rename(superseded, published)
+                put_back = True
+            except OSError:
+                put_back = False
+            _remove_tree(staging)
+            raise PackageSwapError(
+                f"The new package was built and validated but the package it "
+                f"replaces could not be removed. Nothing was published. "
+                + (f"The earlier build is back in place and intact."
+                   if put_back else
+                   f"The earlier build is now at {superseded} and there is no "
+                   f"package at {published.name} — rename that folder back, or "
+                   f"build again.")
+            )
+
     try:
         _retry_rename(staging, published)
     except OSError as exc:
-        restored = False
-        if superseded.exists():
-            try:
-                _retry_rename(superseded, published)
-                restored = True
-            except OSError:
-                restored = False
+        # Nothing to restore: the earlier package is already gone, deliberately,
+        # and the set in staging is not published under any name an operator
+        # uploads. Both facts are stated rather than one of them implied.
         _remove_tree(staging)
         raise PackageSwapError(
             f"The new package was built and validated but could not be moved "
-            f"into {published}: {exc}. "
-            + (f"The earlier build was put back and is intact."
-               if restored
-               else f"The earlier build could NOT be put back and is now at "
-                    f"{superseded} — nothing at {published.name} is publishable.")
+            f"into {published}: {exc}. Nothing was published and no package "
+            f"folder remains — build again."
         ) from exc
-
-    if not _remove_tree(superseded):
-        # The published package is correct and complete; what is wrong is that
-        # a folder full of the PREVIOUS package's files is sitting beside it
-        # under a name an operator could still upload. Reported, not absorbed —
-        # and reported as this failure rather than as a build failure, because
-        # saying "the package was NOT built" about a package that was built and
-        # validated is the same kind of false reassurance A-4 is about.
-        raise PackageSwapError(
-            f"The package at {published} was built, validated and published "
-            f"and is complete. The PREVIOUS package could not be removed and "
-            f"is still on disk at {superseded} — delete that folder; do not "
-            f"upload it."
-        )
 
     return replace(assembled, root=published, readme=published / README_NAME)
 

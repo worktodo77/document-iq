@@ -209,43 +209,49 @@ def test_a_leftover_staging_directory_stops_the_build_rather_than_being_used(
         "the build claimed it could not remove the leftover and removed it")
 
 
-def test_a_package_that_could_not_be_published_says_the_earlier_one_survived(
+def test_a_package_that_cannot_be_moved_aside_leaves_the_earlier_one_in_place(
         tmp_path, monkeypatch):
-    """The rename into place fails AFTER the previous package was moved aside.
-    The earlier build must be put back, and the message must say which of the
-    two things happened."""
+    """The FIRST rename fails — an antivirus scanner holding a file in the
+    published package open. Nothing has been destroyed at that point, and
+    nothing may be."""
     layout, docs = full_matter(tmp_path)
     build_upload_package(layout, document_count=len(docs))
     before = _tree(layout.upload_package)
 
     real = h._retry_rename
-    calls: list[int] = []
 
-    def fail_the_second(src, dst, **kw):
-        calls.append(1)
-        if len(calls) == 2:
+    def fail_moving_aside(src, dst, **kw):
+        if dst.name.endswith(".superseded"):
             raise OSError(LOCK_ERROR)
         return real(src, dst, **kw)
 
-    monkeypatch.setattr(h, "_retry_rename", fail_the_second)
+    monkeypatch.setattr(h, "_retry_rename", fail_moving_aside)
     with pytest.raises(PackageSwapError) as caught:
-        build_upload_package(layout, document_count=len(docs))
+        build_upload_package(layout, doc_ids=(docs[0].doc_id,),
+                             scope_statement="A NARROWER SCOPE\n")
 
-    assert "put back and is intact" in str(caught.value)
+    assert "still holds the earlier build" in str(caught.value)
     assert _tree(layout.upload_package) == before, (
         "the earlier package was destroyed to make room for one that never "
         "arrived")
     assert _siblings(layout) == ["upload_package"]
 
 
-def test_an_unremovable_superseded_folder_is_reported_not_absorbed(
+def test_an_unremovable_previous_package_is_put_back_and_nothing_is_published(
         tmp_path, monkeypatch):
-    """The package IS published and complete; what is wrong is the folder full
-    of the previous package's files sitting beside it. Reported as a swap
-    failure, not as "the package was NOT built" — a false claim about a package
-    that was built and validated is the same class as the finding."""
+    """The previous package cannot be removed, so it is restored and the build
+    reports failure.
+
+    This is the state the publish ORDER exists to produce. Removing the earlier
+    package after the new one has taken the published name would instead leave a
+    correct published package beside a stray folder of the previous one — and
+    the GUI would then say "The upload package was NOT built" about a package
+    that was built, validated and published. A false headline of that shape is
+    finding A-4 again, so the order forbids the state rather than the report
+    describing it."""
     layout, docs = full_matter(tmp_path)
     build_upload_package(layout, document_count=len(docs))
+    before = _tree(layout.upload_package)
 
     real = h._remove_tree
 
@@ -256,15 +262,40 @@ def test_an_unremovable_superseded_folder_is_reported_not_absorbed(
 
     monkeypatch.setattr(h, "_remove_tree", refuse_superseded)
     with pytest.raises(PackageSwapError) as caught:
-        build_upload_package(layout, document_count=len(docs))
+        build_upload_package(layout, doc_ids=(docs[0].doc_id,),
+                             scope_statement="A NARROWER SCOPE\n")
 
     message = str(caught.value)
-    assert "was built, validated and published" in message
-    assert "upload_package.superseded" in message
-    assert "do not" in message.lower()
-    # The published package is REAL — the operator is told to delete a folder,
-    # not that they have no package.
-    assert (layout.upload_package / README_NAME).is_file()
+    assert "Nothing was published" in message
+    assert "back in place and intact" in message
+    assert _tree(layout.upload_package) == before, (
+        "the earlier package was destroyed for a package that never arrived")
+    assert _siblings(layout) == ["upload_package"]
+
+
+def test_a_publish_that_cannot_take_the_name_leaves_no_package_and_says_so(
+        tmp_path, monkeypatch):
+    """The one unrecoverable window: the earlier package is deliberately gone
+    and the final rename fails. There must be NO package folder afterwards — a
+    ``upload_package.incoming`` left behind is a package-shaped folder an
+    operator could upload — and the message must not imply one survives."""
+    layout, docs = full_matter(tmp_path)
+    build_upload_package(layout, document_count=len(docs))
+
+    real = h._retry_rename
+
+    def fail_the_publish(src, dst, **kw):
+        if dst.name == "upload_package":
+            raise OSError(LOCK_ERROR)
+        return real(src, dst, **kw)
+
+    monkeypatch.setattr(h, "_retry_rename", fail_the_publish)
+    with pytest.raises(PackageSwapError) as caught:
+        build_upload_package(layout, document_count=len(docs))
+
+    assert "no package folder remains" in str(caught.value)
+    assert _siblings(layout) == [], (
+        f"a package-shaped folder survives: {_siblings(layout)}")
 
 
 def test_the_removal_helper_answers_with_the_state_of_the_disk(tmp_path):

@@ -1021,6 +1021,21 @@ def package_failed(message: str) -> PackageOutcomeView:
     could not be built" is not. The sentence added around it says what did NOT
     happen, because a half-written package and no package are different states
     of the folder.
+
+    **The second sentence is a load-bearing claim, and when it was written it
+    was false** (Codex review #2 fix round, finding A-4). ``upload_package/``
+    was built in place: a failure after the first copy left a CURRENT partial
+    folder under exactly the name this text was telling the operator held an
+    earlier build. It is true now, and it is true by construction rather than
+    by care — :func:`dociq.emit.handoff.build_upload_package` assembles in a
+    sibling directory and claims the published name only after every copy,
+    filter, README and validation has passed, so a failed build leaves either
+    the earlier package byte-for-byte or no package at all. Both satisfy this
+    sentence. ``tests/test_package_swap.py`` asserts the disk and this text
+    together, in one test, because the finding was that they disagreed.
+
+    The word "completed" carries the other half: a package that failed
+    validation is not a package, and the folder is never left in that state.
     """
     return PackageOutcomeView(
         ok=False,
