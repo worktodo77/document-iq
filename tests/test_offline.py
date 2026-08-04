@@ -197,18 +197,58 @@ def test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN():
     then reports. Fetch CLIENTS must be absent; stdlib transport is separately
     reported with attribution (see ``offline.TRANSPORT_MODULES``) and the
     guard's zero-attempt count is the assurance there.
+
+    **This test fails intermittently under concurrent load, and its failure was
+    not diagnosable.** Observed 2 failures in 24 concurrent jobs during the
+    claims sweep, then 2 in 6 immediately after the A-15 commit — while a
+    ``git push`` and other agents were running — then **15 consecutive full-suite
+    runs green**, and 6/6 green in isolation. It has never reproduced on demand.
+
+    The three ways this test can fail are not equally serious and the summary
+    line does not distinguish them:
+
+    * the **subprocess did not run** — a harness problem under load;
+    * **ATTEMPTS was non-zero** — something tried to open a socket;
+    * **a fetch client was loaded** — criterion 6 is not met.
+
+    Only the last two are findings about the product, and one of them would
+    withdraw a claim made to law-firm IT. So every assertion below now carries
+    the return code, stdout and stderr: the next occurrence has to be
+    self-explaining, because a rate estimate is not a diagnosis and this has now
+    cost three attempts at one.
+
+    Deliberately NOT retried and NOT marked flaky. A retry would convert the one
+    signal that distinguishes a harness failure from a real one into silence.
     """
     import subprocess
 
     code = PROBE_SOURCE
     proc = subprocess.run([sys.executable, "-c", code, str(_fixtures_dir())],
                           capture_output=True, text=True, env=_env_with_src())
-    assert proc.returncode == 0, proc.stderr[-2000:]
+
+    def _detail(headline: str) -> str:
+        return (
+            f"{headline}\n"
+            f"  returncode: {proc.returncode}\n"
+            f"  stdout:\n{proc.stdout.strip() or '(empty)'}\n"
+            f"  stderr:\n{proc.stderr.strip()[-4000:] or '(empty)'}"
+        )
+
+    assert proc.returncode == 0, _detail(
+        "the offline probe SUBPROCESS did not complete — this is a harness "
+        "failure, not evidence about the product, and it must be read as one")
     out = dict(line.split("=", 1) for line in proc.stdout.strip().splitlines()
                if "=" in line)
-    assert out.get("ATTEMPTS") == "0", proc.stdout
+    assert "ATTEMPTS" in out, _detail(
+        "the probe ran but reported no ATTEMPTS line — its output is malformed, "
+        "so this is a harness failure and NOT an offline finding")
+    assert out["ATTEMPTS"] == "0", _detail(
+        f"a whole pipeline run made {out['ATTEMPTS']} outbound attempt(s) — "
+        f"THIS IS A CRITERION 6 FINDING, not a flake")
     fetch = [m for m in out.get("FETCH", "").split(",") if m]
-    assert fetch == [], f"a whole pipeline run loaded fetch clients: {fetch}"
+    assert fetch == [], _detail(
+        f"a whole pipeline run loaded fetch clients {fetch} — THIS IS A "
+        f"CRITERION 6 FINDING, not a flake")
 
 
 def _env_with_src():
