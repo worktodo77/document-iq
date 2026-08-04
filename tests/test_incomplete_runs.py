@@ -388,10 +388,14 @@ def test_there_is_exactly_one_terminal_status_enumeration():
     from dociq import contracts, runstate
 
     assert runstate.TerminalStatus is contracts.TerminalStatus
-    assert (
-        len({id(m) for m in contracts.TerminalStatus}
-            | {id(m) for m in runstate.TerminalStatus}) == 3
-    )
+    # Counted from the enum rather than pinned to a literal. The literal was 3
+    # and A-15 added REFUSED, so the test failed for the one reason it must not:
+    # a legitimate new member is not a second enumeration. What A-07 forbids is
+    # runstate declaring its OWN members, which the identity comparison above
+    # already establishes and this now states without a number to bump.
+    members = {id(m) for m in contracts.TerminalStatus}
+    assert members == {id(m) for m in runstate.TerminalStatus}
+    assert len(members) == len(list(contracts.TerminalStatus))
 
 
 @pytest.mark.parametrize("case", ["completed", "missing-root", "cancelled",

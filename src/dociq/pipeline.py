@@ -886,27 +886,24 @@ def _refuse_publication(
     3. **The record is written under** ``incomplete_run/``, through the same
        :func:`_abort` that every other unpublished run goes through.
 
-    **On the status value.** This is recorded as ``BLOCKED``, whose contract
-    prose is "the run never established a corpus it could publish" — true here,
-    and the operator sentence it produces ("NO DELIVERABLES WERE WRITTEN and the
-    previous run's outputs in this folder were left exactly as they were") is
-    exactly right. But ``TerminalStatus``'s docstring enumerates three ways into
-    ``BLOCKED`` and this is a fourth, so the enumeration is now short by one.
-    :mod:`dociq.contracts` is frozen and shared, so that one-line correction is
-    raised as amendment **A-15** rather than made here — see
-    ``docs/contracts/amendments.md``. A distinct ``REFUSED`` value would be
-    better still and is the shape A-15 asks for; reusing ``BLOCKED`` is what can
-    ship without touching the frozen module, and it is honest rather than
-    convenient: the alternative considered was leaving the termination
-    ``COMPLETED`` and carrying the refusal only in ``published=False``, which
-    would have put "Run status: completed — the walk covered every file found."
-    at the top of a refused run's ``run_status.json``.
+    **On the status value.** Recorded as ``REFUSED`` (amendment **A-15**,
+    applied by the seam owner 2026-08-04). This shipped briefly as ``BLOCKED``,
+    which was honest but wrong in one direction that matters: a blocked run
+    never established a corpus, and a refused run established one and assigned
+    an identifier to every document before failing its own gate. Reporting "the
+    run never established a corpus it could publish" about a run that issued a
+    Doc ID per document says something false about the folder.
+
+    The alternative considered and rejected was leaving the termination
+    ``COMPLETED`` and carrying the refusal only in ``published=False`` — which
+    would have printed "Run status: completed — the walk covered every file
+    found." at the top of a refused run's ``run_status.json``.
     """
     emit_paths.discard_staging(layout)
 
     detail = "; ".join(why for _, why in refusals)
     walk_notes.termination = RunTermination(
-        TerminalStatus.BLOCKED,
+        TerminalStatus.REFUSED,
         f"§4 Stage 6 REFUSED to publish this run: {detail}. The set this run "
         f"built was discarded and the deliverables already in this folder were "
         f"not touched.",

@@ -150,7 +150,9 @@ def test_a_red_stage_6_gate_refuses_to_publish(tmp_path, monkeypatch, gate):
 
     assert not refused.published, "a run that failed its own gates published"
     assert not refused.ok
-    assert refused.termination.status is TerminalStatus.BLOCKED
+    # REFUSED, not BLOCKED (A-15). A blocked run never established a corpus;
+    # this one established a complete corpus and failed its own Stage-6 gate.
+    assert refused.termination.status is TerminalStatus.REFUSED
     assert _deliverables(out) == before, (
         f"the {gate} gate went red and the matter folder changed anyway; the "
         f"last good deliverables must survive a refused run byte for byte")
