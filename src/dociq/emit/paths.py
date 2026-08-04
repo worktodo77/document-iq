@@ -590,6 +590,14 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     # idempotent, so a retry repeats work rather than doing something new — and
     # the roll-forward that follows a genuine failure is idempotent for the same
     # reason.
+    #
+    # This sentence used to be false about one step and is corrected rather than
+    # softened (fix round, B-4): the superseded-DIRECTORY branch was
+    # `shutil.rmtree(path, ignore_errors=True)`, which is neither retried nor
+    # observable. Every removal now goes through `_remove_file_or_fail` or
+    # `_remove_tree_or_fail`, which retry AND then check the name is gone —
+    # "the call returned" and "the file is gone" are not the same fact on
+    # Windows, and only the second one licenses deleting the marker.
     root = destination.root
     removed: list[str] = []
     for rel in superseded:
@@ -637,6 +645,13 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
             )
             if leftover:
                 raise
+
+    # Last, and only now: everything the marker authorized has happened and been
+    # proven. It is deliberately NOT `_remove_file_or_fail` — a marker whose name
+    # lingers after `unlink` returns leaves the folder declared mid-swap, and the
+    # next run's roll-forward finds nothing left to do and removes it. That is
+    # benign, and turning it into a raised error would fail closed over a state
+    # with no evidentiary consequence.
     _retry_io(lambda: marker.unlink(missing_ok=True))
     return tuple(sorted(removed))
 
