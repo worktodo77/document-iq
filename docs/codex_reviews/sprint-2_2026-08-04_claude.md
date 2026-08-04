@@ -49,9 +49,9 @@ D-10 designates **this** review as the merge gate for the whole programme.
 - **PyInstaller one-folder packaging** with bundled ONNX models (D-22), measured: 393.1 MB payload, 178.2 MB zip, warm launch 0.320–0.962 s over 29 launches, and `--selftest` passing **inside the frozen exe** (70 checks, byte-identical over 8 seeds).
 - **§4 Stage-3 Bates confirmation** (A-14), which is what makes Bates work at all — see below.
 
-**Suite:** 1,187 tests, collected at `c25d8e0`. The 8-consecutive-run verification on the **fully merged** tree is recorded in the commit that lands this file — see it for the actual figure. Every constituent branch ran ≥8 green before merge, and the merged tree ran 8/8 green at each earlier merge point; `python -m dociq.selftest` exits 0 with 70 checks.
+**Suite:** 1,187 tests. **8 consecutive full-suite runs on the fully merged tree at `c25d8e0`: 8/8 green, zero failures** — completed 2026-08-04 and recorded here only once it had. Every constituent branch also ran ≥8 green before merge; `python -m dociq.selftest` exits 0 with 70 checks.
 
-*(This line originally read "8 consecutive full-suite runs green" while that sequence was still executing. It is corrected here because writing a verification result from the plan rather than the measurement is the exact defect class this sprint spent its rehearsal review closing, and a relay that commits it is not one Codex should trust.)*
+*(This line originally asserted that result while the sequence was still executing, was corrected to say so, and is now stated with the measurement behind it. Writing a verification result from the plan rather than the measurement is the exact defect class this sprint's rehearsal review spent its time closing, and a relay that commits it is not one a reviewer should trust. Note also: a single full pass now exceeds ten minutes — the claims sweep added concurrent determinism repetitions and an 8-thread OCR stability probe — so a six-minute cap will not see one finish.)*
 
 ---
 
