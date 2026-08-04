@@ -257,24 +257,21 @@ Each is reported with the exact shape proposed. None has been applied locally.
 
 ### 5.1 Bates confirmation has no callback (D-5, the item the brief flagged)
 
-> **PARTLY SUPERSEDED 2026-08-03 — read this before quoting the section below.**
-> **Amendment A-14 is APPLIED**: `BatesProposal` and `BatesConfirm` are in
-> `gui/pipeline.py` and `PipelineAPI.run` carries
-> `confirm_bates: BatesConfirm | None = None`. So "the seam has no way to ask"
-> is **false as of A-14** and is withdrawn.
+> **See the CLOSED banner at the head of §5 — it is authoritative for this
+> section.** The paragraphs below describe the missing callback in the present
+> tense; "the seam has no way to ask" is false as of A-14 and the gap itself was
+> closed by the rehearsal A4 build (`RealPipeline.run` now takes `confirm_bates`
+> and passes it through).
 >
-> **The gap it describes is not closed, and correcting the sentence does not
-> close it.** `RealPipeline.run` still has the pre-A-14 signature and still
-> passes `auto_confirm_bates=False`, so through the shipped GUI a Bates-stamped
-> production still yields no locators at all — which is exactly what D-29 records
-> ("through the shipped GUI the figure is 0%, because nothing confirms a Bates
-> format"). The final paragraph's conclusion therefore stands verbatim: criterion
-> 4 cannot be discharged through the GUI until the adapter and a modal are wired.
+> **A draft of this banner, written 2026-08-03 before that build was merged,
+> said "the gap it describes is not closed."** That was true when written and
+> false within the hour; it is corrected rather than deleted, because a note
+> claiming an open defect that has been fixed sends someone to build it twice.
 >
-> A-14's applied shape also differs from the proposal below: `BatesProposal`
-> carries `pattern`, `example`, `documents`, `pages`, `coverage_pct` and
-> `alternatives` — not `label` / `coverage_pct` / `sample_pages`. Quote the seam,
-> not this block.
+> One thing worth carrying forward regardless: A-14's applied shape differs from
+> the proposal below. `BatesProposal` carries `pattern`, `example`, `documents`,
+> `pages`, `coverage_pct` and `alternatives` — not `label` / `coverage_pct` /
+> `sample_pages`. **Quote the seam, not this block.**
 
 §4 Stage 3 requires the detected Bates format to be confirmed **with the operator**
 on first detection. `PipelineOptions.auto_confirm_bates` exists for headless paths

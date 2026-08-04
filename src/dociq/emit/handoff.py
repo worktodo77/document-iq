@@ -205,6 +205,7 @@ def render_readme(
     has_bates: bool,
     id_regime: str,
     scope_statement: str = "",
+    capacity_tokens: int = ProjectLimits().direct_context_tokens,
 ) -> str:
     """The §8 Path A ``README_START_HERE.txt``.
 
@@ -215,11 +216,28 @@ def render_readme(
 
     ``scope_statement`` (D-20, amendment A-12) is emitted **first — before the
     title line and before any count**. Position is the whole point: a scope
-    caveat under a "368 documents, 18,521 pages" headline is read after the
-    reader has already formed the belief it exists to prevent. If it is empty a
+    caveat under a "368 documents, N pages" headline is read after the reader
+    has already formed the belief it exists to prevent. If it is empty a
     full-scope statement is authored by :func:`default_scope_statement`, because
     a package that says nothing about its scope is exactly the artifact D-20
     forbids.
+
+    ``capacity_tokens`` is the limit the capacity sentence is computed against,
+    and it is a **parameter rather than a default this function reaches for**.
+    It used to call the bare ``estimate.capacity()``, which falls back to
+    :data:`dociq.verify.tokens.DIRECT_CONTEXT_TOKENS` — a *different* literal
+    from the ``ProjectLimits.direct_context_tokens`` that
+    :func:`build_upload_package` checks the package against. With any override
+    the two disagreed, and the disagreement was not subtle: one reproduced
+    package carried ``mode_statement`` "Fits directly in a Claude Project
+    without retrieval mode (about 20% of direct-context capacity)" while **this
+    README** told the recipient "About 181–197% of direct-context capacity — the
+    Project will operate in retrieval (RAG) mode."
+
+    The recipient reads the README. The operator reads ``mode_statement``. They
+    are now computed from one limit and one verdict, so they cannot disagree by
+    construction, and ``tests/test_emit.py`` asserts the verdict appears
+    verbatim in the file rather than asserting the two happen to match today.
     """
     scope = scope_statement.strip() or default_scope_statement(
         document_count, matter_name
@@ -246,7 +264,7 @@ WHAT THIS FOLDER IS
   Method: {estimate.method}. No tokenizer was run, and DocIQ asserts no lower
   bound on token count — only that a text cannot need more tokens than it has
   UTF-8 bytes. Full assumptions in processing_log.json.
-  {estimate.capacity().statement}
+  {estimate.capacity(capacity_tokens).statement}
 
 HOW TO USE IT
   1. Create a Claude Project for this matter.
@@ -525,6 +543,12 @@ def build_upload_package(
     scope = scope_statement.strip() or default_scope_statement(
         doc_count, matter_name, unsupported
     )
+    # ONE verdict, computed once, against THIS package's limit — then both the
+    # README the recipient reads and the `mode_statement` the operator reads are
+    # renderings of the same object. Computing it twice from two different
+    # limits is how a package came to say "Fits directly in a Claude Project"
+    # and "181-197% of capacity - retrieval (RAG) mode" about itself.
+    verdict = estimate.capacity(lim.direct_context_tokens)
     readme_text = render_readme(
         matter_name=matter_name,
         document_count=doc_count,
@@ -534,6 +558,7 @@ def build_upload_package(
         has_bates=has_bates,
         id_regime=id_regime,
         scope_statement=scope,
+        capacity_tokens=lim.direct_context_tokens,
     )
     readme = write_text_deterministic(target / README_NAME, readme_text)
     copied.append(README_NAME)
@@ -565,7 +590,6 @@ def build_upload_package(
         limits=lim,
         unenforced=tuple(unenforced),
     )
-    verdict = estimate.capacity(lim.direct_context_tokens)
     return UploadPackage(
         root=target,
         files=tuple(sorted(copied)),

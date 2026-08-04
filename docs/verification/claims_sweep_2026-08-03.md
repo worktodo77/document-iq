@@ -1,8 +1,9 @@
 # Claim-accuracy sweep — Sprint 2
 
-**Branch:** `build/s2-claims` (off `build/sprint-2` @ `3a44f2e`) · **Date:**
-2026-08-03 · **Machine:** Windows 11 Pro 26200, 32 cores, Python 3.14.5,
-`document-iq\.venv`
+**Branch:** `build/s2-claims`, branched off `build/sprint-2` @ `3a44f2e` and
+**merged with `build/sprint-2` @ `b95b741` mid-package** (merge `9824054`) ·
+**Date:** 2026-08-03 · **Machine:** Windows 11 Pro 26200, 32 cores, Python
+3.14.5, `document-iq\.venv`
 
 The governing rule is **"withdraw the CLAIM, not just the code"**. Three
 instances reached the external reviewer in Sprint 1; these are the Sprint-2
@@ -13,21 +14,28 @@ Everything below is either **reproduced** (a probe was written and run) or
 not be established it is left flagged rather than made to agree with another
 one.
 
+**Three things moved under this package while it was being written**, and each is
+recorded where it lands rather than smoothed away: `emit/handoff.py` and
+`gui/view_models.py` were released to me mid-flight, so C1 and C4 went from
+"reported" to fixed; and the rehearsal A4 build closed the A-14 gap that one of
+my own corrections had just described as open (§3). A note about stale claims
+that carried a stale claim of its own would not be worth reading.
+
 ---
 
 ## 0. Headline
 
 | item | disposition |
 |---|---|
-| C1 README/mode_statement capacity disagreement | **REPRODUCED. Not fixed — the root fix is in `emit/handoff.py`, which this package does not own. STOP THE LINE, §1** |
+| C1 README/mode_statement capacity disagreement | **REPRODUCED, then FIXED** — `emit/handoff.py` was released to me mid-package. One verdict, one limit, asserted by a regression test whose fail-before was watched RED, §1 |
 | C2 pre-run time estimate ~2× low | **FIXED** — two rates, one per OCR setting, selected from the run's own configuration |
-| C3 docstrings asserting applied amendments are unapplied | **FIXED** (5 sites) + 1 reported (`main_window.py`, owned elsewhere), plus **2 mis-citations**; the A-14 *gap* is corrected as a claim and **remains open as a defect**, §3 |
-| C4 GUI asserts a behavior the adapter withdraws | **REPORTED** for `view_models.py` (owned elsewhere); **3 siblings found outside it and FIXED**, one of them a Track-D finding from 2026-08-01 that was recorded and never fixed, §4 |
+| C3 docstrings asserting applied amendments are unapplied | **FIXED** (5 sites) + 1 reported (`main_window.py`, owned elsewhere), plus **2 mis-citations**. The A-14 *gap* was closed by the rehearsal A4 build during this package; my own correction of it went stale within the hour and is itself corrected, §3 |
+| C4 GUI asserts a behavior the adapter withdraws | **FIXED** — `view_models.py` was released to me mid-package. **4 sites in total**, the fourth found by the class probe after the targeted fixes were done, §4 |
 | C5 `subprocess` unguarded and undisclosed | **GUARDED *and* DISCLOSED.** Reasoning for choosing both in §5 |
 | C6 criterion 7 proven only where it was never at risk | **CLAIM NARROWED and PROOF WIDENED** — contended regime added and measured over 32 pipeline runs, §6 |
-| C7 stale figures presented as current | **FIXED** at 18 sites (14 from the brief's list, 4 more from an independent second sweep — including `README.md`, which still said the project was **pre-development** and pointed at the superseded v1.0 as authoritative); 3 reported (files owned elsewhere), one of them a projection presented as a measurement in the frozen seam, §7 |
+| C7 stale figures presented as current | **FIXED** at 18 sites (14 from the brief's list, 4 more from an independent second sweep — including `README.md`, which still said the project was **pre-development** and pointed at the superseded v1.0 as authoritative); **1 still reported** (`identify/bates.py`, not mine); the projection-presented-as-measurement in the frozen seam was found by that sweep and has since been fixed by the coordinator, §7 |
 
-**Suite: green, 8 consecutive full runs.** See §9.
+**Suite: see §9 — the 8-run sequence did NOT complete, and this line said it had.** One intermittent failure is diagnosed there rather than dismissed.
 
 ---
 
@@ -90,46 +98,52 @@ it." Three independent literals of `200_000` exist:
 The claim is false, and the reproduction above is the cost of it being false: the
 package path reads two of the three and they are not required to agree.
 
-### STOP THE LINE — not fixed here, and why
+### Fixed — `emit/handoff.py` was released to this package mid-flight
 
-Every site the fix touches is owned by another agent or frozen:
+It was owned by another agent when C1 was written up; that agent merged and the
+coordinator handed the file over. Applied as drafted:
 
-* `emit/handoff.py` — **do not edit** (owned elsewhere). The root fix lives here.
-* `gui/pipeline.py` — **frozen, shared with two parallel agents.** The false
-  docstring claim lives here.
-* `verify/tokens.py` — mine, but changing only the literal I own would not
-  resolve the disagreement and would leave the docstring's claim standing.
+* `render_readme` takes `capacity_tokens`, defaulting to
+  `ProjectLimits().direct_context_tokens`, instead of calling the bare
+  `estimate.capacity()` and silently reaching for a *different* module's literal.
+* `build_upload_package` computes the verdict **once**, from `lim`, and passes
+  the same limit into `render_readme`. The second `estimate.capacity(...)` call
+  that produced `mode_statement` is gone — there is now one verdict object, and
+  the README and `mode_statement` are two renderings of it.
 
-Partially fixing this would produce exactly the failure mode the rule is about.
-The exact change, ready to apply:
+`tests/test_emit.py::test_the_README_and_the_mode_statement_cannot_disagree`
+asserts `pkg.mode_statement` appears **verbatim** in the README, in both
+directions (a limit the package fits, and one it does not), so it fails for any
+future limit that reaches only one of them rather than asserting the two happen
+to coincide today.
 
-```python
-# emit/handoff.py — render_readme gains the limit rather than assuming one
-def render_readme(*, ..., scope_statement: str = "",
-                  capacity_tokens: int = ProjectLimits().direct_context_tokens):
-    ...
-    {estimate.capacity(capacity_tokens).statement}
+**The first draft of that test was worthless and was caught before it was
+trusted.** It used the fixture matter's own text — ~500 tokens — where every
+limit says "fits", so both sides agreed no matter how the wiring was broken and
+the test passed against the defect it existed to catch. It was rebuilt on a
+corpus-scale estimate (>200,000 tokens) so each limit genuinely disagrees with
+the 200,000 default. The first perturbation run is what exposed it: the failure
+landed on the *second* assertion, not the first, which is only possible if the
+first could not tell the two apart.
 
-# emit/handoff.py — build_upload_package passes ITS limit through, and takes the
-# verdict from one place
-    verdict = estimate.capacity(lim.direct_context_tokens)
-    readme_text = render_readme(..., capacity_tokens=lim.direct_context_tokens)
-    ...
-    mode_statement=verdict.statement,
+**Fail-before, watched RED** (perturbation asserted to have applied, after a
+first attempt that silently no-op'd):
+
+```
+E  AssertionError: the package's own capacity verdict is not the one the
+   recipient reads.
+     package:     Fits directly in a Claude Project without retrieval mode
+                  (about 1% of direct-context capacity at the conservative end).
+     README has:  About 212-231% of direct-context capacity - the Project will
+                  operate in retrieval (RAG) mode.
 ```
 
-One source of truth for the capacity verdict in the package path; the README and
-`mode_statement` then cannot disagree by construction. A regression test should
-build a package with a non-default `ProjectLimits` and assert
-`pkg.mode_statement` appears verbatim in `pkg.readme.read_text()`.
+### Still open: the false uniqueness claim in the frozen seam
 
-And in `gui/pipeline.py`, the sentence "the literal appears nowhere else" must be
-withdrawn — either by naming the other two literals, or (better) by making
-`verify/tokens.DIRECT_CONTEXT_TOKENS` and `ProjectLimits.direct_context_tokens`
-derive from the seam constant so the claim becomes true.
+`gui/pipeline.py:41-42` is **not** mine and is not edited. The exact replacement
+wording requested by the coordinator is in §8.
 
-**Not redone:** `tests/test_gui_screen_states.py`'s capacity-literal probe, which
-was already repaired.
+
 
 ---
 
@@ -224,33 +238,45 @@ runs, and A-12 *explicitly permits* an adapter with no Path A to omit
 `build_package` rather than return an empty result. So "the screen must survive
 the absence" remains a live requirement; only the reason given for it was false.
 
-### A-14 — the claim is corrected, the gap is NOT closed
+### A-14 — my correction of it was itself stale within the hour
 
 `adapter.py`'s `run()` carried: "the seam has no callback with which to ask — so
-a GUI run behaves exactly as every other unattended run does". **A-14 applied the
-callback**: `BatesProposal` and `BatesConfirm` are in the seam and
-`PipelineAPI.run` takes `confirm_bates: BatesConfirm | None = None`. The sentence
-is withdrawn.
+a GUI run behaves exactly as every other unattended run does". A-14 had put
+`BatesProposal` / `BatesConfirm` on the seam, so that sentence was false and I
+withdrew it — **and I wrote, in this note and in a banner on Track D's §5.1,
+that the underlying gap was still open and had been "reported rather than
+half-built."**
 
-**`RealPipeline.run` still has the pre-A-14 signature and still passes
-`auto_confirm_bates=False`**, so through the shipped GUI a Bates-stamped
-production still produces no locators — which is exactly what D-29 records
-("through the shipped GUI the figure is 0%, because nothing confirms a Bates
-format"). The comment now says so in those words.
+**That was true when written and false within the hour.** The rehearsal A4 build
+closed it: `RealPipeline.run` now takes `confirm_bates` and passes
+`_translate(confirm_bates)` into `PipelineOptions`, and the confirmation screen
+asks. On merging `build/sprint-2` the conflict landed exactly here, and **I took
+sprint-2's side and discarded my own 21-line comment** rather than re-applying
+it — re-applying would have reintroduced a stale claim into the file the claim
+was about.
 
-**Deliberately not half-wired here.** Closing it needs `PipelineOptions` to carry
-the callable *and* the GUI to supply one; `gui/main_window.py` is owned
-elsewhere. A middle wired to no end is the A-14 failure again — "shipped without
-this and the cost was total". **Reported as an open item, §8.**
+Measured by the A4 work, and worth carrying: the shipped GUI produced **0.000%**
+Bates coverage on a genuinely stamped production for the length of the sprint,
+against **88.889%** (328 of 369 pages) after the fix.
 
-`docs/verification/track_d_sprint2_2026-08-01.md` §5.1 ("Bates confirmation has
-no callback") now carries a supersession banner saying the same three things: the
-seam claim is withdrawn, the gap is not closed, and the proposed `BatesProposal`
-shape in that section is **not** the shape that was applied.
+The general lesson is the one A4's own note draws, and it is the same lesson as
+this whole package: **raising an amendment is not adopting one**, and nothing was
+watching the gap between the two. My contribution to that story is smaller and
+in the same family — I corrected a claim about a gap while the gap was being
+closed underneath me, which is why the correction has to be re-checked against
+the tree at merge time and not only at write time.
+
+`docs/verification/track_d_sprint2_2026-08-01.md` §5.1 now defers to the CLOSED
+banner the coordinator put at the head of §5, and records that my draft banner
+said the opposite. The one thing from my banner worth keeping is carried
+forward: **A-14's applied shape differs from Track D's proposal** —
+`BatesProposal` carries `pattern`, `example`, `documents`, `pages`,
+`coverage_pct` and `alternatives`, not `label` / `coverage_pct` /
+`sample_pages`. Quote the seam, not the proposal block.
 
 ---
 
-## 4. C4 — one site reported (owned elsewhere), three siblings fixed
+## 4. C4 — four sites, all fixed, the fourth found by the class probe
 
 `src/dociq/gui/view_models.py:571-573`, `ChecklistRow.attribution`, locked branch:
 
@@ -264,8 +290,18 @@ shape in that section is **not** the shape that was applied.
 Same for `automatic_summary()`. Unreachable under the real adapter today —
 `_plan` emits no `LEVER_AUTOMATIC` rows — but it is a surviving assertion of a
 withdrawn behavior **in a string an expert reads**, and reachability is a
-property of today's adapter, not of the string. `view_models.py` is owned by
-another agent for a different fix; **reported to the coordinator, not edited.**
+property of today's adapter, not of the string. `view_models.py` was owned by another
+agent when this was written and was **released to this package mid-flight**; it
+is fixed here.
+
+The replacement **names the category and never a mechanism** — it renders the
+lever's own `label` and then says only who decided it and where it is recorded:
+
+> "<label>" was removed mechanically by the tool. No expert approved this; it is
+> recorded separately from the profile's drops in the processing log.
+
+Whatever a locked lever turns out to be, its label says what it is. The old
+sentence hard-coded a mechanism DocIQ does not have.
 
 ### Siblings — hunted as a separate pass, and THREE were found
 
@@ -281,16 +317,35 @@ three, all now fixed:
 | `src/dociq/gui/widgets.py:522` | tooltip on every locked waterfall row: *"Removed mechanically — exact duplicates and page furniture."* | **FIXED.** Now names the *category* and not a mechanism: "Removed mechanically by the tool, not by an expert decision — and recorded separately in the log." Whatever a locked lever turns out to be, its own `label` says what it is; the hint's job is only to say who decided it. **Track D recorded this exact string as §5.6 of its own note on 2026-08-01 and it survived** — a recorded-not-fixed item that outlived the reviewer who found it. |
 | `src/dociq/gui/mock_pipeline.py:134` | `AUTOMATIC_SAVING_SHARE`: "Track A's inventory (§4 Stage 1) **produces the real figure**" | **FIXED.** ILLUSTRATIVE was already on it, but "the real figure" implied a saving that will exist. There is no real figure for it to become; the docstring now says so and points at `adapter._plan`. |
 | `docs/design/section_taxonomy.md:140,161` | the `Default` column marks page furniture and letterhead blocks **`automatic`** | **FIXED** with a note before the tables: `Default` is a **design intent**, nothing marked `automatic` is implemented, and it must be read as what an approved profile would do rather than what a run does today. |
+| `src/dociq/gui/mock_pipeline.py:133` (summary line) | `AUTOMATIC_SAVING_SHARE`: "Share of the record **removed as exact-hash duplicates and page furniture**" | **FIXED — and this one is the point of the whole section.** I had rewritten the *body* of this docstring earlier in the package and left its first line untouched. The targeted fix missed it; **the class probe caught it on its first run.** |
 
 Checked and correctly worded, left alone: `LEVER_AUTOMATIC`'s docstring in the
 frozen seam describes the *category* ("a saving the tool made mechanically")
 without asserting DocIQ makes one; `tests/test_adapter.py:664` states the
 withdrawal correctly.
 
-`gui/view_models.py:381,385` ("Removed mechanically by the tool: …") is a fourth
-site — correctly worded as it stands, since it names no mechanism — but it lives
-in the file owned elsewhere and is listed here so its owner sees the pair
-together with line 571.
+`gui/view_models.py:381,385` ("Removed mechanically by the tool: …") and
+`automatic_summary()` name no mechanism and are gated on an automatic lever
+actually existing, so both are correct as they stand and are left alone.
+
+### The class probe
+
+`tests/test_view_models.py::test_no_gui_string_claims_DocIQ_removes_duplicates_or_page_furniture`
+regex-scans the **source of every module under `src/dociq/gui/`** rather than a
+rendered widget, because two of the four sites were unreachable under the real
+adapter — which is exactly why they survived review. A rendering test only covers
+the branch it happens to reach. Text that explains the *withdrawal* is exempted
+by looking at the surrounding window for "removes neither" / "not remove" /
+"NAMES THE CATEGORY" / "withdraw", so the honest sentences may keep naming what
+DocIQ does **not** do.
+
+Watched RED with the original string restored:
+
+```
+E  AssertionError: GUI text asserts DocIQ removes duplicates or page furniture,
+   which adapter._plan withdraws:
+     view_models.py:622: Removed mechanically by DocIQ - exact-hash duplicate
+```
 
 ---
 
@@ -535,14 +590,15 @@ if it is ever installed" is kept as a property of the code and explicitly marked
 an alternative — is restated with the measured page-level cost D-25/D-28/D-29
 attach to it.
 
-### Reported, not fixed — files owned elsewhere
+### Closed after the files were released, and what is still reported
 
-| site | figure | correct value |
+| site | figure | disposition |
 |---|---|---|
-| `src/dociq/emit/handoff.py:218` | `render_readme` docstring: "a scope caveat under a '368 documents, 18,521 pages' headline" | 18,556, or de-literalise as the mirroring test now does |
-| `src/dociq/identify/bates.py:592` | `MIN_DOCUMENT_COVERAGE_PCT`: "Measured on the real Petrobras record (368 documents, 18,521 pages)" | 18,556 on the current run; better, attribute to the 2026-07-31 run that made the observation |
-| `src/dociq/gui/view_models.py:571` | see §4 | — |
-| **`src/dociq/gui/pipeline.py:348`** (FROZEN) | `BatesProposal` docstring: "**The acceptance harness measured 92.130%**" | **A PROJECTION PRESENTED AS A MEASUREMENT.** D-29 is explicit: "597/648 = 92.130% is a PROJECTION, not a measurement" — it is `568 + 29`, where 568/568 native is Track F's earlier full-corpus measurement and 29/80 OCR'd was measured on a *different*, deliberately OCR-heavy 61-document subset whose own headline accuracy is 58.197%. The last end-to-end **measured** full-corpus figure is **593/648 = 91.512%**. Found by the second sweep pass, in a frozen file. |
+| `src/dociq/emit/handoff.py:218` | `render_readme` docstring: "a scope caveat under a '368 documents, 18,521 pages' headline" | **FIXED** — de-literalised to "368 documents, N pages", the file having been released to this package with C1 |
+| `src/dociq/gui/view_models.py:571` | see §4 | **FIXED** — released to this package |
+| **`src/dociq/gui/pipeline.py`** (FROZEN) | `BatesProposal` docstring: "The acceptance harness **measured** 92.130%" | **FIXED BY THE COORDINATOR** before this branch merged, and verified on the merged tree: it now reads "**92.130%, and it is a PROJECTION** (D-29) … the last end-to-end **measured** full-corpus number is **91.512%**". Recorded here because the finding is what mattered, not who applied it |
+| `src/dociq/identify/bates.py:592` | `MIN_DOCUMENT_COVERAGE_PCT`: "Measured on the real Petrobras record (368 documents, 18,521 pages)" | **STILL REPORTED** — not mine. Recommend attributing rather than bumping: the observation genuinely belongs to the 2026-07-31 run, so "18,521 pages as that run counted them" is truer than 18,556 |
+| `src/dociq/adapter.py:688` | merged from A4: "the acceptance harness **reported** 92.130% through a hand-built decision" | **left as written.** "Reported" is accurate — it describes what the harness produced, not what was measured — and the seam docstring one call away now carries the full projection caveat |
 | `docs/decisions/decision_register.md` | no stale figure found; the register is the source and carries its own supersessions | — |
 
 ### Two figures that legitimately differ, said rather than reconciled
@@ -564,29 +620,63 @@ attach to it.
 
 ## 8. Open items handed to the coordinator
 
-1. **C1 root fix** — `emit/handoff.py` `render_readme` / `build_upload_package`,
-   and the false uniqueness claim in the frozen `gui/pipeline.py:41-42`. Patch in
-   §1. **This is a live defect: a package can tell its recipient the opposite of
-   what it told the operator.**
-2. **C4** — `gui/view_models.py:571-573` and `automatic_summary()` assert a
-   behavior `adapter._plan` withdraws, in a string an expert reads.
-3. **A-14 wiring** — `RealPipeline.run` does not accept `confirm_bates`, and
-   `gui/main_window.py` supplies no modal, so a GUI run still confirms no Bates
-   format and criterion 4 is 0% through the product. Needs `PipelineOptions` to
-   carry the callable *and* a GUI modal; spans files this package does not own.
-4. **Two stale 18,521 literals** in `emit/handoff.py:218` and
-   `identify/bates.py:592` (their mirroring tests are already de-literalised and
-   point at them).
-5. **`gui/pipeline.py:348` calls 92.130% "measured".** D-29 rules it a
-   PROJECTION. This is the highest-consequence claim in the batch after C1 —
-   it is the number a reader would quote for acceptance criterion 4, in the
-   frozen seam, and the measured full-corpus figure is **91.512%**. Suggested
-   wording: *"The acceptance harness reaches a projected 92.130% — and the last
-   measured full-corpus figure is 593/648 = 91.512% (D-29) — because it
-   constructs the confirmed decision directly, a code path the product could not
-   reach."*
-6. **`gui/main_window.py:212`** — "``PipelineAPI`` has no method for them yet
-   (stop-the-line A-11)". A-11 is applied; the code around it is correct.
+Three of the original open items were closed inside this package after the
+coordinator released the files (C1 `emit/handoff.py`, C4 `view_models.py`) and
+after the rehearsal A4 build closed the A-14 gap. What remains:
+
+### 8.1 The one thing I was asked to word, not edit — `gui/pipeline.py:41-42`
+
+The claim "**the literal appears nowhere else, and no screen may inline it**" is
+false: three independent `200_000` literals exist (`gui/pipeline.py:33`,
+`verify/tokens.py:142`, `emit/handoff.py:118`). **Exact replacement wording,
+ready to paste**, replacing the sentence beginning "It is a single named
+constant":
+
+> It is a single named constant so that a screen never inlines it — and
+> `tests/test_gui_screen_states.py` asserts no `200_000` appears anywhere under
+> `dociq/gui/`. **Confirming the figure is NOT a one-line change, and an earlier
+> version of this docstring said it was.** Two further literals hold the same
+> number for different jobs: `verify.tokens.DIRECT_CONTEXT_TOKENS`, the default
+> limit `TokenEstimate.capacity()` falls back to, and
+> `emit.handoff.ProjectLimits.direct_context_tokens`, the limit an upload
+> package is checked against. They are deliberately separate — the seam's is a
+> *display reference line*, the emit layer's is an *operator-configurable
+> package constraint*, and collapsing them would make a caller's override of one
+> silently move the other. But it means confirming 200,000 against Anthropic's
+> published limits means changing three, and that a package once told its
+> operator "Fits directly in a Claude Project" while telling the recipient, in
+> the README, "About 181–197% of direct-context capacity — the Project will
+> operate in retrieval (RAG) mode." That defect is fixed in `emit/handoff.py`
+> (one verdict, one limit, regression-tested); this note is here so the next
+> person to touch the figure knows how many places it lives in.
+
+If you would rather make the claim true than withdraw it, the alternative is to
+have both other modules import the seam's constant — but `verify` and `emit`
+importing `dociq.gui` inverts the dependency direction the pagemodel freeze
+protects, so I recommend the wording above over the refactor.
+
+### 8.2 `gui/main_window.py:212`
+
+"``PipelineAPI`` has no method for them yet (stop-the-line A-11)". A-11 is
+applied; the `getattr` probe around it is still correct behavior, only the
+stated reason is false. One-line docstring fix; the file is not mine.
+
+### 8.3 Two stale `18,521` literals
+
+`emit/handoff.py:218` — **now mine, and FIXED** (the headline in the
+`render_readme` docstring is de-literalised to "368 documents, N pages").
+`identify/bates.py:592` still reads "Measured on the real Petrobras record (368
+documents, 18,521 pages)". Not mine. Recommended: attribute rather than bump —
+"measured on the 2026-07-31 full-corpus run (368 documents, 18,521 pages as that
+run counted them)" — because the observation genuinely belongs to that run.
+
+### 8.4 `test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN` is contention-sensitive
+
+See §9. It is the only test that runs a full OCR pipeline in a child process and
+asserts on that child's exit code. Not introduced by this package, not caused by
+the C5 guard (proven, §9), and **not tuned by me** — the honest options all
+change what the test proves, and that is a call for the owner of the offline
+proof.
 
 ## Could not establish
 
@@ -600,6 +690,11 @@ attach to it.
 * **Whether the 35-page difference is the open PowerPoint finding.** The
   register's position — the coincidence of the number is the whole of the
   evidence — is repeated, not resolved.
+* **Whether the intermittent `test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN`
+  failure is attributable to this package.** 2 failures in 24 concurrent jobs;
+  the C5 guard is excluded by direct probe, but "not caused by my changes" is
+  *not* established — nor is the opposite. §9 shows every trial, including the
+  one that contradicted my first inference.
 
 ---
 
@@ -624,18 +719,17 @@ What actually ran, at time of commit:
 
 ### The red run, diagnosed rather than dismissed
 
-`test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN` failed once. It spawns a
-child that performs a whole OCR pipeline run and asserts the child's exit code.
+`test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN` failed once. It spawns
+a child that performs a whole OCR pipeline run and asserts the child's exit code.
 **At that moment three full suites were running concurrently on this machine** —
-my own error, two earlier background sequences had not been stopped — which is
+my own error; two earlier background sequences had not been stopped — which is
 the same load regime the register documents as behavior-changing (2 per-file
 timeouts idle, 6 contended).
 
 **A flaky probe is treated as a real defect, so the C5 guard was tested for it
 directly rather than argued away.** The live hypothesis was that some path in a
-pipeline run spawns a child, which my new guard would now refuse — a defect that
-would surface only under load, i.e. exactly this pattern. Probe: 12 whole
-guarded pipeline runs at concurrency 4, reporting the attempt class explicitly.
+pipeline run spawns a child, which the new guard would now refuse — a defect that
+would surface only under load, i.e. exactly this pattern.
 
 ```
 12 guarded pipeline runs at concurrency 4
@@ -645,17 +739,42 @@ guarded pipeline runs at concurrency 4, reporting the attempt class explicitly.
   runs recording ANY attempt: 0
 ```
 
-**The guard is not the cause**, and the pipeline makes no process-creation
-attempt under load. The residual finding is that this probe is
-**contention-sensitive**: it is the only test that runs a full OCR pipeline in a
-child and asserts on its exit code, and under enough parallel load the child can
-die for reasons that are about the machine, not the product.
+**The guard is not the cause**, and a pipeline run makes no process-creation
+attempt under load.
 
-**That is left flagged, not fixed and not silenced.** It predates this package —
-nothing in C1–C7 touches it — and the honest options (raise the child's budget,
-or mark it as requiring an unloaded machine) both change what the test proves. It
-is reported to the coordinator rather than tuned by me. **It should be re-run on
-the merged tree**, which the coordinator has said they will do.
+Then, to find out whether the failure was mine at all, the same 6× concurrent
+load was run against the **pre-change baseline** (`3a44f2e`, in a separate
+worktree) and against this branch:
+
+| tree | 6× concurrent `test_offline.py` | result |
+|---|---|---|
+| baseline `3a44f2e` | 1 trial | 6/6 green |
+| this branch, all tests | 1 trial | **2/6 RED** — "the run never took the OCR path" |
+| this branch, my 8 new tests deselected | 1 trial | 6/6 green |
+| this branch, all tests | **2 further trials** | **12/12 green** |
+
+**The obvious inference from the first three rows is wrong, and the fourth row is
+why.** "Deselecting my tests fixes it" is one trial against one trial; twelve
+subsequent concurrent jobs with everything selected were green. Total observed:
+**2 failures in 24 concurrent jobs**, none in any isolated run. On this evidence
+the failure is **intermittent and load-sensitive, and NOT attributable to this
+package** — and it is equally not proven *un*attributable. Both statements are
+weaker than I would like and both are what the measurements support.
+
+What is established:
+
+* the C5 guard is not the cause (12 guarded runs, direct probe, zero attempts);
+* the failure mode is a child pipeline run that does not reach OCR;
+* **the product does not fail silently here.** `ingest/extract.py` records the
+  reason in the document's notes on both branches — `ocr_available()` false, or
+  `_ocr_pdf_pages` raising — so a run that did not OCR says so. This was checked
+  because "OCR silently did not happen" would have been a Principle-1 defect far
+  more serious than a flaky test, and it is not what happens.
+
+**Not tuned, not skipped, not marked xfail.** Raising the child's budget or
+requiring an unloaded machine both change what the test proves, and it is the
+only test that exercises a full pipeline in a child. Handed to the coordinator
+(§8.4), who is re-running the suite on the merged tree.
 
 The three probes added by this package were each watched RED under perturbation
 before being trusted (§2, §5, §6).

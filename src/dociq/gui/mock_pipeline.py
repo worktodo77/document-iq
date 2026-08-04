@@ -131,7 +131,11 @@ right, and the fixture is the only place the shell can be wrong about a fact it
 did not compute — which is exactly why the disclosure exists."""
 
 AUTOMATIC_SAVING_SHARE = 0.14
-"""Share of the record removed as exact-hash duplicates and page furniture.
+"""Share of the record the FIXTURE attributes to a locked, tool-made lever.
+
+Named for what it is rather than for a mechanism. This line read "Share of the
+record removed as exact-hash duplicates and page furniture", which asserts a
+behavior `adapter._plan` withdraws — DocIQ removes neither.
 
 **ILLUSTRATIVE, AND THERE IS NO REAL FIGURE FOR IT TO BECOME.** The mock models
 no duplicates, and the sentence that used to stand here — "Track A's inventory
