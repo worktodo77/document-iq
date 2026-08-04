@@ -215,6 +215,16 @@ A-11, A-11b, A-12 and A-13 were applied on 2026-08-01
 (`docs/contracts/amendments.md`); A-14 was applied at `3a44f2e`. Five surviving
 assertions to the contrary, all corrected:
 
+> **CORRECTION, 2026-08-04.** "A-11b … applied on 2026-08-01" is **withdrawn**.
+> A-11b was applied to the *seam* on that date and to the *product* at `91fed8d`:
+> `ReductionLever.rule` and `.note` were declared, documented and probe-covered,
+> and populated by no adapter and rendered by no screen for the whole sprint —
+> including on the §6 checklist the amendment exists for. This sweep read the
+> register and did not check the wiring, which is the distinction
+> `amendments.toml`'s `wired_in` field was later added to carry. Found by the
+> seam-population probe built for Codex review #2's B-3; see
+> `docs/verification/codex_r2_uigap_2026-08-04.md`.
+
 | site | claim withdrawn |
 |---|---|
 | `src/dociq/adapter.py:341` | "A-11 is raised and not yet applied, so Track E asks for it by an optional `getattr` hook" |
