@@ -1521,6 +1521,24 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             f"{len(man.unclassified)} output(s): "
             f"{', '.join(sorted(man.unclassified)[:5])}",
         ))
+    if man.log_content_sha256 is None:
+        # The class-B sibling, found by enumerating the other places that
+        # substitute a permissive default for state they could not read.
+        # `manifest._log_content_hash` returns None when `processing_log.json`
+        # is missing or unparseable, and `corpus_sha256` folds it in as
+        # `self.log_content_sha256 or ""` — so an unreadable log produced a
+        # manifest that silently omitted one of the claim's two halves and a
+        # corpus hash that could not be told apart from a run whose log hashed
+        # to nothing. Stage 5 always writes that file into this very staging
+        # directory, so there is no legitimate None here. Measured: without this
+        # gate the run publishes AND reports ok=True, because
+        # `PipelineOutcome.ok` does not look at the field either.
+        refusals.append((
+            "log-content-hash",
+            f"{mf.LOG_NAME}'s '{mf.LOG_CONTENT_KEY}' section could not be "
+            f"hashed, so the byte-identical claim would be published missing "
+            f"half of what it claims",
+        ))
     if not ordered:
         refusals.append((
             "corpus-order",

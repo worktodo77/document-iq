@@ -41,6 +41,7 @@ from dociq.ingest import extract as ex
 from dociq.ingest import walker
 from dociq.profiles.model import OperatorStamp
 from dociq.verify import accounting
+from dociq.verify import manifest as mf
 
 from .conftest import FIXTURES
 
@@ -384,6 +385,22 @@ def test_a_truncated_marker_cannot_publish_a_mixed_set_on_a_shrinking_rerun(tmp_
     marker.write_text('{"staging": "staging", "superseded": ["clean_te',
                       encoding="utf-8", newline="")
 
+    # The recovery IN ISOLATION first, because that is where the mixing happens
+    # and an end-to-end assertion cannot see it: run 3 walks the same source as
+    # run 1, so it republishes the same seventeen files either way and the
+    # folder-comparison below is satisfied by a mixed set and a clean one alike.
+    # Measured on the pre-fix code at this point: seventeen clean_text files
+    # visible, a manifest claiming four, fifteen stale survivors, marker deleted.
+    with pytest.raises(emit_paths.PendingSwapUnreadable):
+        emit_paths.recover_pending(OutputLayout.at(out))
+    mid = {
+        p.relative_to(out).as_posix()
+        for p in (out / "clean_text").rglob("*") if p.is_file()
+    }
+    assert mid == big_texts, (
+        f"the recovery published a MIXED set: {len(mid)} clean_text files "
+        f"visible, from a run that produced {len(small_texts)}")
+
     third = _run(out)
 
     assert not third.published, "a run published on top of an unreadable swap"
@@ -413,3 +430,132 @@ def test_a_truncated_marker_cannot_publish_a_mixed_set_on_a_shrinking_rerun(tmp_
     assert survived == small_texts, (
         f"the roll-forward left {sorted(survived - small_texts)} behind from "
         f"the larger run")
+
+
+# ---------------------------------------------------------------------------
+# The CLASS, not the two repros
+# ---------------------------------------------------------------------------
+#
+# B-1 and B-2 are one sentence: state was computed and then not acted on. The
+# two probes below hold the class rather than the instances.
+
+
+_REAL_MF_BUILD = mf.build
+
+
+def _force_no_log_hash(monkeypatch, out):
+    """The class-B sibling: `manifest._log_content_hash` returns None when the
+    processing log cannot be read, and `corpus_sha256` folds that in as `""`."""
+    def build(root, config=None):
+        man = _REAL_MF_BUILD(root, config=config)
+        man.log_content_sha256 = None
+        return man
+
+    monkeypatch.setattr("dociq.pipeline.mf.build", build)
+    return {}
+
+
+def _force_unreadable_marker(monkeypatch, out):
+    layout = OutputLayout.at(out).ensure()
+    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "sources.json").write_text("{}\n", encoding="utf-8", newline="")
+    (out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME).write_text(
+        '{"superseded": ["clean', encoding="utf-8", newline="")
+    return {}
+
+
+def _force_blocked_walk(monkeypatch, out):
+    """A source root DocIQ cannot reach — the oldest unpublishable route there
+    is, closed by Codex review #1's B-1 and included here on purpose."""
+    return {"source": out.parent / "no_such_source_folder"}
+
+
+UNPUBLISHABLE = {
+    # Every route by which a run can end without publishing, and how to force
+    # it. Enumerated rather than sampled: the invariant below is only as wide as
+    # this dict, so a route missing from it is a hole in the probe.
+    "walk-blocked": _force_blocked_walk,
+    "gate-accounting": lambda mp, out: (_force_accounting_red(mp), {})[1],
+    "gate-unclassified": lambda mp, out: (_force_unclassified(mp), {})[1],
+    "gate-corpus-order": lambda mp, out: (_force_out_of_order(mp), {})[1],
+    "gate-log-content-hash": _force_no_log_hash,
+    "unreadable-swap-marker": _force_unreadable_marker,
+}
+
+
+@pytest.mark.parametrize("route", sorted(UNPUBLISHABLE))
+def test_a_run_that_is_not_ok_never_published(tmp_path, monkeypatch, route):
+    """THE class invariant: ``ok is False`` implies ``published is False``.
+
+    Both findings are instances of its violation, and it is what a future
+    regression would break first. Before the fix it was reachable and measured:
+    a forced page-accounting discrepancy produced ``published=True, ok=False``
+    with the matter folder already replaced.
+
+    The walk-blocked route is not a new defect — Codex review #1 closed it — and
+    it is here on purpose. An invariant proven only over the paths a fix just
+    touched is an invariant that stops being checked the moment someone adds a
+    seventh route.
+    """
+    out = tmp_path / "matter"
+    if route != "walk-blocked":
+        assert _run(out).published, "nothing was published to protect"
+    before = _deliverables(out)
+
+    kwargs = UNPUBLISHABLE[route](monkeypatch, out)
+    outcome = _run(out, **kwargs)
+
+    assert not outcome.ok, f"{route} did not produce a not-ok run"
+    assert not outcome.published, (
+        f"{route}: a run that is not ok published its output set")
+    assert outcome.incomplete_dir is not None, (
+        f"{route}: nothing on disk records why this run published nothing")
+    assert _deliverables(out) == before, (
+        f"{route}: the matter folder changed under a run that published nothing")
+
+
+def test_the_swap_is_unreachable_without_passing_the_gate(tmp_path):
+    """A structural probe over ``pipeline.run``'s own source.
+
+    The runtime invariant above proves the gate WORKS; this proves it is still
+    in the road. They fail differently: deleting the ``if refusals`` block
+    breaks both, but reordering the gate below ``mark_ready`` — which is exactly
+    what the pre-fix code was — could leave a red set published while every
+    forced-gate test above still passed by luck of what it asserted.
+
+    It is deliberately a source check and not a coverage trick: there is no
+    runtime observation that distinguishes "the swap ran after the gate" from
+    "the swap ran, and the gate happened to be green".
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(pipeline.run))
+    body = tree.body[0].body
+
+    def index_of(predicate) -> int:
+        for i, node in enumerate(body):
+            if predicate(node):
+                return i
+        return -1
+
+    def calls(node, name) -> bool:
+        return any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == name for n in ast.walk(node))
+
+    gate = index_of(lambda n: isinstance(n, ast.If) and any(
+        isinstance(s, ast.Return) and isinstance(s.value, ast.Call)
+        and getattr(s.value.func, "id", "") == "_refuse_publication"
+        for s in ast.walk(n)))
+    mark = index_of(lambda n: calls(n, "mark_ready"))
+    commit = index_of(lambda n: calls(n, "commit_staging"))
+
+    assert gate >= 0, (
+        "pipeline.run has no top-level gate that returns _refuse_publication — "
+        "Stage 6 is computing checks and publishing regardless (Codex B-1)")
+    assert mark >= 0 and commit >= 0, "the swap left pipeline.run's top level"
+    assert gate < mark < commit, (
+        f"the swap is not downstream of the gate: gate at statement {gate}, "
+        f"mark_ready at {mark}, commit_staging at {commit}")
