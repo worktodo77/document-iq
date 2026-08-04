@@ -662,6 +662,11 @@ def _abort(
     stamp: OperatorStamp,
     opts: PipelineOptions,
     timings: list[tuple[str, float]],
+    result: RunResult | None = None,
+    assignment: AssignmentResult | None = None,
+    reconciliation: ReconciliationReport | None = None,
+    manifest: mf.Manifest | None = None,
+    accounting_report: accounting.AccountingReport | None = None,
 ) -> PipelineOutcome:
     """End a run that did not complete, WITHOUT publishing anything.
 
@@ -685,6 +690,22 @@ def _abort(
     A subsequent complete run purges the directory (``_STALE_PATTERNS``), and
     the manifest classifies it as excluded so it can never make a later, good
     run report an unclassified output.
+
+    **The optional arguments** (Codex review #2, finding B-1). This started as
+    the Stage-1 abort and is now also the STAGE-6 REFUSAL, where a run walked
+    the whole corpus, built a complete set in staging, and was refused
+    publication because its own gates went red. That run knows things a Stage-1
+    abort cannot — the assigned identifiers, the reconciliation, the manifest of
+    the set it built, the accounting report that condemned it — and blanking
+    them would make the quarantined record say "no identifier was issued" about
+    a run that issued nine thousand.
+
+    They are overrides on ONE function rather than a second unpublishing path on
+    purpose: the whole of Codex review #1's B-1 was that a second publication
+    rule is a second chance to get publication wrong. Everything that decides
+    *not* to publish returns from here, so ``published=False``,
+    ``incomplete_dir``, the quarantined log, the status file and the failing
+    ``<run>`` discrepancy are written once and cannot drift between the cases.
     """
     termination = walk_notes.termination
     documents = walked.documents
@@ -695,7 +716,9 @@ def _abort(
     # aborted run handed a consumer a machine result that contradicted the
     # wrapper around it, the log beside it and the run_status.json under it.
     result = walk_notes.termination.stamp(
-        RunResult(
+        result
+        if result is not None
+        else RunResult(
             config=config,
             documents=documents,
             unsupported=walked.unsupported,
@@ -707,7 +730,10 @@ def _abort(
     # offered these as alternatives; doing both means a consumer that only reads
     # `accounting.ok` — the property `PipelineOutcome.ok` used to be derived
     # from on its own — still cannot mistake this for a good run.
-    report_acc = accounting.check(result)
+    report_acc = (
+        accounting_report if accounting_report is not None
+        else accounting.check(result)
+    )
     report_acc.discrepancies.insert(
         0,
         accounting.Discrepancy(
@@ -797,8 +823,8 @@ def _abort(
         result=result,
         layout=layout,
         accounting=report_acc,
-        manifest=mf.Manifest(),
-        assignment=AssignmentResult(
+        manifest=manifest if manifest is not None else mf.Manifest(),
+        assignment=assignment if assignment is not None else AssignmentResult(
             documents=documents,
             regime=IdRegime.NATIVE,
             assignments=(),
@@ -808,14 +834,16 @@ def _abort(
             warnings=(f"no identifier was issued: the run ended "
                       f"{termination.status.value}",),
         ),
-        reconciliation=ReconciliationReport(
-            matched=(),
-            folder_only=(),
-            index_only=(),
-            snapshot=None,
-            root_prefix=None,
-            warnings=(f"reconciliation was not run: the run ended "
-                      f"{termination.status.value}",),
+        reconciliation=(
+            reconciliation if reconciliation is not None else ReconciliationReport(
+                matched=(),
+                folder_only=(),
+                index_only=(),
+                snapshot=None,
+                root_prefix=None,
+                warnings=(f"reconciliation was not run: the run ended "
+                          f"{termination.status.value}",),
+            )
         ),
         log=bundle,
         walk_notes=walk_notes,
@@ -823,6 +851,91 @@ def _abort(
         published=False,
         incomplete_dir=quarantine.root,
         timings_s=tuple(timings),
+    )
+
+
+def _refuse_publication(
+    *,
+    effective: RunConfig,
+    result: RunResult,
+    walk_notes: walker.RunNotes,
+    layout: OutputLayout,
+    stamp: OperatorStamp,
+    opts: PipelineOptions,
+    timings: list[tuple[str, float]],
+    assignment: AssignmentResult,
+    reconciliation: ReconciliationReport,
+    report_acc: accounting.AccountingReport,
+    manifest: mf.Manifest,
+    refusals: list[tuple[str, str]],
+) -> PipelineOutcome:
+    """Stage 6 went red: REFUSE to publish (Codex review #2, finding B-1).
+
+    Three things happen and their order is the guarantee, exactly as it is on
+    the success side:
+
+    1. **Staging is discarded.** It is a set that failed its own audit, and
+       leaving it under a matter folder is leaving something a later hand could
+       mark ready. Nothing in the destination is touched — no marker was
+       written, so :func:`~dociq.emit.paths.commit_staging` has nothing to act
+       on and the previous run's deliverables stay byte-for-byte as they were.
+    2. **The refusal becomes the terminal status**, so every consumer that
+       already knows how to read one — the log's ``run`` section, the GUI's
+       failure state, ``run_status.json``, the summary banner — sees it without
+       learning a new vocabulary.
+    3. **The record is written under** ``incomplete_run/``, through the same
+       :func:`_abort` that every other unpublished run goes through.
+
+    **On the status value.** This is recorded as ``BLOCKED``, whose contract
+    prose is "the run never established a corpus it could publish" — true here,
+    and the operator sentence it produces ("NO DELIVERABLES WERE WRITTEN and the
+    previous run's outputs in this folder were left exactly as they were") is
+    exactly right. But ``TerminalStatus``'s docstring enumerates three ways into
+    ``BLOCKED`` and this is a fourth, so the enumeration is now short by one.
+    :mod:`dociq.contracts` is frozen and shared, so that one-line correction is
+    raised as amendment **A-15** rather than made here — see
+    ``docs/contracts/amendments.md``. A distinct ``REFUSED`` value would be
+    better still and is the shape A-15 asks for; reusing ``BLOCKED`` is what can
+    ship without touching the frozen module, and it is honest rather than
+    convenient: the alternative considered was leaving the termination
+    ``COMPLETED`` and carrying the refusal only in ``published=False``, which
+    would have put "Run status: completed — the walk covered every file found."
+    at the top of a refused run's ``run_status.json``.
+    """
+    emit_paths.discard_staging(layout)
+
+    detail = "; ".join(why for _, why in refusals)
+    walk_notes.termination = RunTermination(
+        TerminalStatus.BLOCKED,
+        f"§4 Stage 6 REFUSED to publish this run: {detail}. The set this run "
+        f"built was discarded and the deliverables already in this folder were "
+        f"not touched.",
+    )
+    walk_notes.invocation.append(
+        "PUBLICATION REFUSED at §4 Stage 6 — the run completed its walk and "
+        "built a full set, and that set failed the Stage-6 gates: "
+        + ", ".join(kind for kind, _ in refusals)
+    )
+    # Each failing gate is its own `<run>` discrepancy, so a reader of the
+    # accounting report alone learns which gate refused rather than only that
+    # something did. `_abort` inserts the terminal-status line above these.
+    for kind, why in reversed(refusals):
+        report_acc.discrepancies.insert(
+            0, accounting.Discrepancy("<run>", f"refused-{kind}", why))
+
+    return _abort(
+        config=effective,
+        walked=result,
+        walk_notes=walk_notes,
+        layout=layout,
+        stamp=stamp,
+        opts=opts,
+        timings=timings,
+        result=result,
+        assignment=assignment,
+        reconciliation=reconciliation,
+        manifest=manifest,
+        accounting_report=report_acc,
     )
 
 
@@ -853,7 +966,34 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # made a completed roll-forward silent whenever the folder had been empty,
     # which is the case an operator is least likely to reconstruct unaided.
     was_pending = emit_paths.pending_swap(layout)
-    recovered = emit_paths.recover_pending(layout)
+    try:
+        recovered = emit_paths.recover_pending(layout)
+    except emit_paths.PendingSwapUnreadable as unreadable:
+        # Codex review #2, B-2. The marker exists and cannot be trusted to say
+        # which of this folder's files the staged set replaces, so nothing has
+        # moved and nothing has been deleted. The run STOPS here — before the
+        # `discard_staging` below, which would otherwise throw away the complete
+        # set the operator is being told to go and look at, and before the walk,
+        # so no work is done that a refused publication would discard anyway.
+        #
+        # It takes the ordinary abort path rather than raising: a windowed
+        # executable turns a traceback into nothing at all, and this is a state
+        # an operator can act on if — and only if — they are told what it is.
+        blocked = walker.RunNotes()
+        blocked.termination = RunTermination(
+            TerminalStatus.BLOCKED, str(unreadable))
+        blocked.invocation.append(
+            "BLOCKED before Stage 1: an interrupted swap could not be "
+            "completed safely and this folder was left untouched.")
+        return _abort(
+            config=config,
+            walked=RunResult(config=config),
+            walk_notes=blocked,
+            layout=layout,
+            stamp=stamp,
+            opts=opts,
+            timings=timings,
+        )
     emit_paths.discard_staging(layout)
 
     index = opts.master_index
@@ -1346,9 +1486,84 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     report_acc = accounting.check(result)
     man = mf.build(stage_out.root, config=effective)
     mf.write(stage_out.root, man)
+    ordered = corpus_sort_check(result)
     mark("verify", t)
 
+    # ---- The gate ----------------------------------------------------------
+    #
+    # Codex review #2, finding B-1. Everything above COMPUTED these checks; only
+    # this decides anything with them. Until it existed, Stage 6 detected a
+    # page-accounting discrepancy or an unclassified artifact and then marked
+    # the set ready and swapped it in regardless, so a red set replaced the last
+    # good deliverables and `PipelineOutcome.ok` reported the fact afterwards to
+    # an in-memory caller who need never look. Observation is not a gate. The
+    # heading said "the gates" and the relay said the set was "gated there,
+    # marked, then swapped"; that claim was false and is withdrawn with the
+    # behavior it described.
+    #
+    # `corpus_sort_check` joins them here rather than staying the module-level
+    # function nothing called. It was written as a Stage-6 check, was reachable
+    # from no code path in the product, and is exactly the same defect one step
+    # further along: a check that never runs cannot fail differently from a
+    # check whose result is ignored.
+    refusals: list[tuple[str, str]] = []
+    if not report_acc.ok:
+        refusals.append((
+            "accounting",
+            f"§4 Stage 6's page accounting reports "
+            f"{len(report_acc.discrepancies)} discrepancy(ies); the first is "
+            f"{report_acc.discrepancies[0]}",
+        ))
+    if man.unclassified:
+        refusals.append((
+            "unclassified-output",
+            f"the byte-identical claim does not classify "
+            f"{len(man.unclassified)} output(s): "
+            f"{', '.join(sorted(man.unclassified)[:5])}",
+        ))
+    if man.log_content_sha256 is None:
+        # The class-B sibling, found by enumerating the other places that
+        # substitute a permissive default for state they could not read.
+        # `manifest._log_content_hash` returns None when `processing_log.json`
+        # is missing or unparseable, and `corpus_sha256` folds it in as
+        # `self.log_content_sha256 or ""` — so an unreadable log produced a
+        # manifest that silently omitted one of the claim's two halves and a
+        # corpus hash that could not be told apart from a run whose log hashed
+        # to nothing. Stage 5 always writes that file into this very staging
+        # directory, so there is no legitimate None here. Measured: without this
+        # gate the run publishes AND reports ok=True, because
+        # `PipelineOutcome.ok` does not look at the field either.
+        refusals.append((
+            "log-content-hash",
+            f"{mf.LOG_NAME}'s '{mf.LOG_CONTENT_KEY}' section could not be "
+            f"hashed, so the byte-identical claim would be published missing "
+            f"half of what it claims",
+        ))
+    if not ordered:
+        refusals.append((
+            "corpus-order",
+            "the corpus is not in canonical order, so the run's identity and "
+            "its Doc ID assignment do not agree on the sequence of documents",
+        ))
+    if refusals:
+        return _refuse_publication(
+            effective=effective,
+            result=result,
+            walk_notes=walk_notes,
+            layout=layout,
+            stamp=stamp,
+            opts=opts,
+            timings=timings,
+            assignment=assignment,
+            reconciliation=report,
+            report_acc=report_acc,
+            manifest=man,
+            refusals=refusals,
+        )
+
     # ---- The swap ----------------------------------------------------------
+    #
+    # Reached only by a set that PASSED the gate above.
     #
     # Two statements, in this order, and the order is the guarantee: the marker
     # says "staging holds a COMPLETE set of deliverables and the folder they

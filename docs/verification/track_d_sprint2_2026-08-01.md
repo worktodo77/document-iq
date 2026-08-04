@@ -16,7 +16,7 @@ supports it, and the last section names the ones nothing supports.
 | D-3 `run()` | `src/dociq/adapter.py` | real six-stage run, merged progress, honest cancellation |
 | D-4 `ReductionPlan` | `src/dociq/adapter.py` | counted per-section savings, expert levers only |
 | D-5 Bates confirmation | — | **STOP THE LINE**, see §5.1 |
-| D-6 emit atomicity | `src/dociq/emit/paths.py`, `src/dociq/pipeline.py` | staged, gated, swapped, roll-forward |
+| D-6 emit atomicity | `src/dociq/emit/paths.py`, `src/dociq/pipeline.py` | staged, marked, swapped, roll-forward — **"gated" was WITHDRAWN 2026-08-04** (Codex #2, B-1: Stage 6 computed its checks and published regardless; see `docs/verification/codex_r2_gate_2026-08-04.md`) |
 | A-11 `profile_rules()` | `src/dociq/adapter.py` | implemented, unblocking Track E's §6 checklist |
 
 `get_pipeline()` returns `dociq.adapter.RealPipeline`. `set_pipeline()` still

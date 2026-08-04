@@ -24,6 +24,14 @@ Three properties are proven here:
    one log ``content`` hash, and byte-identical adjacent files. This is the check
    that would have caught ``output_root`` inside hashed log content in Sprint 1,
    and it is the one this change could most plausibly break.
+
+**What this file does NOT prove, and where that lives instead.** Codex review #2
+found two things these three properties are silent about, both in
+``tests/test_publication_gate.py``: that a set which fails §4 Stage 6 must never
+be marked ready at all (B-1 — the tests here all start from a run whose gates
+were green), and that an interrupted swap whose MARKER is unreadable must fail
+closed rather than roll forward with an empty supersede list (B-2 — property 2
+above only ever exercises a readable one).
 """
 
 from __future__ import annotations
