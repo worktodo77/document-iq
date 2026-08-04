@@ -43,7 +43,15 @@ D-10 designates **this** review as the merge gate for the whole programme.
 ## What Sprint 2 delivered
 
 - **The real pipeline under the GUI.** `get_pipeline()` returns `dociq.adapter.RealPipeline`. It lives at `src/dociq/adapter.py`, not in `gui/`, because `tests/test_import_graph.py` forbids exactly the packages it needs and exempting a file from that check would have hollowed it out.
-- **Staged, atomic emit.** Deliverables are built in `.dociq/staging/`, gated there, marked, then swapped; an interrupted swap is rolled forward by the next run before it reads anything. This closed the one gap Sprint 1 wrote down as unproven rather than leaving to be discovered.
+- **Staged, atomic emit.** Deliverables are built in `.dociq/staging/`, marked ready, then swapped;
+  an interrupted swap is rolled forward by the next run before it reads anything. This closed the
+  one gap Sprint 1 wrote down as unproven rather than leaving to be discovered.
+  > **CORRECTION (2026-08-04).** This bullet originally read "gated there, marked, then swapped".
+  > That was FALSE and Codex review #2 filed it as B-1: Stage 6 computed page accounting and built
+  > the manifest and then marked ready and swapped **unconditionally**, so a red set replaced the
+  > last good deliverables and `PipelineOutcome.ok` merely reported it afterwards. The gate now
+  > exists (`dociq.pipeline._refuse_publication`); the claim is corrected here rather than quietly
+  > made true, because this sentence is what a reviewer was asked to rely on.
 - **The §6 profiling checklist and the D-14 waterfall** on real figures, with D-21's capacity line as a named, sourced reference and never a target.
 - **§8 Paths A and B**, including the first upload package this project has ever built.
 - **PyInstaller one-folder packaging** with bundled ONNX models (D-22), measured: 393.1 MB payload, 178.2 MB zip, warm launch 0.320–0.962 s over 29 launches, and `--selftest` passing **inside the frozen exe** (70 checks, byte-identical over 8 seeds).
