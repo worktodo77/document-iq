@@ -214,8 +214,7 @@ probe for `PackageResult.missing`, and **both** render probes.
   It crosses the worker-thread boundary, where `failed` and `QThread.quit` are
   ordered only by Qt's queued delivery, and the standing rule is 30 runs for
   threading-sensitive work.
-- The changed suites were run repeatedly; see the run log at the foot of this
-  note.
+- The changed suites were run repeatedly; see the run log below.
 
 ---
 
@@ -246,3 +245,41 @@ probe for `PackageResult.missing`, and **both** render probes.
   `BatesProposal.alternatives` (single-series) are legitimately empty there and
   are not asserted non-default.
 - B-1 and B-2 are **not** addressed here.
+
+---
+
+## Run log
+
+Interpreter: `C:\Users\Alex\document-iq\.venv\Scripts\python.exe`, `PYTHONPATH=src`.
+
+**Changed suites, 8 consecutive runs, all green.**
+`tests/test_gui_failure_states.py tests/test_seam_population.py
+tests/test_gui_screen_states.py tests/test_gui_states.py
+tests/test_view_models.py tests/test_adapter.py tests/test_amendments.py`
+
+```
+run 1: ..................................................................... [100%]
+run 2: ..................................................................... [100%]
+run 3: ..................................................................... [100%]
+run 4: ..................................................................... [100%]
+run 5: ..................................................................... [100%]
+run 6: ..................................................................... [100%]
+run 7: ..................................................................... [100%]
+run 8: ..................................................................... [100%]
+```
+
+69 tests per run, no failure in any. `test_the_failed_state_is_reached_every_time`
+is 30 of those 69, so the threaded path was exercised **240 times** across the
+eight runs, plus 30 more in each earlier verification run.
+
+**Full suite** — `python -m pytest -q`, one complete run: **1,271 passed, 1
+skipped, exit 0**. The skip is the seam-population source probe for a record the
+adapter never constructs, which the probe reports rather than passing silently.
+
+The Codex verdict notes that a full run was attempted under a six-minute cap and
+did not complete. It does not complete in six minutes on this machine either; the
+run above took roughly twenty. That is a property of the fixture corpus and the
+real-run fixtures, not of this package, and it is stated so the next reviewer
+budgets for it rather than reading a timeout as a failure.
+
+`python -m compileall -q src tests` — clean.
