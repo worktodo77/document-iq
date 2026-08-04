@@ -552,14 +552,18 @@ def build_upload_package(
     published name is only claimed after **every** copy, filter, README and
     validation has passed:
 
-    * any failure discards the sibling and leaves ``upload_package/``
-      byte-for-byte as the earlier build the screen says it is;
-    * the previous package is moved aside, not deleted, and is only removed
-      once the new one holds the name — so nothing is destroyed before its
-      replacement is in place, and a failed move restores it;
+    * any failure during assembly discards the sibling and leaves
+      ``upload_package/`` byte-for-byte as the earlier build the screen says it
+      is;
+    * the previous package is moved aside first, so the step that can fail
+      cannot destroy anything, and a failure at any point up to and including
+      its removal puts it back;
     * every removal is checked for whether the directory is actually GONE, and
       a failure raises :class:`PackageSwapError` naming the directory rather
       than being absorbed.
+
+    The publish order — and why the previous package is removed BEFORE the new
+    one takes the name rather than after — is in :func:`_publish_package`.
     """
     lim = limits or ProjectLimits()
     published = layout.upload_package
