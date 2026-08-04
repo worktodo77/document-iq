@@ -334,3 +334,113 @@ def test_the_upload_package_no_longer_survives_a_shrinking_re_run(tmp_path):
     assert not stray.exists(), (
         "a previous run's upload_package file survived a re-run"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. A destructive step that cannot complete must not publish (B-4)
+# ---------------------------------------------------------------------------
+
+
+def _stage_a_second_set(tmp_path, out, superseded):
+    """A complete second set in ``out``'s staging directory, marked ready.
+
+    The set is a real run's output rather than hand-built files, because the
+    property under test is about the swap moving a COMPLETE set over a
+    superseded one — a synthetic staging directory would prove the same code
+    path over evidence nobody would publish.
+    """
+    layout = OutputLayout.at(out)
+    second_out = tmp_path / "second"
+    _run(second_out)
+    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
+    if staging.exists():
+        shutil.rmtree(staging)
+    shutil.copytree(second_out, staging, ignore=shutil.ignore_patterns(".dociq"))
+    emit_paths.mark_ready(layout, superseded)
+    return layout, staging
+
+
+def test_a_directory_removal_that_fails_cannot_publish_a_mixed_set(tmp_path):
+    """FAIL-BEFORE (Codex review #2 fix round, B-4).
+
+    One file inside a superseded DIRECTORY is held open, which is the ordinary
+    Windows case this project's environment notes already document: an antivirus
+    or backup agent has a handle on a file the swap is about to delete. The
+    removal genuinely fails — no mock, a real ``PermissionError`` from a real
+    open handle.
+
+    With ``shutil.rmtree(path, ignore_errors=True)``, which is what this
+    replaced, the swap absorbed that failure, recorded the directory as removed,
+    moved the new package in beside the survivor and DELETED the readiness
+    marker: a folder holding two builds with nothing left saying so. The
+    assertions below are written against that state, so the test is red on the
+    old code for the reason B-4 names rather than for an incidental one.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    package = out / "upload_package"
+    assert package.is_dir(), "the fixture run did not produce a package to supersede"
+
+    stale = package / "LI-99999-from-an-earlier-run.txt"
+    stale.write_text("evidence from another run\n", encoding="utf-8", newline="")
+    layout, staging = _stage_a_second_set(tmp_path, out, ("upload_package",))
+    staged_now = _fingerprint(staging)
+
+    held = stale.open("rb")  # the antivirus handle
+    try:
+        with pytest.raises(OSError) as excinfo:
+            emit_paths.commit_staging(layout)
+        assert str(stale) in str(excinfo.value) or "upload_package" in str(
+            excinfo.value
+        ), "the failure does not name the directory it could not remove"
+
+        # The three facts B-4 is about, in the order they were violated.
+        assert emit_paths.pending_swap(layout), (
+            "the readiness marker was deleted over a superseded directory that "
+            "is still on disk — nothing remains to disclose or repair the folder"
+        )
+        assert stale.exists(), "the fixture's premise (a surviving stale file) is gone"
+        # Nothing moved. The new set is still whole, in staging, where a
+        # roll-forward can still publish it as a set — rather than half in the
+        # folder beside a superseded file that outlived its own removal.
+        assert _fingerprint(staging) == staged_now, (
+            "the new set was moved into the folder over a superseded directory "
+            "that is still on disk — this is the mixed set"
+        )
+    finally:
+        held.close()
+
+    # Roll-forward is still possible: the marker survived, so the next run
+    # finishes the swap the moment the lock is released.
+    emit_paths.recover_pending(layout)
+    assert not emit_paths.pending_swap(layout)
+    assert not stale.exists(), "the roll-forward left the stale file behind"
+    after = _fingerprint(out)
+    for rel, digest in staged_now.items():
+        assert after.get(rel) == digest, f"{rel} did not survive the roll-forward"
+
+
+def test_a_file_removal_that_fails_cannot_publish_a_mixed_set(tmp_path):
+    """The FILE sibling of the test above, enumerated with it rather than after.
+
+    ``unlink`` was already retried, so this passed before the B-4 fix — it is
+    here because "the retried step and the unretried step behave the same way
+    under a real lock" is the property, and a class fix that only ever proves
+    the branch the reviewer named has not been shown to be a class fix.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    victim = out / "document_index.csv"
+    assert victim.is_file()
+    layout, staging = _stage_a_second_set(tmp_path, out, ("document_index.csv",))
+
+    held = victim.open("rb")
+    try:
+        with pytest.raises(OSError):
+            emit_paths.commit_staging(layout)
+        assert emit_paths.pending_swap(layout), "the marker did not survive"
+    finally:
+        held.close()
+
+    emit_paths.recover_pending(layout)
+    assert not emit_paths.pending_swap(layout)

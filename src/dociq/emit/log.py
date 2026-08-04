@@ -46,6 +46,8 @@ from dociq.identify.bates import BatesDecision, BatesRange
 from dociq.profiles.apply import DropLogEntry
 from dociq.profiles.model import FormatProfile, OperatorStamp, operator_stamp
 from dociq.verify import tokens as tokens_mod
+from dociq.verify.accounting import AccountingReport
+from dociq.verify.manifest import Manifest
 from dociq.verify.tokens import TokenEstimate
 
 __all__ = ["build_log", "write_processing_log", "assert_float_free", "LogBundle"]
@@ -172,9 +174,35 @@ def build_log(
     stamp: OperatorStamp | None = None,
     tool_version: str = "",
     output_hashes: Mapping[str, str] | None = None,
+    accounting_report: AccountingReport | None = None,
+    manifest: Manifest | None = None,
+    timings_s: Sequence[tuple[str, float]] = (),
     run_notes: Mapping[str, Any] | None = None,
 ) -> LogBundle:
-    """Assemble the log. Pure — nothing here touches the filesystem."""
+    """Assemble the log. Pure — nothing here touches the filesystem.
+
+    **On the three arguments that land in ``run`` rather than in ``content``**
+    (``accounting_report``, ``manifest``, ``timings_s`` — Codex review #2 fix
+    round, B-5). They exist because a run that was REFUSED publication at §4
+    Stage 6 has a diagnosis, and until this the diagnosis lived only in the
+    in-memory :class:`~dociq.pipeline.PipelineOutcome`. The quarantined
+    ``processing_log.json`` is what remains after the process exits; a value the
+    operator can only see by holding the return value of the function that
+    already returned is not a durable audit record.
+
+    They go in ``run``, and that placement is not a filing convenience — it is
+    criterion 7. A run that was refused and a run that was not differ in their
+    INVOCATION, not in their evidence: the same corpus, the same profile and the
+    same index must produce the same ``content`` bytes whether or not this
+    particular attempt tripped a gate. Hashing a gate outcome, a manifest of a
+    discarded staging set or a wall clock would make the byte-identical claim
+    false on its face, which is exactly what ``output_root`` and an elapsed-time
+    string each did here before and had to be unpicked. ``content`` keeps only
+    the input-derived facts — the assignment, the reconciliation, the drops, the
+    profiles, the Bates section — and those ARE passed on the refusal path now,
+    because a refused run established them and blanking them makes the record
+    lie about what the run did.
+    """
     docs = sorted(documents, key=document_sort_key)
     ranges = bates_ranges or {}
     s = stamp or operator_stamp()
@@ -206,6 +234,43 @@ def build_log(
     # what it emits, and is a float, which Principle 5 bars from identity
     # fields). They are supplied by the pipeline rather than read here, because
     # `emit` does not depend on `ingest`.
+    # The Stage-6 gate outcome, serialized. `AccountingReport.ok` is a property
+    # over `discrepancies`, so the list is what is recorded and the boolean is
+    # restated beside it for a reader who wants one field: a log that says only
+    # "not ok" reproduces the unactionable-at-9,000-documents problem
+    # `AccountingReport` was written to avoid. The `<run>` entries the pipeline
+    # inserts — the terminal status and one line per refusing gate — are part of
+    # this list and are therefore the thing that names WHICH gate refused.
+    if accounting_report is not None:
+        run["accounting_gate"] = {
+            "ok": accounting_report.ok,
+            "documents": accounting_report.documents,
+            "unsupported": accounting_report.unsupported,
+            "failed": accounting_report.failed,
+            "pages_in": accounting_report.pages_in,
+            "pages_kept": accounting_report.pages_kept,
+            "pages_dropped": accounting_report.pages_dropped,
+            "documents_degraded": accounting_report.documents_degraded,
+            "documents_evidence_lost": accounting_report.documents_evidence_lost,
+            "discrepancies": [
+                {"rel_path": d.rel_path, "kind": d.kind, "detail": d.detail}
+                for d in accounting_report.discrepancies
+            ],
+        }
+    # The manifest of the set this run BUILT. On a published run it is also a
+    # deliverable of its own (`output_manifest.json`); on a refused one the
+    # staging directory that held it is discarded, so without this the only
+    # record of what the refused set contained — including the unclassified
+    # outputs that may be the reason it was refused — would be the in-memory
+    # outcome.
+    if manifest is not None:
+        run["output_manifest"] = manifest.to_jsonable()
+    # Wall clock per stage. Reporting only, and in `run` for the plainest of the
+    # reasons on this list: a run that took longer is not a different run. Ints
+    # of milliseconds rather than floats, so the same rule that keeps floats out
+    # of identity is not quietly relaxed one section over.
+    if timings_s:
+        run["stage_ms"] = {stage: round(seconds * 1000) for stage, seconds in timings_s}
     run.update(dict(run_notes or {}))
 
     bates_section: dict[str, Any] = {

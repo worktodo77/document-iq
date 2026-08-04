@@ -678,3 +678,214 @@ def test_corrupt_json_is_not_retried(tmp_path):
     assert reads["n"] == 1, (
         f"a corrupt marker was read {reads['n']} times — content corruption is "
         f"not transient and must not be retried")
+
+
+# ---------------------------------------------------------------------------
+# B-5 — the quarantined log is the record that outlives the process
+# ---------------------------------------------------------------------------
+
+
+def _refused_log(tmp_path, monkeypatch, force=_force_accounting_red):
+    """A real Stage-6 refusal, and the log it left ON DISK.
+
+    Returns the outcome and the parsed ``incomplete_run/processing_log.json``,
+    because every assertion in this section is a comparison between the two.
+    That pairing is the finding: the fix round asserted only the outcome, and
+    the outcome is the one artifact that does not exist once DocIQ has exited.
+    """
+    out = tmp_path / "matter"
+    force(monkeypatch)
+    refused = _run(out)
+    assert not refused.published
+    assert refused.incomplete_dir is not None
+    log = json.loads(
+        (refused.incomplete_dir / "processing_log.json").read_text(encoding="utf-8"))
+    return refused, log
+
+
+def test_the_refusal_log_on_disk_carries_the_assignment_and_reconciliation(
+    tmp_path, monkeypatch
+):
+    """FAIL-BEFORE (Codex review #2 fix round, B-5).
+
+    ``_abort`` accepted the real assignment and reconciliation, returned them on
+    the outcome, and called ``build_log()`` without them. So the durable record
+    said no identifier was issued about a run that issued one per document.
+    Codex measured 19 assignments in memory against ``[]`` on disk; these
+    assertions compare the two directly rather than trusting either alone.
+    """
+    refused, log = _refused_log(tmp_path, monkeypatch)
+
+    on_disk = log["content"]["doc_ids"]["assignments"]
+    assert on_disk, (
+        "the quarantined log serialized no assignments for a run that assigned "
+        f"{len(refused.assignment.assignments)} identifiers")
+    assert len(on_disk) == len(refused.assignment.assignments), (
+        "the durable record and the in-memory outcome disagree on how many "
+        "identifiers this run issued")
+    assert [a["doc_id"] for a in on_disk] == [
+        a.doc_id for a in refused.assignment.assignments]
+
+    assert log["content"]["reconciliation"] is not None, (
+        "the quarantined log serialized `reconciliation: null` for a run that "
+        "reconciled the matter")
+    assert (
+        log["content"]["reconciliation"]["totals"]
+        == refused.reconciliation.totals
+    )
+
+
+def test_the_refusal_log_on_disk_names_the_discrepancies_that_refused_it(
+    tmp_path, monkeypatch
+):
+    """FAIL-BEFORE: ``build_log()`` had no input for them at all, so the gate
+    discrepancies existed only in memory.
+
+    The forced ``page-count`` discrepancy is the one that made Stage 6 refuse,
+    and the ``<run>`` entries name which gate did it. Both have to be readable
+    from the file, because "why did this refuse" is the question the folder is
+    opened to answer.
+    """
+    refused, log = _refused_log(tmp_path, monkeypatch)
+
+    gate = log["run"]["accounting_gate"]
+    assert gate["ok"] is False
+    on_disk = [(d["rel_path"], d["kind"], d["detail"]) for d in gate["discrepancies"]]
+    in_memory = [
+        (d.rel_path, d.kind, d.detail) for d in refused.accounting.discrepancies
+    ]
+    assert on_disk == in_memory, (
+        "the discrepancies that refused publication are not the ones the "
+        "durable record carries")
+    assert any(k == "refused-accounting" for _, k, _ in on_disk), (
+        "the file does not say which gate refused")
+    assert any(k == "page-count" for _, k, _ in on_disk), (
+        "the file does not carry the underlying discrepancy")
+
+
+def test_the_refusal_log_on_disk_carries_the_manifest_of_the_discarded_set(
+    tmp_path, monkeypatch
+):
+    """The same class, one field further out.
+
+    A refused run DISCARDS its staging directory, so ``output_manifest.json``
+    -- the record of what the refused set contained, including the unclassified
+    outputs that may be the reason for the refusal -- exists nowhere else on
+    disk. Enumerated as part of the B-5 class rather than reported by the
+    reviewer.
+    """
+    refused, log = _refused_log(tmp_path, monkeypatch, _force_unclassified)
+
+    man = log["run"]["output_manifest"]
+    assert man["unclassified"] == sorted(refused.manifest.unclassified)
+    assert man["unclassified"], "the fixture did not produce an unclassified output"
+    assert man["corpus_sha256"] == refused.manifest.corpus_sha256
+
+
+def test_the_refusal_log_keeps_criterion_7(tmp_path, monkeypatch):
+    """The diagnosis went into ``run``, and nothing else moved.
+
+    Two refused runs into two destinations, over the same corpus, with the same
+    forced gate: the hashed ``content`` must be byte-identical, and the refusal
+    vocabulary must appear nowhere inside it. This project has already put
+    ``output_root`` and an elapsed-time string into hashed content and had to
+    unpick both, and B-5's fix is precisely the shape of change that would do it
+    a third time.
+    """
+    _force_accounting_red(monkeypatch)
+    a, b = tmp_path / "a", tmp_path / "b"
+    first, second = _run(a), _run(b)
+    assert not first.published and not second.published
+
+    log_a = json.loads(
+        (first.incomplete_dir / "processing_log.json").read_text(encoding="utf-8"))
+    log_b = json.loads(
+        (second.incomplete_dir / "processing_log.json").read_text(encoding="utf-8"))
+
+    assert log_a["content_sha256"] == log_b["content_sha256"], (
+        "two refused runs over one corpus produced different hashed content")
+    assert log_a["content"] == log_b["content"]
+
+    blob = json.dumps(log_a["content"]).lower()
+    for word in ("refused", "accounting_gate", "output_manifest", "stage_ms"):
+        assert word not in blob, f"{word!r} reached the hashed content"
+    # The destination, checked directly as well as by the equality above. Both
+    # separators, because a JSON dump escapes the Windows one.
+    for dest in (a, b):
+        for form in (str(dest).lower(), str(dest).lower().replace("\\", "\\\\"),
+                     dest.as_posix().lower()):
+            assert form not in blob, "the output root reached the hashed content"
+
+    # And a refused run's content must equal a PUBLISHED run's content over the
+    # same corpus: the two differ in invocation, not in evidence. The gate that
+    # refuses is injected after the log is built, which is what makes this a
+    # real check rather than a tautology.
+    monkeypatch.undo()
+    clean = _run(tmp_path / "clean")
+    assert clean.published
+    published = json.loads(
+        (tmp_path / "clean" / "processing_log.json").read_text(encoding="utf-8"))
+    assert published["content"]["doc_ids"] == log_a["content"]["doc_ids"]
+    assert published["content"]["documents"] == log_a["content"]["documents"]
+    assert published["content"]["drops"] == log_a["content"]["drops"]
+    assert published["content"]["bates"] == log_a["content"]["bates"]
+
+
+# The class probe. Every fact the in-memory outcome carries has to have a
+# declared home in the durable record, or a written reason why it has none.
+#
+# B-5 is not "assignments were missing"; it is "a value lived in memory and
+# never reached the artifact that outlives the process", and that shape had
+# four instances in one function. A test that checked the two fields the
+# reviewer named would have left the other two. This one fails when a NEW field
+# is added to `PipelineOutcome` without anybody deciding where it is recorded --
+# which is the only way to stop the class coming back.
+_DURABLE_HOME = {
+    "result": lambda log: log["content"]["documents"],
+    "layout": lambda log: log["run"]["output_root"],
+    "accounting": lambda log: log["run"]["accounting_gate"],
+    "manifest": lambda log: log["run"]["output_manifest"],
+    "assignment": lambda log: log["content"]["doc_ids"]["assignments"],
+    "reconciliation": lambda log: log["content"]["reconciliation"],
+    "renumbering": lambda log: log["run"]["renumbering_warnings"],
+    "bates_ranges": lambda log: log["content"]["bates"],
+    "timings_s": lambda log: log["run"]["stage_ms"],
+    "walk_notes": lambda log: log["run"]["invocation_notes"],
+    "termination": lambda log: log["run"]["terminal_status"],
+    "published": lambda log: log["run"]["published"],
+    # The log IS the file, and `incomplete_dir` is the directory holding it --
+    # a lookup inside the document would be circular.
+    "log": lambda log: log["content_sha256"],
+    "incomplete_dir": lambda log: log["run"]["deliverables_note"],
+}
+_NOT_DURABLE = {
+    # A refused run removes nothing: the supersede list is computed for a
+    # publishable termination only, and `_stale_deliverables` raises for any
+    # other. There is no value here to record, rather than a value being
+    # dropped.
+    "stale_removed": "a refused run replaced nothing, so there is nothing to record",
+}
+
+
+def test_every_outcome_field_of_a_refused_run_has_a_durable_home(
+    tmp_path, monkeypatch
+):
+    """FAIL-BEFORE: four of these lookups raise ``KeyError`` on the old code --
+    ``accounting``, ``manifest``, ``assignment`` and ``reconciliation`` -- which
+    is B-5 and the two siblings the finding did not name."""
+    import dataclasses
+
+    refused, log = _refused_log(tmp_path, monkeypatch)
+
+    declared = set(_DURABLE_HOME) | set(_NOT_DURABLE)
+    actual = {f.name for f in dataclasses.fields(pipeline.PipelineOutcome)}
+    assert actual == declared, (
+        "PipelineOutcome gained or lost a field without a decision about where "
+        "the durable record keeps it: "
+        f"undeclared={sorted(actual - declared)}, stale={sorted(declared - actual)}")
+
+    for name, find in sorted(_DURABLE_HOME.items()):
+        value = find(log)
+        assert value is not None, (
+            f"{name} is declared durable but the quarantined log records it as "
+            "null -- the in-memory outcome is the only place it exists")

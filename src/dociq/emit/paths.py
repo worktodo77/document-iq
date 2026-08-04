@@ -19,6 +19,7 @@ softened.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -301,6 +302,77 @@ def _retry_io(what, *, attempts: int = 8, delay: float = 0.02):
     raise last
 
 
+def _remove_file_or_fail(path: Path) -> None:
+    """``unlink``, retried, and PROVEN gone — the file sibling of
+    :func:`_remove_tree_or_fail`.
+
+    ``unlink`` raising is not the only way a removal fails to remove. On Windows
+    a file with an open handle is marked for delete-on-close and its NAME
+    survives until the last handle is released, so ``unlink`` can return without
+    the entry disappearing. The caller of this function goes on to delete the
+    readiness marker, and the marker is the only thing that would have disclosed
+    a surviving stale deliverable — so "did it raise" is the wrong question and
+    "is it gone" is the right one, for a file exactly as much as for a
+    directory. Enumerated with B-4 rather than after it.
+    """
+
+    def once() -> None:
+        if path.exists():
+            path.unlink(missing_ok=True)
+        if path.exists():
+            raise OSError(
+                errno.EACCES,
+                "the file is still present after it was removed",
+                str(path),
+            )
+
+    _retry_io(once)
+
+
+def _remove_tree_or_fail(path: Path) -> None:
+    """Remove a directory and PROVE it is gone, or raise.
+
+    Codex review #2 fix round, finding B-4. The retry discipline
+    :func:`_retry_io` describes was applied to file ``unlink`` and to the staged
+    moves, and the one destructive step it was not applied to was the one that
+    removes a superseded *directory*: ``shutil.rmtree(path,
+    ignore_errors=True)``. ``ignore_errors`` is not "best effort" here, it is
+    "unobservable failure" — the caller then recorded the directory as removed,
+    moved the new set in on top of whatever survived, and deleted the readiness
+    marker. An antivirus holding one old package file open was enough to publish
+    a folder holding two builds with nothing left on disk saying so.
+
+    So the claim the fix round made — that every destructive swap step is
+    retried and roll-forward remains possible — was false for this step, and is
+    withdrawn together with the code that made it false.
+
+    Two things are needed rather than one. ``rmtree`` without ``ignore_errors``
+    raises on the *first* failure, which the retry handles; but a removal can
+    also report success on Windows while a directory entry lingers (a handle
+    still open marks the file for delete-on-close and the name remains until it
+    is released). ``exists()`` after the fact is therefore checked as well: what
+    the caller needs to know is not whether ``rmtree`` returned, it is whether
+    the name is gone. Anything else and the marker would be deleted over a
+    directory that is still there.
+
+    Idempotent, which is what makes the roll-forward safe: on the next attempt
+    an already-removed path is not a directory, the caller skips it, and the
+    partially-completed removal is simply finished.
+    """
+
+    def once() -> None:
+        if path.exists():
+            shutil.rmtree(path)
+        if path.exists():
+            raise OSError(
+                errno.ENOTEMPTY,
+                "the directory is still present after it was removed",
+                str(path),
+            )
+
+    _retry_io(once)
+
+
 def _validate_superseded_entry(rel: object) -> str:
     """A supersede entry names a file INSIDE the matter folder, or it is refused.
 
@@ -407,7 +479,16 @@ def staging_layout(destination: OutputLayout) -> OutputLayout:
 
 def discard_staging(destination: OutputLayout) -> None:
     """Throw away an unfinished staging directory. Never touches the matter
-    folder's deliverables — that is the whole point of writing elsewhere."""
+    folder's deliverables — that is the whole point of writing elsewhere.
+
+    This one keeps ``ignore_errors``, and the reason is the same test B-4
+    applies to the swap: what does an absorbed failure let a reader believe that
+    is false? Nothing here. No readiness marker exists on this path, so a
+    surviving staging directory cannot be published by anything — and
+    :func:`staging_layout` removes it WITHOUT ``ignore_errors`` before the next
+    run reuses the name, so a genuinely stuck directory surfaces as a raised
+    error at the start of that run rather than as a silent mixture in the
+    matter folder."""
     root = _staging_root(destination)
     if root.exists():
         shutil.rmtree(root, ignore_errors=True)
@@ -468,6 +549,19 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     it again finishes it, and :func:`recover_pending` makes every run call it
     again before doing anything else.
 
+    **Every destructive step fails closed.** Each removal is retried and then
+    proven — the name is checked to be gone, not merely the call to have
+    returned — and a step that cannot be completed raises with the readiness
+    marker STILL ON DISK. That is what makes the roll-forward claim true rather
+    than asserted: the marker is the folder's record that it is mid-swap, so it
+    is removed last and only after everything it authorized actually happened.
+    Until the fix round's B-4, a superseded *directory* was removed with
+    ``ignore_errors=True`` and this paragraph was false for that one step: the
+    removal could fail, the new set was moved in beside the survivor, and the
+    marker was deleted anyway. The one tolerated residue is an EMPTY staging
+    tree, which is DocIQ's own state and no part of the evidence set; that
+    exception is stated at the line that makes it.
+
     **What it does not guarantee, stated rather than implied.** The swap is a
     sequence of moves, not one atomic operation — Windows offers no atomic
     replacement of a directory whose target is non-empty, and the deliverables
@@ -496,15 +590,28 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     # idempotent, so a retry repeats work rather than doing something new — and
     # the roll-forward that follows a genuine failure is idempotent for the same
     # reason.
+    #
+    # This sentence used to be false about one step and is corrected rather than
+    # softened (fix round, B-4): the superseded-DIRECTORY branch was
+    # `shutil.rmtree(path, ignore_errors=True)`, which is neither retried nor
+    # observable. Every removal now goes through `_remove_file_or_fail` or
+    # `_remove_tree_or_fail`, which retry AND then check the name is gone —
+    # "the call returned" and "the file is gone" are not the same fact on
+    # Windows, and only the second one licenses deleting the marker.
     root = destination.root
     removed: list[str] = []
     for rel in superseded:
         path = root / rel
         if path.is_file():
-            _retry_io(path.unlink)
+            _remove_file_or_fail(path)
             removed.append(rel)
         elif path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
+            # Retried and PROVEN gone, like every other destructive step here
+            # — see :func:`_remove_tree_or_fail` for the failure this used to
+            # absorb (Codex review #2 fix round, B-4). A failure propagates out
+            # of this function with the marker still on disk, so the folder
+            # stays declared mid-swap and the next run rolls it forward.
+            _remove_tree_or_fail(path)
             removed.append(rel)
 
     staging = _staging_root(destination)
@@ -515,8 +622,36 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
             dst = root / src.relative_to(staging)
             dst.parent.mkdir(parents=True, exist_ok=True)
             _retry_io(lambda s=src, d=dst: s.replace(d))
-        shutil.rmtree(staging, ignore_errors=True)
+        # The staged FILES are all moved by here or the loop above raised. What
+        # can be left is empty directories, and their removal is the one step in
+        # this function whose failure carries no evidentiary consequence: the
+        # deliverables are in place and `.dociq/staging/` is not a deliverable —
+        # the manifest excludes the whole prefix and `staging_layout` clears it
+        # before the next run reuses it. So it is retried, and a residual EMPTY
+        # tree is tolerated rather than converted into a permanently blocked
+        # matter folder by a lock on a directory nobody reads.
+        #
+        # A residual FILE is a different fact and is not tolerated: it would mean
+        # the move loop did not do what the line above assumes, and deleting the
+        # marker over it would strand a piece of this run's set outside the
+        # folder with nothing recording it.
+        try:
+            _remove_tree_or_fail(staging)
+        except OSError:
+            leftover = sorted(
+                p.relative_to(staging).as_posix()
+                for p in staging.rglob("*")
+                if p.is_file()
+            )
+            if leftover:
+                raise
 
+    # Last, and only now: everything the marker authorized has happened and been
+    # proven. It is deliberately NOT `_remove_file_or_fail` — a marker whose name
+    # lingers after `unlink` returns leaves the folder declared mid-swap, and the
+    # next run's roll-forward finds nothing left to do and removes it. That is
+    # benign, and turning it into a raised error would fail closed over a state
+    # with no evidentiary consequence.
     _retry_io(lambda: marker.unlink(missing_ok=True))
     return tuple(sorted(removed))
 
