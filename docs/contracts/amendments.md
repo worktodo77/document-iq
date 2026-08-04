@@ -201,7 +201,16 @@ A-02 land, because it would have nowhere to read these values from.
 **Raised by:** the B-2/B-6 fix package, 2026-07-31, against contract **v1.3.0**
 **Affects:** `TokenEstimate.floor_tokens` (documentation), `EffectiveLimits`
 **Proposed severity:** MINOR for the first, DISPOSITION-ONLY for the second
-**Status:** RAISED, not applied. `contracts.py` was not modified by this package.
+**Status:** **APPLIED** — `contracts.py:49` documents `floor_tokens` as
+"reserved and withdrawn", which is (a); `EffectiveLimits` carries the settings
+that are (b). Adopted with the Sprint-1 merge, `e7fd4eb`.
+
+> This line read "RAISED, not applied" from 2026-07-31 until 2026-08-04, while
+> the change it describes was already in the module. It was found by the
+> status-agreement test written for Codex fix-round finding D-2 — on that test's
+> FIRST run, against a different amendment than the one that prompted it. Two
+> independent stale-status entries, neither noticed by anyone reading the file,
+> is the argument for comparing the halves mechanically rather than carefully.
 
 ### (a) `TokenEstimate.floor_tokens` documents a claim that has been withdrawn
 
@@ -1052,8 +1061,17 @@ wrong.
 **Affects:** `dociq/contracts.py` — `TerminalStatus.BLOCKED` docstring, and
 optionally a new `TerminalStatus.REFUSED` member
 **Proposed severity:** TRIVIAL as a docstring correction; MINOR as a new member
-**Status:** RAISED, NOT APPLIED. The behavior it describes has shipped; the
-frozen module is unchanged.
+**Status:** **APPLIED 2026-08-04 at `b1eac7e`** — `TerminalStatus.REFUSED`
+exists, `_refuse_publication` records it, and the B-2 unreadable-marker case
+correctly stays `BLOCKED` because it fails before a corpus exists.
+
+> This line read "RAISED, NOT APPLIED" for the length of a fix round *after the
+> amendment was applied*, while `amendments.toml` said `applied` — so the two
+> halves of the register contradicted each other, in the file a reviewer is sent
+> to. Codex filed it as D-2. The registry was built to stop exactly this and did
+> not, because nothing compared the two halves' STATUS; `tests/test_amendments.py`
+> only checked that every prose entry had a machine-readable one. It compares
+> status now.
 
 ### The case
 

@@ -128,16 +128,40 @@ def _module_symbols(rel: str) -> set[str]:
     return names
 
 
-def _commit_exists(sha: str) -> bool:
+SYMBOLIC = {"HEAD", "ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD"}
+"""Refs whose meaning MOVES. Rejected outright as an adopting commit.
+
+``adopted_in = "HEAD"`` shipped as a placeholder and passed this check for a
+whole fix round, because ``git cat-file -t HEAD`` always names a commit. So the
+registry recorded "whatever is checked out" as the immutable fact of which
+commit adopted an amendment, and moving the branch changed what the record
+meant without changing the record. Codex filed it as D-2.
+"""
+
+
+def _commit_problem(sha: str) -> str:
+    """Empty string when the value is a usable historical commit id."""
     if not sha:
-        return False
+        return "names no adopting commit"
+    if sha in SYMBOLIC or sha.startswith(("HEAD~", "HEAD^", "@")):
+        return (f"records the SYMBOLIC ref {sha!r} as its adopting commit — that "
+                f"names whatever is checked out, so the record changes meaning "
+                f"when the branch moves. Use the immutable commit id")
+    if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+        return f"records {sha!r}, which is not a commit id"
     try:
         out = subprocess.run(
             ["git", "cat-file", "-t", sha], cwd=ROOT,
             capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
-        return True  # no git available: do not manufacture a failure
-    return out.returncode == 0 and out.stdout.strip() == "commit"
+        # Git unavailable. Reported rather than silently passed: this check's
+        # own subject matter is claims that go unverified, and "could not
+        # verify" reported as "verified" is the defect it polices.
+        print(f"  note: git unavailable — {sha} not verified to exist")
+        return ""
+    if out.returncode != 0 or out.stdout.strip() != "commit":
+        return f"names adopting commit {sha}, which does not exist"
+    return ""
 
 
 def main() -> int:
@@ -168,12 +192,10 @@ def main() -> int:
                     f"the seam but not wired through leaves the product doing "
                     f"nothing while every file reads as correct.")
 
-        # 3. Applied with no adopting commit.
-        sha = entry.get("adopted_in", "")
-        if not sha:
-            problems.append(f"{ident} is marked APPLIED but names no adopting commit.")
-        elif not _commit_exists(sha):
-            problems.append(f"{ident} names adopting commit {sha}, which does not exist.")
+        # 3. Applied with no usable adopting commit.
+        trouble = _commit_problem(entry.get("adopted_in", ""))
+        if trouble:
+            problems.append(f"{ident} is marked APPLIED but {trouble}.")
 
         # 4. Claims tests that are not there.
         for rel in entry.get("tests") or []:
