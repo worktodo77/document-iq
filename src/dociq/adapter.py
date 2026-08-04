@@ -183,6 +183,7 @@ def measured_basis(ocr_enabled: bool) -> str:
         "§10 restated 2026-07-31). OCR is not in this rate."
     )
 
+
 _LEVER_ENGAGED: dict[Disposition, bool] = {
     Disposition.KEEP: False,
     Disposition.DROP: True,

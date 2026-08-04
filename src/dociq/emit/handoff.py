@@ -660,7 +660,7 @@ def _publish_package(assembled: UploadPackage, staging: Path, published: Path,
             raise PackageSwapError(
                 f"The new package was built and validated but the package it "
                 f"replaces could not be removed. Nothing was published. "
-                + (f"The earlier build is back in place and intact."
+                + ("The earlier build is back in place and intact."
                    if put_back else
                    f"The earlier build is now at {superseded} and there is no "
                    f"package at {published.name} — rename that folder back, or "
