@@ -45,7 +45,22 @@ PROSE = ROOT / "docs" / "contracts" / "amendments.md"
 # project keeps finding in its own tests.
 SEARCH_ROOTS = ("src", "tests", "tools", "docs", "packaging")
 
-REF = re.compile(r"\bA-(\d{2})\b")
+REF = re.compile(r"\bA-(\d{2}[a-z]?)\b")
+"""Amendment ids, INCLUDING a letter suffix.
+
+The first version was ``\\bA-(\\d{2})\\b``, which cannot match ``A-11b``. Of the
+fifteen amendments this repository has, exactly one carries a letter suffix —
+and it was the one that turned out to be declared, documented, probe-covered and
+**populated by nobody**: A-11b's ``rule`` and ``note``, the profile's verbatim
+matching pattern and the expert's own stated reason for an omission, reached no
+adapter and no screen, on the §6 checklist the amendment exists for.
+
+So the single id this check could not see was the single id that needed seeing.
+That is not luck. A pattern written from the ids you happen to remember will
+have its blind spot exactly where the naming was irregular, and irregular naming
+is what an entry gets when it was added as an afterthought — which is also what
+makes it the one most likely to be half-applied.
+"""
 
 
 def _load_registry() -> dict[str, dict]:

@@ -70,6 +70,14 @@ adopted_in = "e7fd4eb"
 wired_in = { "src/dociq/contracts.py" = ["RunConfig"] }
 tests = ["tests/test_contracts.py", "tests/test_tokens.py"]
 
+[amendment.A-05a]
+status = "applied"
+title = "structural_tokens is not a bound in either direction; its assumptions travel in provenance"
+raised_by = "Sprint 1, as a sub-amendment of A-05 closing Codex review #1 finding B-6"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/contracts.py" = ["TokenEstimate"] }
+tests = ["tests/test_contracts.py", "tests/test_tokens.py"]
+
 [amendment.A-06]
 status = "applied"
 title = "RunResult cannot say whether the run COMPLETED"
