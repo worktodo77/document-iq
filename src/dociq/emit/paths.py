@@ -280,8 +280,11 @@ def _retry_io(what, *, attempts: int = 8, delay: float = 0.02):
     retried: re-reading the same bytes cannot make them valid, and a retry loop
     there would be a delay dressed up as a check.
 
-    Roughly 5 s across the eight attempts, which is the order an on-access scan
-    takes; after that the caller's fail-closed path is the right answer.
+    Eight attempts with a doubling backoff from 20 ms is **2.54 s** of waiting
+    (0.02 × (1+2+…+64)), which is the order an on-access scan takes on one file.
+    The figure is stated because a retry budget nobody has multiplied out is a
+    number that drifts; after it, the caller's fail-closed path is the right
+    answer and waiting longer only delays the operator learning that.
     """
     import time
 
@@ -293,7 +296,8 @@ def _retry_io(what, *, attempts: int = 8, delay: float = 0.02):
             last = exc
             if attempt + 1 < attempts:
                 time.sleep(delay * (2 ** attempt))
-    assert last is not None
+    if last is None:  # unreachable, and not an `assert`: -O strips those
+        raise RuntimeError("_retry_io exhausted its attempts without an error")
     raise last
 
 

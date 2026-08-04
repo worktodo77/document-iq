@@ -228,9 +228,9 @@ loud one correct.
 
 `_retry_io` wraps the marker read, the supersede unlinks, the staged moves, the
 marker delete, and `mark_ready`'s `os.replace`: eight attempts, doubling
-backoff, ~5 s total, `OSError` only, and only where the operation is idempotent.
+backoff, ≈2.54 s total, `OSError` only, and only where the operation is idempotent.
 **Corrupt JSON is never retried** — re-reading the same bytes cannot make them
-valid, and a retry there would be a five-second delay dressed up as a check.
+valid, and a retry there would be a 2.5-second delay dressed up as a check.
 `test_corrupt_json_is_not_retried` asserts the read count, because the only
 visible symptom of getting that wrong is a slower suite.
 

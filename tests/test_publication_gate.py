@@ -647,7 +647,7 @@ def test_corrupt_json_is_not_retried(tmp_path):
     """Transient I/O and corrupt state are different things.
 
     Re-reading the same bytes cannot make invalid JSON valid, so a retry there
-    would be a delay dressed up as a check — and a five-second one on every
+    would be a delay dressed up as a check — and a 2.5-second one on every
     hand-edited marker. Asserted by counting the reads, because the only visible
     symptom of getting this wrong is that the suite is slower.
     """
