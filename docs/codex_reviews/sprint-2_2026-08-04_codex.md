@@ -1,3 +1,151 @@
+# Codex second fix-round review — DocIQ Sprint 2 (merge gate)
+
+**Repository:** `worktodo77/document-iq`
+**Branch:** `build/sprint-2`
+**Reviewed commit:** `ec19900` (implementation tip `19cfe6b`)
+**Fix-round handoff:** `docs/codex_reviews/sprint-2_2026-08-04_claude_r3.md`
+**Review date:** 2026-08-05
+**Gate:** D-10, Codex review #2, second fix round
+
+## Second fix-round verdict
+
+**NOT PASSED — another fix round is required. One A finding and two B
+findings.**
+
+A-3, A-4, B-4, B-5, and D-2 are fixed at the boundaries named in the prior
+verdict. The terminal-status prose is total, package assembly is staged, named
+refusal facts now reach the durable record, superseded files and directories
+are removed with proof, and the amendment registry records and checks immutable
+adopting commits.
+
+The merge remains held by three adjacent failure paths. A readiness marker
+whose name survives `unlink()` can make the next recovery delete the newly
+published set. An ordinary refused run without a master index creates a durable
+log whose own content hash disagrees with the hash embedded in its manifest.
+And the package rollback can restore a partly deleted prior package under the
+published name while assuring the operator that it is intact.
+
+## B-6 — A surviving readiness marker deletes the newly published set on recovery
+
+**Severity class:** B — evidentiary-integrity; a successful current set can be
+silently removed by the next recovery.
+
+**Locations:** `src/dociq/emit/paths.py:601-615`,
+`src/dociq/emit/paths.py:649-655`
+
+The B-4 fix now proves every named superseded file and directory is gone, but
+the final marker removal deliberately uses `_retry_io(marker.unlink)` rather
+than the same proof. The comment calls a lingering marker benign because the
+next roll-forward supposedly has nothing left to do. That marker still contains
+the superseded list, however. After the staged files have taken those same
+names, the next recovery interprets the stale authorization again and removes
+the new files before discovering that staging is empty.
+
+**Failure scenario:** Windows delete-on-close semantics, an on-access scanner,
+or a filesystem shim lets `unlink()` return while `staging_ready.json` remains
+visible. The first `commit_staging()` reports success and the new
+`sources.json` is visible. On the next run, `recover_pending()` reads the stale
+marker, removes that new `sources.json` as superseded, finds no staged
+replacement, deletes the marker, and returns. The direct reproduction produced
+exactly `after_first: new, marker=True` followed by
+`after_recovery: sources_exists=False, marker=False`.
+
+Prove marker removal before reporting success, or atomically replace it with a
+completed/harmless recovery record before attempting deletion. Add a
+fail-before test that leaves the marker name visible after the first commit and
+runs recovery a second time.
+
+## B-7 — A no-index refusal log contradicts its embedded manifest hash
+
+**Severity class:** B — evidentiary-integrity; one durable audit file gives two
+different identities for its own hashed content.
+
+**Locations:** `src/dociq/pipeline.py:778-794`,
+`src/dociq/pipeline.py:1419-1425`,
+`tests/test_publication_gate.py:810-816`
+
+The published path passes `reconciliation=None` when no master index was
+supplied. `_abort()` instead passes the always-created no-index
+`ReconciliationReport`. The manifest is built from the staged, published-style
+log before refusal; `_abort()` then rebuilds the quarantined log with a
+different hashed `content.reconciliation`. The R3 comparison test checks two
+refused logs and selected fields, so it does not exercise the promised full
+published-versus-refused content equality in this ordinary configuration.
+
+**Failure scenario:** a matter without a master index reaches Stage 6 and is
+refused. Its quarantined `processing_log.json` says
+`content.reconciliation.warnings == ["no master index was supplied; reconciliation was not run"]`,
+while the staged log used to build the embedded manifest had
+`reconciliation: null`. In the direct reproduction, refused and published
+`content` and `content_sha256` differed; worse,
+`run.output_manifest.log_content_sha256` did not equal the same file's top-level
+`content_sha256`. A verifier must choose which of the record's two hashes to
+believe.
+
+Make `_abort()` use the same no-index projection as the published path. Add an
+on-disk assertion that the full refused and published `content` values and
+hashes agree over the same no-index corpus, and that the refused log's embedded
+manifest hash equals its own top-level content hash.
+
+## A-5 — Package rollback can call a partially deleted build “intact”
+
+**Severity class:** A — real user-facing bug in ordinary internal use.
+
+**Locations:** `src/dociq/emit/handoff.py:105-126`,
+`src/dociq/emit/handoff.py:640-668`, `tests/test_package_swap.py:240-273`
+
+`_remove_tree()` repeatedly invokes `shutil.rmtree(..., ignore_errors=True)` and
+returns whether the path ultimately vanished. That is sufficient to stop a new
+publish, but not to roll back deletion: a failed attempt may already have
+removed most of the old package. `_publish_package()` renames whatever remains
+back to `upload_package/` and, if the rename succeeds, tells the GUI that the
+earlier build is “back in place and intact.” The test double returns `False`
+without deleting anything, so it assumes the property the production helper
+cannot guarantee.
+
+**Failure scenario:** an antivirus process holds one file in the superseded
+package while `rmtree` removes the other files. Exhausting retries returns
+`False`; rename-back succeeds. The screen reports that nothing was published
+and the earlier build is intact, and the ordinary published package name exists,
+so the operator can upload it. The direct reproduction started with six files,
+removed one before returning `False`, restored a five-file package, and emitted
+the exact “back in place and intact” assurance.
+
+Do not expose a destructively modified backup as an intact published package.
+Preserve an immutable prior package until the replacement can claim the name,
+or validate the restored tree against a pre-removal inventory/hash and report
+the damaged state accurately. The fail-before must partially remove the
+superseded tree before returning failure and assert both bytes on disk and GUI
+wording.
+
+## Second fix-round verification performed
+
+- Fetched and checked out `build/sprint-2`; reviewed the clean remote tip at
+  `ec19900` and read the R3 handoff from the branch.
+- **536 targeted tests passed** across publication/refusal, atomic emit,
+  package swap, terminal rendering, amendments, offline enforcement, adapter,
+  emitter, view models, GUI screen/failure states, and incomplete-run handling.
+- Direct reproductions confirmed B-6, B-7, and A-5 against the reviewed tip.
+- `git diff --check 9c69bb0...HEAD` passed.
+- No fresh full-suite run was attempted. The handoff's eight reported green
+  1,374-test passes are not counted as this review's independent verification.
+- The R3 correction is accepted: the disclosed probe recorded **zero network
+  attempts across 75 runs**. Its 84 events were the exact CPython
+  `platform._syscmd_ver` process spawn permitted by D-30. Criterion 6 is not
+  filed as open, and this review withdraws the prior uncertainty.
+- The handoff's non-claims remain non-claims: criterion 4 is not met, no
+  mouse-driven GUI acceptance was performed, the package double-failure branch
+  remains uncovered, and the 3,600-second per-file timeout ruling remains
+  Alex's open decision.
+
+## Second fix-round merge condition
+
+Fix A-5, B-6, and B-7 with fail-before coverage at the disk and durable-record
+boundaries described above, refresh the verification evidence, and request the
+next fix-round review.
+
+---
+
 # Codex fix-round review — DocIQ Sprint 2 (merge gate)
 
 **Repository:** `worktodo77/document-iq`
