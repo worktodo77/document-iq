@@ -32,6 +32,19 @@ be marked ready at all (B-1 — the tests here all start from a run whose gates
 were green), and that an interrupted swap whose MARKER is unreadable must fail
 closed rather than roll forward with an empty supersede list (B-2 — property 2
 above only ever exercises a readable one).
+
+**D-31 (2026-08-05) — the swap no longer deletes before it publishes**, and
+section 4 below is rewritten against that. The old design removed the previous
+run's deliverables and then moved the staged ones in, so every failure mode was
+"half-deleted" and three consecutive review rounds each found a new window inside
+the previous round's fix (B-1/B-2, then B-4/B-5, then B-6). The swap now RENAMES
+the current set into ``.dociq/<aside>/``, renames the staged set into place, and
+deletes only after that. A fourth property is therefore proven here:
+
+4. **Nothing under the matter root is ever deleted or overwritten by the swap or
+   by recovery.** Not "the deletion is retried and proven" — there is no
+   deletion. That is asserted as a CLASS, by auditing every destructive
+   filesystem call made during a swap, rather than one failure mode at a time.
 """
 
 from __future__ import annotations
@@ -39,6 +52,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -337,7 +351,8 @@ def test_the_upload_package_no_longer_survives_a_shrinking_re_run(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 4. A destructive step that cannot complete must not publish (B-4)
+# 4. DELETE-LAST — the swap renames, and recovery destroys nothing published
+#    (D-31; the class B-1/B-2, B-4/B-5 and B-6 were instances of)
 # ---------------------------------------------------------------------------
 
 
@@ -427,6 +442,12 @@ def test_a_file_removal_that_fails_cannot_publish_a_mixed_set(tmp_path):
     here because "the retried step and the unretried step behave the same way
     under a real lock" is the property, and a class fix that only ever proves
     the branch the reviewer named has not been shown to be a class fix.
+
+    Under D-31 the step it exercises is a RENAME rather than an ``unlink``, and
+    the lock is still real: Windows refuses to rename a file another process
+    holds open. The property it asserts is unchanged and is the one that
+    matters — a superseded deliverable that cannot leave the folder stops the
+    swap with the marker still on disk.
     """
     out = tmp_path / "matter"
     _run(out)
@@ -444,3 +465,445 @@ def test_a_file_removal_that_fails_cannot_publish_a_mixed_set(tmp_path):
 
     emit_paths.recover_pending(layout)
     assert not emit_paths.pending_swap(layout)
+
+
+# --- D-31: the marker cannot authorize destroying a published set (B-6) -----
+
+
+def _keep_the_marker_name(monkeypatch):
+    """``unlink()`` returns and the marker's NAME survives.
+
+    Codex's B-6 scenario verbatim: Windows delete-on-close semantics, an
+    on-access scanner, or a filesystem shim lets the call return while the entry
+    is still visible. Simulated by monkeypatch rather than by a real exclusive
+    lock, because the state being reproduced — *the call succeeded and the name
+    is still there* — is precisely the one a real lock does NOT produce (a real
+    lock makes ``unlink`` raise, which this code already handles).
+    """
+    real = Path.unlink
+
+    def keep(self, *a, **kw):
+        if self.name == emit_paths.MARKER_NAME:
+            return None
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", keep)
+
+
+def test_a_marker_that_outlives_its_swap_deletes_nothing(tmp_path, monkeypatch):
+    """FAIL-BEFORE (Codex review #2, second fix round, B-6).
+
+    The swap completes and publishes the staged set; the marker's ``unlink()``
+    returns while its name survives. On the OLD design that marker still carried
+    the supersede list and nothing else, so the next ``recover_pending()`` read
+    it, deleted the newly published files as superseded, found no staged
+    replacement, removed the marker and returned. Codex's reproduction:
+    ``after_first: new, marker=True`` then
+    ``after_recovery: sources_exists=False, marker=False``.
+
+    Under delete-last the same surviving marker authorizes nothing: it says
+    ``published``, and independently of that the staging directory is empty, so
+    there is nothing to publish and therefore nothing may be set aside. The
+    assertion is the one Codex's reproduction violated — the published bytes are
+    still there.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    layout, staging = _stage_a_second_set(
+        tmp_path, out, ("sources.json", "document_index.csv"))
+    staged_now = _fingerprint(staging)
+
+    _keep_the_marker_name(monkeypatch)
+    emit_paths.commit_staging(layout)
+    monkeypatch.undo()
+
+    assert emit_paths.pending_swap(layout), (
+        "the fixture's premise is gone: the marker did not survive its unlink")
+    published = _fingerprint(out)
+    for rel, digest in staged_now.items():
+        assert published.get(rel) == digest, f"{rel} was not published"
+
+    emit_paths.recover_pending(layout)
+
+    assert _fingerprint(out) == published, (
+        "a recovery driven by a stale marker changed the published set — this "
+        "is B-6: the marker outlived the swap and authorized deleting the files "
+        "the swap had just put in place")
+    assert (out / "sources.json").is_file()
+    assert not emit_paths.pending_swap(layout), (
+        "the second recovery did not clear the stale marker")
+
+
+def test_a_stale_pending_marker_beside_an_empty_staging_deletes_nothing(
+        tmp_path):
+    """The same class one step further out, and it does not need a phase field.
+
+    A marker left at ``pending`` — hand-restored, restored by a backup agent,
+    written by an older build — beside a staging directory holding nothing. The
+    names on disk are the primary evidence and they say there is nothing to
+    publish, so nothing may be set aside. This is the guard that would hold even
+    if the recorded phase were wrong.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    layout = OutputLayout.at(out)
+    published = _fingerprint(out)
+    assert published
+
+    emit_paths.mark_ready(layout, ("sources.json", "clean_text", "upload_package"))
+    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
+    if staging.exists():
+        shutil.rmtree(staging)
+    assert emit_paths.pending_swap(layout)
+
+    moved = emit_paths.recover_pending(layout)
+
+    assert moved == (), f"a stale marker reported replacing {moved}"
+    assert _fingerprint(out) == published, (
+        "a stale pending marker moved the published set out of the folder")
+    assert not emit_paths.pending_swap(layout)
+
+
+# --- D-31: the class assertion — no destructive call reaches a deliverable --
+
+
+class _DestructiveCallAudit:
+    """Every filesystem-destroying call made while it is installed, by target.
+
+    The class-level probe for D-31. The claim is not "this failure mode no
+    longer deletes the published set" — it is that **the swap and its recovery
+    contain no code path that deletes or overwrites anything under the matter
+    root at all**. That is a property of the whole subsystem, so it is asserted
+    over the calls it makes rather than over one scenario's outcome.
+
+    ``os.replace`` is audited alongside the deletions because an overwrite IS a
+    delete: it destroys whatever occupied the destination, with no name left to
+    read afterwards. That is exactly the substitution D-31 forbids, and the swap
+    used to publish with it.
+    """
+
+    def __init__(self):
+        self.targets: list[str] = []
+
+    def install(self, monkeypatch):
+        import os as _os
+
+        for mod, name, argno in (
+            (shutil, "rmtree", 0),
+            (_os, "remove", 0),
+            (_os, "unlink", 0),
+            (_os, "rmdir", 0),
+            (_os, "replace", 1),  # the DESTINATION is what gets destroyed
+        ):
+            real = getattr(mod, name)
+
+            def wrapper(*a, _real=real, _argno=argno, **kw):
+                if len(a) > _argno:
+                    self.targets.append(str(a[_argno]))
+                return _real(*a, **kw)
+
+            monkeypatch.setattr(mod, name, wrapper)
+
+        real_unlink = Path.unlink
+
+        def path_unlink(this, *a, **kw):
+            self.targets.append(str(this))
+            return real_unlink(this, *a, **kw)
+
+        monkeypatch.setattr(Path, "unlink", path_unlink)
+
+        real_replace = Path.replace
+
+        def path_replace(this, target, *a, **kw):
+            self.targets.append(str(target))
+            return real_replace(this, target, *a, **kw)
+
+        monkeypatch.setattr(Path, "replace", path_replace)
+
+    def outside(self, root: Path) -> list[str]:
+        """Targets under ``root`` that are NOT DocIQ's own state."""
+        state = (root / emit_paths.STATE_DIRNAME).resolve()
+        bad = []
+        for t in self.targets:
+            path = Path(t)
+            if not path.is_absolute():
+                continue
+            try:
+                path.resolve().relative_to(root.resolve())
+            except ValueError:
+                continue  # outside the matter folder entirely (a temp file)
+            try:
+                path.resolve().relative_to(state)
+            except ValueError:
+                bad.append(t)
+        return bad
+
+
+def test_the_swap_destroys_nothing_under_the_matter_root(tmp_path, monkeypatch):
+    """FAIL-BEFORE: on the delete-first design this reports ``sources.json``,
+    ``document_index.csv``, ``upload_package`` and every ``clean_text/*.txt``
+    the previous run wrote — the supersede loop's ``unlink``/``rmtree`` and the
+    publish loop's ``os.replace``. The count is the finding.
+
+    The property is stated as an ENUMERATION of destructive primitives rather
+    than as an outcome, so a future step that reaches for a different one is
+    covered the day it is written.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    layout, staging = _stage_a_second_set(
+        tmp_path, out,
+        ("sources.json", "document_index.csv", "upload_package"))
+
+    audit = _DestructiveCallAudit()
+    audit.install(monkeypatch)
+    emit_paths.commit_staging(layout)
+    monkeypatch.undo()
+
+    assert audit.targets, "the audit recorded nothing; it is not installed"
+    assert audit.outside(out) == [], (
+        "the swap deleted or overwrote something under the matter root that is "
+        f"not DocIQ's own state: {audit.outside(out)}")
+
+
+def test_recovery_destroys_nothing_under_the_matter_root(tmp_path, monkeypatch):
+    """The same probe over RECOVERY, which is where B-6 lived.
+
+    Recovery is the path a stale or hostile marker reaches, so it gets its own
+    assertion rather than inheriting the swap's.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    layout, staging = _stage_a_second_set(
+        tmp_path, out, ("sources.json", "upload_package"))
+
+    # Interrupt mid-swap: one file set aside by hand, marker left as it is.
+    aside = out / emit_paths.STATE_DIRNAME / emit_paths.ASIDE_PREFIX
+    aside.mkdir(parents=True, exist_ok=True)
+    (out / "sources.json").rename(aside / "sources.json")
+
+    audit = _DestructiveCallAudit()
+    audit.install(monkeypatch)
+    emit_paths.recover_pending(layout)
+    monkeypatch.undo()
+
+    assert audit.outside(out) == [], (
+        f"recovery destroyed something published: {audit.outside(out)}")
+    assert (out / "sources.json").is_file(), "the roll-forward did not finish"
+    assert not emit_paths.pending_swap(layout)
+
+
+# --- D-31: what each failure LEAVES, read from the names on disk ------------
+
+
+def test_a_blocked_set_aside_leaves_the_previous_set_and_no_mixture(
+        tmp_path, monkeypatch):
+    """Step 1 fails partway. The matter folder must hold the previous run's
+    files and NONE of the new run's — incomplete is allowed, mixed is not."""
+    out = tmp_path / "matter"
+    _run(out)
+    before = _fingerprint(out)
+    superseded = ("sources.json", "document_index.csv")
+    layout, staging = _stage_a_second_set(tmp_path, out, superseded)
+    staged_now = _fingerprint(staging)
+
+    real = emit_paths._rename_or_fail
+
+    # The plan is acted on in sorted order, so `document_index.csv` moves and
+    # `sources.json` is the one that cannot.
+    def refuse_the_second(src, dst):
+        if src.name == "sources.json":
+            raise OSError("[WinError 32] held by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(emit_paths, "_rename_or_fail", refuse_the_second)
+    with pytest.raises(OSError):
+        emit_paths.commit_staging(layout)
+    monkeypatch.undo()
+
+    assert emit_paths.pending_swap(layout), "the marker did not survive"
+    # Nothing of the new set is in the folder.
+    assert _fingerprint(staging) == staged_now, "the new set was disturbed"
+    assert (out / "sources.json").is_file(), (
+        "the deliverable that could not be moved is gone — a rename that fails "
+        "must destroy nothing")
+    # What DID leave the folder is INTACT under `.dociq/`, moved not deleted.
+    aside = out / emit_paths.STATE_DIRNAME / emit_paths.ASIDE_PREFIX
+    kept = aside / "document_index.csv"
+    assert kept.is_file()
+    assert hashlib.sha256(kept.read_bytes()).hexdigest() == (
+        before["document_index.csv"])
+    # And the roll-forward finishes it.
+    emit_paths.recover_pending(layout)
+    after = _fingerprint(out)
+    for rel, digest in staged_now.items():
+        assert after.get(rel) == digest, f"{rel} did not survive the roll-forward"
+    assert not emit_paths.pending_swap(layout)
+
+
+def test_a_blocked_publish_leaves_an_incomplete_set_never_a_mixed_one(
+        tmp_path, monkeypatch):
+    """Step 2 fails partway — the case D-31 is most pointed about.
+
+    The previous set is entirely out of the folder by then, so what a reader
+    sees is *some of the new run and none of the old*. That is incomplete and
+    it is honest; the old design's equivalent state was some of each, under Doc
+    IDs that need not agree, with nothing saying so.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    before = _fingerprint(out)
+    superseded = tuple(sorted(before))
+    layout, staging = _stage_a_second_set(tmp_path, out, superseded)
+    staged_now = _fingerprint(staging)
+
+    real = emit_paths._rename_or_fail
+    state = {"published": 0}
+
+    def refuse_after_two_publishes(src, dst):
+        if str(src).startswith(str(staging)):
+            state["published"] += 1
+            if state["published"] > 2:
+                raise OSError("[WinError 32] held by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(emit_paths, "_rename_or_fail", refuse_after_two_publishes)
+    with pytest.raises(OSError):
+        emit_paths.commit_staging(layout)
+    monkeypatch.undo()
+
+    landed = _fingerprint(out)
+    assert landed, "nothing was published at all; the fixture proves nothing"
+    assert len(landed) < len(staged_now), "the publish did not actually stop"
+    for rel, digest in landed.items():
+        assert staged_now.get(rel) == digest, (
+            f"{rel} in the matter folder belongs to neither the staged set nor "
+            "nothing — this is the mixture delete-last exists to forbid")
+
+    # The whole previous set is intact, moved not modified.
+    aside = out / emit_paths.STATE_DIRNAME / emit_paths.ASIDE_PREFIX
+    for rel, digest in before.items():
+        kept = aside / rel
+        assert kept.is_file(), f"{rel} is neither published nor set aside"
+        assert hashlib.sha256(kept.read_bytes()).hexdigest() == digest
+
+    emit_paths.recover_pending(layout)
+    after = _fingerprint(out)
+    for rel, digest in staged_now.items():
+        assert after.get(rel) == digest
+    assert not emit_paths.pending_swap(layout)
+
+
+def test_a_blocked_cleanup_publishes_and_discloses_the_residue(
+        tmp_path, monkeypatch):
+    """Step 3 fails. This is a SUCCESS with a residue, not a failure.
+
+    A lock on one file in a tree that has already been superseded must not turn
+    a published run into a failed one — and the residue must not be silent,
+    because nobody opens ``.dociq/``.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    layout, staging = _stage_a_second_set(tmp_path, out, ("sources.json",))
+    staged_now = _fingerprint(staging)
+
+    def refuse(path):
+        if path.name.startswith(emit_paths.ASIDE_PREFIX):
+            raise OSError("[WinError 32] held by another process")
+
+    monkeypatch.setattr(emit_paths, "_remove_tree_or_fail", refuse)
+    moved = emit_paths.commit_staging(layout)  # no exception
+    monkeypatch.undo()
+
+    assert "sources.json" in moved
+    after = _fingerprint(out)
+    for rel, digest in staged_now.items():
+        assert after.get(rel) == digest, f"{rel} was not published"
+    assert not emit_paths.pending_swap(layout), (
+        "a cleanup failure left the folder declared mid-swap after a "
+        "successful publish")
+    residue = emit_paths.superseded_residue(layout)
+    assert residue, "the surviving set-aside tree was not disclosed"
+    assert all(r.startswith(f"{emit_paths.STATE_DIRNAME}/") for r in residue)
+
+    # The NEXT swap must not collide with it, and must not overwrite it.
+    marker = emit_paths.mark_ready(layout, ("sources.json",))
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert payload["aside"] != emit_paths.ASIDE_PREFIX, (
+        "the next swap chose a set-aside name the residue already occupies")
+
+
+# --- D-31: the marker is state read from disk, and is checked as such -------
+
+
+@pytest.mark.parametrize("aside", [
+    "../clean_text", "..", "C:/Windows", "clean_text", "sources.json",
+    "superseded/../..", "", 7,
+])
+def test_a_marker_cannot_point_the_cleanup_outside_dociq(tmp_path, aside):
+    """The set-aside name selects what gets DELETED at the end of the swap, so
+    a hand-edited or corrupt one must not be able to name a deliverable.
+
+    The sibling of ``_validate_superseded_entry`` pointed the other way, and
+    enumerated with it rather than after it: one check governs what a marker can
+    move, the other what it can move things INTO and later delete.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    layout = OutputLayout.at(out)
+    before = _fingerprint(out)
+
+    marker = out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME
+    marker.write_text(json.dumps({
+        "staging": emit_paths.STAGING_DIRNAME,
+        "superseded": ["sources.json"],
+        "aside": aside,
+        "phase": emit_paths.PHASE_PENDING,
+    }), encoding="utf-8", newline="")
+
+    with pytest.raises(emit_paths.PendingSwapUnreadable):
+        emit_paths.recover_pending(layout)
+    assert _fingerprint(out) == before, "the folder was touched by a refusal"
+    assert emit_paths.pending_swap(layout), "a refusal deleted the marker"
+
+
+def test_a_marker_without_a_phase_or_an_aside_fails_closed(tmp_path):
+    """The B-2 rule applied to the two fields D-31 added.
+
+    Nothing has shipped, so a marker missing them is not an older format — it is
+    a marker this code did not write, and guessing a phase would be guessing
+    whether the previous set is still in the matter folder.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    layout = OutputLayout.at(out)
+    marker = out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME
+
+    for payload in (
+        {"staging": "staging", "superseded": ["sources.json"]},
+        {"staging": "staging", "superseded": [], "aside": "superseded"},
+        {"staging": "staging", "superseded": [], "aside": "superseded",
+         "phase": "halfway"},
+    ):
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(payload), encoding="utf-8", newline="")
+        with pytest.raises(emit_paths.PendingSwapUnreadable):
+            emit_paths.recover_pending(layout)
+
+
+def test_dociq_state_inside_staging_is_never_published(tmp_path):
+    """A staging layout is an ``OutputLayout``, so anything run against it makes
+    its own ``.dociq/`` inside it — the package builder does. Publishing that
+    into the matter root would put DocIQ's scratch where the manifest expects
+    deliverables. Held by construction rather than by the one consumer that
+    happens to clean up after itself."""
+    out = tmp_path / "matter"
+    _run(out)
+    layout, staging = _stage_a_second_set(tmp_path, out, ())
+    ghost = staging / emit_paths.STATE_DIRNAME / "scratch.txt"
+    ghost.parent.mkdir(parents=True, exist_ok=True)
+    ghost.write_text("DocIQ's own state", encoding="utf-8", newline="")
+
+    emit_paths.commit_staging(layout)
+    assert not (out / emit_paths.STATE_DIRNAME / "scratch.txt").exists()
+    assert not (out / "scratch.txt").exists()

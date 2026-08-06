@@ -285,13 +285,19 @@ def test_a_rerun_into_the_same_folder_is_byte_identical_to_the_first(tmp_path):
     assert first.manifest.deterministic == second.manifest.deterministic
 
 
-def test_the_purge_is_recorded_outside_the_hashed_content(tmp_path):
+def test_the_replaced_set_is_recorded_outside_the_hashed_content(tmp_path):
+    """Renamed from ``..._purge_...`` and its key from ``stale_outputs_removed``
+    under D-31: nothing is purged any more. The previous run's deliverables are
+    RENAMED into ``.dociq/`` and deleted only after the new set holds their
+    names, so "removed" was about to become a false description of the field."""
     _run(tmp_path, "record")
     second = _run(tmp_path, "record")
     payload = json.loads(
         second.layout.processing_log.read_text(encoding="utf-8"))
-    assert payload["run"]["stale_outputs_removed"]
-    assert "stale_outputs_removed" not in json.dumps(payload["content"])
+    assert payload["run"]["stale_outputs_replaced"]
+    assert "stale_outputs_replaced" not in json.dumps(payload["content"])
+    assert "stale_outputs_removed" not in json.dumps(payload), (
+        "the old key survives beside the new one")
 
 
 def test_the_state_of_the_destination_cannot_change_the_hashed_content(tmp_path):

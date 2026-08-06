@@ -276,6 +276,20 @@ class PipelineOutcome:
     stale_removed: tuple[str, ...] = ()
     """Deliverables of a previous run that this one replaced. Recorded in the
     log's ``run`` section, never in its hashed content."""
+    superseded_residue: tuple[str, ...] = ()
+    """Set-aside trees under ``.dociq/`` that could not be deleted (D-31).
+
+    A swap renames the previous set aside, renames the staged set into place,
+    and deletes the set-aside tree LAST. A failure of that last step leaves the
+    matter folder holding one complete, correct set and ``.dociq/`` holding a
+    clearly-named stale one — a success with a residue, not a failed run. It is
+    surfaced here rather than absorbed because nobody opens ``.dociq/``.
+
+    Measured AFTER this run's swap, which is why it also has to be measured
+    before the log is built: the log is written into staging and sealed before
+    the swap happens, so this run's own residue reaches the durable record via
+    the NEXT run's ``run.superseded_residue_before_swap``. Stated rather than
+    left to be discovered."""
     bates_ranges: dict[tuple[str, str, int], BatesRange] = field(default_factory=dict)
     timings_s: tuple[tuple[str, float], ...] = ()
     """Per-stage wall clock, in stage order. Reporting only — it never reaches
@@ -1233,7 +1247,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             f"RECOVERED: a previous run had finished writing its deliverables "
             f"but was interrupted while moving them into place; the move was "
             f"completed before this run started ({len(recovered)} superseded "
-            "file(s) removed).")
+            "file(s) replaced).")
     stage(1)
     walked = walker.run(walk_config, opts.walk, walk_notes)
     stage(2, f"{len(walked.documents)} document(s) read")
@@ -1564,8 +1578,21 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 "ocr_page_workers": ex._OCR_PAGE_WORKERS,
                 "disk_headroom_x100": round(walker._DISK_HEADROOM * 100),
             },
-            "stale_outputs_removed": list(stale),
+            "stale_outputs_replaced": list(stale),
             "recovered_swap": list(recovered),
+            # Set-aside trees an EARLIER run could not delete (D-31). A swap
+            # that publishes and then cannot remove what it moved aside is a
+            # success with a residue: the matter folder holds one complete set
+            # and `.dociq/` holds a clearly-named stale one. Nobody opens
+            # `.dociq/`, so it is recorded.
+            #
+            # Stated precisely, because it is measured before this run's own
+            # swap and cannot be otherwise: the log is written INTO STAGING, so
+            # residue THIS run leaves is recorded by the NEXT run's log. The
+            # operator sees this run's residue on screen through
+            # `PipelineOutcome.superseded_residue`.
+            "superseded_residue_before_swap": list(
+                emit_paths.superseded_residue(layout)),
             "load_dependent_extraction": list(walk_notes.load_dependent),
             "invocation_notes": list(walk_notes.invocation),
         },
@@ -1737,8 +1764,14 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # replace is listed here", and only then does anything move. A crash before
     # the marker leaves the matter folder exactly as the last complete run left
     # it; a crash after it leaves a swap that the next run rolls forward.
+    #
+    # Under D-31 the swap RENAMES this folder's set into `.dociq/` before it
+    # renames the staged set in, and deletes only afterwards — so a crash here
+    # can leave the folder incomplete but never MIXED, and a failure of the
+    # final deletion is a residue rather than an error. See `commit_staging`.
     emit_paths.mark_ready(layout, stale)
     emit_paths.commit_staging(layout)
+    residue = emit_paths.superseded_residue(layout)
 
     return PipelineOutcome(
         result=result,
@@ -1751,6 +1784,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         walk_notes=walk_notes,
         renumbering=renumbering,
         stale_removed=stale,
+        superseded_residue=residue,
         bates_ranges=ranges,
         timings_s=tuple(timings),
         termination=walk_notes.termination,

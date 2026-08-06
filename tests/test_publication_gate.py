@@ -1003,6 +1003,15 @@ _NOT_DURABLE = {
     # other. There is no value here to record, rather than a value being
     # dropped.
     "stale_removed": "a refused run replaced nothing, so there is nothing to record",
+    # D-31. A refused run never reaches the swap, so it never sets anything
+    # aside and can leave no residue of its own. Residue left by an EARLIER run
+    # IS recorded, in `run.superseded_residue_before_swap` -- but only on a run
+    # that got as far as building a log, which a refused run does not do twice.
+    "superseded_residue": (
+        "a refused run never swaps, so it sets nothing aside and leaves no "
+        "residue; an earlier run's residue is recorded by the run that observes "
+        "it in `run.superseded_residue_before_swap`"
+    ),
 }
 
 

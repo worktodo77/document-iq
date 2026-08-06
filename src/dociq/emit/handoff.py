@@ -34,6 +34,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from dociq.contracts import IdRegime, canonical_json
+from dociq.emit import paths
 from dociq.emit.indexbook import INDEX_COLUMNS
 from dociq.emit.paths import OutputLayout, safe_component, write_text_deterministic
 from dociq.verify.tokens import TokenEstimate
@@ -95,11 +96,28 @@ class PackageSwapError(RuntimeError):
     """
 
 
-_INCOMING_SUFFIX = ".incoming"
-"""Where a package is ASSEMBLED. Never the folder an operator uploads."""
+_INCOMING_NAME = "package_staging"
+"""Where a package is ASSEMBLED, under ``.dociq/``. Never the folder an operator
+uploads, and — since D-31 — never a sibling of it either.
 
-_SUPERSEDED_SUFFIX = ".superseded"
-"""Where the previous package waits while the new one takes its name."""
+It used to be ``upload_package.incoming/`` **at the matter root**, next to the
+deliverables. That put a folder full of package-shaped files where §7 says only
+deliverables live, and where an operator glancing at the matter folder could
+pick it up. ``.dociq/`` is DocIQ's own state, the manifest excludes the whole
+prefix, and it is on the same volume — which is what keeps the publish a rename
+rather than a copy."""
+
+_SUPERSEDED_NAME = "package_superseded"
+"""Where the previous package is RENAMED while the new one takes its name.
+
+Also under ``.dociq/``, and the rename is the point (D-31). The previous package
+is moved, never modified, so if the publish cannot be completed the rollback puts
+back something byte-identical to what was there — which is what makes finding
+A-5 unreachable rather than defended against."""
+
+
+def _dociq_dir(layout: OutputLayout) -> Path:
+    return layout.root / paths.STATE_DIRNAME
 
 
 def _remove_tree(path: Path, *, attempts: int = 8, delay: float = 0.02) -> bool:
@@ -113,8 +131,18 @@ def _remove_tree(path: Path, *, attempts: int = 8, delay: float = 0.02) -> bool:
     ANSWER is the state of the disk afterwards, not the absence of an
     exception, and every caller below branches on it.
 
+    **Since D-31 it is only ever pointed at ``.dociq/``.** That matters, because
+    what A-5 found is not that this function absorbs errors — it is that a caller
+    used its ``False`` to decide to RENAME A PARTIALLY DELETED TREE BACK and call
+    it intact. ``rmtree`` deletes some of a tree before it fails, so ``False``
+    means "some unknown part of this is gone", and no caller can restore from
+    that. The publish order no longer asks it to: the previous package is renamed
+    aside and only deleted once the new one holds the published name, so every
+    ``False`` this returns now describes DocIQ's own scratch and nothing an
+    operator uploads.
+
     Deliberately local rather than reused from :mod:`dociq.emit.paths`, whose
-    ``_retry_io`` is private and under concurrent revision for B-4.
+    ``_retry_io`` is private.
     """
     for attempt in range(attempts):
         if not path.exists():
@@ -548,27 +576,30 @@ def build_upload_package(
     disk was from an earlier build. Both statements could not be true and the
     false one was the reassuring one.
 
-    So the assembly happens in a sibling ``upload_package.incoming/`` and the
-    published name is only claimed after **every** copy, filter, README and
-    validation has passed:
+    So the assembly happens in ``.dociq/package_staging/`` and the published
+    name is only claimed after **every** copy, filter, README and validation has
+    passed:
 
-    * any failure during assembly discards the sibling and leaves
+    * any failure during assembly discards the staging tree and leaves
       ``upload_package/`` byte-for-byte as the earlier build the screen says it
       is;
-    * the previous package is moved aside first, so the step that can fail
-      cannot destroy anything, and a failure at any point up to and including
-      its removal puts it back;
-    * every removal is checked for whether the directory is actually GONE, and
-      a failure raises :class:`PackageSwapError` naming the directory rather
-      than being absorbed.
+    * the previous package is RENAMED aside, never deleted, so nothing that can
+      fail is destructive and a rollback restores something that was never
+      modified;
+    * only after the new package holds the published name is anything deleted,
+      and then only under ``.dociq/``.
 
-    The publish order — and why the previous package is removed BEFORE the new
-    one takes the name rather than after — is in :func:`_publish_package`.
+    **D-31 moved both working directories under ``.dociq/``.** They were
+    ``upload_package.incoming/`` and ``upload_package.superseded/`` at the matter
+    root — package-shaped folders sitting beside the deliverables, in the space
+    §7 reserves for what Expert Assist reads. The publish order and what each
+    failure leaves behind are in :func:`_publish_package`.
     """
     lim = limits or ProjectLimits()
     published = layout.upload_package
-    staging = published.with_name(published.name + _INCOMING_SUFFIX)
-    superseded = published.with_name(published.name + _SUPERSEDED_SUFFIX)
+    state = _dociq_dir(layout)
+    staging = state / _INCOMING_NAME
+    superseded = state / _SUPERSEDED_NAME
 
     # Residue from an earlier attempt that died between these same steps. It is
     # removed BEFORE anything is assembled, and a failure to remove it stops the
@@ -583,6 +614,7 @@ def build_upload_package(
                 f"in that folder open and try again."
             )
 
+    state.mkdir(parents=True, exist_ok=True)
     staging.mkdir(parents=True, exist_ok=False)
     try:
         assembled = _assemble_package(
@@ -611,33 +643,57 @@ def build_upload_package(
 
 def _publish_package(assembled: UploadPackage, staging: Path, published: Path,
                      superseded: Path) -> UploadPackage:
-    """Give the validated staging directory the published name.
+    """Give the validated staging directory the published name. DELETE LAST.
 
-    Four steps, and the ORDER is the guarantee. Everything that can fail is
-    done while the earlier package can still be put back, and the last step —
-    the one with no recovery — is the cheapest operation available: renaming a
-    directory this function just created, in the same parent, onto a name
-    nothing occupies.
+    Three steps, and the ORDER is the guarantee — **and since D-31 the order is
+    the reverse of what it was.**
 
-    1. Move the earlier package ASIDE. A metadata operation; a failure here
-       destroys nothing and the folder still holds the earlier build.
-    2. REMOVE it, and check that it is gone. A failure here puts it back.
-    3. Rename staging onto the published name.
-    4. Nothing.
+    1. RENAME the earlier package aside, into ``.dociq/package_superseded/``.
+       A metadata operation. It destroys nothing, and a failure here leaves the
+       earlier build under its own name, untouched.
+    2. RENAME staging onto the published name. If this fails, the earlier
+       package is renamed BACK — and that restore is trustworthy, because step 1
+       moved it and nothing has modified it since.
+    3. Only now, DELETE what was moved aside. The published name already holds
+       the new package, so a failure here cannot make the folder wrong; it
+       leaves a clearly-named stale tree under ``.dociq/`` and is reported as a
+       residue rather than as a failed build.
 
-    **Why the removal is step 2 and not step 4.** The obvious order — publish,
-    then tidy up — has one outcome this one does not: the new package holds the
-    published name, correct and complete, while a folder of the previous
-    package's files sits beside it under a name an operator could still upload.
-    Reporting that as a failure makes the GUI say *"The upload package was NOT
-    built"* about a package that was built, validated and published, which is a
-    false statement of exactly the kind finding A-4 is about; absorbing it
-    leaves the stray folder. Removing first means the only reachable states are
-    "the earlier build is intact and nothing was published" and "the new
-    package is published and it is the only one" — and both of those are states
-    the screen can describe truthfully.
+    **What changed and why** (finding A-5, Codex review #2 second fix round).
+    The previous order removed the superseded package *before* the new one took
+    the name, on the reasoning that publishing-then-tidying could leave a stray
+    uploadable folder beside a correct package. The reasoning was right about
+    that state and wrong about the cost: ``shutil.rmtree`` deletes part of a tree
+    before it fails, so "the removal did not complete" meant "an unknown part of
+    the earlier package is gone" — and the code then renamed that damaged tree
+    back under the published name and told the operator *"The earlier build is
+    back in place and intact."* An antivirus handle on one file was enough. The
+    operator then uploads a package missing documents, with the screen's word
+    that it is intact.
+
+    The stray-folder worry that motivated the old order is answered by *where*
+    the set-aside tree now lives: under ``.dociq/``, which is DocIQ's state, is
+    excluded from the manifest, and is not a place an operator picks a folder up
+    from. So the two concerns no longer trade off, and the destructive step is
+    last — which is the whole of D-31.
+
+    **A-5 is unreachable rather than defended against**: there is no longer a
+    path on which a partially deleted package is presented under the published
+    name, because nothing is deleted until the published name belongs to the new
+    package.
     """
+    moved_aside = False
     if published.exists():
+        superseded.parent.mkdir(parents=True, exist_ok=True)
+        # Residue under the set-aside name would make the rename fail; it is
+        # DocIQ's own scratch from an earlier attempt, so it goes first.
+        if not _remove_tree(superseded):
+            _remove_tree(staging)
+            raise PackageSwapError(
+                f"{superseded} is left over from an earlier package build and "
+                f"could not be removed, so nothing was published. The package "
+                f"folder was NOT touched and still holds the earlier build."
+            )
         try:
             _retry_rename(published, superseded)
         except OSError as exc:
@@ -648,38 +704,42 @@ def _publish_package(assembled: UploadPackage, staging: Path, published: Path,
                 f"was published and the package folder still holds the earlier "
                 f"build."
             ) from exc
-
-        if not _remove_tree(superseded):
-            put_back = False
-            try:
-                _retry_rename(superseded, published)
-                put_back = True
-            except OSError:
-                put_back = False
-            _remove_tree(staging)
-            raise PackageSwapError(
-                f"The new package was built and validated but the package it "
-                f"replaces could not be removed. Nothing was published. "
-                + ("The earlier build is back in place and intact."
-                   if put_back else
-                   f"The earlier build is now at {superseded} and there is no "
-                   f"package at {published.name} — rename that folder back, or "
-                   f"build again.")
-            )
+        moved_aside = True
 
     try:
         _retry_rename(staging, published)
     except OSError as exc:
-        # Nothing to restore: the earlier package is already gone, deliberately,
-        # and the set in staging is not published under any name an operator
-        # uploads. Both facts are stated rather than one of them implied.
+        # The earlier package was MOVED, not deleted, so putting it back restores
+        # exactly the bytes that were there. That sentence is the difference
+        # between this branch and A-5: the old code said the same thing about a
+        # tree `rmtree` had already eaten into.
+        restored = False
+        if moved_aside:
+            try:
+                _retry_rename(superseded, published)
+                restored = True
+            except OSError:
+                restored = False
         _remove_tree(staging)
         raise PackageSwapError(
             f"The new package was built and validated but could not be moved "
-            f"into {published}: {exc}. Nothing was published and no package "
-            f"folder remains — build again."
+            f"into {published}: {exc}. Nothing was published. "
+            + ("The earlier build is back in place, byte for byte — it was "
+               "moved aside and never modified."
+               if restored else
+               (f"The earlier build is intact at {superseded} — it was moved "
+                f"aside and never modified — and there is no package at "
+                f"{published.name}. Rename that folder back, or build again."
+                if moved_aside else
+                "There was no earlier package, and no package folder remains — "
+                "build again."))
         ) from exc
 
+    # Published. Everything below is cleanup under `.dociq/` and cannot make the
+    # folder wrong, so a failure is a disclosed residue rather than an error:
+    # reporting "the package was NOT built" about a package that was built,
+    # validated and published is the false-headline shape of finding A-4.
+    _remove_tree(superseded)
     return replace(assembled, root=published, readme=published / README_NAME)
 
 
