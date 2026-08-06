@@ -192,7 +192,90 @@ fixes: it does not name a failure mode, it names the primitives.
 
 ## 5. Enumeration — every destructive filesystem operation in the product
 
-*(filled in §5 below from the independent sweep — see the table.)*
+D-31's standing instruction: *enumerate every remaining destructive filesystem
+operation in the product and state, for each, what happens when it fails — and
+whether that outcome is readable from disk.* An independent sweep of
+`src/dociq/**` found **58** call sites. They fall into six groups.
+
+**Doing this found a defect nobody had reported, and it is fixed** — see §5.7.
+
+### 5.1 The swap engine (`emit/paths.py`) — 10 sites
+
+| operation | target | on failure | readable from disk? |
+|---|---|---|---|
+| `_rename_or_fail` (set-aside, publish, unplanned-occupant) | matter root ↔ `.dociq/<aside>/` | raises; marker stays at the phase actually reached | **yes** — the names say which side each entry is on |
+| `_remove_tree_or_fail` | `.dociq/<aside>` or `.dociq/staging` **only** | raises to callers that absorb it | yes — the tree is still named |
+| `_discard_aside_trees` | every `.dociq/superseded*` | collects survivors, never raises | yes — and reported by `superseded_residue()` |
+| `commit_staging` staging removal | `.dociq/staging` | `except OSError: pass` | yes |
+| `commit_staging` marker unlink | `.dociq/staging_ready.json` | **tolerated** (§5.7) | yes — and the surviving marker says `published` |
+| `staging_layout` | `.dociq/staging` | raises at the top of Stage 5, deliberately loud | yes |
+| `discard_staging` | `.dociq/staging` | `ignore_errors=True` | yes; no marker exists on that path, so a survivor can publish nothing |
+| `replace_text_deterministic` (`os.replace` + tmp unlink) | `.dociq/staging_ready.json` | raises; the `.partial` is removed | yes |
+
+**No matter-root path is deleted or overwritten anywhere in this module.**
+Containment is enforced at marker-parse time by `_validate_superseded_entry`
+(what may be moved) and `_validate_aside_name` (where it may be moved to, and
+therefore what may later be deleted).
+
+### 5.2 The package builder (`emit/handoff.py`) — 16 sites
+
+Every deletion targets `.dociq/package_staging` or `.dociq/package_superseded`.
+The only matter-root operations are two renames — `upload_package/` out to
+`.dociq/`, and staging in — plus the rollback rename. Failures before the
+publish raise `PackageSwapError` with the earlier package under its own name;
+the rollback failure names where the earlier build is; the post-publish deletion
+is absorbed on purpose, because a published package must not be reported as a
+failed build.
+
+### 5.3 The Stage-5 emitters — 12 sites
+
+`cleantext`, `indexbook`, `log`, `summary`, `manifest.write`,
+`IssuedIdLedger.write`, `write_matter_copy`. All are truncating writers, all
+bare (no retry, no temp file), and **all of them write into
+`.dociq/staging/`** — `pipeline.run` hands every Stage-5 emitter `stage_out`, not
+`layout`. A failure raises out of Stage 5 with the matter folder untouched,
+which is what `test_a_crash_during_emit_leaves_the_previous_run_untouched`
+proves for four of them.
+
+### 5.4 `_abort` — 3 sites, and the one exception to §5.3
+
+`_abort` writes `processing_log.json`, `run_status.json` and `run_summary.pdf`
+**directly into `<matter>/incomplete_run/`**, which may already exist. These are
+truncating in-place overwrites of a real matter-root directory. They are not a
+D-31 concern — `incomplete_run/` is the record of a run that published nothing,
+and overwriting an older failed run's record with a newer one is the intended
+behaviour — but it is the one place a matter-root file is overwritten rather
+than renamed into, and it is named here rather than left to be found.
+
+### 5.5 Ingest scratch — 5 sites
+
+`_clear_scratch`, the resume journal's truncate and unlink, and two
+`NamedTemporaryFile` unlinks. All under `.dociq/scratch/` or `%TEMP%`, all
+absorbed, none evidentiary.
+
+### 5.6 Outside the matter root — 7 sites
+
+`profiles/model.py::save_to_library` writes into `%APPDATA%\LI DocIQ\profiles`
+(D-05); `branding/make_*.py` overwrite repo assets; `selftest.py` deletes its
+work directory. See §8 for the one of these worth flagging.
+
+### 5.7 The defect the enumeration found — and closed
+
+Steps 1–3 of `commit_staging` are built so that a failure **below the publish**
+is a disclosed residue rather than an error. The final `marker.unlink` was not:
+`_retry_io` re-raised after eight attempts and nothing above `commit_staging`
+handles it, so a transient antivirus lock on `staging_ready.json` — *the same
+condition every other step in that function absorbs* — turned a run whose
+deliverables were fully published into a traceback.
+
+Fixed, with a fail-before watched red
+(`test_a_locked_marker_does_not_fail_a_run_whose_set_is_published`). The
+surviving marker is provably harmless: it says `published`, and the next
+recovery reads that, finds an empty staging directory, and touches nothing.
+
+This is recorded prominently because of what it says about the method: the
+finding came from enumerating the primitives, not from a test failing and not
+from a reviewer. Two of the last three rounds' findings were of the same shape.
 
 ---
 
@@ -244,4 +327,62 @@ and the reason is given per row rather than glossed.
 
 ## 8. What this package does NOT claim
 
-*(filled in below.)*
+### 8.1 Stop-the-line items — raised, not taken
+
+* **`src/dociq/contracts.py` and `src/dociq/gui/pipeline.py` were not touched.**
+  No amendment was needed and none was written.
+* **The residue does not reach the screen.** `superseded_residue` is on
+  `PipelineOutcome` and in the next run's log
+  (`run.superseded_residue_before_swap`), but `gui/pipeline.py::RunOutcome` — the
+  frozen seam — carries no field for it, and adding one is a
+  **stop-the-line amendment** that was not authorized. It was deliberately not
+  routed through `RunResult.warnings` instead, because those become hashed
+  `content.warnings` and a residue is an invocation fact: doing so would break
+  criterion 7. Precedent: `stale_removed` does not cross the seam either.
+
+### 8.2 Windows fidelity
+
+Three tests use a **real** open handle (§7). The rest use monkeypatch, with a
+per-test reason. B-6's trigger specifically **cannot** be reproduced with a real
+lock: a real lock makes `unlink` raise, and the state the finding is about is
+the call *succeeding* over a surviving name. So the B-6 test asserts the
+consequence over a simulated cause. That is a genuine limit and is not
+presented as anything else.
+
+### 8.3 Reasoned premises
+
+The redesign rests on `os.rename` having no delete-on-close analogue on NTFS
+(§6). That is the semantics of the operation, not a measurement taken here. If
+it is wrong, the redesign has a window and this note is where that would have
+had to be said.
+
+### 8.4 Outside this package's scope, and disclosed
+
+`src/dociq/selftest.py` takes `$DOCIQ_SELFTEST_WORKDIR` from the environment and
+`shutil.rmtree`s it whole, unvalidated, with errors silenced. It is a CI/operator
+entry point rather than anything the GUI reaches, and it predates this package —
+but it is in `src/dociq/`, it is the one bare unretried deletion of a whole tree
+at a path DocIQ did not derive, and D-31 asked for the enumeration to be
+complete rather than convenient. **Not fixed here**: changing the selftest
+harness's teardown is outside a swap-redesign package and would go untested by
+the suite that would have to run it.
+
+### 8.5 Carried forward unchanged
+
+`_remove_tree` (handoff) and `_remove_tree_or_fail` (paths) remain two
+independent retry helpers with different contracts. The reason previously given
+for the duplication — that `paths.py` was under concurrent revision — has
+expired, so the duplication is now just duplication. Recorded rather than
+collapsed, because merging them mid-redesign would put an untested shared
+helper under both swaps at once.
+
+### 8.6 Unchanged non-claims from the previous round
+
+Criterion 4 is not met. No mouse-driven GUI acceptance has been performed. The
+3,600-second per-file timeout remains Alex's open decision.
+
+---
+
+## 9. Suite evidence
+
+*(filled in after the repeat runs.)*
