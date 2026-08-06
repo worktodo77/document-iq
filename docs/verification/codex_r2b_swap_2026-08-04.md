@@ -11,6 +11,16 @@ D-2 was already closed by `5ab2a79`.
 Measured, not expected. Every claim below names the check that supports it, and
 §7 names what nothing here supports.
 
+> ⚠️ **SUPERSEDED IN PART BY D-31 (2026-08-05).** The measurements here stand as
+> a record of what was true at `build/s2-r2-swap`. The *design* they describe
+> does not: Codex's next review found B-6 inside this very fix, and Alex ruled
+> the class out with **delete-last** — the swap renames the current set into
+> `.dociq/<aside>/`, renames the staged set into place, and deletes only
+> afterwards. The two rows of §1.2's table naming `_remove_file_or_fail` and the
+> "proven gone" discipline for a *superseded deliverable* are false as of D-31:
+> `_remove_file_or_fail` no longer exists, and no deliverable is deleted at all.
+> Current account: `docs/verification/codex_r3_deletelast_2026-08-05.md`.
+
 ---
 
 ## 1. B-4 — reproduced first, then fixed

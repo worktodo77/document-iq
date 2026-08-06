@@ -1,4 +1,18 @@
-"""A failed package build never leaves a CURRENT partial folder — A-4.
+"""A failed package build never leaves a CURRENT partial folder — A-4, then A-5.
+
+**D-31 (2026-08-05) rewrote the second half of this file.** The publish order it
+tested — move the earlier package aside, DELETE it, then rename the new one into
+place — was found to have one more window (A-5): ``shutil.rmtree`` deletes part
+of a tree before it fails, so "the removal did not complete" meant "an unknown
+part of the earlier package is gone", and the code renamed that damaged tree back
+under the published name and told the operator it was *"back in place and
+intact"*. The order is now **delete-last** — rename aside, rename into place,
+delete only after the new package holds the name — and both working directories
+moved under ``.dociq/`` so a set-aside tree is not a package-shaped folder beside
+the deliverables. The tests below are rewritten against that; the ones asserting
+the old order's wording are gone rather than adapted.
+
+Original A-4 statement, which still holds:
 
 Codex review #2 fix round, finding A-4. ``build_upload_package()`` deleted the
 prior package, created the final ``upload_package/`` directory, and wrote files
@@ -14,10 +28,10 @@ Codex's reproduction: with the README write failing, ``DIQ-1.txt`` and
 screen said the package there was an earlier build. An operator following that
 assurance uploads a partial current package as if it were complete.
 
-The fix assembles in a sibling ``upload_package.incoming/`` and claims the
-published name only after every copy, filter, README and validation has passed.
-So the screen's sentence becomes TRUE rather than merely narrower: on any
-failure the folder still holds the earlier build, byte for byte.
+The fix assembles in ``.dociq/package_staging/`` and claims the published name
+only after every copy, filter, README and validation has passed. So the screen's
+sentence becomes TRUE rather than merely narrower: on any failure the folder
+still holds the earlier build, byte for byte.
 
 **Every test here inspects the DISK.** Two of them also inspect the screen, and
 the disclosure stands: nobody has ever driven this GUI with a mouse — the
@@ -34,6 +48,7 @@ from pathlib import Path
 import pytest
 
 import dociq.emit.handoff as h
+from dociq.emit import paths
 from dociq.emit.handoff import (
     README_NAME,
     PackageSwapError,
@@ -58,11 +73,21 @@ def _tree(root: Path) -> dict[str, str]:
 
 
 def _siblings(layout) -> list[str]:
-    """Every ``upload_package*`` directory in the matter folder."""
+    """Every ``upload_package*`` directory in the matter folder.
+
+    Since D-31 there is only ever one, on every path: the staging and set-aside
+    trees live under ``.dociq/`` where nothing mistakes them for a deliverable,
+    so this is now an assertion about the matter folder rather than about
+    cleanup timing.
+    """
     return sorted(
         p.name for p in layout.root.iterdir()
         if p.is_dir() and p.name.startswith("upload_package")
     )
+
+
+def _state(layout) -> Path:
+    return layout.root / paths.STATE_DIRNAME
 
 
 # ---------------------------------------------------------------------------
@@ -196,14 +221,14 @@ def test_a_leftover_staging_directory_stops_the_build_rather_than_being_used(
     build_upload_package(layout, document_count=len(docs))
     before = _tree(layout.upload_package)
 
-    leftover = layout.root / "upload_package.incoming"
-    leftover.mkdir()
+    leftover = _state(layout) / h._INCOMING_NAME
+    leftover.mkdir(parents=True)
     (leftover / "GHOST.txt").write_text("another attempt", encoding="utf-8")
     monkeypatch.setattr(h, "_remove_tree", lambda p, **_k: not p.exists())
 
     with pytest.raises(PackageSwapError) as caught:
         build_upload_package(layout, document_count=len(docs))
-    assert "upload_package.incoming" in str(caught.value)
+    assert h._INCOMING_NAME in str(caught.value)
     assert _tree(layout.upload_package) == before
     assert (leftover / "GHOST.txt").is_file(), (
         "the build claimed it could not remove the leftover and removed it")
@@ -221,7 +246,7 @@ def test_a_package_that_cannot_be_moved_aside_leaves_the_earlier_one_in_place(
     real = h._retry_rename
 
     def fail_moving_aside(src, dst, **kw):
-        if dst.name.endswith(".superseded"):
+        if dst.name == h._SUPERSEDED_NAME:
             raise OSError(LOCK_ERROR)
         return real(src, dst, **kw)
 
@@ -237,65 +262,139 @@ def test_a_package_that_cannot_be_moved_aside_leaves_the_earlier_one_in_place(
     assert _siblings(layout) == ["upload_package"]
 
 
-def test_an_unremovable_previous_package_is_put_back_and_nothing_is_published(
-        tmp_path, monkeypatch):
-    """The previous package cannot be removed, so it is restored and the build
-    reports failure.
+def _eat_one_file_then_fail(path, **_kw):
+    """A ``_remove_tree`` that behaves like the real ``shutil.rmtree`` does under
+    an antivirus handle: it removes SOME of the tree and then gives up.
 
-    This is the state the publish ORDER exists to produce. Removing the earlier
-    package after the new one has taken the published name would instead leave a
-    correct published package beside a stray folder of the previous one — and
-    the GUI would then say "The upload package was NOT built" about a package
-    that was built, validated and published. A false headline of that shape is
-    finding A-4 again, so the order forbids the state rather than the report
-    describing it."""
+    This is A-5's premise, and the old test double did not have it — it returned
+    ``False`` without deleting anything, so it assumed the very property the
+    production helper cannot guarantee. Every assertion built on that double was
+    therefore true of a tree that had not actually been damaged.
+    """
+    if not path.exists():
+        return True
+    victims = sorted(p for p in path.rglob("*") if p.is_file())
+    if victims:
+        victims[0].unlink()
+    return False
+
+
+def test_a_partly_deleted_superseded_package_is_never_the_published_one(
+        tmp_path, monkeypatch):
+    """FAIL-BEFORE (Codex review #2, second fix round, A-5).
+
+    An antivirus process holds one file in the superseded package. ``rmtree``
+    removes the others and gives up. On the OLD order that removal happened
+    BEFORE the new package took the name, so the code renamed the damaged tree
+    back to ``upload_package/`` and raised with *"The earlier build is back in
+    place and intact."* Codex's reproduction: six files in, one removed, a
+    five-file package restored under the published name, and that exact
+    assurance on screen. An operator uploads a package missing a document.
+
+    Under delete-last the removal cannot happen until the new package already
+    holds the name, so the damaged tree is never a candidate for it. The
+    assertions are written against the old state — a five-file *old* package
+    under ``upload_package/`` and a ``PackageSwapError`` — so this is red on the
+    old code for A-5's reason rather than an incidental one.
+    """
+    layout, docs = full_matter(tmp_path)
+    first = build_upload_package(layout, document_count=len(docs))
+    assert len(first.files) > 1, "nothing to partially delete"
+    monkeypatch.setattr(h, "_remove_tree", _eat_one_file_then_fail)
+
+    # The build SUCCEEDS. On the old code this raised.
+    second = build_upload_package(layout, doc_ids=(docs[0].doc_id,),
+                                  scope_statement="A NARROWER SCOPE\n")
+    assert second.root == layout.upload_package
+
+    on_disk = _tree(layout.upload_package)
+    assert README_NAME in on_disk
+    assert "A NARROWER SCOPE" in (
+        layout.upload_package / README_NAME).read_text(encoding="utf-8"), (
+        "the published folder is not the package this build produced")
+    assert set(on_disk) == set(second.files), (
+        "the published folder and the package this build reports disagree")
+
+    # And the damaged tree is where nobody uploads from, under a name that says
+    # what it is — never at the matter root beside the deliverables.
+    assert _siblings(layout) == ["upload_package"], (
+        f"a package-shaped folder sits beside the deliverables: "
+        f"{_siblings(layout)}")
+    assert (_state(layout) / h._SUPERSEDED_NAME).is_dir(), (
+        "the fixture's premise is gone: nothing was left partially deleted")
+
+
+def test_a_publish_that_cannot_take_the_name_restores_an_unmodified_backup(
+        tmp_path, monkeypatch):
+    """The rollback branch, and the sentence A-5 is about.
+
+    The final rename fails. The earlier package was RENAMED aside, not deleted,
+    so putting it back restores exactly the bytes that were there — and the
+    message may say so. The old code reached its equivalent sentence over a tree
+    ``rmtree`` had already eaten into; this asserts the bytes rather than the
+    wording alone.
+    """
     layout, docs = full_matter(tmp_path)
     build_upload_package(layout, document_count=len(docs))
     before = _tree(layout.upload_package)
+    assert len(before) > 1
 
-    real = h._remove_tree
+    real = h._retry_rename
+    attempts = {"n": 0}
 
-    def refuse_superseded(path, **kw):
-        if path.name.endswith(".superseded") and path.exists():
-            return False
-        return real(path, **kw)
+    def fail_the_first_publish(src, dst, **kw):
+        # The publish rename fails; the rename BACK is allowed, which is the
+        # branch under test.
+        if dst.name == "upload_package":
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise OSError(LOCK_ERROR)
+        return real(src, dst, **kw)
 
-    monkeypatch.setattr(h, "_remove_tree", refuse_superseded)
+    monkeypatch.setattr(h, "_retry_rename", fail_the_first_publish)
     with pytest.raises(PackageSwapError) as caught:
         build_upload_package(layout, doc_ids=(docs[0].doc_id,),
                              scope_statement="A NARROWER SCOPE\n")
 
     message = str(caught.value)
     assert "Nothing was published" in message
-    assert "back in place and intact" in message
+    assert "byte for byte" in message
+    assert "never modified" in message
     assert _tree(layout.upload_package) == before, (
-        "the earlier package was destroyed for a package that never arrived")
+        "the restored package is not byte-identical to the one moved aside — "
+        "which is the only thing that licenses the message above")
     assert _siblings(layout) == ["upload_package"]
 
 
-def test_a_publish_that_cannot_take_the_name_leaves_no_package_and_says_so(
+def test_a_publish_that_cannot_take_the_name_and_cannot_roll_back_says_where(
         tmp_path, monkeypatch):
-    """The one unrecoverable window: the earlier package is deliberately gone
-    and the final rename fails. There must be NO package folder afterwards — a
-    ``upload_package.incoming`` left behind is a package-shaped folder an
-    operator could upload — and the message must not imply one survives."""
+    """Both renames fail. There must be NO package folder at the matter root —
+    a package-shaped folder an operator could upload — and the message must name
+    where the earlier build actually is, and must not claim it is back.
+    """
     layout, docs = full_matter(tmp_path)
     build_upload_package(layout, document_count=len(docs))
+    before = _tree(layout.upload_package)
 
     real = h._retry_rename
 
-    def fail_the_publish(src, dst, **kw):
+    def fail_every_publish(src, dst, **kw):
         if dst.name == "upload_package":
             raise OSError(LOCK_ERROR)
         return real(src, dst, **kw)
 
-    monkeypatch.setattr(h, "_retry_rename", fail_the_publish)
+    monkeypatch.setattr(h, "_retry_rename", fail_every_publish)
     with pytest.raises(PackageSwapError) as caught:
         build_upload_package(layout, document_count=len(docs))
 
-    assert "no package folder remains" in str(caught.value)
+    message = str(caught.value)
+    assert h._SUPERSEDED_NAME in message, "the message does not say where it is"
+    assert "back in place" not in message
     assert _siblings(layout) == [], (
         f"a package-shaped folder survives: {_siblings(layout)}")
+    # It is intact — it was moved, never touched — which is what the message
+    # tells the operator, so it is asserted rather than believed.
+    assert _tree(_state(layout) / h._SUPERSEDED_NAME) == before
 
 
 def test_the_removal_helper_answers_with_the_state_of_the_disk(tmp_path):

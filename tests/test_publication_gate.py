@@ -694,17 +694,58 @@ def test_corrupt_json_is_not_retried(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _refused_log(tmp_path, monkeypatch, force=_force_accounting_red):
+def _master_index(tmp_path):
+    """A tiny synthetic master index, so a run RECONCILES.
+
+    D-04's regime, not the client's file: three rows with a perfect
+    ``Original Sort`` sequence, which is all that is needed for
+    ``reconciliation`` to be a real section rather than ``null``. Rows that
+    match nothing in the fixture corpus reconcile as index-only, which is a
+    populated report and therefore exactly what these assertions need.
+
+    It exists because of B-7. The refusal tests below used to run **without** an
+    index and still assert that ``content.reconciliation`` was populated — which
+    passed only because ``_abort`` recorded the always-created no-index report
+    where the published path recorded ``null``. The assertions were true of a
+    projection that was itself the defect, so the fixture is what changes rather
+    than the assertion.
+    """
+    headers = ["Original Sort", "Filename", "File Extension", "Filepath",
+               "Size\n(KB)", "Date", "Source Received", "Date Received"]
+    rows = [
+        ["1", "Letter 001.pdf", "pdf", r"P 495\LETTERS", "1879", "5/22/2026",
+         "Client Link", "2026-05-22"],
+        ["2", "Letter 002.pdf", "pdf", r"P 495\LETTERS", "1185", "6/7/2026",
+         "Client Link", "2026-06-08"],
+        ["3", "Letter 003.pdf", "pdf", r"P 495\LETTERS", "1200", "6/8/2026",
+         "Client Link", "2026-06-09"],
+    ]
+    lines = [",".join(f'"{h}"' for h in headers)]
+    lines += [",".join(f'"{c}"' for c in row) for row in rows]
+    path = tmp_path / "master_index.csv"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    return path
+
+
+def _refused_log(tmp_path, monkeypatch, force=_force_accounting_red, *,
+                 with_index=True):
     """A real Stage-6 refusal, and the log it left ON DISK.
 
     Returns the outcome and the parsed ``incomplete_run/processing_log.json``,
     because every assertion in this section is a comparison between the two.
     That pairing is the finding: the fix round asserted only the outcome, and
     the outcome is the one artifact that does not exist once DocIQ has exited.
+
+    ``with_index`` decides whether a master index is supplied, because after
+    B-7 that is what decides whether ``content.reconciliation`` is a section or
+    ``null`` — on the refusal path exactly as on the published one.
     """
     out = tmp_path / "matter"
     force(monkeypatch)
-    refused = _run(out)
+    extra = (
+        {"master_index_path": str(_master_index(tmp_path))} if with_index else {}
+    )
+    refused = _run(out, **extra)
     assert not refused.published
     assert refused.incomplete_dir is not None
     log = json.loads(
@@ -834,10 +875,99 @@ def test_the_refusal_log_keeps_criterion_7(tmp_path, monkeypatch):
     assert clean.published
     published = json.loads(
         (tmp_path / "clean" / "processing_log.json").read_text(encoding="utf-8"))
-    assert published["content"]["doc_ids"] == log_a["content"]["doc_ids"]
-    assert published["content"]["documents"] == log_a["content"]["documents"]
-    assert published["content"]["drops"] == log_a["content"]["drops"]
-    assert published["content"]["bates"] == log_a["content"]["bates"]
+    # FULL equality, not four named sections. **This is the reach that missed
+    # B-7** (Codex review #2, second fix round): the four-field version passed
+    # while `content.reconciliation` and `content.output_hashes` disagreed
+    # between the two logs, because neither was one of the four. The whole
+    # section is compared, so a field added to `content` is covered the day it
+    # is added rather than the day somebody remembers to list it.
+    assert published["content"] == log_a["content"], (
+        "a refused run and a published run over one corpus produced different "
+        "hashed content: differing keys = "
+        + ", ".join(sorted(
+            k for k in set(published["content"]) | set(log_a["content"])
+            if published["content"].get(k) != log_a["content"].get(k)))
+    )
+    assert published["content_sha256"] == log_a["content_sha256"]
+
+
+def test_a_refused_log_gives_one_identity_for_its_own_hashed_content(
+    tmp_path, monkeypatch
+):
+    """FAIL-BEFORE (Codex review #2, second fix round, B-7).
+
+    ON DISK, over the ordinary NO-INDEX configuration Codex reproduced. Two
+    facts, and the second is the one an auditor trips over:
+
+    1. the refused log's ``content`` and ``content_sha256`` equal the published
+       log's over the same corpus;
+    2. the refused log's OWN ``content_sha256`` equals the
+       ``run.output_manifest.log_content_sha256`` it carries.
+
+    (2) is the whole finding. The manifest is built over the STAGED,
+    published-style log before Stage 6 refuses; ``_abort`` then rebuilt the
+    quarantined log with a different projection, so one durable audit file
+    carried two different hashes for its own hashed section and a verifier had
+    to choose which to believe.
+
+    The no-index case is the trigger and is therefore the fixture: with no
+    master index the published path recorded ``reconciliation: null`` and
+    ``_abort`` recorded the always-created "no master index was supplied"
+    report. ``output_hashes`` was the second divergence, found by enumerating
+    ``content``'s keys rather than by being reported.
+    """
+    refused, log = _refused_log(tmp_path, monkeypatch, with_index=False)
+
+    assert log["content"]["reconciliation"] is None, (
+        "a run given no master index recorded a reconciliation section; the "
+        "published path records null and the two must agree")
+
+    embedded = log["run"]["output_manifest"]["log_content_sha256"]
+    assert embedded, "the refused log carries no manifest hash to compare"
+    assert embedded == log["content_sha256"], (
+        "the refused log's embedded manifest hash and its own top-level content "
+        "hash disagree: one audit file, two identities for one section")
+
+    monkeypatch.undo()
+    clean = _run(tmp_path / "clean")
+    assert clean.published
+    published = json.loads(
+        (tmp_path / "clean" / "processing_log.json").read_text(encoding="utf-8"))
+    assert published["content"] == log["content"], (
+        "refused and published hashed content differ over the same no-index "
+        "corpus: differing keys = "
+        + ", ".join(sorted(
+            k for k in set(published["content"]) | set(log["content"])
+            if published["content"].get(k) != log["content"].get(k)))
+    )
+    assert published["content_sha256"] == log["content_sha256"]
+    # And the published side agrees with ITS manifest too, so the property is
+    # stated over both branches rather than only the one that broke. A published
+    # run's manifest is a file beside the log rather than a section inside it —
+    # the refusal path embeds it because the staging set it describes is
+    # discarded and the file would exist nowhere else.
+    on_disk_manifest = json.loads(
+        (tmp_path / "clean" / mf.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert (on_disk_manifest["log_content_sha256"]
+            == published["content_sha256"]), (
+        "the published manifest and the published log disagree about the log's "
+        "own hashed content")
+
+
+def test_a_refused_log_with_an_index_also_agrees_with_its_manifest(
+    tmp_path, monkeypatch
+):
+    """The WITH-index branch of the same property, enumerated with it.
+
+    B-7's reproduction is the no-index configuration, but the property is not
+    about indexes — it is that the quarantined log and the manifest it embeds
+    hash the same bytes. A fix that only held where ``reconciliation`` is
+    ``null`` would be the repro, not the class.
+    """
+    refused, log = _refused_log(tmp_path, monkeypatch, with_index=True)
+    assert log["content"]["reconciliation"] is not None
+    assert (log["run"]["output_manifest"]["log_content_sha256"]
+            == log["content_sha256"])
 
 
 # The class probe. Every fact the in-memory outcome carries has to have a
@@ -873,6 +1003,15 @@ _NOT_DURABLE = {
     # other. There is no value here to record, rather than a value being
     # dropped.
     "stale_removed": "a refused run replaced nothing, so there is nothing to record",
+    # D-31. A refused run never reaches the swap, so it never sets anything
+    # aside and can leave no residue of its own. Residue left by an EARLIER run
+    # IS recorded, in `run.superseded_residue_before_swap` -- but only on a run
+    # that got as far as building a log, which a refused run does not do twice.
+    "superseded_residue": (
+        "a refused run never swaps, so it sets nothing aside and leaves no "
+        "residue; an earlier run's residue is recorded by the run that observes "
+        "it in `run.superseded_residue_before_swap`"
+    ),
 }
 
 

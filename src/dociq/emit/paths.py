@@ -15,6 +15,36 @@ and moved into place at the end, and an interrupted swap is rolled forward by th
 next run rather than left as a mixture. What that does and does not guarantee is
 stated on :func:`commit_staging`, in the terms the note used, rather than
 softened.
+
+**DELETE-LAST (D-31, 2026-08-05) — read this before changing anything below.**
+Three consecutive Codex rounds each found a new defect inside the previous
+round's fix, all in this subsystem and all one class: *a destructive filesystem
+step that cannot be proven complete when antivirus, a scanner, or Windows
+delete-on-close interferes.* B-1/B-2, then B-4/B-5, then B-6 (a marker whose
+``unlink`` returned while its name survived authorized the next recovery to
+delete the newly published set). Every fix was correct and every fix opened the
+next window, **because the design deleted before it published, so every failure
+mode was "half-deleted".**
+
+So the swap no longer deletes anything at the matter root. It **renames**. The
+current set is renamed aside into ``.dociq/``, the staged set is renamed into
+place, and only then is what was moved aside deleted. The substitution carries
+the whole design: *a rename on one volume either happened or it did not, and its
+outcome is readable from the names on disk*, whereas a delete under lock is
+neither provable nor reversible.
+
+What that buys, and what the tests below are written against:
+
+* a crash or a blocked step leaves a clearly-named stale folder under
+  ``.dociq/`` **beside** whichever complete set is at the root — never a mixture
+  of two runs' evidence;
+* :func:`recover_pending` **never deletes a published file**. Its destructive
+  scope is ``.dociq/`` and nothing else, so a stale marker cannot authorize
+  destroying a set that is already in place (B-6 is unreachable rather than
+  defended against);
+* recovery reads **the names on disk** as its primary evidence — what is left in
+  staging, and what is already set aside. The marker records the plan; it is not
+  the sole authority for destroying anything.
 """
 
 from __future__ import annotations
@@ -36,13 +66,19 @@ __all__ = [
     "safe_component",
     "STATE_DIRNAME",
     "STAGING_DIRNAME",
+    "ASIDE_PREFIX",
     "MARKER_NAME",
+    "PHASE_PENDING",
+    "PHASE_ASIDE",
+    "PHASE_PUBLISHED",
+    "SwapPlan",
     "staging_layout",
     "discard_staging",
     "mark_ready",
     "commit_staging",
     "recover_pending",
     "pending_swap",
+    "superseded_residue",
     "PendingSwapUnreadable",
 ]
 
@@ -215,17 +251,71 @@ the window this exists to close — and on a matter folder that is a network sha
 it would copy the whole corpus twice.
 """
 
+ASIDE_PREFIX = "superseded"
+"""Where the CURRENT set is renamed to while the staged set takes its place.
+
+Under ``.dociq/``, for the reason §7 forces: Expert Assist reads the matter
+folder from disk with no rearrangement (D-20, Path B), so a set-aside name at the
+matter root would be a folder full of deliverable-shaped files sitting beside the
+deliverables. ``.dociq/`` is DocIQ's own state, the manifest excludes the whole
+prefix, and it is on the same volume as the root — which is what makes the move a
+**rename** rather than a copy.
+
+The name is chosen per swap (``superseded``, ``superseded.1``, …) and recorded in
+the marker, so a set-aside tree that could not be deleted never blocks or is
+overwritten by the next run's."""
+
 MARKER_NAME = "staging_ready.json"
 """Written when staging is COMPLETE and the swap may begin; removed when the
-swap has finished. Its presence is the only thing that authorizes moving files
-into the matter folder, and it is what makes an interrupted swap recoverable —
+swap has finished. It records the swap PLAN — which of this folder's names the
+staged set replaces, which ``.dociq/`` name they are being renamed to, and which
+phase the swap reached — and it is what makes an interrupted swap recoverable;
 see :func:`commit_staging`.
+
+**It is no longer the sole authority for anything destructive** (D-31). Under the
+delete-first design a marker was what authorized deleting the previous run's
+deliverables, so a marker whose ``unlink()`` returned while its name survived
+authorized the next recovery to delete the newly published set (Codex review #2,
+second fix round, B-6). Recovery now reads the NAMES ON DISK first — what is left
+in staging, and what is already set aside — and the marker's plan can only ever
+select paths to *rename into* ``.dociq/``. A stale marker beside an empty staging
+directory therefore selects nothing.
 
 Written by :func:`replace_text_deterministic`, so it is never observed
 half-written: the marker either does not exist or holds the whole document. A
 marker that nonetheless cannot be parsed is corruption or a hand edit, and
 :func:`commit_staging` refuses to act on it rather than guessing — see
 :class:`PendingSwapUnreadable`."""
+
+PHASE_PENDING = "pending"
+"""Nothing has moved yet, or the set-aside renames are unfinished."""
+
+PHASE_ASIDE = "aside"
+"""Every planned name is out of the matter folder and in ``.dociq/<aside>/``.
+Only the publish renames remain."""
+
+PHASE_PUBLISHED = "published"
+"""The staged set holds the published names. Everything that remains is deletion
+UNDER ``.dociq/``, and no failure of it can touch a deliverable — which is why
+this phase exists as a written record rather than being inferred."""
+
+_PHASES = (PHASE_PENDING, PHASE_ASIDE, PHASE_PUBLISHED)
+
+
+@dataclass(frozen=True, slots=True)
+class SwapPlan:
+    """What the readiness marker says, validated.
+
+    ``superseded`` are matter-root-relative names the staged set replaces;
+    ``aside`` is the single ``.dociq/`` component they are renamed into; ``phase``
+    is how far the swap got. All three are checked at parse time rather than
+    trusted, because they select paths that get *moved* — see
+    :func:`_validate_superseded_entry` and :func:`_validate_aside_name`.
+    """
+
+    superseded: tuple[str, ...]
+    aside: str
+    phase: str
 
 
 class PendingSwapUnreadable(DocIQError):
@@ -302,28 +392,37 @@ def _retry_io(what, *, attempts: int = 8, delay: float = 0.02):
     raise last
 
 
-def _remove_file_or_fail(path: Path) -> None:
-    """``unlink``, retried, and PROVEN gone — the file sibling of
-    :func:`_remove_tree_or_fail`.
+def _rename_or_fail(src: Path, dst: Path) -> None:
+    """Move ``src`` to ``dst`` by RENAME, retried, and proven by the names.
 
-    ``unlink`` raising is not the only way a removal fails to remove. On Windows
-    a file with an open handle is marked for delete-on-close and its NAME
-    survives until the last handle is released, so ``unlink`` can return without
-    the entry disappearing. The caller of this function goes on to delete the
-    readiness marker, and the marker is the only thing that would have disclosed
-    a surviving stale deliverable — so "did it raise" is the wrong question and
-    "is it gone" is the right one, for a file exactly as much as for a
-    directory. Enumerated with B-4 rather than after it.
+    **This is the operation D-31 substitutes for deletion**, and the whole
+    argument for the redesign is the difference between the two. A rename on one
+    volume either happened or it did not, and which of those is true is readable
+    from the two names afterwards: there is no "marked for rename on close"
+    state, no partial rename, and no rename that removes half of what it moved.
+    A delete under an antivirus handle has all three problems, which is what
+    three fix rounds kept discovering one window at a time.
+
+    ``os.rename`` rather than ``os.replace``: on Windows it REFUSES when the
+    destination exists, and that refusal is wanted. ``os.replace`` would silently
+    destroy whatever occupied the destination, which is a delete before a publish
+    wearing a different name. Callers that meet an occupied destination move the
+    occupant aside first.
+
+    Retried for the reason :func:`_retry_io` gives, and idempotent under retry:
+    an attempt that landed and then reported an error leaves ``src`` gone and
+    ``dst`` present, which the first branch recognizes as done.
     """
 
     def once() -> None:
-        if path.exists():
-            path.unlink(missing_ok=True)
-        if path.exists():
+        if not src.exists() and dst.exists():
+            return  # a previous attempt landed
+        os.rename(src, dst)
+        if src.exists() or not dst.exists():
             raise OSError(
-                errno.EACCES,
-                "the file is still present after it was removed",
-                str(path),
+                errno.EEXIST,
+                f"the rename to {dst} did not take effect",
+                str(src),
             )
 
     _retry_io(once)
@@ -358,6 +457,14 @@ def _remove_tree_or_fail(path: Path) -> None:
     Idempotent, which is what makes the roll-forward safe: on the next attempt
     an already-removed path is not a directory, the caller skips it, and the
     partially-completed removal is simply finished.
+
+    **Its scope narrowed to ``.dociq/`` under D-31.** It used to delete a
+    superseded deliverable out of the matter folder, and B-4's fix made that
+    failure loud rather than silent. It is now only ever pointed at DocIQ's own
+    state — a set-aside tree or a drained staging tree — so a failure here can no
+    longer leave the evidence set in any state at all. The B-4 reasoning still
+    applies to it and is kept: a caller that cannot prove the name is gone must
+    not report the directory removed.
     """
 
     def once() -> None:
@@ -393,47 +500,80 @@ def _validate_superseded_entry(rel: object) -> str:
     return rel
 
 
-def _read_marker(marker: Path) -> tuple[str, ...]:
-    """The supersede list a readiness marker declares, or fail closed.
+def _validate_aside_name(name: object) -> str:
+    """The set-aside directory is ONE component under ``.dociq/``, or refused.
+
+    The same check as :func:`_validate_superseded_entry` pointed the other way.
+    That one stops a marker naming something outside the matter folder to be
+    moved; this one stops a marker naming somewhere outside ``.dociq/`` to move
+    it TO — and, at the end of the swap, to delete. A hand-edited ``"aside":
+    "../clean_text"`` would otherwise make the cleanup step delete the
+    deliverables it exists to preserve.
+
+    The ``superseded`` prefix is required as well as the shape, so the only names
+    this can ever delete are ones DocIQ's own :func:`_free_aside_name` could have
+    issued.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"`aside` is not a non-empty string: {name!r}")
+    if name != safe_component(name) or "/" in name or "\\" in name:
+        raise ValueError(f"`aside` is not a single safe path component: {name!r}")
+    if name != ASIDE_PREFIX and not name.startswith(ASIDE_PREFIX + "."):
+        raise ValueError(
+            f"`aside` is not a DocIQ set-aside name (it must be "
+            f"{ASIDE_PREFIX!r} or {ASIDE_PREFIX}.N): {name!r}"
+        )
+    return name
+
+
+def _read_marker(marker: Path) -> SwapPlan:
+    """The swap plan a readiness marker declares, or fail closed.
 
     Every deviation is fatal, including ones a permissive reader would shrug at
     (a missing ``superseded`` key, a non-list, a non-string entry): the marker is
     written by exactly one function, atomically, so anything this cannot parse is
     corruption or a hand edit, and neither is a state to guess through.
     """
+    def refuse(why: str, cause: BaseException | None = None):
+        exc = PendingSwapUnreadable(_UNREADABLE.format(
+            marker=marker, why=why, staging=marker.parent / STAGING_DIRNAME))
+        if cause is not None:
+            raise exc from cause
+        raise exc
+
     try:
         raw = _retry_io(lambda: marker.read_text(encoding="utf-8"))
     except OSError as exc:
-        raise PendingSwapUnreadable(_UNREADABLE.format(
-            marker=marker, why=f"it could not be read ({exc})",
-            staging=marker.parent / STAGING_DIRNAME)) from exc
+        refuse(f"it could not be read ({exc})", exc)
     try:
         payload = json.loads(raw)
     except ValueError as exc:
-        raise PendingSwapUnreadable(_UNREADABLE.format(
-            marker=marker, why=f"it is not valid JSON ({exc})",
-            staging=marker.parent / STAGING_DIRNAME)) from exc
+        refuse(f"it is not valid JSON ({exc})", exc)
     if not isinstance(payload, dict):
-        raise PendingSwapUnreadable(_UNREADABLE.format(
-            marker=marker,
-            why=f"its top level is {type(payload).__name__}, not an object",
-            staging=marker.parent / STAGING_DIRNAME))
+        refuse(f"its top level is {type(payload).__name__}, not an object")
     if "superseded" not in payload:
-        raise PendingSwapUnreadable(_UNREADABLE.format(
-            marker=marker, why="it names no `superseded` list",
-            staging=marker.parent / STAGING_DIRNAME))
+        refuse("it names no `superseded` list")
     entries = payload["superseded"]
     if not isinstance(entries, list):
-        raise PendingSwapUnreadable(_UNREADABLE.format(
-            marker=marker,
-            why=f"`superseded` is {type(entries).__name__}, not a list",
-            staging=marker.parent / STAGING_DIRNAME))
+        refuse(f"`superseded` is {type(entries).__name__}, not a list")
     try:
-        return tuple(_validate_superseded_entry(e) for e in entries)
+        superseded = tuple(_validate_superseded_entry(e) for e in entries)
     except ValueError as exc:
-        raise PendingSwapUnreadable(_UNREADABLE.format(
-            marker=marker, why=str(exc),
-            staging=marker.parent / STAGING_DIRNAME)) from exc
+        refuse(str(exc), exc)
+    # `aside` and `phase` are required with the same strictness as `superseded`
+    # and for the same reason: they are read from disk and they select what gets
+    # moved and, later, deleted. A marker without them is not an older format —
+    # nothing has shipped — it is a marker this code did not write.
+    if "aside" not in payload:
+        refuse("it names no `aside` directory for the set it moves aside")
+    try:
+        aside = _validate_aside_name(payload["aside"])
+    except ValueError as exc:
+        refuse(str(exc), exc)
+    phase = payload.get("phase")
+    if phase not in _PHASES:
+        refuse(f"its `phase` is {phase!r}, not one of {_PHASES}")
+    return SwapPlan(superseded=superseded, aside=aside, phase=phase)
 
 
 _UNREADABLE = (
@@ -460,6 +600,61 @@ def _staging_root(destination: OutputLayout) -> Path:
 
 def _marker_path(destination: OutputLayout) -> Path:
     return _state_dir(destination) / MARKER_NAME
+
+
+def _aside_root(destination: OutputLayout, name: str) -> Path:
+    return _state_dir(destination) / name
+
+
+def _aside_names(destination: OutputLayout) -> tuple[str, ...]:
+    """Every set-aside directory currently under ``.dociq/``, sorted."""
+    state = _state_dir(destination)
+    if not state.is_dir():
+        return ()
+    return tuple(sorted(
+        p.name for p in state.iterdir()
+        if p.is_dir()
+        and (p.name == ASIDE_PREFIX or p.name.startswith(ASIDE_PREFIX + "."))
+    ))
+
+
+def _free_aside_name(destination: OutputLayout) -> str:
+    """A set-aside name nothing occupies.
+
+    A previous swap that could not delete its own set-aside tree — an antivirus
+    handle on one file in it — leaves that tree on disk. Under D-31 that is a
+    tolerated, disclosed residue rather than a failure, so the NEXT swap must not
+    collide with it: it takes ``superseded.1`` and the two sit side by side, each
+    readable for what it is.
+
+    The ceiling is not a silent cap. A thousand undeleted set-aside trees is not
+    a busy matter folder, it is a machine where nothing can be deleted at all,
+    and continuing to pile up renames would hide that.
+    """
+    state = _state_dir(destination)
+    for n in range(1000):
+        name = ASIDE_PREFIX if n == 0 else f"{ASIDE_PREFIX}.{n}"
+        if not (state / name).exists():
+            return name
+    raise DocIQError(
+        f"{state} already holds 1,000 undeleted set-aside directories. Each one "
+        f"is a previous run's superseded deliverables that could not be removed, "
+        f"so nothing on this machine is deleting files. Clear "
+        f"{state}/{ASIDE_PREFIX}* by hand before running again."
+    )
+
+
+def superseded_residue(destination: OutputLayout) -> tuple[str, ...]:
+    """Set-aside trees still on disk, relative to the matter root.
+
+    Reported rather than tolerated silently. Under D-31 a swap that publishes
+    successfully and then cannot delete what it moved aside is a SUCCESS with a
+    residue: the matter folder holds one complete set and ``.dociq/`` holds a
+    clearly-named stale one. Nobody reads ``.dociq/``, so the run says so.
+    """
+    return tuple(
+        f"{STATE_DIRNAME}/{name}" for name in _aside_names(destination)
+    )
 
 
 def staging_layout(destination: OutputLayout) -> OutputLayout:
@@ -494,33 +689,43 @@ def discard_staging(destination: OutputLayout) -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def mark_ready(destination: OutputLayout, superseded: tuple[str, ...] = ()) -> Path:
-    """Record that staging is complete and the swap may proceed.
+_MARKER_NOTE = {
+    PHASE_PENDING: (
+        "A DocIQ run finished writing its deliverables into "
+        f"{STATE_DIRNAME}/{STAGING_DIRNAME}/ and is swapping them into this "
+        "folder. NOTHING HAS BEEN DELETED. The swap renames this folder's "
+        f"current set into {STATE_DIRNAME}/<aside>/, renames the staged set into "
+        "place, and only then deletes what it moved aside. If this file is still "
+        "here the swap did not finish: the next run completes it before doing "
+        "anything else. Do not delete it by hand — deleting it abandons a "
+        "complete set of deliverables."
+    ),
+    PHASE_ASIDE: (
+        "A DocIQ swap has renamed this folder's previous set into "
+        f"{STATE_DIRNAME}/<aside>/ and is renaming the staged set into place. "
+        "The previous set is INTACT under that name — it was moved, not "
+        "modified. The next run finishes the swap."
+    ),
+    PHASE_PUBLISHED: (
+        "A DocIQ swap has PUBLISHED the staged set — the files in this folder "
+        "are the current run's, complete. All that remains is deleting what was "
+        f"moved aside under {STATE_DIRNAME}/, which is DocIQ's own state and no "
+        "part of the evidence. Nothing further will touch this folder's files."
+    ),
+}
 
-    ``superseded`` is the list of the previous run's deliverables this swap
-    replaces, relative to the matter root. It is carried in the marker rather
-    than recomputed at swap time so that a roll-forward removes the same files
-    the interrupted attempt was going to remove, whatever the folder looks like
-    when the roll-forward happens.
-    """
-    marker = _marker_path(destination)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    for rel in superseded:
-        _validate_superseded_entry(rel)
-    replace_text_deterministic(
+
+def _write_marker(marker: Path, plan: SwapPlan) -> Path:
+    """The marker's ONE writer. Atomic, so it is never observed half-written."""
+    return replace_text_deterministic(
         marker,
         json.dumps(
             {
                 "staging": STAGING_DIRNAME,
-                "superseded": sorted(superseded),
-                "note": (
-                    "A DocIQ run finished writing its deliverables into "
-                    f"{STATE_DIRNAME}/{STAGING_DIRNAME}/ and was moving them "
-                    "into this folder. If this file is still here, the move did "
-                    "not finish: the next run completes it before doing anything "
-                    "else. Do not delete it by hand — deleting it abandons a "
-                    "complete set of deliverables."
-                ),
+                "superseded": sorted(plan.superseded),
+                "aside": plan.aside,
+                "phase": plan.phase,
+                "note": _MARKER_NOTE[plan.phase],
             },
             indent=2,
             sort_keys=True,
@@ -528,7 +733,32 @@ def mark_ready(destination: OutputLayout, superseded: tuple[str, ...] = ()) -> P
         )
         + "\n",
     )
-    return marker
+
+
+def mark_ready(destination: OutputLayout, superseded: tuple[str, ...] = ()) -> Path:
+    """Record that staging is complete and the swap may proceed.
+
+    ``superseded`` is the list of the previous run's deliverables this swap
+    replaces, relative to the matter root. It is carried in the marker rather
+    than recomputed at swap time so that a roll-forward moves aside the same
+    files the interrupted attempt was going to, whatever the folder looks like
+    when the roll-forward happens.
+
+    Under D-31 the marker also fixes **where** they go — a set-aside name nothing
+    occupies — and the phase the swap has reached. The name is chosen here rather
+    than at swap time so that a swap and its roll-forward always agree on it: a
+    roll-forward that picked a fresh name would leave the first attempt's
+    set-aside tree stranded under a name no marker mentions.
+    """
+    marker = _marker_path(destination)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    for rel in superseded:
+        _validate_superseded_entry(rel)
+    return _write_marker(marker, SwapPlan(
+        superseded=tuple(sorted(superseded)),
+        aside=_free_aside_name(destination),
+        phase=PHASE_PENDING,
+    ))
 
 
 def pending_swap(destination: OutputLayout) -> bool:
@@ -536,10 +766,69 @@ def pending_swap(destination: OutputLayout) -> bool:
     return _marker_path(destination).is_file()
 
 
+def _staged_files(staging: Path) -> list[Path]:
+    """The staged FILES, in a deterministic order.
+
+    ``.dociq/`` inside staging is skipped. A staging layout is an
+    :class:`OutputLayout` like any other, so anything that runs against it — the
+    package builder does — creates its own state directory inside it. Publishing
+    that state into the matter root would put DocIQ's scratch where the manifest
+    expects deliverables. It has never happened, because the one such consumer
+    cleans up after itself; this makes the property hold by construction rather
+    than by that consumer continuing to.
+    """
+    if not staging.is_dir():
+        return []
+    out = []
+    for src in sorted(staging.rglob("*")):
+        if not src.is_file():
+            continue
+        if src.relative_to(staging).parts[0] == STATE_DIRNAME:
+            continue
+        out.append(src)
+    return out
+
+
 def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     """Replace the matter folder's deliverables with the staged ones.
 
-    Returns the paths removed, relative to the matter root, in sorted order.
+    Returns the paths the matter folder no longer holds — the ones renamed
+    aside — relative to the matter root, in sorted order.
+
+    **DELETE-LAST (D-31).** Nothing under the matter root is ever deleted or
+    overwritten here. The sequence is:
+
+    1. **Set aside.** Every planned name is RENAMED into ``.dociq/<aside>/``.
+       Nothing is destroyed, and a failure leaves the rest of the previous set
+       exactly where it was.
+    2. **Publish.** Every staged file is RENAMED into place. Its destination is
+       free, because step 1 emptied it; a destination the plan did not cover is
+       moved aside too rather than overwritten.
+    3. **Then delete** — and only under ``.dociq/``. By this point the matter
+       folder holds one complete set and a failure here cannot change that.
+
+    **Why the phases are written down.** The marker records which phase the swap
+    reached, and recovery *also* reads the names on disk. The two together are
+    what make B-6 unreachable: a marker whose ``unlink()`` returned while its
+    name survived used to re-authorize deleting the newly published set, and now
+    (a) the plan can only select paths to RENAME INTO ``.dociq/``, never to
+    delete, (b) a phase of ``published`` says the publish is done, and (c) an
+    empty staging directory says there is nothing to publish, so nothing is set
+    aside. Any one of the three is enough; the disk-readable one is primary.
+
+    **What is left behind by a failure, in every case.**
+
+    * a failure in step 1 — the matter folder holds the previous set minus the
+      names already moved, all of which are intact in ``.dociq/<aside>/``;
+    * a failure in step 2 — the matter folder holds *part of the new set and
+      nothing of the old*, which is incomplete but is not a MIXTURE; the whole
+      previous set is intact in ``.dociq/<aside>/`` and the whole remaining new
+      set is intact in staging;
+    * a failure in step 3 — the matter folder holds the complete new set and
+      ``.dociq/`` holds a clearly-named stale tree. This is not an error and does
+      not raise; it is reported by :func:`superseded_residue`.
+
+    Every one of those is readable from the names on disk without the marker.
 
     **What this guarantees, precisely.** Every deliverable is written and hashed
     in staging first, so a crash at any point during emit — which is where the
@@ -549,18 +838,20 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     it again finishes it, and :func:`recover_pending` makes every run call it
     again before doing anything else.
 
-    **Every destructive step fails closed.** Each removal is retried and then
-    proven — the name is checked to be gone, not merely the call to have
-    returned — and a step that cannot be completed raises with the readiness
-    marker STILL ON DISK. That is what makes the roll-forward claim true rather
-    than asserted: the marker is the folder's record that it is mid-swap, so it
-    is removed last and only after everything it authorized actually happened.
-    Until the fix round's B-4, a superseded *directory* was removed with
-    ``ignore_errors=True`` and this paragraph was false for that one step: the
-    removal could fail, the new set was moved in beside the survivor, and the
-    marker was deleted anyway. The one tolerated residue is an EMPTY staging
-    tree, which is DocIQ's own state and no part of the evidence set; that
-    exception is stated at the line that makes it.
+    **Every step that touches the matter folder fails closed.** Each rename is
+    retried and then proven by the names, and a step that cannot be completed
+    raises with the readiness marker STILL ON DISK, at the phase the swap
+    actually reached. That is what makes the roll-forward claim true rather than
+    asserted.
+
+    *This paragraph used to say something stronger about deletions and it is
+    withdrawn along with them* (D-31). Two earlier rounds hardened the deletion
+    of superseded deliverables — B-4 made a failed ``rmtree`` loud, and
+    ``_remove_file_or_fail`` proved a file's name was gone rather than trusting
+    ``unlink`` to have returned. Both were correct and both are now **deleted
+    rather than kept**, because nothing under the matter root is deleted at all.
+    ``_remove_file_or_fail`` no longer exists; the only proof this function needs
+    of a superseded deliverable is that its name moved.
 
     **What it does not guarantee, stated rather than implied.** The swap is a
     sequence of moves, not one atomic operation — Windows offers no atomic
@@ -568,20 +859,23 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     live at the matter root by design (§8 Path B: Expert Assist reads
     ``clean_text/`` and ``sources.json`` from exactly there). So a *reader* that
     opens the folder during the moves, or between a crash and the next run, can
-    still see a mixture. What changed is the size of that window: from the whole
-    of Stage 5 — minutes, and every OCR page of it — to a sequence of same-volume
-    metadata operations, with a marker on disk saying the folder is mid-swap and
-    a roll-forward that completes it. Closing the window entirely needs a
-    published-set indirection that §8's fixed paths currently forbid.
+    still see a set that is INCOMPLETE. What it can no longer see is a set that
+    is MIXED: step 1 takes the whole previous set out before step 2 puts any of
+    the new one in, so at every instant the matter root holds files from one run
+    only. What also changed is the size of the window: from the whole of Stage 5
+    — minutes, and every OCR page of it — to a sequence of same-volume metadata
+    operations, with a marker on disk saying which phase the swap is in and a
+    roll-forward that completes it. Closing the incompleteness window entirely
+    needs a published-set indirection that §8's fixed paths currently forbid.
     """
     marker = _marker_path(destination)
     if not marker.is_file():
         return ()
-    # Read and validated BEFORE anything moves or is deleted. An unreadable
-    # marker raises :class:`PendingSwapUnreadable` from here, with the folder
-    # untouched — see that class for why the permissive read this replaces was
-    # the more dangerous of the two options (Codex review #2, B-2).
-    superseded = _read_marker(marker)
+    # Read and validated BEFORE anything moves. An unreadable marker raises
+    # :class:`PendingSwapUnreadable` from here, with the folder untouched — see
+    # that class for why the permissive read this replaces was the more
+    # dangerous of the two options (Codex review #2, B-2).
+    plan = _read_marker(marker)
 
     # Every step below is wrapped in :func:`_retry_io` for the reason given
     # there: on Windows the swap is a burst of metadata operations over files an
@@ -590,70 +884,135 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     # idempotent, so a retry repeats work rather than doing something new — and
     # the roll-forward that follows a genuine failure is idempotent for the same
     # reason.
-    #
-    # This sentence used to be false about one step and is corrected rather than
-    # softened (fix round, B-4): the superseded-DIRECTORY branch was
-    # `shutil.rmtree(path, ignore_errors=True)`, which is neither retried nor
-    # observable. Every removal now goes through `_remove_file_or_fail` or
-    # `_remove_tree_or_fail`, which retry AND then check the name is gone —
-    # "the call returned" and "the file is gone" are not the same fact on
-    # Windows, and only the second one licenses deleting the marker.
     root = destination.root
-    removed: list[str] = []
-    for rel in superseded:
-        path = root / rel
-        if path.is_file():
-            _remove_file_or_fail(path)
-            removed.append(rel)
-        elif path.is_dir():
-            # Retried and PROVEN gone, like every other destructive step here
-            # — see :func:`_remove_tree_or_fail` for the failure this used to
-            # absorb (Codex review #2 fix round, B-4). A failure propagates out
-            # of this function with the marker still on disk, so the folder
-            # stays declared mid-swap and the next run rolls it forward.
-            _remove_tree_or_fail(path)
-            removed.append(rel)
-
     staging = _staging_root(destination)
-    if staging.is_dir():
-        for src in sorted(staging.rglob("*")):
-            if not src.is_file():
+    aside = _aside_root(destination, plan.aside)
+    moved: list[str] = []
+
+    # THE NAMES ON DISK, read before the marker's phase is acted on and given
+    # priority over it (D-31). A staging directory with no files in it means
+    # there is nothing to publish, and therefore nothing may be set aside — which
+    # is the state B-6's stale marker leaves behind after a successful swap. The
+    # old design read a surviving marker and deleted the newly published set;
+    # this reads the same marker, sees an empty staging directory, and moves
+    # nothing.
+    staged = _staged_files(staging)
+    phase = plan.phase
+    abandoned = not staged and phase == PHASE_PENDING
+    if abandoned:
+        # A marker that outlived its swap. There is nothing staged, so there is
+        # nothing this marker can authorize: skip straight to the cleanup, which
+        # cannot reach outside `.dociq/`.
+        phase = PHASE_PUBLISHED
+
+    if phase == PHASE_PENDING:
+        # ---- 1. SET ASIDE. Renames only. Nothing is deleted. ---------------
+        for rel in plan.superseded:
+            src = root / rel
+            if not src.exists():
+                # Already moved by an interrupted attempt, or never there. Both
+                # are "this name is not in the matter folder", which is the only
+                # thing this step is trying to achieve.
+                if (aside / rel).exists():
+                    moved.append(rel)
                 continue
+            dst = aside / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            _rename_or_fail(src, dst)
+            moved.append(rel)
+        _write_marker(marker, SwapPlan(plan.superseded, plan.aside, PHASE_ASIDE))
+        phase = PHASE_ASIDE
+    elif phase == PHASE_ASIDE:
+        # An earlier attempt completed step 1; those names are already out.
+        moved.extend(rel for rel in plan.superseded if (aside / rel).exists())
+
+    if phase == PHASE_ASIDE:
+        # ---- 2. PUBLISH. Renames only. ------------------------------------
+        for src in staged:
             dst = root / src.relative_to(staging)
             dst.parent.mkdir(parents=True, exist_ok=True)
-            _retry_io(lambda s=src, d=dst: s.replace(d))
-        # The staged FILES are all moved by here or the loop above raised. What
-        # can be left is empty directories, and their removal is the one step in
-        # this function whose failure carries no evidentiary consequence: the
-        # deliverables are in place and `.dociq/staging/` is not a deliverable —
-        # the manifest excludes the whole prefix and `staging_layout` clears it
-        # before the next run reuses it. So it is retried, and a residual EMPTY
-        # tree is tolerated rather than converted into a permanently blocked
-        # matter folder by a lock on a directory nobody reads.
-        #
-        # A residual FILE is a different fact and is not tolerated: it would mean
-        # the move loop did not do what the line above assumes, and deleting the
-        # marker over it would strand a piece of this run's set outside the
-        # folder with nothing recording it.
-        try:
-            _remove_tree_or_fail(staging)
-        except OSError:
-            leftover = sorted(
-                p.relative_to(staging).as_posix()
-                for p in staging.rglob("*")
-                if p.is_file()
+            if dst.exists():
+                # A name the plan did not cover — a deliverable an older run
+                # wrote that `_stale_deliverables` no longer enumerates, say. It
+                # is moved aside like everything else rather than overwritten:
+                # `os.replace` here would be a delete before a publish with a
+                # different name on it, and it would be the one destructive act
+                # in this function that nothing recorded.
+                rel = src.relative_to(staging).as_posix()
+                occupant = aside / rel
+                occupant.parent.mkdir(parents=True, exist_ok=True)
+                _rename_or_fail(dst, occupant)
+                moved.append(rel)
+            _rename_or_fail(src, dst)
+        leftover = sorted(
+            p.relative_to(staging).as_posix() for p in _staged_files(staging)
+        )
+        if leftover:  # pragma: no cover - `_rename_or_fail` raises before this
+            raise OSError(
+                errno.ENOTEMPTY,
+                "the staged set was not fully published: " + ", ".join(leftover),
+                str(staging),
             )
-            if leftover:
-                raise
+        _write_marker(
+            marker, SwapPlan(plan.superseded, plan.aside, PHASE_PUBLISHED))
+    # A re-entry at `published`, and the abandoned-marker case, deliberately
+    # report NOTHING moved: this call did not move anything, and a caller that
+    # renders "N superseded file(s) replaced" from the return value would
+    # otherwise attribute the previous run's work to this one. Whether a swap
+    # was pending at all is a separate question the caller already asks.
 
-    # Last, and only now: everything the marker authorized has happened and been
-    # proven. It is deliberately NOT `_remove_file_or_fail` — a marker whose name
-    # lingers after `unlink` returns leaves the folder declared mid-swap, and the
-    # next run's roll-forward finds nothing left to do and removes it. That is
-    # benign, and turning it into a raised error would fail closed over a state
-    # with no evidentiary consequence.
-    _retry_io(lambda: marker.unlink(missing_ok=True))
-    return tuple(sorted(removed))
+    # ---- 3. ONLY NOW, delete — and only under `.dociq/`. -------------------
+    #
+    # The matter folder is complete and correct at this line, whatever happens
+    # below. So none of it raises: a lock on one file in a set-aside tree, or on
+    # a drained staging directory, must not turn a published run into a failed
+    # one, and it cannot make the evidence set wrong. What survives is named by
+    # :func:`superseded_residue` and disclosed by the run rather than absorbed.
+    _discard_aside_trees(destination)
+    try:
+        _remove_tree_or_fail(staging)
+    except OSError:
+        pass
+
+    # Last, and TOLERATED like every other step below the publish.
+    #
+    # A marker whose name lingers is now provably harmless, which is the
+    # difference from B-6: it says `published`, and the next roll-forward reads
+    # that, finds an empty staging directory, sets nothing aside and deletes
+    # nothing outside `.dociq/`. Under the old design the same lingering name
+    # authorized deleting the set that had just been published.
+    #
+    # It is tolerated whether `unlink` RETURNS over a surviving name or RAISES,
+    # and the second half of that was a real gap found by enumerating this
+    # module's destructive operations rather than by a test: `_retry_io` re-raised
+    # after eight attempts, and nothing above `commit_staging` handles it — so a
+    # transient antivirus lock on `staging_ready.json`, the same condition every
+    # other step here absorbs, turned a run whose deliverables were fully
+    # published into a raised exception. The published set is correct at this
+    # line; nothing below it may say otherwise.
+    try:
+        _retry_io(lambda: marker.unlink(missing_ok=True))
+    except OSError:
+        pass
+    return tuple(sorted(set(moved)))
+
+
+def _discard_aside_trees(destination: OutputLayout) -> tuple[str, ...]:
+    """Delete every ``.dociq/superseded*`` tree that will go. Never raises.
+
+    Returns the names that survived. All of them, not just this swap's: a tree
+    left by an earlier run is the same thing — a previous set that has already
+    been replaced — and the lock that stopped it being deleted then may be gone
+    now. Nothing outside ``.dociq/`` is reachable from here, because
+    :func:`_validate_aside_name` is the only thing that ever names one.
+    """
+    survivors: list[str] = []
+    for name in _aside_names(destination):
+        try:
+            _remove_tree_or_fail(_aside_root(destination, name))
+        except OSError:
+            survivors.append(name)
+    return tuple(survivors)
 
 
 def recover_pending(destination: OutputLayout) -> tuple[str, ...]:
@@ -665,6 +1024,16 @@ def recover_pending(destination: OutputLayout) -> tuple[str, ...]:
     B-2 fix. :func:`dociq.pipeline.run` calls this as its first statement and
     turns that into a blocked run with the ordinary ``incomplete_run/`` record,
     so an operator sees the reason rather than a traceback.
+
+    **What recovery can and cannot do (D-31).** It can rename this folder's names
+    into ``.dociq/``, rename staged files into this folder, and delete inside
+    ``.dociq/``. It **cannot delete a published file**, and that is a property of
+    the code rather than of the marker being correct: the only destructive call
+    reachable from here is :func:`_remove_tree_or_fail` on a path
+    :func:`_validate_aside_name` produced. That is what makes B-6 unreachable —
+    the finding was a stale marker authorizing recovery to delete the newly
+    published set, and there is no longer a code path that deletes a published
+    set at all.
     """
     if not pending_swap(destination):
         return ()

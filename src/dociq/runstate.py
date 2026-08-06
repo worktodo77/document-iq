@@ -8,9 +8,13 @@ stale-deliverable purge, emission, accounting, manifest — and both could repor
 success, because zero pages in equals zero pages kept plus zero pages dropped
 and a partial corpus balances against itself.
 
-The consequence is not a status-display bug. A blocked run purges the previous
-run's deliverables and writes an empty set over them, so a failed disk check
-destroys the last good reduction of a matter. That is provenance loss.
+The consequence was not a status-display bug. A blocked run purged the previous
+run's deliverables and wrote an empty set over them, so a failed disk check
+destroyed the last good reduction of a matter. That is provenance loss.
+
+*(Both sentences are past tense on purpose. The purge itself is gone as well as
+the status defect: under D-31 Stage 5 renames the previous set aside and deletes
+it only after the new one is in place — see :func:`dociq.emit.paths.commit_staging`.)*
 
 This module is the fix's vocabulary: one small record and the operator-facing
 prose that goes with it.
