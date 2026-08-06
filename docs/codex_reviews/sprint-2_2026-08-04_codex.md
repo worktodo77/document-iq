@@ -1,3 +1,161 @@
+# Codex third fix-round review — DocIQ Sprint 2 (merge gate)
+
+**Repository:** `worktodo77/document-iq`
+**Branch:** `build/sprint-2`
+**Reviewed commit:** `416bafc` (implementation tip `e89b8f9`)
+**Fix-round handoff:** `docs/codex_reviews/sprint-2_2026-08-06_claude_r4.md`
+**Review date:** 2026-08-06
+**Gate:** D-10, Codex review #2, third fix round
+
+## Third fix-round verdict
+
+**NOT PASSED — another fix round is required. Two A findings and one B
+finding.**
+
+B-7 is fixed and closed: the no-index projection is shared, full refused and
+published content is compared, and each refused log agrees with the manifest
+hash it embeds. The specific A-5 and B-6 failure scenarios are unreachable in
+the new order: no partially deleted package is rolled back, and stale marker
+recovery contains no root-deliverable deletion.
+
+That is not enough to accept D-31 as implemented. The matter swap sets aside a
+fixed list rather than the complete previous set, then handles unplanned
+occupants lazily after new files are already visible. A real Windows lock
+therefore recreates a mixed old/new root, and a retired output can survive a
+successful swap permanently. The package state machine also deletes the only
+intact prior package when restarting from its interrupted two-rename state, and
+its post-publish cleanup can leave a hidden old package that no result or screen
+reports.
+
+## B-8 — Delete-last does not set aside the complete previous set
+
+**Severity class:** B — evidentiary-integrity; old and new deliverables can be
+visible together during a failed swap or after a reported-successful one.
+
+**Locations:** `src/dociq/pipeline.py:611-672`,
+`src/dociq/emit/paths.py:908-946`,
+`tests/test_emit_atomicity.py:699-794`
+
+D-31's load-bearing ordering claim is that the *whole* previous set leaves the
+matter root before any new file enters. `_stale_deliverables()` does not
+inventory that set; it expands a fixed list of current patterns. During
+publication, `commit_staging()` recognizes a destination the plan missed only
+when it reaches the corresponding staged file, and moves that occupant aside at
+that late point. Earlier staged files may already have landed. The supplied
+mid-publish test avoids the branch by defining `superseded = tuple(before)`, so
+it assumes the completeness the production enumerator does not guarantee.
+
+**Failure scenario:** an older DocIQ version left `z_legacy.txt`, which the
+current stale-pattern list no longer names, and the new version still writes a
+replacement at that path. Publication first lands sorted `a_new.txt`. An
+antivirus process holds the old `z_legacy.txt` open, so its late move-aside
+fails. In the direct reproduction using a real Windows open handle, the marker
+remained at phase `aside` and the matter root visibly contained
+`a_new.txt = NEW` beside `z_legacy.txt = OLD`. That is the mixed set D-31 says is
+unreachable.
+
+There is a success-path sibling. If a former version emitted
+`legacy_report.json` and the current version retired it, no staged path ever
+triggers the lazy occupant branch. The direct reproduction completed the swap,
+removed the marker, and left old `legacy_report.json` beside new
+`sources.json`. Stage 6 cannot catch it because the manifest is built over
+staging, not the destination root.
+
+Build the set-aside plan from a durable inventory of the complete previously
+published set, not the current version's output patterns, and move every member
+before publishing any new file. Add fail-before coverage for both a locked
+unplanned replacement and a retired output with no staged successor.
+
+## A-6 — “Build again” can delete the only intact package before replacement
+
+**Severity class:** A — real user-facing bug in ordinary internal recovery.
+
+**Locations:** `src/dociq/emit/handoff.py:604-615`,
+`src/dociq/emit/handoff.py:644-742`, `tests/test_package_swap.py:369-397`
+
+The package's two renames are not crash-recovered. If publication or rollback
+is interrupted after `upload_package/` moves to
+`.dociq/package_superseded/`, that directory is the only intact prior package.
+The double-rename failure test deliberately leaves and names the same state,
+telling the operator to rename it back **or build again**. On the next build,
+the unconditional startup loop classifies both `package_staging` and
+`package_superseded` as disposable residue and deletes them before assembling a
+replacement. This is delete-before-publish inside the D-31 redesign.
+
+**Failure scenario:** the final publish rename and rollback rename fail, or the
+process dies between the two publish renames. The old six-file package is intact
+under `.dociq/package_superseded` and no `upload_package/` exists. The operator
+chooses the offered “build again” path; startup deletes both state directories,
+then an ordinary assembly error occurs. The direct reproduction ended with no
+published package, no staging package, and no superseded package: the last good
+package was destroyed before any replacement existed.
+
+Recover this state before cleanup: when the published name is absent and an
+intact superseded package exists, restore it or finish the validated staged
+publish without deleting either candidate first. Add a two-invocation
+fail-before that starts from the covered double-rename failure (and a
+process-death equivalent), fails the next assembly, and proves the earlier
+package remains byte-identical.
+
+## A-7 — Package cleanup residue is reported as an unqualified success
+
+**Severity class:** A — real user-facing/retention bug in ordinary internal use.
+
+**Locations:** `src/dociq/emit/handoff.py:230-248`,
+`src/dociq/emit/handoff.py:738-743`, `src/dociq/gui/pipeline.py:448-478`,
+`src/dociq/adapter.py:874-903`, `src/dociq/gui/view_models.py:992-1013`
+
+The package post-publish cleanup calls `_remove_tree(package_superseded)` and
+discards its boolean result. `UploadPackage` and the GUI's `PackageResult` have
+no residue field, so the success screen cannot disclose it. A-16 does not close
+this branch: `emit.paths.superseded_residue()` recognizes only matter-swap
+directories named `superseded*`, not `package_superseded`.
+
+**Failure scenario:** a scanner locks one file in the old package after the new
+package has taken the published name. `_remove_tree()` partially removes the
+old tree and returns `False`; `_publish_package()` nevertheless returns normal
+success. The direct reproduction showed `upload_package/` correctly published,
+`.dociq/package_superseded/` still present, `UploadPackage` carrying no field for
+it, and the A-16 scanner returning `()`. The GUI therefore says only “Upload
+package built,” while the stale package copy remains on the matter machine.
+
+Carry package cleanup residue through `UploadPackage`/`PackageResult` and render
+the same success-first disclosure A-16 requires for the matter swap. Add a
+fail-before that forces the final removal to return `False` and asserts both the
+surviving disk path and the visible success-with-residue wording.
+
+## Third fix-round verification performed
+
+- Fetched and checked out `build/sprint-2`; reviewed the clean remote tip at
+  `416bafc`, the R4 handoff, D-31/A-16, and the named verification §8.3.
+- **582 targeted tests passed** across atomic emit, package swap, publication
+  gating, pipeline, adapter, view models, GUI screen/failure states, amendments,
+  terminal rendering, offline enforcement, incomplete runs, and emitters.
+- Direct reproductions confirmed B-8's real-lock mixed state and successful
+  retired-output residue, A-6's destruction on restart, and A-7's silent package
+  residue against the reviewed tip.
+- `git diff --check ae6af18...HEAD` passed.
+- No fresh full-suite run was attempted. The handoff's reported 1,395-test
+  passes are not counted as this review's independent verification.
+- The reasoned §8.3 premise is accepted narrowly. Official Python documentation
+  says Windows `os.rename` fails when the destination exists, and Microsoft
+  documents immediate move success/failure separately from the explicit
+  `MOVEFILE_DELAY_UNTIL_REBOOT` mode. This review found no support for a hidden
+  delete-on-close-style pending state in the operation used here. The findings
+  above do not depend on refuting that premise.
+- The R4 non-claims remain non-claims: criterion 4 is not met, no mouse-driven
+  GUI acceptance was performed, the real-corpus byte-identical claim remains
+  open, and the 3,600-second per-file timeout remains Alex's open ruling.
+
+## Third fix-round merge condition
+
+Fix B-8, A-6, and A-7 with fail-before coverage at the complete-inventory,
+two-invocation recovery, and operator-visible residue boundaries described
+above. Re-enumerate the redesigned state machines from every persistent state,
+refresh verification, and request the next fix-round review.
+
+---
+
 # Codex second fix-round review — DocIQ Sprint 2 (merge gate)
 
 **Repository:** `worktodo77/document-iq`
