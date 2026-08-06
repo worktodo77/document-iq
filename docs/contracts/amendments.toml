@@ -167,3 +167,15 @@ title = "a Stage-6 gate refusal is not a BLOCKED run; TerminalStatus needs REFUS
 raised_by = "the Codex review #2 fix round (B-1), on a frozen and concurrently-edited module"
 wired_in = { "src/dociq/contracts.py" = ["TerminalStatus"] }
 tests = ["tests/test_publication_gate.py"]
+
+# A-16's wiring lands in the SAME commit that adds this entry, so its adopting
+# commit id cannot exist yet — a commit cannot name itself. Recorded as "raised"
+# for exactly one commit and flipped to "applied" with the real id in the next.
+# The checker rejecting the "PENDING" placeholder is how this constraint
+# surfaced; it also rejects "HEAD", which is the D-2 hole that made the rule.
+[amendment.A-16]
+status = "raised"
+title = "a completed swap's undeletable residue has nowhere to reach the operator"
+raised_by = "the D-31 delete-last redesign, correctly declining to route it through hashed content"
+wired_in = { "src/dociq/gui/pipeline.py" = ["RunOutcome"], "src/dociq/adapter.py" = ["RunOutcome"] }
+tests = ["tests/test_seam_population.py"]

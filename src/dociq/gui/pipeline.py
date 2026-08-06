@@ -366,6 +366,28 @@ class RunOutcome:
     """Whether this run wrote the §7 deliverables. False for every non-complete
     termination — see :attr:`termination`."""
 
+    superseded_residue: tuple[str, ...] = ()
+    """Set-aside trees under ``.dociq/`` a completed swap could not delete
+    (amendment A-16, from ruling D-31).
+
+    **This is a success with a residue, not a failure**, and the screen must say
+    so in that order. Under D-31 the swap renames the previous set aside,
+    renames the staged set into place, and deletes the set-aside tree LAST — so
+    a failure of that last step leaves the matter folder holding one complete,
+    correct set, and ``.dociq/`` holding a clearly-named stale one. The run
+    published. The evidence is right.
+
+    It crosses the seam because **nobody opens ``.dociq/``**. Left unsurfaced it
+    is disk that fills for reasons no operator can see, and — worse for this
+    tool — a stale copy of a previous run's deliverables sitting on the matter
+    machine with nothing on screen having mentioned it.
+
+    Deliberately NOT routed through ``RunResult.warnings``: those become hashed
+    ``content``, and a run that hit a transient lock and one that did not would
+    then produce different bytes for the same evidence. That is criterion 7's
+    whole boundary, and this project has twice had to unpick something from
+    hashed content that belonged in the run record instead."""
+
 
 @dataclass(frozen=True, slots=True)
 class BatesProposal:

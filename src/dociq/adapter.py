@@ -789,6 +789,12 @@ class RealPipeline:
                   else None),
             termination=outcome.termination,
             published=outcome.published,
+            # A-16. Carried across even though it describes a SUCCESS: the swap
+            # published correctly and could not delete what it set aside, and
+            # nobody opens `.dociq/` to find out. Populating it here rather than
+            # deriving it in a screen keeps seam rule 2 — the GUI computes
+            # nothing the pipeline is responsible for.
+            superseded_residue=tuple(outcome.superseded_residue),
         )
 
     # -- §8 handoff (amendment A-12) ----------------------------------------
