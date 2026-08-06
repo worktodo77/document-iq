@@ -891,6 +891,54 @@ def test_a_marker_without_a_phase_or_an_aside_fails_closed(tmp_path):
             emit_paths.recover_pending(layout)
 
 
+def test_a_locked_marker_does_not_fail_a_run_whose_set_is_published(
+        tmp_path, monkeypatch):
+    """FAIL-BEFORE, and it was found by ENUMERATION rather than by a reviewer.
+
+    Steps 1-3 of the swap are designed so a failure below the publish is a
+    disclosed residue rather than an error — the set-aside removal collects
+    survivors and the staging removal is wrapped. The final ``marker.unlink``
+    was **not** wrapped: ``_retry_io`` re-raised after eight attempts and nothing
+    above ``commit_staging`` handles it. So a transient antivirus lock on
+    ``staging_ready.json`` — the same condition every other step here absorbs —
+    turned a run whose deliverables were fully published into a traceback.
+
+    The published set is correct at that line, and nothing below it may say
+    otherwise. The surviving marker is provably harmless: it says ``published``,
+    and the next recovery reads that and touches nothing.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    layout, staging = _stage_a_second_set(tmp_path, out, ("sources.json",))
+    staged_now = _fingerprint(staging)
+
+    real = Path.unlink
+
+    def lock_the_marker(self, *a, **kw):
+        if self.name == emit_paths.MARKER_NAME:
+            raise PermissionError(
+                32, "[WinError 32] The process cannot access the file")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", lock_the_marker)
+    moved = emit_paths.commit_staging(layout)  # must NOT raise
+    monkeypatch.undo()
+
+    assert "sources.json" in moved
+    after = _fingerprint(out)
+    for rel, digest in staged_now.items():
+        assert after.get(rel) == digest, f"{rel} was not published"
+
+    # The surviving marker is harmless, and the next recovery says so by doing
+    # nothing to the folder and then clearing it.
+    assert emit_paths.pending_swap(layout)
+    published = _fingerprint(out)
+    assert emit_paths.recover_pending(layout) == (), (
+        "the recovery reported replacing files the previous run had replaced")
+    assert _fingerprint(out) == published
+    assert not emit_paths.pending_swap(layout)
+
+
 def test_dociq_state_inside_staging_is_never_published(tmp_path):
     """A staging layout is an ``OutputLayout``, so anything run against it makes
     its own ``.dociq/`` inside it — the package builder does. Publishing that

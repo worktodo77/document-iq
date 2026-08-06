@@ -955,13 +955,11 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
             )
         _write_marker(
             marker, SwapPlan(plan.superseded, plan.aside, PHASE_PUBLISHED))
-    elif not abandoned:
-        # The publish already completed on an earlier attempt, so every planned
-        # name was replaced. Reported from the PLAN rather than from what is
-        # still in `.dociq/<aside>/`, because a previous cleanup may already have
-        # deleted the set-aside tree — and "the deliverable is not in the matter
-        # folder any more" is true either way.
-        moved.extend(plan.superseded)
+    # A re-entry at `published`, and the abandoned-marker case, deliberately
+    # report NOTHING moved: this call did not move anything, and a caller that
+    # renders "N superseded file(s) replaced" from the return value would
+    # otherwise attribute the previous run's work to this one. Whether a swap
+    # was pending at all is a separate question the caller already asks.
 
     # ---- 3. ONLY NOW, delete — and only under `.dociq/`. -------------------
     #
@@ -976,13 +974,26 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     except OSError:
         pass
 
-    # Last. A marker whose name lingers after `unlink` returns is now provably
-    # harmless, which is the difference from B-6: it says `published`, and the
-    # next roll-forward reads that, finds an empty staging directory, sets
-    # nothing aside and deletes nothing outside `.dociq/`. Under the old design
-    # the same lingering name authorized deleting the set that had just been
-    # published.
-    _retry_io(lambda: marker.unlink(missing_ok=True))
+    # Last, and TOLERATED like every other step below the publish.
+    #
+    # A marker whose name lingers is now provably harmless, which is the
+    # difference from B-6: it says `published`, and the next roll-forward reads
+    # that, finds an empty staging directory, sets nothing aside and deletes
+    # nothing outside `.dociq/`. Under the old design the same lingering name
+    # authorized deleting the set that had just been published.
+    #
+    # It is tolerated whether `unlink` RETURNS over a surviving name or RAISES,
+    # and the second half of that was a real gap found by enumerating this
+    # module's destructive operations rather than by a test: `_retry_io` re-raised
+    # after eight attempts, and nothing above `commit_staging` handles it — so a
+    # transient antivirus lock on `staging_ready.json`, the same condition every
+    # other step here absorbs, turned a run whose deliverables were fully
+    # published into a raised exception. The published set is correct at this
+    # line; nothing below it may say otherwise.
+    try:
+        _retry_io(lambda: marker.unlink(missing_ok=True))
+    except OSError:
+        pass
     return tuple(sorted(set(moved)))
 
 

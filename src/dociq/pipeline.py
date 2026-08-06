@@ -1251,9 +1251,9 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         # auditor should not have to infer.
         walk_notes.invocation.append(
             f"RECOVERED: a previous run had finished writing its deliverables "
-            f"but was interrupted while moving them into place; the move was "
+            f"but was interrupted before its swap was fully wound up; it was "
             f"completed before this run started ({len(recovered)} superseded "
-            "file(s) replaced).")
+            "file(s) replaced by the recovery itself).")
     stage(1)
     walked = walker.run(walk_config, opts.walk, walk_notes)
     stage(2, f"{len(walked.documents)} document(s) read")
