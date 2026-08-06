@@ -174,7 +174,8 @@ tests = ["tests/test_publication_gate.py"]
 # The checker rejecting the "PENDING" placeholder is how this constraint
 # surfaced; it also rejects "HEAD", which is the D-2 hole that made the rule.
 [amendment.A-16]
-status = "raised"
+status = "applied"
+adopted_in = "f7358a7"
 title = "a completed swap's undeletable residue has nowhere to reach the operator"
 raised_by = "the D-31 delete-last redesign, correctly declining to route it through hashed content"
 wired_in = { "src/dociq/gui/pipeline.py" = ["RunOutcome"], "src/dociq/adapter.py" = ["RunOutcome"] }
