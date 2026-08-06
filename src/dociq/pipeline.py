@@ -31,7 +31,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from dociq.contracts import (
     ContractViolation,
@@ -653,6 +653,29 @@ def _stale_deliverables(
     return tuple(sorted(found))
 
 
+def _log_reconciliation(
+    report: ReconciliationReport | None, *, index_supplied: bool
+) -> ReconciliationReport | None:
+    """The reconciliation projection the log's hashed ``content`` records.
+
+    **One projection, two callers** (Codex review #2, second fix round, B-7).
+    The published path passed ``report if index is not None else None`` and
+    :func:`_abort` passed the always-created no-index report, so an ordinary
+    matter *without* a master index produced a refused log whose
+    ``content.reconciliation`` was an object where the published log's was
+    ``null`` — two different hashed identities for the same evidence, and the
+    refused log's own ``content_sha256`` therefore disagreed with the
+    ``log_content_sha256`` embedded in the manifest it carries. A verifier had
+    to choose which of one file's two hashes to believe.
+
+    The rule itself is unchanged and is stated here rather than at two call
+    sites: **reconciliation is a fact about the master index**, so a run given
+    no index records ``null`` — not an empty report, which would say
+    "reconciliation ran and matched nothing".
+    """
+    return report if index_supplied else None
+
+
 def _abort(
     *,
     config: RunConfig,
@@ -665,12 +688,16 @@ def _abort(
     result: RunResult | None = None,
     assignment: AssignmentResult | None = None,
     reconciliation: ReconciliationReport | None = None,
+    index_supplied: bool = False,
     manifest: mf.Manifest | None = None,
     accounting_report: accounting.AccountingReport | None = None,
     renumbering: Sequence[RenumberWarning] = (),
     drops: Sequence[DropLogEntry] = (),
     bates_decision: BatesDecision | None = None,
     bates_ranges: dict[tuple[str, str, int], BatesRange] | None = None,
+    content_warnings: Sequence[str] | None = None,
+    output_hashes: Mapping[str, str] | None = None,
+    staged_bundle: LogBundle | None = None,
 ) -> PipelineOutcome:
     """End a run that did not complete, WITHOUT publishing anything.
 
@@ -714,6 +741,16 @@ def _abort(
     termination = walk_notes.termination
     documents = walked.documents
     warnings = list(walk_notes.messages()) + list(walked.warnings)
+    # The list that becomes hashed `content.warnings`. A Stage-1 abort has only
+    # the walk's own warnings and passes nothing, so it keeps the line above. A
+    # STAGE-6 REFUSAL walked the whole corpus and assigned identifiers, so it
+    # hands over the same list the published log records — otherwise the refused
+    # log's content is missing the assignment and drop warnings the published
+    # one carries, and the two hashes for the same evidence disagree again one
+    # field over from B-7's (Codex review #2, second fix round).
+    hashed_warnings = (
+        list(content_warnings) if content_warnings is not None else warnings
+    )
 
     # Stamped from the SAME termination the outcome carries (round-2 F-1).
     # This construction site took the contract's COMPLETED default, so an
@@ -775,34 +812,91 @@ def _abort(
     # the wall clock are facts about this INVOCATION and are handed to
     # `build_log` as `run`-section arguments. A refused run and an unrefused run
     # over the same corpus must still agree on `content_sha256`.
-    bundle = build_log(
-        config,
-        documents,
-        unsupported=walked.unsupported,
-        assignment=assignment,
-        reconciliation=reconciliation,
-        renumbering=renumbering,
-        drops=drops,
-        profiles=opts.profiles,
-        bates_decision=bates_decision,
-        bates_ranges=bates_ranges,
-        token_estimate=after,
-        warnings=list(walked.warnings),
-        stamp=stamp,
-        accounting_report=report_acc,
-        manifest=manifest,
-        timings_s=timings,
-        run_notes={
-            **termination.as_jsonable(),
-            "published": False,
-            "deliverables_note": (
-                "This run wrote NO deliverables. The files in the parent folder, "
-                "if any, belong to the last run that completed."
+    #
+    # B-7 (second fix round) added three arguments to this call, and all three
+    # are here for one property: the quarantined log's own `content_sha256` must
+    # equal the `run.output_manifest.log_content_sha256` it carries. That
+    # manifest was built over the STAGED log — the published-style one this run
+    # wrote into `.dociq/staging/` before Stage 6 refused it — so any field on
+    # which this rebuild disagrees with that one gives a single durable audit
+    # file two identities for its own hashed content. `reconciliation` went
+    # through `_log_reconciliation` (the projection the published path uses),
+    # `warnings` became the published list rather than the walk's subset, and
+    # `output_hashes` — the hashes of the set this run actually built — stopped
+    # being blanked to `{}`.
+    run_notes: dict[str, object] = {
+        **termination.as_jsonable(),
+        "published": False,
+        "deliverables_note": (
+            "This run wrote NO deliverables. The files in the parent folder, "
+            "if any, belong to the last run that completed."
+        ),
+        "load_dependent_extraction": list(walk_notes.load_dependent),
+        "invocation_notes": list(walk_notes.invocation),
+    }
+    def _build() -> LogBundle:
+        return build_log(
+            config,
+            documents,
+            unsupported=walked.unsupported,
+            assignment=assignment,
+            reconciliation=_log_reconciliation(
+                reconciliation, index_supplied=index_supplied),
+            renumbering=renumbering,
+            drops=drops,
+            profiles=opts.profiles,
+            bates_decision=bates_decision,
+            bates_ranges=bates_ranges,
+            token_estimate=after,
+            warnings=hashed_warnings,
+            stamp=stamp,
+            accounting_report=report_acc,
+            manifest=manifest,
+            timings_s=timings,
+            output_hashes=output_hashes,
+            run_notes=run_notes,
+        )
+
+    bundle = _build()
+    # The property above, ENFORCED rather than asserted in prose. The rebuild is
+    # a genuinely independent computation from the same inputs, so this compares
+    # two answers rather than an answer with itself; and where they disagree the
+    # STAGED content wins, because that is the one the embedded manifest hash was
+    # taken over and an audit file must not carry two hashes for one section.
+    #
+    # A disagreement is a defect, and it is DISCLOSED rather than raised: this
+    # code path is already handling a refused run, and turning a projection drift
+    # into a traceback would replace an operator's refusal report with a crash.
+    # It surfaces as a named `<run>` discrepancy and a run note listing the keys
+    # — and it is disclosed by REBUILDING, because `build_log` copies both the
+    # notes and the accounting report at call time, so a discrepancy appended
+    # afterwards would reach the in-memory outcome and never reach the file.
+    # That is the B-5 class, and it is not being reintroduced by its own fix.
+    if staged_bundle is not None and bundle.content != staged_bundle.content:
+        drifted = sorted(
+            k for k in set(bundle.content) | set(staged_bundle.content)
+            if bundle.content.get(k) != staged_bundle.content.get(k)
+        )
+        run_notes["log_content_projection_drift"] = drifted
+        report_acc.discrepancies.insert(
+            1,
+            accounting.Discrepancy(
+                "<run>",
+                "log-content-projection-drift",
+                "the quarantined log's hashed content was rebuilt from the same "
+                "inputs as the staged log and disagreed on: "
+                + ", ".join(drifted)
+                + ". The staged projection is recorded, because the manifest's "
+                "log_content_sha256 was taken over it — but the two projections "
+                "must agree and this run proves they do not.",
             ),
-            "load_dependent_extraction": list(walk_notes.load_dependent),
-            "invocation_notes": list(walk_notes.invocation),
-        },
-    )
+        )
+        rebuilt = _build()
+        bundle = LogBundle(
+            run=rebuilt.run,
+            content=staged_bundle.content,
+            content_sha256=staged_bundle.content_sha256,
+        )
     write_processing_log(bundle, quarantine)
 
     (quarantine.root / STATUS_FILENAME).write_text(
@@ -895,9 +989,13 @@ def _refuse_publication(
     timings: list[tuple[str, float]],
     assignment: AssignmentResult,
     reconciliation: ReconciliationReport,
+    index_supplied: bool,
     report_acc: accounting.AccountingReport,
     manifest: mf.Manifest,
     refusals: list[tuple[str, str]],
+    content_warnings: Sequence[str],
+    output_hashes: Mapping[str, str],
+    staged_bundle: LogBundle,
     renumbering: Sequence[RenumberWarning] = (),
     drops: Sequence[DropLogEntry] = (),
     bates_decision: BatesDecision | None = None,
@@ -965,12 +1063,19 @@ def _refuse_publication(
         result=result,
         assignment=assignment,
         reconciliation=reconciliation,
+        index_supplied=index_supplied,
         manifest=manifest,
         accounting_report=report_acc,
         renumbering=renumbering,
         drops=drops,
         bates_decision=bates_decision,
         bates_ranges=bates_ranges,
+        # The three that make the quarantined log's own hash agree with the
+        # manifest hash it carries, and the staged bundle they are checked
+        # against (B-7). See the note at the `build_log` call in `_abort`.
+        content_warnings=content_warnings,
+        output_hashes=output_hashes,
+        staged_bundle=staged_bundle,
     )
 
 
@@ -1416,12 +1521,18 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # would report that nothing was renumbered, every time, forever.
     written.append(ledger.write(stage_out.issued_ids))
 
+    # Captured in a name because the REFUSAL path needs the same value: a run
+    # refused at Stage 6 built this same set and its quarantined log has to
+    # record the same `content.output_hashes`, or its own `content_sha256`
+    # disagrees with the `log_content_sha256` the manifest took over this very
+    # log (B-7).
+    staged_hashes = _hashes_of(written, stage_out)
     bundle = build_log(
         effective,
         documents,
         unsupported=unsupported,
         assignment=assignment,
-        reconciliation=report if index is not None else None,
+        reconciliation=_log_reconciliation(report, index_supplied=index is not None),
         renumbering=renumbering,
         drops=applied.drops,
         profiles=opts.profiles,
@@ -1430,7 +1541,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         token_estimate=after,
         warnings=warnings,
         stamp=stamp,
-        output_hashes=_hashes_of(written, stage_out),
+        output_hashes=staged_hashes,
         run_notes={
             # The terminal status is recorded on EVERY run, not only on the
             # ones that end badly (Codex B-1). A consumer must be able to ask
@@ -1594,9 +1705,17 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             timings=timings,
             assignment=assignment,
             reconciliation=report,
+            index_supplied=index is not None,
             report_acc=report_acc,
             manifest=man,
             refusals=refusals,
+            # The three that keep the quarantined log's hashed `content` equal
+            # to the STAGED log's — the one `man.log_content_sha256` was taken
+            # over — so the refused record does not give two identities for its
+            # own content (B-7).
+            content_warnings=warnings,
+            output_hashes=staged_hashes,
+            staged_bundle=bundle,
             # Everything else Stage 6 had in hand. A refused run walked the
             # whole corpus: it has the renumbering comparison, the drop log, the
             # Bates decision and its per-document ranges, and leaving them at
