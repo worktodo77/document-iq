@@ -637,9 +637,14 @@ extra ``upload_package/LI-06999.txt`` sitting in a folder an operator uploads
 whole. The claim that the rebuild covers it was true of the old write path and is
 withdrawn with it.
 
-``incomplete_run/*`` IS purged: once a complete run has written this folder, the
+``incomplete_run/*`` IS listed: once a complete run has written this folder, the
 record of an earlier aborted attempt describes a state the folder is no longer
-in, and leaving it would put a "RUN BLOCKED" artifact beside a good output set."""
+in, and leaving it would put a "RUN BLOCKED" artifact beside a good output set.
+
+**These names are RENAMED ASIDE, not deleted** (D-31). Every entry here is a
+name the swap moves into ``.dociq/<aside>/`` before the staged set takes it, and
+that tree is deleted only once the new set is in place. The word "stale" is
+about what the name holds, not about how it leaves."""
 
 
 def _stale_deliverables(
@@ -716,7 +721,7 @@ def _abort(
     """End a run that did not complete, WITHOUT publishing anything.
 
     Codex review #1, finding B-1. Everything Stage 5 would do is skipped: no
-    purge, no ``clean_text/``, no index, no ``sources.json``, no
+    swap, no ``clean_text/``, no index, no ``sources.json``, no
     ``processing_log.json``, no ``run_summary.pdf``, no ``output_manifest.json``
     and no issued-ID ledger. Whatever the last COMPLETE run left in this folder
     is exactly as it was, which is the point of the finding.
@@ -732,9 +737,10 @@ def _abort(
 
     They live in a sub-directory rather than beside the deliverables so that no
     name an incomplete run writes can collide with a name a complete run wrote.
-    A subsequent complete run purges the directory (``_STALE_PATTERNS``), and
-    the manifest classifies it as excluded so it can never make a later, good
-    run report an unclassified output.
+    A subsequent complete run replaces the directory (``_STALE_PATTERNS`` — it
+    is renamed aside with the rest of the superseded set, D-31), and the
+    manifest classifies it as excluded so it can never make a later, good run
+    report an unclassified output.
 
     **The optional arguments** (Codex review #2, finding B-1). This started as
     the Stage-1 abort and is now also the STAGE-6 REFUSAL, where a run walked
@@ -1254,8 +1260,8 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     mark("walk_extract", t)
 
     # Codex B-1. A blocked or cancelled walk stops HERE, before Stage 3 and
-    # therefore long before Stage 5's purge. Every later stage — assignment,
-    # the purge, emission, accounting, the manifest — is unreachable for a run
+    # therefore long before Stage 5's swap. Every later stage — assignment, the
+    # swap, emission, accounting, the manifest — is unreachable for a run
     # that did not complete, so none of them needs to know about the case, and
     # none of them can be the place a future edit reintroduces it.
     if not walk_notes.termination.publishable:

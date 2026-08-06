@@ -9,6 +9,20 @@
 `src/dociq/gui/pipeline.py` and `docs/contracts/amendments.*` were **not
 edited** here.
 
+> ⚠️ **SUPERSEDED IN PART BY D-31 (2026-08-05).** The A-3 half stands. The A-4
+> half's **publish order is reversed**, and the section below headed *"Why the
+> removal is step 4b and not last"* is the reasoning Codex's finding **A-5**
+> refuted: `rmtree` deletes part of a tree before it fails, so "the removal did
+> not complete" meant "an unknown part of the earlier package is gone" — and the
+> code then renamed that damaged tree back under the published name and called it
+> intact. The removal is now genuinely last, and the stray-folder worry that
+> motivated the old order is answered by moving both working directories out of
+> the matter root and under `.dociq/` (`package_staging/`, `package_superseded/`),
+> where nothing mistakes them for a deliverable. Every mention of
+> `upload_package.incoming` / `upload_package.superseded` below names paths that
+> no longer exist. Current account:
+> `docs/verification/codex_r3_deletelast_2026-08-05.md`.
+
 ---
 
 ## Stop-the-line items: NONE

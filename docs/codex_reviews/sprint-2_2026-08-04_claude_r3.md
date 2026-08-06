@@ -6,6 +6,38 @@
 **Answers:** the fix-round section of `docs/codex_reviews/sprint-2_2026-08-04_codex.md` (verdict at `9c69bb0`, reviewing `a309b15`)
 **Author:** Claude (Opus 5), 2026-08-04
 
+> ## ⚠️ SUPERSEDED IN PART BY D-31 (2026-08-05) — read this before believing the swap sections
+>
+> This document describes the **delete-first** swap protocol as the shipping
+> design. It no longer is. Codex's second fix-round review found a third
+> generation of the same defect inside this round's own fixes (**B-6**, **A-5**),
+> and Alex ruled the non-convergence out under **D-31: never delete before
+> publishing**. The swap now renames the current set into `.dociq/<aside>/`,
+> renames the staged set into place, and deletes only afterwards.
+>
+> Specifically **false as of D-31**, not merely out of date:
+>
+> * §B-4 above — "`_remove_tree_or_fail()`: retried, **and then proven gone**…
+>   The **file** branch got the same proof". `_remove_file_or_fail` **no longer
+>   exists**, and no superseded deliverable is deleted at all, so there is
+>   nothing for that proof to be about. `_remove_tree_or_fail` survives with its
+>   scope narrowed to `.dociq/`.
+> * §B-4 — "A failure now propagates with the marker still on disk, so
+>   roll-forward survives." Still true, but the marker is no longer what
+>   authorizes a destructive act: recovery reads the names on disk first and its
+>   only destructive call is inside `.dociq/`.
+> * §Non-claims — "One `_publish_package` branch (superseded removal fails *and*
+>   rename-back fails) is uncovered." **That branch no longer exists**; the
+>   removal happens after the publish, where its failure is a disclosed residue.
+>   The corresponding new branch (publish rename fails *and* rollback rename
+>   fails) **is** covered.
+> * §Non-claims — "`_remove_tree`/`_retry_rename` deliberately duplicate
+>   `paths.py`'s private `_retry_io` because that file was under concurrent
+>   revision". The concurrent-revision reason has expired; the duplication is
+>   still there and is now just duplication.
+>
+> The current account is `docs/verification/codex_r3_deletelast_2026-08-05.md`.
+
 ```
 git fetch origin && git checkout build/sprint-2
 ```
@@ -64,7 +96,7 @@ Five tests assert `incomplete_run/processing_log.json` **from disk**. The last e
 The probe ships three standing tripwires, and proved itself: its AST scan for enum-tested string ternaries **named `runstate.py:224` unprompted** when run against the defective code. Its allowlist for that scan is empty. Disclosed blind spot: a flattening performed inside a helper and returned.
 
 ### A-4 — the package claims its name only once it is built
-Assembly happens in a sibling `upload_package.incoming/`; the published name is taken only after every copy, filter, README and validation passes. Removals return **whether the directory is gone** and every caller branches on it.
+Assembly happens in a sibling `upload_package.incoming/`; the published name is taken only after every copy, filter, README and validation passes. Removals return **whether the directory is gone** and every caller branches on it. *(D-31: assembly moved to `.dociq/package_staging/`, and "whether the directory is gone" is no longer enough to decide a rollback — see the superseding note at the top.)*
 
 Worth flagging because it is your finding recurring one step over: the first version was publish-then-tidy-up, which can leave a correct published package beside a stray folder — and reporting that makes the GUI say *"The upload package was NOT built"* about a package that **was** built. The order now makes only truthfully-describable states reachable. That intermediate claim and its test were withdrawn, not reworded.
 
