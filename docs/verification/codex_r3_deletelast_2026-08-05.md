@@ -385,4 +385,41 @@ Criterion 4 is not met. No mouse-driven GUI acceptance has been performed. The
 
 ## 9. Suite evidence
 
-*(filled in after the repeat runs.)*
+All at `8caeca1` on `build/s2-r3-deletelast`. **No source file was edited while
+any of these ran** — see §9.3 for why that sentence is here.
+
+### 9.1 Full suite — 9 runs, nothing deselected
+
+| batch | runs | result |
+|---|---|---|
+| sequential ×4 | 1–4 | 100%, no `F` and no `E` in the progress output, loop exit 0 |
+| single | 5 | `1394 passed, 1 skipped in 537.74s` |
+| sequential ×4 | 6–9 | `1394 passed, 1 skipped` — 554.55s, 1481.45s, 358.45s, 341.40s |
+
+A further five runs completed exit 0 in a batch whose per-run output was
+swallowed by a bad `grep` in the harness. **They are not counted**, because
+"exit 0" there was the exit code of `tail`, not of `pytest`. Recorded rather
+than quietly folded into the total.
+
+The wall-clock spread (5:41 to 24:41) is contention — two suites ran
+concurrently for part of it, deliberately — not variance in the tests. The
+24:41 run passed under that contention, which is a small piece of evidence in
+its own right for a package this filesystem-heavy.
+
+### 9.2 The filesystem-sensitive class — 30 repeats
+
+`test_emit_atomicity.py` + `test_package_swap.py` + `test_publication_gate.py` +
+`test_incomplete_runs.py`, the four modules that touch real files, locks and
+renames: **30 repeats, 30 green, 0 red.** This is the "30 for anything
+filesystem/timing/subprocess-sensitive" bar; the whole of this package is that
+class, and one green run of it would have proved nothing.
+
+### 9.3 One discarded run, and what it teaches
+
+The first full-suite run of this package went red on
+`test_the_swap_is_unreachable_without_passing_the_gate` with an
+`IndentationError` out of `ast.parse`. It was not a defect: that test reads
+`pipeline.py` **from disk** via `inspect.getsource`, and the file was edited
+while the suite was running. The run is discarded and the finding is recorded —
+a source-inspection test makes concurrent editing a source of phantom failures,
+and the correct response is not to touch the tree during a suite run.
