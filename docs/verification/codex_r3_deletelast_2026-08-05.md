@@ -48,7 +48,7 @@ and the **`phase`**.
 | 0 | read the names on disk: what is left in staging, what is already set aside | — |
 | 1 **pending → aside** | RENAME each planned name into `.dociq/<aside>/` | raise; the matter folder holds the previous set minus what already moved, all of it intact under `.dociq/`; marker stays at `pending` |
 | — | atomically rewrite the marker to `aside` | raise; step 1 re-runs and is idempotent (a name already moved is skipped because it is not at the root) |
-| 2 **aside → published** | RENAME each staged file into place; a destination the plan did not cover is moved aside too, never overwritten | raise; the matter folder holds *part of the new set and none of the old* — incomplete, never mixed; the whole previous set is intact under `.dociq/<aside>/` and the rest of the new set is intact in staging; marker stays at `aside` |
+| 2 **aside → published** | (a) RENAME every occupied destination into `.dociq/<aside>/`, as a COMPLETE pass, then (b) RENAME each staged file into place — *corrected 2026-08-06, see the withdrawal below; this row used to describe (a) as happening lazily, inside (b)* | raise; the matter folder holds *part of the new set and none of the old* — incomplete, never mixed; the whole previous set is intact under `.dociq/<aside>/` and the rest of the new set is intact in staging; marker stays at `aside` |
 | — | atomically rewrite the marker to `published` | as above |
 | 3 | DELETE `.dociq/superseded*` and the drained staging tree | **does not raise.** The matter folder is complete and correct; a surviving tree is a disclosed residue |
 | 4 | `unlink` the marker | a surviving name is now provably harmless — see §3.1 |
@@ -58,6 +58,37 @@ folder *entirely* before any of the new set arrives, so at every instant the
 matter root holds files from one run only. That is the difference between
 "incomplete" and "mixed", and it is what §7's fixed deliverable paths (D-20,
 Path B) otherwise make impossible to guarantee.
+
+> **WITHDRAWN AS WRITTEN, 2026-08-06 — Codex review #2, third fix round, B-8.**
+> The sentence above was the load-bearing claim of this note and **it was false
+> when it was written.** Step 1 did not take the previous set out; it took out
+> the names `pipeline._STALE_PATTERNS` enumerated — *this build's* output
+> names. Two things followed, and Codex reproduced both on Windows:
+>
+> * a deliverable an older build wrote at a name this build no longer names, but
+>   still writes a replacement for, was recognised only when the publish loop
+>   REACHED it, and moved aside at that late point. Sorted publication landed
+>   `a_new.txt` first; a real open handle on `z_legacy.txt` then froze the swap
+>   at phase `aside` with `a_new.txt = NEW` beside `z_legacy.txt = OLD` — the
+>   mixed set this note says is unreachable;
+> * a deliverable an older build wrote and this one RETIRED had no staged
+>   successor, so the lazy branch was never entered. The swap **completed**,
+>   removed the marker, and left the old file beside the new set permanently.
+>   §4 Stage 6 cannot see it: the manifest is built over staging, not over the
+>   destination root.
+>
+> The claim is now true, and it is true for two independent reasons rather than
+> asserted: the plan is built from a **durable inventory of what the last run
+> actually published** (`.dociq/published_set.json`, written by the swap that
+> published it, so it survives a version change), and the publish phase begins
+> with a **complete pass that clears every destination** before any staged file
+> is renamed in. The first makes the plan complete; the second makes an
+> incomplete plan harmless. See `docs/verification/codex_r4_inventory_2026-08-06.md`.
+>
+> Two further states are corrected there, found by enumerating the swap's
+> persistent states backwards rather than by following a run forwards — both
+> destroyed a complete set of deliverables and neither was reachable from the
+> code, which is why this note never mentioned them.
 
 **Why step 3 is last and non-fatal.** By that line the published set is in
 place. A lock on one file in an already-superseded tree must not turn a

@@ -753,9 +753,22 @@ def test_a_blocked_publish_leaves_an_incomplete_set_never_a_mixed_one(
     out = tmp_path / "matter"
     _run(out)
     before = _fingerprint(out)
-    superseded = tuple(sorted(before))
+    # NOT `tuple(sorted(before))`, which is what this said and what Codex named
+    # in B-8: defining the plan as "everything that is there" assumes exactly the
+    # completeness the production enumerator does not guarantee, so the test
+    # never entered the branch that handles a name the plan missed. One
+    # deliverable is deliberately withheld from the plan here — the same shape as
+    # a file an older build wrote under a name this build no longer enumerates —
+    # and the mixture assertions below are unchanged. They now have to be
+    # satisfied by the pre-publish destination sweep rather than by the fixture.
+    unplanned = "document_index.csv"
+    assert unplanned in before, "the fixture's premise is gone"
+    superseded = tuple(sorted(set(before) - {unplanned}))
     layout, staging = _stage_a_second_set(tmp_path, out, superseded)
     staged_now = _fingerprint(staging)
+    assert unplanned in staged_now, (
+        "the withheld name has no staged replacement, so it would never reach "
+        "the occupant branch this test exists to cover")
 
     real = emit_paths._rename_or_fail
     state = {"published": 0}
@@ -955,3 +968,716 @@ def test_dociq_state_inside_staging_is_never_published(tmp_path):
     emit_paths.commit_staging(layout)
     assert not (out / emit_paths.STATE_DIRNAME / "scratch.txt").exists()
     assert not (out / "scratch.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# 5. B-8: the plan is the COMPLETE previous set, and it leaves FIRST
+#
+# Codex review #2, third fix round. D-31's load-bearing ordering claim is that
+# the whole previous set is out of the matter root before any new file enters
+# it. The plan did not inventory that set — it expanded this build's own output
+# patterns — and an occupant the plan missed was moved aside only when the
+# publish loop REACHED it. Two states followed, both of which Codex reproduced
+# on Windows with a real open handle, and both are covered here.
+# ---------------------------------------------------------------------------
+
+
+def _stage_with(tmp_path, out, superseded, extra):
+    """``_stage_a_second_set`` plus hand-placed staged files.
+
+    ``extra`` maps a staging-relative name to its contents, added BEFORE
+    ``mark_ready`` so the marker's published inventory covers them exactly as it
+    would for a file an emitter wrote.
+    """
+    layout = OutputLayout.at(out)
+    second_out = tmp_path / f"second-{len(list(tmp_path.iterdir()))}"
+    _run(second_out)
+    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
+    if staging.exists():
+        shutil.rmtree(staging)
+    shutil.copytree(second_out, staging, ignore=shutil.ignore_patterns(".dociq"))
+    for rel, text in extra.items():
+        target = staging / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8", newline="")
+    emit_paths.mark_ready(layout, superseded)
+    return layout, staging
+
+
+def test_a_locked_unplanned_replacement_publishes_nothing_before_it(tmp_path):
+    """FAIL-BEFORE (Codex review #2, third fix round, B-8) — reproduction 1.
+
+    An older DocIQ left ``z_legacy.txt``; this build's pattern list does not name
+    it and the folder's inventory (written by a run that predates it) does not
+    either, so the set-aside plan misses it. This build still writes a
+    replacement at that path.
+
+    The old publish loop recognized the occupant when it REACHED it. Staged
+    files sort before it, so ``a_new.txt`` landed first; a real open handle on
+    ``z_legacy.txt`` then made its move-aside fail, and the swap stopped with the
+    matter root holding ``a_new.txt = NEW`` beside ``z_legacy.txt = OLD``. That
+    is the mixed set D-31 says is unreachable, and the assertions below are
+    written against exactly that state.
+
+    The handle is real — ``open()`` on Windows, the same mechanism the B-4 test
+    uses — not a monkeypatch, because the property is about what the operating
+    system does to a rename under an antivirus lock.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    legacy = out / "z_legacy.txt"
+    legacy.write_text("OLD\n", encoding="utf-8", newline="")
+
+    # The plan covers what this build knows about. It does NOT cover
+    # `z_legacy.txt` — that is the premise, asserted rather than assumed.
+    layout, staging = _stage_with(
+        tmp_path, out, ("sources.json",),
+        {"a_new.txt": "NEW\n", "z_legacy.txt": "NEW\n"})
+    plan = json.loads(
+        (out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME)
+        .read_text(encoding="utf-8"))
+    assert "z_legacy.txt" not in plan["superseded"], (
+        "the fixture's premise is gone: the plan already covers the unplanned "
+        "occupant, so this proves nothing about an occupant it misses")
+    assert "a_new.txt" in plan["published"] and "z_legacy.txt" in plan["published"]
+
+    held = legacy.open("rb")  # the antivirus handle
+    try:
+        with pytest.raises(OSError):
+            emit_paths.commit_staging(layout)
+
+        # THE B-8 ASSERTION. Nothing of the new set may be in the folder while a
+        # member of the old one is still in it.
+        assert not (out / "a_new.txt").exists(), (
+            "a staged file was published while an old deliverable the plan "
+            "missed was still in the matter root — this is B-8's mixed set")
+        assert legacy.read_text(encoding="utf-8") == "OLD\n", (
+            "the deliverable that could not be moved was modified; a rename "
+            "that fails must destroy nothing")
+        assert emit_paths.pending_swap(layout), "the marker did not survive"
+        assert (staging / "a_new.txt").is_file(), (
+            "the new set is neither in the folder nor in staging")
+    finally:
+        held.close()
+
+    # And the roll-forward finishes it once the lock is gone.
+    emit_paths.recover_pending(layout)
+    assert not emit_paths.pending_swap(layout)
+    assert (out / "a_new.txt").read_text(encoding="utf-8") == "NEW\n"
+    assert (out / "z_legacy.txt").read_text(encoding="utf-8") == "NEW\n"
+    assert not (out / emit_paths.STATE_DIRNAME
+                / emit_paths.ASIDE_PREFIX).exists()
+
+
+def test_a_retired_output_leaves_the_folder_on_the_SUCCESS_path(tmp_path):
+    """FAIL-BEFORE (Codex review #2, third fix round, B-8) — reproduction 2.
+
+    The success-path sibling, and the one no failure injection can reach. A
+    former build emitted ``legacy_report.json``; this build RETIRED it, so no
+    staged path ever lands on that name and the lazy occupant branch is never
+    entered at all. The swap completed, removed the marker, and left the old file
+    beside the new ``sources.json`` — permanently, and reported as a clean run.
+
+    §4 Stage 6 cannot catch it: the manifest is built over STAGING, not over the
+    destination root, so nothing in the gate has ever seen the file.
+
+    The only thing that can know about it is a record of what the last run
+    actually published. Here that record is made the way a real run makes it —
+    ``legacy_report.json`` is published THROUGH the swap, so the inventory is
+    written by the code under test rather than by the test.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    # A run of a former build: it publishes `legacy_report.json` along with
+    # everything else, through the ordinary swap.
+    layout, staging = _stage_with(
+        tmp_path, out, ("sources.json", "document_index.csv"),
+        {"legacy_report.json": '{"from": "a build that emitted this"}\n'})
+    emit_paths.commit_staging(layout)
+    retired = out / "legacy_report.json"
+    assert retired.is_file(), "the fixture did not publish the retired output"
+    inventory = json.loads(
+        (out / emit_paths.STATE_DIRNAME / emit_paths.PUBLISHED_NAME)
+        .read_text(encoding="utf-8"))
+    assert "legacy_report.json" in inventory["published"], (
+        "the swap published a file and did not record it in the durable "
+        "inventory — the next run cannot know the file is there")
+
+    # This build. It has no pattern for `legacy_report.json` and writes nothing
+    # at that name, so the ONLY way it leaves is the inventory.
+    assert "legacy_report.json" not in json.dumps(list(pipeline._STALE_PATTERNS))
+    outcome = _run(out)
+
+    assert not retired.exists(), (
+        "a deliverable the previous run published survived a successful swap "
+        "because this build has no pattern for it — this is B-8's success-path "
+        "residue, which no gate can see")
+    assert "legacy_report.json" in outcome.stale_removed, (
+        "the retired output left the folder without being recorded")
+    assert (out / "sources.json").is_file()
+    assert not (out / emit_paths.STATE_DIRNAME
+                / emit_paths.ASIDE_PREFIX).exists(), (
+        "the retired output was set aside and the tree was not cleaned up")
+
+
+def test_the_inventory_survives_a_version_that_never_heard_of_the_name(tmp_path):
+    """The CLASS, stated without a specific file name.
+
+    B-8 is not about ``legacy_report.json``. It is about the plan being built
+    from what this build writes rather than from what the folder holds, so it
+    fails for *any* name a version change retires. This asserts the general
+    property: whatever the previous run published, the next run's plan covers all
+    of it, and the matter root afterwards holds the new set and nothing else.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    strays = {
+        "aa_first_alphabetically.txt": "OLD\n",
+        "zz_last_alphabetically.dat": "OLD\n",
+        "retired_dir/nested/deep.json": "{}\n",
+        "profile/not-a-yaml.txt": "OLD\n",
+    }
+    layout, staging = _stage_with(tmp_path, out, ("sources.json",), strays)
+    emit_paths.commit_staging(layout)
+    for rel in strays:
+        assert (out / rel).is_file(), f"{rel} was not published by the fixture"
+
+    published = set(json.loads(
+        (out / emit_paths.STATE_DIRNAME / emit_paths.PUBLISHED_NAME)
+        .read_text(encoding="utf-8"))["published"])
+    for rel in strays:
+        assert rel in published, f"{rel} is missing from the durable inventory"
+
+    _run(out)
+    survivors = [rel for rel in strays if (out / rel).exists()]
+    assert survivors == [], (
+        f"a version change left these behind: {survivors}")
+    assert not (out / "retired_dir").exists(), (
+        "the retired directory's shell survived its contents")
+
+
+def test_a_corrupt_published_inventory_fails_closed(tmp_path):
+    """The inventory decides what gets moved aside, so an unreadable one is the
+    same state as an unreadable marker and gets the same answer (B-2's
+    reasoning, one file over): nothing moves, the folder is untouched, and the
+    run is BLOCKED with a message naming the file.
+
+    An ABSENT inventory is deliberately NOT this — that is the ordinary folder
+    published by a build predating it, and it falls back to the patterns.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    before = _fingerprint(out)
+    inventory = out / emit_paths.STATE_DIRNAME / emit_paths.PUBLISHED_NAME
+    assert inventory.is_file(), "a completed run wrote no inventory"
+
+    inventory.write_text('{"published": [{"not": "a name"}]}\n',
+                         encoding="utf-8", newline="")
+    with pytest.raises(emit_paths.PublishedSetUnreadable) as excinfo:
+        emit_paths.published_inventory(OutputLayout.at(out))
+    assert str(inventory) in str(excinfo.value)
+
+    blocked = _run(out)
+    assert not blocked.published, "a corrupt inventory published anyway"
+    for rel, digest in before.items():
+        victim = out / rel
+        assert victim.is_file(), f"{rel} left the folder"
+        assert hashlib.sha256(victim.read_bytes()).hexdigest() == digest, (
+            f"{rel} was modified by a run that should have refused to publish")
+
+
+def test_an_absent_inventory_falls_back_to_the_patterns_and_says_so(tmp_path):
+    """The bootstrap case: a folder last published by a build that predates the
+    inventory. The plan is this build's patterns — which is B-8's incomplete
+    plan — so the run DISCLOSES that rather than presenting the plan as
+    complete."""
+    out = tmp_path / "matter"
+    _run(out)
+    (out / emit_paths.STATE_DIRNAME / emit_paths.PUBLISHED_NAME).unlink()
+
+    second = _run(out)
+    payload = json.loads(
+        second.layout.processing_log.read_text(encoding="utf-8"))
+    disclosed = payload["run"]["published_set_inventory"]
+    assert isinstance(disclosed, str) and "absent" in disclosed, (
+        "a run whose set-aside plan was built from patterns alone did not say "
+        "so; the operator cannot tell a complete plan from an incomplete one")
+    assert "published_set_inventory" not in json.dumps(payload["content"]), (
+        "the folder's history reached the hashed content (criterion 7)")
+
+    third = _run(out)
+    rebuilt = json.loads(
+        third.layout.processing_log.read_text(encoding="utf-8")
+    )["run"]["published_set_inventory"]
+    assert isinstance(rebuilt, list) and rebuilt, (
+        "the run after the fallback did not rebuild the inventory")
+
+
+def test_a_lock_on_the_inventory_keeps_the_marker_as_the_record(tmp_path,
+                                                                monkeypatch):
+    """The inventory is written BELOW the publish, where nothing may raise. So
+    the one thing that must not happen is it silently staying at the previous
+    run's set while the marker — which carries the same list — is deleted.
+
+    Enumerated rather than found: the marker's own removal is tolerated for
+    exactly this reason, and "tolerated" is how B-6 happened."""
+    out = tmp_path / "matter"
+    _run(out)
+    layout, staging = _stage_with(
+        tmp_path, out, ("sources.json",), {"a_new.txt": "NEW\n"})
+
+    real = emit_paths._write_inventory
+
+    def refuse(destination, published):
+        raise OSError("[WinError 32] held by another process")
+
+    monkeypatch.setattr(emit_paths, "_write_inventory", refuse)
+    emit_paths.commit_staging(layout)
+    monkeypatch.undo()
+
+    assert (out / "a_new.txt").is_file(), "the publish did not complete"
+    assert emit_paths.pending_swap(layout), (
+        "the marker was deleted while the inventory it backs was not written — "
+        "the record of what this run published is now gone entirely")
+    assert "a_new.txt" in emit_paths.published_inventory(layout), (
+        "the marker did not stand in for the inventory it is held back for")
+
+    # And the next call finishes it.
+    emit_paths.recover_pending(layout)
+    assert not emit_paths.pending_swap(layout)
+    assert "a_new.txt" in emit_paths.published_inventory(layout)
+    assert real is emit_paths._write_inventory
+
+
+# ---------------------------------------------------------------------------
+# 6. THE STATE ENUMERATION
+#
+# Codex review #2, third fix round: *"Re-enumerate the redesigned state machines
+# from every persistent state."* Every round of this review found a defect that
+# came from reasoning FORWARD through the happy path instead of BACKWARD from
+# each state that can exist on disk, so the states are enumerated here as a
+# table and, where they can be constructed, as probes.
+#
+# The full table — every combination of marker/phase, staging, matter root,
+# set-aside tree and inventory, with the next run's behaviour and whether it is
+# correct — is in `docs/verification/codex_r4_inventory_2026-08-06.md` §2. The
+# row IDs below are that table's.
+#
+# Two rows had a next step that DESTROYED evidence, and neither was reachable
+# from the code, which is why nothing had looked at them:
+#
+#   S-09  phase `aside`, staging empty, nothing published — the set-aside tree
+#         holds the only copy of the matter's deliverables, and the old code
+#         ran an empty publish loop, recorded `published`, and DELETED it.
+#   S-13  phase `published`, staging still full — the old code deleted
+#         `.dociq/staging`, a complete set of deliverables, as drained scratch.
+#
+# Both are now refused or rolled back, and both have a probe below.
+# ---------------------------------------------------------------------------
+
+
+def _marker_of(out) -> Path:
+    return out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME
+
+
+def _set_phase(out, phase: str) -> None:
+    marker = _marker_of(out)
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    payload["phase"] = phase
+    marker.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                      encoding="utf-8", newline="")
+
+
+def _stop_at_phase_aside(layout, staging, monkeypatch):
+    """Drive a real swap to the end of step 1 and no further.
+
+    The set-aside completes, the marker records `aside`, and the first publish
+    rename raises — which is the state a crash between the two steps leaves.
+    """
+    real = emit_paths._rename_or_fail
+
+    def refuse_staged(src, dst):
+        if str(src).startswith(str(staging)):
+            raise OSError("[WinError 32] held by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(emit_paths, "_rename_or_fail", refuse_staged)
+    with pytest.raises(OSError):
+        emit_paths.commit_staging(layout)
+    monkeypatch.undo()
+    plan = json.loads(_marker_of(layout.root).read_text(encoding="utf-8"))
+    assert plan["phase"] == emit_paths.PHASE_ASIDE, plan["phase"]
+    return plan
+
+
+def test_S09_aside_with_a_lost_staging_restores_the_previous_set(
+        tmp_path, monkeypatch):
+    """FAIL-BEFORE — the most destructive state in this module, and the one with
+    no test.
+
+    The swap has moved the previous set into ``.dociq/<aside>/`` and the staged
+    set is then LOST: a cleanup script, a backup agent, or an operator following
+    the readiness marker's own "move staging aside" instruction without also
+    deleting the marker. The set-aside tree now holds the only copy of the
+    matter's deliverables.
+
+    The old code did not ask. It ran the publish loop over nothing, recorded
+    ``published``, and then ran the cleanup — which deletes every
+    ``.dociq/superseded*`` tree. The folder was left with no deliverables at all
+    and nothing on disk saying where they had gone.
+
+    Reached backwards from the disk state rather than forwards from a run, which
+    is the whole point of the enumeration.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    before = _fingerprint(out)
+    layout, staging = _stage_with(
+        tmp_path, out, tuple(sorted(before)), {"only_new.txt": "NEW\n"})
+    _stop_at_phase_aside(layout, staging, monkeypatch)
+
+    aside = out / emit_paths.STATE_DIRNAME / emit_paths.ASIDE_PREFIX
+    assert aside.is_dir(), "the fixture did not reach the set-aside state"
+    assert not (out / "sources.json").exists(), (
+        "the fixture's premise is gone: the previous set is still at the root")
+
+    shutil.rmtree(staging)  # the staged set is lost
+
+    emit_paths.recover_pending(layout)
+
+    after = _fingerprint(out)
+    assert after == before, (
+        "the previous set was not restored to the matter folder. It was the "
+        f"only copy left: {sorted(set(before) - set(after))}")
+    assert not emit_paths.pending_swap(layout), "the abandoned marker survived"
+    assert not aside.exists(), "the set-aside tree survived its own rollback"
+    assert not (out / "only_new.txt").exists()
+    # The inventory still describes what is in the folder, because the swap
+    # never reached `published` and never rewrote it.
+    assert set(emit_paths.published_inventory(layout)) <= set(before) | {
+        rel for rel in before}
+    # And an ordinary run over the restored folder works.
+    assert _run(out).published
+
+
+def test_S10_aside_with_everything_already_published_only_cleans_up(
+        tmp_path, monkeypatch):
+    """The other reading of the same disk shape, and the reason S-09 has to test
+    the root rather than trust the phase.
+
+    Every published name IS at the matter root and staging is empty: the publish
+    finished and only the marker update was lost. Nothing may move — rolling the
+    set-aside tree back here would put the PREVIOUS set on top of the current
+    one, which is B-6 with the arrow reversed.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    before = _fingerprint(out)
+    layout, staging = _stage_with(
+        tmp_path, out, tuple(sorted(before)), {"only_new.txt": "NEW\n"})
+    plan = _stop_at_phase_aside(layout, staging, monkeypatch)
+
+    # Finish the publish by hand, leaving the marker at `aside`.
+    for rel in plan["published"]:
+        src, dst = staging / rel, out / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        src.rename(dst)
+    shutil.rmtree(staging)
+    published = _fingerprint(out)
+
+    emit_paths.recover_pending(layout)
+
+    assert _fingerprint(out) == published, (
+        "a recovery moved the published set; at phase `aside` with everything "
+        "already in place there is nothing to move")
+    assert (out / "only_new.txt").is_file()
+    assert not emit_paths.pending_swap(layout)
+    assert not (out / emit_paths.STATE_DIRNAME
+                / emit_paths.ASIDE_PREFIX).exists()
+
+
+def test_S11_aside_with_a_half_published_root_refuses(tmp_path, monkeypatch):
+    """The state between S-09 and S-10, which the code cannot produce — a
+    publish moves one file at a time, so an interrupted one leaves the rest IN
+    staging. It is a restore, a half-finished copy or a hand edit.
+
+    Guessing costs a whole set either way, so it is refused with everything left
+    where it was."""
+    out = tmp_path / "matter"
+    _run(out)
+    before = _fingerprint(out)
+    layout, staging = _stage_with(
+        tmp_path, out, tuple(sorted(before)), {"only_new.txt": "NEW\n"})
+    plan = _stop_at_phase_aside(layout, staging, monkeypatch)
+
+    (staging / "only_new.txt").rename(out / "only_new.txt")
+    shutil.rmtree(staging)
+    frozen = _fingerprint(out)
+    aside_before = _fingerprint(
+        out / emit_paths.STATE_DIRNAME / emit_paths.ASIDE_PREFIX)
+
+    with pytest.raises(emit_paths.PendingSwapUnrecoverable) as excinfo:
+        emit_paths.recover_pending(layout)
+    assert emit_paths.ASIDE_PREFIX in str(excinfo.value), (
+        "the refusal does not tell the operator where the previous set is")
+
+    assert _fingerprint(out) == frozen, "the refusal moved something"
+    assert _fingerprint(
+        out / emit_paths.STATE_DIRNAME / emit_paths.ASIDE_PREFIX
+    ) == aside_before, "the refusal touched the set-aside tree"
+    assert emit_paths.pending_swap(layout), (
+        "the marker was cleared by a refusal — nothing is left to repair from")
+
+    # An ordinary run over that folder is BLOCKED rather than a traceback.
+    blocked = _run(out)
+    assert not blocked.published
+    assert _fingerprint(
+        out / emit_paths.STATE_DIRNAME / emit_paths.ASIDE_PREFIX
+    ) == aside_before
+
+
+def test_S13_published_with_a_full_staging_refuses(tmp_path):
+    """A marker saying ``published`` beside a staging directory that still holds
+    a complete set.
+
+    The publish loop raises rather than recording ``published`` over an
+    unpublished file, so this is a restore or a hand edit. The old code trusted
+    the phase, skipped both moving steps, and ran the cleanup —
+    ``_remove_tree_or_fail(staging)`` — deleting a complete set of deliverables
+    as drained scratch.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    layout, staging = _stage_with(
+        tmp_path, out, ("sources.json",), {"only_new.txt": "NEW\n"})
+    _set_phase(out, emit_paths.PHASE_PUBLISHED)
+    staged_before = _fingerprint(staging)
+    root_before = _fingerprint(out)
+    assert staged_before, "the fixture staged nothing"
+
+    with pytest.raises(emit_paths.PendingSwapUnrecoverable) as excinfo:
+        emit_paths.recover_pending(layout)
+    assert emit_paths.STAGING_DIRNAME in str(excinfo.value)
+
+    assert _fingerprint(staging) == staged_before, (
+        "the staged set was destroyed by a marker that said the swap was "
+        "already finished")
+    assert _fingerprint(out) == root_before
+    assert emit_paths.pending_swap(layout)
+
+
+def test_S16_a_residue_tree_does_not_block_or_get_overwritten(tmp_path):
+    """A set-aside tree an earlier run could not delete, and no marker.
+
+    It is DocIQ's own state, it is disclosed, and the next swap must neither
+    trip over it nor write into it — the two ways a residue turns into a
+    second-order defect."""
+    out = tmp_path / "matter"
+    _run(out)
+    residue = out / emit_paths.STATE_DIRNAME / emit_paths.ASIDE_PREFIX
+    residue.mkdir(parents=True, exist_ok=True)
+    (residue / "left_by_an_earlier_run.txt").write_text(
+        "OLD\n", encoding="utf-8", newline="")
+    layout = OutputLayout.at(out)
+    assert emit_paths.superseded_residue(layout) == (
+        f"{emit_paths.STATE_DIRNAME}/{emit_paths.ASIDE_PREFIX}",)
+
+    layout, staging = _stage_with(tmp_path, out, ("sources.json",),
+                                  {"only_new.txt": "NEW\n"})
+    plan = json.loads(_marker_of(out).read_text(encoding="utf-8"))
+    assert plan["aside"] == f"{emit_paths.ASIDE_PREFIX}.1", (
+        "the new swap chose a set-aside name the residue already occupies")
+    emit_paths.commit_staging(layout)
+    assert (out / "only_new.txt").is_file()
+    # Both trees are deleted once nothing holds them: the residue is a previous
+    # set that has already been replaced, so a later swap finishes the job.
+    assert emit_paths.superseded_residue(layout) == ()
+
+
+@pytest.mark.parametrize("build", [
+    "S03_pending_full_staging",
+    "S05_pending_empty_staging",
+    "S07_aside_full_staging",
+    "S08_aside_unplanned_occupant",
+    "S09_aside_lost_staging",
+    "S12_published_empty_staging",
+])
+def test_no_persistent_state_lets_two_generations_share_the_matter_root(
+        tmp_path, monkeypatch, build):
+    """THE CLASS ASSERTION, over the states rather than over one failure.
+
+    ``only_old.txt`` belongs to the previous set and ``only_new.txt`` to the
+    staged one. D-31's claim is that the matter root never holds both, at any
+    instant, in any state — so it is asserted state by state rather than once on
+    the happy path, and before as well as after the recovery.
+
+    States that REFUSE (S-11, S-13) and states that fail closed (an unreadable
+    marker) are covered by their own probes above; this one covers the states a
+    recovery is expected to complete.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    (out / "only_old.txt").write_text("OLD\n", encoding="utf-8", newline="")
+    before = _fingerprint(out)
+    plan_names = tuple(sorted(before))
+    layout, staging = _stage_with(
+        tmp_path, out, plan_names, {"only_new.txt": "NEW\n"})
+
+    def generations():
+        return ((out / "only_old.txt").exists(), (out / "only_new.txt").exists())
+
+    if build == "S03_pending_full_staging":
+        pass
+    elif build == "S05_pending_empty_staging":
+        shutil.rmtree(staging)
+    elif build == "S07_aside_full_staging":
+        _stop_at_phase_aside(layout, staging, monkeypatch)
+    elif build == "S08_aside_unplanned_occupant":
+        _stop_at_phase_aside(layout, staging, monkeypatch)
+        # A name no plan covers reappears at the root before the publish.
+        (out / "only_new.txt").parent.mkdir(parents=True, exist_ok=True)
+        (staging / "unplanned.txt").write_text(
+            "NEW\n", encoding="utf-8", newline="")
+        (out / "unplanned.txt").write_text("OLD\n", encoding="utf-8", newline="")
+    elif build == "S09_aside_lost_staging":
+        _stop_at_phase_aside(layout, staging, monkeypatch)
+        shutil.rmtree(staging)
+    elif build == "S12_published_empty_staging":
+        emit_paths.commit_staging(layout)
+
+    old_here, new_here = generations()
+    assert not (old_here and new_here), (
+        f"{build}: the matter root holds both generations BEFORE recovery")
+
+    emit_paths.recover_pending(layout)
+
+    old_here, new_here = generations()
+    assert not (old_here and new_here), (
+        f"{build}: the matter root holds both generations after recovery")
+    assert old_here or new_here, (
+        f"{build}: recovery left the matter root holding NEITHER generation")
+    if build == "S08_aside_unplanned_occupant":
+        assert (out / "unplanned.txt").read_text(encoding="utf-8") == "NEW\n"
+    assert not emit_paths.pending_swap(layout), f"{build}: the marker survived"
+
+
+def test_S09_rollback_restores_an_UNPLANNED_occupant_too(tmp_path, monkeypatch):
+    """The sibling of S-09, enumerated rather than met.
+
+    Step 2a moves an occupant the plan did not name into the SAME set-aside
+    tree, and records it only in ``commit_staging``'s return value — nothing
+    durable names it. So a rollback keyed on ``plan.superseded`` would restore
+    part of the tree and hand the rest to ``_discard_aside_trees``, which
+    deletes it. The rollback is therefore driven by what is in the tree.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    (out / "unplanned.txt").write_text("OLD\n", encoding="utf-8", newline="")
+    before = _fingerprint(out)
+    # `unplanned.txt` is deliberately NOT in the plan, and has a staged
+    # replacement, so only step 2a can move it.
+    layout, staging = _stage_with(
+        tmp_path, out, tuple(sorted(set(before) - {"unplanned.txt"})),
+        {"unplanned.txt": "NEW\n"})
+
+    real = emit_paths._rename_or_fail
+
+    def refuse_staged(src, dst):
+        if str(src).startswith(str(staging)):
+            raise OSError("[WinError 32] held by another process")
+        return real(src, dst)
+
+    # First attempt: step 1 and step 2a complete, step 2b raises.
+    monkeypatch.setattr(emit_paths, "_rename_or_fail", refuse_staged)
+    with pytest.raises(OSError):
+        emit_paths.commit_staging(layout)
+    monkeypatch.undo()
+
+    aside = out / emit_paths.STATE_DIRNAME / emit_paths.ASIDE_PREFIX
+    assert (aside / "unplanned.txt").is_file(), (
+        "the fixture's premise is gone: 2a did not move the unplanned occupant")
+    marker = json.loads(
+        (out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME)
+        .read_text(encoding="utf-8"))
+    assert "unplanned.txt" not in marker["superseded"], (
+        "the occupant is in the durable plan after all, so a plan-keyed "
+        "rollback would have restored it and this proves nothing")
+
+    shutil.rmtree(staging)  # the staged set is lost — S-09
+    emit_paths.recover_pending(layout)
+
+    assert _fingerprint(out) == before, (
+        "the rollback lost a file step 2a had moved aside: "
+        f"{sorted(set(before) - set(_fingerprint(out)))}")
+    assert (out / "unplanned.txt").read_text(encoding="utf-8") == "OLD\n"
+    assert not emit_paths.pending_swap(layout)
+    assert not aside.exists()
+
+
+def test_a_rollback_is_not_disclosed_as_a_completed_swap(tmp_path, monkeypatch):
+    """The recovery's DURABLE description has to match what the recovery did.
+
+    S-09 introduced an outcome the disclosure had never had to describe: the
+    interrupted run's staged set is gone and the PREVIOUS run's set is restored,
+    so the deliverables in the folder are not the ones the interrupted run
+    wrote. The invocation note asserted "it was completed", which is precisely
+    the wrong fact about which run's evidence an auditor is looking at.
+
+    Enumerated with the state, not after it: a recovery that describes itself
+    wrongly in the processing log is the same class of defect as one that does
+    the wrong thing, one layer out.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    before = _fingerprint(out)
+    layout, staging = _stage_with(
+        tmp_path, out, tuple(sorted(before)), {"only_new.txt": "NEW\n"})
+    _stop_at_phase_aside(layout, staging, monkeypatch)
+    shutil.rmtree(staging)
+
+    notes: list[str] = []
+    emit_paths.recover_pending(layout, notes)
+    assert notes and notes[0].startswith("ROLLED BACK"), notes
+
+    # And the same fact reaches the next run's durable record.
+    layout2, staging2 = _stage_with(
+        tmp_path, out, ("sources.json",), {"only_new.txt": "NEW\n"})
+    _stop_at_phase_aside(layout2, staging2, monkeypatch)
+    shutil.rmtree(staging2)
+    recovered_run = _run(out)
+    payload = json.loads(
+        recovered_run.layout.processing_log.read_text(encoding="utf-8"))
+    invocation = " ".join(payload["run"]["invocation_notes"])
+    assert "RECOVERED" in invocation
+    assert "ROLLED BACK" in invocation, (
+        "the durable record does not say the interrupted run's set was the one "
+        f"that did not survive: {invocation!r}")
+    assert "invocation_notes" not in json.dumps(payload["content"]), (
+        "the recovery outcome reached the hashed content (criterion 7)")
+
+
+def test_an_ordinary_roll_forward_says_so(tmp_path):
+    """The sibling reading, so the note above is a discriminator rather than a
+    label the recovery always prints."""
+    out = tmp_path / "matter"
+    _run(out)
+    layout, staging = _stage_with(
+        tmp_path, out, ("sources.json",), {"only_new.txt": "NEW\n"})
+    notes: list[str] = []
+    emit_paths.recover_pending(layout, notes)
+    assert notes and notes[0].startswith("ROLLED FORWARD"), notes
+    assert (out / "only_new.txt").is_file()
+
+
+def test_a_marker_that_outlived_its_swap_says_nothing_to_do(tmp_path):
+    out = tmp_path / "matter"
+    _run(out)
+    layout = OutputLayout.at(out)
+    emit_paths.mark_ready(layout, ("sources.json",))
+    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
+    if staging.exists():
+        shutil.rmtree(staging)
+    notes: list[str] = []
+    emit_paths.recover_pending(layout, notes)
+    assert notes and notes[0].startswith("NOTHING TO DO"), notes
+    assert (out / "sources.json").is_file()

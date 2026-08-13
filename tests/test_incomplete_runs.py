@@ -588,7 +588,17 @@ def test_an_incomplete_record_never_makes_a_later_good_run_fail_its_own_gate(
     assert good.manifest.unclassified == []
     # The record of a failed attempt does not sit beside a good output set.
     assert not (out / INCOMPLETE_DIR / "run_status.json").exists()
-    assert any(r.startswith(f"{INCOMPLETE_DIR}/") for r in good.stale_removed)
+    # The whole quarantine folder, or its named contents. Which of the two the
+    # plan reports is a fact about the set-aside plan's normalisation, not about
+    # the folder: under B-8 a directory every one of whose entries the plan
+    # covers is renamed aside as ONE name (`emit.paths.covering_plan`), so the
+    # record says `incomplete_run` rather than `incomplete_run/run_status.json`.
+    # What must be true either way is that the record of the aborted attempt is
+    # named as replaced, and the assertion above proves it is gone.
+    assert any(
+        r == INCOMPLETE_DIR or r.startswith(f"{INCOMPLETE_DIR}/")
+        for r in good.stale_removed
+    ), good.stale_removed
 
 
 def test_the_manifest_classifies_an_incomplete_run_record_rather_than_flagging_it(

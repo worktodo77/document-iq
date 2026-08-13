@@ -26,6 +26,20 @@ delete the newly published set). Every fix was correct and every fix opened the
 next window, **because the design deleted before it published, so every failure
 mode was "half-deleted".**
 
+**AND THEN B-8** (third fix round), which is a different class and is why this
+paragraph does not end here. Delete-last was implemented correctly and the thing
+it renamed aside was **not the previous set** — it was the names *this build's*
+output patterns enumerate. A deliverable an older build wrote under a retired
+name either survived a successful swap or was moved aside lazily, after new
+files had already landed. So the swap now builds its plan from
+:func:`published_inventory`, a durable record of what the last run actually
+published, and clears every destination in a complete pass before publishing
+anything. Re-enumerating the states backwards from the disk — the exercise that
+round required — found three more whose next step destroyed a complete set; they
+are the ``PHASE_ASIDE``/``PHASE_PUBLISHED`` dispatch in :func:`commit_staging`.
+The table is in ``docs/verification/codex_r4_inventory_2026-08-06.md`` §2, and it
+is the thing to read before changing this module.
+
 So the swap no longer deletes anything at the matter root. It **renames**. The
 current set is renamed aside into ``.dociq/``, the staged set is renamed into
 place, and only then is what was moved aside deleted. The substitution carries
@@ -54,6 +68,7 @@ import json
 import os
 import re
 import shutil
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -68,6 +83,7 @@ __all__ = [
     "STAGING_DIRNAME",
     "ASIDE_PREFIX",
     "MARKER_NAME",
+    "PUBLISHED_NAME",
     "PHASE_PENDING",
     "PHASE_ASIDE",
     "PHASE_PUBLISHED",
@@ -79,7 +95,11 @@ __all__ = [
     "recover_pending",
     "pending_swap",
     "superseded_residue",
+    "published_inventory",
+    "covering_plan",
     "PendingSwapUnreadable",
+    "PendingSwapUnrecoverable",
+    "PublishedSetUnreadable",
 ]
 
 _UNSAFE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -287,6 +307,43 @@ marker that nonetheless cannot be parsed is corruption or a hand edit, and
 :func:`commit_staging` refuses to act on it rather than guessing — see
 :class:`PendingSwapUnreadable`."""
 
+PUBLISHED_NAME = "published_set.json"
+"""The DURABLE INVENTORY of the set currently published in the matter folder.
+
+Codex review #2, third fix round, **B-8**. D-31's load-bearing claim is that the
+*whole* previous set leaves the matter root before any new file enters it. The
+set-aside plan did not inventory that set — it expanded
+:data:`dociq.pipeline._STALE_PATTERNS`, *this version's* output names. Two things
+follow from that, and Codex reproduced both on Windows:
+
+* a deliverable an OLDER DocIQ wrote at a name this version no longer names, but
+  still writes a replacement for, was recognized only when publication reached
+  the corresponding staged file — by which time earlier staged files had already
+  landed. A real open handle on the old file then froze the swap at phase
+  ``aside`` with ``a_new.txt = NEW`` beside ``z_legacy.txt = OLD``: the mixed set
+  D-31 says is unreachable;
+* a deliverable an older DocIQ wrote and this version RETIRED has no staged
+  successor at all, so nothing ever noticed it. The swap completed, removed the
+  marker, and left the old file beside the new set permanently. §4 Stage 6 cannot
+  catch that, because the manifest is built over STAGING, not over the
+  destination root.
+
+So the plan is built from what the last run actually published, recorded here
+when it published it, rather than from what this build happens to know how to
+write. **That is the point: the inventory survives a version change.** A run can
+set aside a file whose name its own pattern list has never heard of.
+
+It lives under ``.dociq/`` because §7's layout is fixed — Expert Assist reads the
+matter folder with no rearrangement (D-20, Path B) — so a manifest-shaped file at
+the matter root is not available. It is DocIQ's own state, excluded from the
+manifest with the rest of the prefix, and it reaches no hashed artifact
+(criterion 7).
+
+Written by :func:`replace_text_deterministic` like the marker, so it is never
+observed half-written. Until it lands, the marker itself carries the same list —
+see :func:`published_inventory` for why that fallback is not belt-and-braces but
+the thing that makes the record durable across a lock on this one file."""
+
 PHASE_PENDING = "pending"
 """Nothing has moved yet, or the set-aside renames are unfinished."""
 
@@ -311,11 +368,20 @@ class SwapPlan:
     is how far the swap got. All three are checked at parse time rather than
     trusted, because they select paths that get *moved* — see
     :func:`_validate_superseded_entry` and :func:`_validate_aside_name`.
+
+    ``published`` is the fourth, added for B-8: the matter-root-relative names
+    the STAGED set will occupy once this swap finishes — that is, the inventory
+    the *next* run must set aside in full. It rides in the marker rather than
+    being recomputed at the end of the swap because by then there is nothing left
+    to compute it from: a roll-forward that re-enters at phase ``published``
+    finds an empty staging directory, and an inventory it could not write would
+    silently become the previous run's. See :data:`PUBLISHED_NAME`.
     """
 
     superseded: tuple[str, ...]
     aside: str
     phase: str
+    published: tuple[str, ...] = ()
 
 
 class PendingSwapUnreadable(DocIQError):
@@ -573,7 +639,23 @@ def _read_marker(marker: Path) -> SwapPlan:
     phase = payload.get("phase")
     if phase not in _PHASES:
         refuse(f"its `phase` is {phase!r}, not one of {_PHASES}")
-    return SwapPlan(superseded=superseded, aside=aside, phase=phase)
+    # `published` is required with the same strictness and for a related reason
+    # (B-8): it becomes the durable inventory the NEXT run's set-aside plan is
+    # built from, so a marker that does not carry it would publish a set the
+    # following run cannot enumerate. Validated with the supersede-entry check
+    # because it is written back out as a list of matter-root-relative names that
+    # a later run will select for renaming.
+    if "published" not in payload:
+        refuse("it names no `published` inventory for the set it publishes")
+    listed = payload["published"]
+    if not isinstance(listed, list):
+        refuse(f"`published` is {type(listed).__name__}, not a list")
+    try:
+        published = tuple(_validate_superseded_entry(e) for e in listed)
+    except ValueError as exc:
+        refuse(f"in `published`: {exc}", exc)
+    return SwapPlan(
+        superseded=superseded, aside=aside, phase=phase, published=published)
 
 
 _UNREADABLE = (
@@ -725,6 +807,7 @@ def _write_marker(marker: Path, plan: SwapPlan) -> Path:
                 "superseded": sorted(plan.superseded),
                 "aside": plan.aside,
                 "phase": plan.phase,
+                "published": sorted(plan.published),
                 "note": _MARKER_NOTE[plan.phase],
             },
             indent=2,
@@ -749,16 +832,276 @@ def mark_ready(destination: OutputLayout, superseded: tuple[str, ...] = ()) -> P
     than at swap time so that a swap and its roll-forward always agree on it: a
     roll-forward that picked a fresh name would leave the first attempt's
     set-aside tree stranded under a name no marker mentions.
+
+    The marker also carries the inventory of the set being published (B-8),
+    computed HERE from the staged files rather than taken as an argument: the
+    caller's business is what the swap replaces, and what the swap publishes is a
+    fact about the staging directory that is complete at this instant and gone by
+    the end of the swap. See :data:`PUBLISHED_NAME`.
     """
     marker = _marker_path(destination)
     marker.parent.mkdir(parents=True, exist_ok=True)
     for rel in superseded:
         _validate_superseded_entry(rel)
+    staging = _staging_root(destination)
+    published = tuple(sorted(
+        p.relative_to(staging).as_posix() for p in _staged_files(staging)))
     return _write_marker(marker, SwapPlan(
         superseded=tuple(sorted(superseded)),
         aside=_free_aside_name(destination),
         phase=PHASE_PENDING,
+        published=published,
     ))
+
+
+class PublishedSetUnreadable(DocIQError):
+    """The durable published-set inventory exists and cannot be parsed.
+
+    The same fail-closed reasoning as :class:`PendingSwapUnreadable`, one file
+    over (B-8). The inventory decides which of this folder's names the next swap
+    moves aside, so a permissive read — absorb the error, fall back to the
+    pattern list — is exactly the defect B-8 is: an incomplete plan that looks
+    complete, whose failure mode is a matter folder holding two runs' evidence
+    with nothing on disk saying so.
+
+    An ABSENT inventory is a different state and is not this error. It means the
+    folder was last published by a build that predates the inventory, and the run
+    falls back to the pattern list and DISCLOSES that it did. A present-but-
+    corrupt one is a hand edit or corruption, and neither is a state to guess
+    through.
+    """
+
+
+class PendingSwapUnrecoverable(DocIQError):
+    """An interrupted swap is in a state whose next step cannot be deduced.
+
+    Found by ENUMERATING the swap's persistent states backwards rather than by
+    following the happy path forwards (Codex review #2, third fix round: *"re-
+    enumerate the redesigned state machines from every persistent state"*). Two
+    of them had a next step that destroyed evidence, and both are refused here:
+
+    * **phase ``aside``, staging empty, only SOME of the published names at the
+      matter root.** The code cannot produce it — a publish moves one file at a
+      time, so an interrupted one leaves the rest IN staging — so it is a
+      restored backup, a half-copied folder or a hand edit. Guessing costs
+      either the previous set (if it is treated as published and the set-aside
+      tree is deleted) or the new one.
+    * **phase ``published``, staging still holding files.** The publish loop
+      raises rather than recording ``published`` over an unpublished file, so
+      this state also cannot be reached from the code. Treating the marker as
+      true deletes ``.dociq/staging`` — a complete set of deliverables — as
+      drained scratch.
+
+    Both leave the folder exactly as found, with the marker on disk, which is
+    what makes the situation repairable rather than merely reported.
+    """
+
+
+_UNRECOVERABLE = (
+    "REFUSING to complete an interrupted swap: the readiness marker at "
+    "{marker} says phase {phase!r}, and {why}.\n"
+    "Nothing has been moved or deleted \u2014 this folder is exactly as it was "
+    "found.\n"
+    "DocIQ cannot reach this state on its own, so it was produced by a restore, "
+    "a copy, or a hand edit, and the next step is not deducible from the names "
+    "on disk: one reading of them destroys the previous set and the other "
+    "destroys the new one.\n"
+    "{repair}"
+)
+
+
+_INVENTORY_UNREADABLE = (
+    "REFUSING to plan a replacement: the published-set inventory at {path} "
+    "exists but {why}.\n"
+    "Nothing has been read, moved or deleted. That file records which files the "
+    "last DocIQ run published into this folder, and without it this run cannot "
+    "know which of them to move aside — so it would publish its own set beside "
+    "whichever of the previous one it failed to name, with nothing recording "
+    "the mixture.\n"
+    "To go on: delete {path} to fall back to this build's own output names "
+    "(any deliverable an older build wrote under a name this build does not "
+    "use will then be left in place and must be cleared by hand), or restore a "
+    "readable copy."
+)
+
+
+def _inventory_path(destination: OutputLayout) -> Path:
+    return _state_dir(destination) / PUBLISHED_NAME
+
+
+def _write_inventory(destination: OutputLayout, published: tuple[str, ...]) -> Path:
+    path = _inventory_path(destination)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return replace_text_deterministic(
+        path,
+        json.dumps(
+            {
+                "published": sorted(published),
+                "note": (
+                    "The files the last completed DocIQ run published into this "
+                    "matter folder. The NEXT run reads this to move the whole "
+                    "previous set aside before publishing any of its own — "
+                    "including files under names a newer build no longer writes. "
+                    "Deleting it does not damage the deliverables; it makes the "
+                    "next run fall back to that build's own output names, which "
+                    "can leave a retired file behind. DocIQ's own state: it is "
+                    "no part of the evidence and no manifest describes it."
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        + "\n",
+    )
+
+
+def published_inventory(destination: OutputLayout) -> tuple[str, ...]:
+    """The COMPLETE set the last run published, matter-root-relative and sorted.
+
+    Empty when the folder has never been published by a build that writes the
+    inventory — which the caller must treat as "unknown", not as "nothing", and
+    disclose (see :data:`PUBLISHED_NAME` and :class:`PublishedSetUnreadable`).
+
+    **Two sources, and the second is not redundancy.** The inventory file is
+    written as part of the transition to phase ``published``; everything at and
+    below that transition is TOLERATED rather than fatal, because the matter
+    folder is already complete and correct and nothing there may turn a published
+    run into a failed one. A transient lock on this one file would therefore
+    leave the previous run's inventory in place — under-naming the next plan,
+    which is precisely B-8. So the marker, which carries the same list and is
+    NOT deleted while the inventory is behind it, is read as the authority
+    whenever it is ahead. In the ordinary case :func:`recover_pending` has
+    already reconciled the two before any caller gets here.
+    """
+    from_marker: tuple[str, ...] = ()
+    marker = _marker_path(destination)
+    if marker.is_file():
+        try:
+            plan = _read_marker(marker)
+        except PendingSwapUnreadable:
+            # Not this function's failure to report: every entry point calls
+            # `recover_pending` first, which raises on exactly this. Leaving it
+            # to that call keeps one message for one state.
+            from_marker = ()
+        else:
+            if plan.phase in (PHASE_ASIDE, PHASE_PUBLISHED):
+                # At `pending` the staged set has not taken those names, so the
+                # folder still holds the OLDER set and the file below is right.
+                from_marker = plan.published
+
+    path = _inventory_path(destination)
+    from_file: tuple[str, ...] = ()
+    if path.is_file():
+        def refuse(why: str, cause: BaseException | None = None):
+            exc = PublishedSetUnreadable(
+                _INVENTORY_UNREADABLE.format(path=path, why=why))
+            raise exc from cause
+
+        try:
+            raw = _retry_io(lambda: path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            refuse(f"it could not be read ({exc})", exc)
+        try:
+            payload = json.loads(raw)
+        except ValueError as exc:
+            refuse(f"it is not valid JSON ({exc})", exc)
+        if not isinstance(payload, dict):
+            refuse(f"its top level is {type(payload).__name__}, not an object")
+        if "published" not in payload:
+            refuse("it names no `published` list")
+        listed = payload["published"]
+        if not isinstance(listed, list):
+            refuse(f"`published` is {type(listed).__name__}, not a list")
+        try:
+            from_file = tuple(_validate_superseded_entry(e) for e in listed)
+        except ValueError as exc:
+            refuse(str(exc), exc)
+
+    return tuple(sorted(set(from_marker or from_file)))
+
+
+def covering_plan(
+    names: Iterable[str], root: Path | None = None
+) -> tuple[str, ...]:
+    """Normalise a set-aside plan so it moves each thing ONCE and leaves no shell.
+
+    Two reductions, both of which change how many renames the swap makes and
+    neither of which changes what ends up where.
+
+    **Drop any entry an ANCESTOR already covers.** ``upload_package`` and
+    ``upload_package/LI-06881.txt`` in one plan is not wrong — the directory
+    moves first and the file is then found already gone — but it makes the swap
+    report the same evidence leaving twice, under two names, in the durable
+    ``stale_outputs_replaced`` record. The plan is a union of a pattern expansion
+    (which names directories) and a file inventory (which names their contents),
+    so the overlap is the ordinary case rather than the odd one.
+
+    **Collapse a directory the plan would EMPTY into the directory itself**, when
+    ``root`` is given. Renaming ``retired_dir/nested/deep.json`` aside is
+    complete as far as evidence goes and still leaves ``retired_dir/nested/`` at
+    the matter root — an empty shell of a directory a former build published and
+    this one retired, which no later run has any reason to touch. Collapsing it
+    is the only reduction available that stays inside D-31's rule that the swap
+    RENAMES and never deletes at the matter root: an empty directory removal
+    would be a deletion there, and a new destructive primitive is exactly what
+    three review rounds bought the right not to add.
+
+    The collapse is guarded by set containment against the DISK: a directory is
+    only replaced by its own name when **every** entry it currently holds is
+    already in the plan. A file inside it that the plan does not name — an
+    operator's note in ``clean_text/``, a deliverable from a build older still —
+    keeps the directory expanded and is left exactly where it is. That guard is
+    what makes this safe to apply to ``clean_text/`` as readily as to a retired
+    directory, and it is checked here rather than reasoned about at the call
+    site.
+
+    Sorted and deterministic, because it feeds a durable record.
+    """
+    kept = set(names)
+    if root is not None:
+        # Deepest first, and repeated to a fixed point: emptying
+        # ``retired_dir/nested`` is what makes ``retired_dir`` collapsible.
+        while True:
+            candidates = {
+                PurePosixPath(rel.replace("\\", "/")).parent.as_posix()
+                for rel in kept
+            }
+            candidates.discard(".")
+            grew = False
+            for rel in sorted(candidates, key=lambda d: (-d.count("/"), d)):
+                if rel in kept:
+                    continue
+                if rel == STATE_DIRNAME or rel.startswith(STATE_DIRNAME + "/"):
+                    # Not reachable from either source — the pattern list does
+                    # not glob `.dociq/` and `_staged_files` skips it — and
+                    # excluded anyway, because promoting DocIQ's own state
+                    # directory into a set-aside plan would rename the staging
+                    # tree, the marker and the inventory into a subdirectory of
+                    # themselves. A guard on the one reduction that INVENTS a
+                    # name the caller did not pass.
+                    continue
+                here = root / rel
+                if not here.is_dir():
+                    continue
+                try:
+                    children = {
+                        f"{rel}/{child.name}" for child in here.iterdir()}
+                except OSError:
+                    continue
+                if children and children <= kept:
+                    kept -= children
+                    kept.add(rel)
+                    grew = True
+            if not grew:
+                break
+    out: list[str] = []
+    for rel in sorted(kept):
+        parts = PurePosixPath(rel.replace("\\", "/")).parts
+        if any("/".join(parts[:i]) in kept for i in range(1, len(parts))):
+            continue
+        out.append(rel)
+    return tuple(out)
 
 
 def pending_swap(destination: OutputLayout) -> bool:
@@ -789,7 +1132,9 @@ def _staged_files(staging: Path) -> list[Path]:
     return out
 
 
-def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
+def commit_staging(
+    destination: OutputLayout, notes: list[str] | None = None
+) -> tuple[str, ...]:
     """Replace the matter folder's deliverables with the staged ones.
 
     Returns the paths the matter folder no longer holds — the ones renamed
@@ -801,9 +1146,12 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     1. **Set aside.** Every planned name is RENAMED into ``.dociq/<aside>/``.
        Nothing is destroyed, and a failure leaves the rest of the previous set
        exactly where it was.
-    2. **Publish.** Every staged file is RENAMED into place. Its destination is
-       free, because step 1 emptied it; a destination the plan did not cover is
-       moved aside too rather than overwritten.
+    2. **Publish, in two complete passes.** (a) Every destination a staged file
+       will take that is still occupied — a name the plan did not cover — is
+       RENAMED into ``.dociq/<aside>/`` too, rather than overwritten. (b) Only
+       then is any staged file renamed into place. The two passes are the B-8
+       fix: folding (a) into (b) meant an unplanned occupant was handled *after*
+       earlier staged files had landed.
     3. **Then delete** — and only under ``.dociq/``. By this point the matter
        folder holds one complete set and a failure here cannot change that.
 
@@ -860,14 +1208,39 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     ``clean_text/`` and ``sources.json`` from exactly there). So a *reader* that
     opens the folder during the moves, or between a crash and the next run, can
     still see a set that is INCOMPLETE. What it can no longer see is a set that
-    is MIXED: step 1 takes the whole previous set out before step 2 puts any of
-    the new one in, so at every instant the matter root holds files from one run
-    only. What also changed is the size of the window: from the whole of Stage 5
+    is MIXED: the whole previous set is out of the matter root before any staged
+    file enters it, so at every instant the root holds files from one run only.
+
+    *That sentence used to say "step 1 takes the whole previous set out", and it
+    was false* (Codex review #2, third fix round, B-8). Step 1 takes out what the
+    PLAN names, and the plan was an expansion of this build's own output
+    patterns; an occupant it missed was moved aside lazily, when the publish loop
+    reached it, after earlier staged files had already landed. It is true now for
+    two independent reasons: the plan is built from
+    :func:`published_inventory` — what the last run actually published, which
+    survives a version change — and step 2a clears every destination in a
+    complete pass before step 2b renames anything in. The first makes the plan
+    complete; the second makes an incomplete plan harmless. What also changed is the size of the window: from the whole of Stage 5
     — minutes, and every OCR page of it — to a sequence of same-volume metadata
     operations, with a marker on disk saying which phase the swap is in and a
     roll-forward that completes it. Closing the incompleteness window entirely
     needs a published-set indirection that §8's fixed paths currently forbid.
     """
+    def note(what: str) -> None:
+        """Say WHICH of this function's outcomes happened.
+
+        A sink rather than a return value because the return value has one
+        meaning already — the names that left the matter folder — and it is ``()``
+        for three different outcomes, including the rollback. The caller's
+        durable disclosure used to assert that an interrupted swap "was
+        completed", which the rollback below makes false: the interrupted run's
+        set is the one that did NOT survive. A recovery that describes itself
+        wrongly in the processing log is the same class of defect as one that
+        does the wrong thing, one layer out.
+        """
+        if notes is not None:
+            notes.append(what)
+
     marker = _marker_path(destination)
     if not marker.is_file():
         return ()
@@ -905,6 +1278,100 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
         # cannot reach outside `.dociq/`.
         phase = PHASE_PUBLISHED
 
+    # ---- The two states the happy path never asks about --------------------
+    #
+    # Enumerated backwards from what can be ON DISK rather than forwards from
+    # what a run does, which is the exercise the third fix round asked for. Both
+    # of these used to fall through into a step that destroyed the only intact
+    # copy of a complete set, and neither is reachable from the code — which is
+    # exactly why nothing had looked at them.
+    if phase == PHASE_ASIDE and not staged:
+        # The previous set is in `.dociq/<aside>/` and staging is empty. Either
+        # the staged set was published and only the marker update was lost, or
+        # the staged set is GONE — a cleanup script, a backup agent, or an
+        # operator following the marker's own "move staging aside" instruction
+        # without also removing the marker.
+        #
+        # The old code could not tell the two apart and did not ask: it ran the
+        # empty publish loop, recorded `published`, and then deleted the
+        # set-aside tree. In the second case that tree held the only copy of the
+        # matter's deliverables, and the folder was left with nothing in it at
+        # all. That is the most destructive state in this module and it was the
+        # one with no test.
+        landed = [rel for rel in plan.published if (root / rel).exists()]
+        if not landed:
+            # Nothing was published. Put the previous set back where it was and
+            # abandon the swap: renames only, into names step 1 vacated, and the
+            # marker survives any failure so the next run retries.
+            #
+            # Driven by what is IN the tree, not by `plan.superseded`, and the
+            # difference is not cosmetic: step 2a moves unplanned occupants into
+            # the same tree and records them only in this call's return value,
+            # so a rollback keyed on the plan would restore some of the tree and
+            # then hand the rest to `_discard_aside_trees`. File granularity for
+            # the same reason a plan entry may name a whole directory that the
+            # matter root still partly holds — a directory rename would collide
+            # where a file rename lands.
+            restore = sorted(
+                p for p in aside.rglob("*") if p.is_file()
+            ) if aside.is_dir() else []
+            for src in restore:
+                rel = src.relative_to(aside).as_posix()
+                dst = root / rel
+                if dst.exists():
+                    raise PendingSwapUnrecoverable(_UNRECOVERABLE.format(
+                        marker=marker, phase=plan.phase,
+                        why=(f"the staged set is gone while {rel!r} is back at "
+                             "the matter root"),
+                        repair=(f"To go on: move {aside} back into the matter "
+                                f"folder by hand and delete {marker}."),
+                    ))
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _rename_or_fail(src, dst)
+            _discard_aside_trees(destination)
+            try:
+                _remove_tree_or_fail(staging)
+            except OSError:
+                pass
+            try:
+                _retry_io(lambda: marker.unlink(missing_ok=True))
+            except OSError:
+                pass
+            # Nothing left the matter folder: the set that was moved aside is
+            # back in it, and the inventory that described it was never
+            # rewritten, so it is still true.
+            note("ROLLED BACK: the interrupted run's staged set was gone from "
+                 "the staging directory, so the previous run's set — which was "
+                 "waiting intact under .dociq/ — was moved back into place. "
+                 "This folder holds the PREVIOUS run's deliverables, not the "
+                 "interrupted run's")
+            return ()
+        if len(landed) != len(plan.published):
+            raise PendingSwapUnrecoverable(_UNRECOVERABLE.format(
+                marker=marker, phase=plan.phase,
+                why=(f"{len(landed)} of the {len(plan.published)} names it says "
+                     "it published are at the matter root while the staging "
+                     "directory is empty"),
+                repair=(f"To go on: decide which set this folder should hold. "
+                        f"The previous one is intact under {aside} \u2014 move it "
+                        f"back and delete {marker} to keep it, or delete "
+                        f"{aside} and {marker} to keep what is at the root."),
+            ))
+        # Every published name is in place: the publish finished and only the
+        # marker update was lost. Nothing to move; go and clean up.
+        phase = PHASE_PUBLISHED
+
+    if phase == PHASE_PUBLISHED and staged:
+        raise PendingSwapUnrecoverable(_UNRECOVERABLE.format(
+            marker=marker, phase=plan.phase,
+            why=("the staging directory still holds "
+                 f"{len(staged)} file(s) it says were published"),
+            repair=(f"To go on: if {staging} is the set this folder should "
+                    f"hold, set the marker's `phase` back to {PHASE_ASIDE!r}; "
+                    f"otherwise move {staging} somewhere safe and delete "
+                    f"{marker}."),
+        ))
+
     if phase == PHASE_PENDING:
         # ---- 1. SET ASIDE. Renames only. Nothing is deleted. ---------------
         for rel in plan.superseded:
@@ -920,29 +1387,58 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
             dst.parent.mkdir(parents=True, exist_ok=True)
             _rename_or_fail(src, dst)
             moved.append(rel)
-        _write_marker(marker, SwapPlan(plan.superseded, plan.aside, PHASE_ASIDE))
+        _write_marker(
+            marker,
+            SwapPlan(plan.superseded, plan.aside, PHASE_ASIDE, plan.published),
+        )
         phase = PHASE_ASIDE
     elif phase == PHASE_ASIDE:
         # An earlier attempt completed step 1; those names are already out.
         moved.extend(rel for rel in plan.superseded if (aside / rel).exists())
 
     if phase == PHASE_ASIDE:
-        # ---- 2. PUBLISH. Renames only. ------------------------------------
+        # ---- 2a. CLEAR EVERY DESTINATION, BEFORE ANY OF 2b. ----------------
+        #
+        # Codex review #2, third fix round, **B-8**. This used to be folded into
+        # the publish loop below: a destination the plan had missed was
+        # recognized when the loop REACHED it, and moved aside at that point —
+        # by which time the staged files sorting before it had already landed.
+        # A real open handle on the missed occupant then stopped the swap with
+        # the matter root holding `a_new.txt = NEW` beside `z_legacy.txt = OLD`.
+        # That is the mixed set delete-last exists to forbid, produced by the
+        # one step in the design that ran out of order.
+        #
+        # So the sweep is a separate, complete pass. Nothing of the new set
+        # enters the folder until every name it will take is free, which is the
+        # D-31 ordering claim applied to the names the plan did not know about
+        # as well as the ones it did. The plan itself is now built from a durable
+        # inventory (`published_inventory`), so in the ordinary case this pass
+        # finds nothing and the two mechanisms are independent: one makes the
+        # plan complete, the other makes an incomplete plan harmless.
+        #
+        # Idempotent, and it runs on re-entry at phase `aside` as well as on the
+        # first attempt — which is the case step 1 cannot cover, because step 1
+        # is skipped once the marker says the set-aside is done.
+        for src in staged:
+            rel = src.relative_to(staging).as_posix()
+            dst = root / rel
+            if not dst.exists():
+                continue
+            # A name the plan did not cover — a deliverable an older build wrote
+            # that neither the inventory nor `_stale_deliverables` enumerates.
+            # It is moved aside like everything else rather than overwritten:
+            # `os.replace` here would be a delete before a publish with a
+            # different name on it, and it would be the one destructive act in
+            # this function that nothing recorded.
+            occupant = aside / rel
+            occupant.parent.mkdir(parents=True, exist_ok=True)
+            _rename_or_fail(dst, occupant)
+            moved.append(rel)
+
+        # ---- 2b. PUBLISH. Renames only, onto names proven free above. ------
         for src in staged:
             dst = root / src.relative_to(staging)
             dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.exists():
-                # A name the plan did not cover — a deliverable an older run
-                # wrote that `_stale_deliverables` no longer enumerates, say. It
-                # is moved aside like everything else rather than overwritten:
-                # `os.replace` here would be a delete before a publish with a
-                # different name on it, and it would be the one destructive act
-                # in this function that nothing recorded.
-                rel = src.relative_to(staging).as_posix()
-                occupant = aside / rel
-                occupant.parent.mkdir(parents=True, exist_ok=True)
-                _rename_or_fail(dst, occupant)
-                moved.append(rel)
             _rename_or_fail(src, dst)
         leftover = sorted(
             p.relative_to(staging).as_posix() for p in _staged_files(staging)
@@ -954,7 +1450,9 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
                 str(staging),
             )
         _write_marker(
-            marker, SwapPlan(plan.superseded, plan.aside, PHASE_PUBLISHED))
+            marker,
+            SwapPlan(plan.superseded, plan.aside, PHASE_PUBLISHED, plan.published),
+        )
     # A re-entry at `published`, and the abandoned-marker case, deliberately
     # report NOTHING moved: this call did not move anything, and a caller that
     # renders "N superseded file(s) replaced" from the return value would
@@ -968,6 +1466,40 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     # a drained staging directory, must not turn a published run into a failed
     # one, and it cannot make the evidence set wrong. What survives is named by
     # :func:`superseded_residue` and disclosed by the run rather than absorbed.
+    # The DURABLE INVENTORY of what now holds the matter root (B-8). Written
+    # here, below the publish, for the same reason everything else here is: the
+    # folder is already correct and a lock on one `.dociq/` file must not fail a
+    # published run. But an inventory that silently stayed at the PREVIOUS run's
+    # set would under-name the next swap's plan, which is B-8 itself — so the
+    # readiness marker, which carries the same list, is kept until this lands.
+    # A surviving `published` marker is provably harmless (see below) and
+    # :func:`published_inventory` reads it in preference to a file behind it.
+    #
+    # NOT written on the abandoned-marker path. There the staged set never
+    # existed, the matter root still holds the OLDER set, and `plan.published`
+    # names files that were never published: writing it would replace a correct
+    # inventory with a wrong one.
+    inventory_written = abandoned
+    if not abandoned:
+        try:
+            _write_inventory(destination, plan.published)
+        except OSError:
+            inventory_written = False
+        else:
+            inventory_written = True
+
+    if abandoned:
+        note("NOTHING TO DO: the readiness marker outlived its own swap. The "
+             "staging directory was empty, so nothing could be published and "
+             "nothing was set aside; only DocIQ's own state under .dociq/ was "
+             "cleaned up")
+    elif moved or plan.phase != PHASE_PUBLISHED:
+        note("ROLLED FORWARD: the interrupted run's staged set was published "
+             "into this folder and the set it replaced was moved aside")
+    else:
+        note("CLEANED UP: the interrupted run's staged set was already fully "
+             "published; only DocIQ's own state under .dociq/ remained")
+
     _discard_aside_trees(destination)
     try:
         _remove_tree_or_fail(staging)
@@ -990,10 +1522,15 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     # other step here absorbs, turned a run whose deliverables were fully
     # published into a raised exception. The published set is correct at this
     # line; nothing below it may say otherwise.
-    try:
-        _retry_io(lambda: marker.unlink(missing_ok=True))
-    except OSError:
-        pass
+    #
+    # Held back when the inventory above could not be written: the marker is
+    # then the only durable record of what this run published, and the next run
+    # builds its set-aside plan from it.
+    if inventory_written:
+        try:
+            _retry_io(lambda: marker.unlink(missing_ok=True))
+        except OSError:
+            pass
     return tuple(sorted(set(moved)))
 
 
@@ -1015,7 +1552,9 @@ def _discard_aside_trees(destination: OutputLayout) -> tuple[str, ...]:
     return tuple(survivors)
 
 
-def recover_pending(destination: OutputLayout) -> tuple[str, ...]:
+def recover_pending(
+    destination: OutputLayout, notes: list[str] | None = None
+) -> tuple[str, ...]:
     """Finish an interrupted swap, if there is one.
 
     Safe to call always, in the sense that it does nothing when no swap is
@@ -1037,4 +1576,4 @@ def recover_pending(destination: OutputLayout) -> tuple[str, ...]:
     """
     if not pending_swap(destination):
         return ()
-    return commit_staging(destination)
+    return commit_staging(destination, notes)

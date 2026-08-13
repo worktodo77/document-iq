@@ -648,7 +648,9 @@ about what the name holds, not about how it leaves."""
 
 
 def _stale_deliverables(
-    layout: OutputLayout, termination: RunTermination
+    layout: OutputLayout,
+    termination: RunTermination,
+    previously_published: Sequence[str] | None = None,
 ) -> tuple[str, ...]:
     """ENUMERATE the previous run's deliverables this run supersedes.
 
@@ -658,18 +660,47 @@ def _stale_deliverables(
     carries the same required, validated ``termination`` argument as the removal
     always has, so the guard sits on the function that decides what gets deleted
     as well as on the one that deletes it.
+
+    **Two sources, and the first is the one that matters** (Codex review #2,
+    third fix round, B-8). ``previously_published`` is the durable inventory the
+    last run wrote — *what is actually in this folder* — and
+    :data:`_STALE_PATTERNS` is what THIS BUILD knows how to write. Only the first
+    can name a deliverable an older DocIQ left under a name this build has
+    retired or renamed, and D-31's whole ordering claim is that the *complete*
+    previous set leaves the matter root before any new file enters it. The
+    pattern expansion is kept beside it rather than replaced, because a folder
+    last published by a build that predates the inventory has no inventory to
+    read and the patterns are then the only knowledge there is; the run says so
+    (``published_set_inventory`` in the log's ``run`` block).
+
+    Entries are filtered to what is ON DISK and normalised so that a directory
+    and its contents are not both listed — see
+    :func:`~dociq.emit.paths.covering_plan`. Passing ``None`` reads the inventory
+    from the folder; ``dociq.pipeline.run`` passes the value it read at the top
+    of the run, inside the block that turns an unreadable one into a disclosed
+    BLOCKED run rather than a traceback.
     """
     if not termination.publishable:
         raise ContractViolation(
             "refusing to list a previous run's deliverables for replacement for "
             f"a run that ended {termination.status.value}: {termination.reason}"
         )
+    if previously_published is None:
+        previously_published = emit_paths.published_inventory(layout)
     found: list[str] = []
     for pattern in _STALE_PATTERNS:
         for path in sorted(layout.root.glob(pattern)):
             if path.is_file() or path.is_dir():
                 found.append(path.relative_to(layout.root).as_posix())
-    return tuple(sorted(found))
+    for rel in previously_published:
+        # A name the last run published that this build no longer writes — the
+        # B-8 case — or one it does, in which case the glob already found it and
+        # the set absorbs the duplicate. Filtered by existence so the durable
+        # `stale_outputs_replaced` record does not claim to have replaced a file
+        # that was already gone.
+        if (layout.root / rel).exists():
+            found.append(rel)
+    return emit_paths.covering_plan(found, layout.root)
 
 
 def _log_reconciliation(
@@ -1126,9 +1157,22 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # made a completed roll-forward silent whenever the folder had been empty,
     # which is the case an operator is least likely to reconstruct unaided.
     was_pending = emit_paths.pending_swap(layout)
+    recovery_notes: list[str] = []
     try:
-        recovered = emit_paths.recover_pending(layout)
-    except emit_paths.PendingSwapUnreadable as unreadable:
+        recovered = emit_paths.recover_pending(layout, recovery_notes)
+        # The DURABLE INVENTORY of the set this folder currently holds (B-8),
+        # read AFTER the roll-forward — before it, the folder is mid-swap and
+        # the inventory describes whichever side of the swap has the names.
+        # Read here, in this block, rather than at Stage 5 where it is used:
+        # a corrupt inventory must reach the operator as the same disclosed
+        # BLOCKED run an unreadable marker does, not as a traceback out of the
+        # middle of a run that has already done the work.
+        previously_published = emit_paths.published_inventory(layout)
+    except (
+        emit_paths.PendingSwapUnreadable,
+        emit_paths.PendingSwapUnrecoverable,
+        emit_paths.PublishedSetUnreadable,
+    ) as unreadable:
         # Codex review #2, B-2. The marker exists and cannot be trusted to say
         # which of this folder's files the staged set replaces, so nothing has
         # moved and nothing has been deleted. The run STOPS here — before the
@@ -1143,8 +1187,15 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         blocked.termination = RunTermination(
             TerminalStatus.BLOCKED, str(unreadable))
         blocked.invocation.append(
-            "BLOCKED before Stage 1: an interrupted swap could not be "
-            "completed safely and this folder was left untouched.")
+            "BLOCKED before Stage 1: "
+            + (
+                "this folder's record of what the previous run published could "
+                "not be read, so this run could not tell which of its files it "
+                "would be replacing"
+                if isinstance(unreadable, emit_paths.PublishedSetUnreadable)
+                else "an interrupted swap could not be completed safely"
+            )
+            + " and this folder was left untouched.")
         return _abort(
             config=config,
             walked=RunResult(config=config),
@@ -1249,11 +1300,22 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         # whose deliverables were completed by a LATER run's recovery rather
         # than by the run that produced them is exactly the kind of thing an
         # auditor should not have to infer.
+        #
+        # WHICH outcome, not just "recovered". The recovery can also ROLL BACK —
+        # if the interrupted run's staged set was gone, the previous run's set
+        # is restored and the interrupted run's deliverables are the ones that
+        # did not survive. This sentence used to assert that the swap "was
+        # completed", which is false in that case, and a durable record that
+        # says the wrong thing about which run's evidence is in the folder is
+        # the failure this whole subsystem exists to prevent.
         walk_notes.invocation.append(
-            f"RECOVERED: a previous run had finished writing its deliverables "
-            f"but was interrupted before its swap was fully wound up; it was "
-            f"completed before this run started ({len(recovered)} superseded "
-            "file(s) replaced by the recovery itself).")
+            "RECOVERED: a previous run had finished writing its deliverables "
+            "but was interrupted before its swap was fully wound up. It was "
+            "resolved before this run started, and the folder held ONE complete "
+            f"set as a result ({len(recovered)} superseded file(s) replaced by "
+            "the recovery itself). "
+            + (recovery_notes[0] + "." if recovery_notes else
+               "The outcome was not recorded."))
     stage(1)
     walked = walker.run(walk_config, opts.walk, walk_notes)
     stage(2, f"{len(walked.documents)} document(s) read")
@@ -1518,7 +1580,8 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # destinations, which is the only check that would catch it.
     stage(5)
     t = time.monotonic()
-    stale = _stale_deliverables(layout, walk_notes.termination)
+    stale = _stale_deliverables(
+        layout, walk_notes.termination, previously_published)
     stage_out = emit_paths.staging_layout(layout)
     written: list[Path] = []
     # Clean text is for EXTRACTED documents only. An unsupported file has no
@@ -1585,6 +1648,19 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 "disk_headroom_x100": round(walker._DISK_HEADROOM * 100),
             },
             "stale_outputs_replaced": list(stale),
+            # WHERE the set-aside plan's knowledge came from (B-8). A folder
+            # last published by a build that predates the durable inventory has
+            # none to read, so the plan falls back to this build's own output
+            # names — which is exactly the incomplete-plan case B-8 is about, and
+            # is disclosed rather than assumed away. `run`, not `content`: it is
+            # a fact about this folder's history, not about the evidence, and
+            # hashing it would make a first run and a re-run differ.
+            "published_set_inventory": (
+                list(previously_published) if previously_published
+                else "absent — the set-aside plan used this build's output "
+                     "patterns only; a deliverable an older build wrote under a "
+                     "name this build does not write may remain in the folder"
+            ),
             "recovered_swap": list(recovered),
             # Set-aside trees an EARLIER run could not delete (D-31). A swap
             # that publishes and then cannot remove what it moved aside is a
