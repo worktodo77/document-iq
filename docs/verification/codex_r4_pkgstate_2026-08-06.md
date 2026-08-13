@@ -160,19 +160,25 @@ passed and only the `residue` assertion failed.
 
 ## 5. Test runs
 
-* **Full suite: 8 consecutive runs, all green.** Recorded in the run log for
-  this branch; the counts and the last-run tail are in §5.1.
+* **Full suite: 8 consecutive runs, all green.** `1,418` collected,
+  `1,417` passed, `1` skipped, every run. Sequential, not parallel — concurrent
+  pytest invocations share `tmp_path` numbering and this branch's tests are
+  about what is on disk. Runs 1-8 completed 09:27-10:25 on 2026-08-13.
 * **`tests/test_package_swap.py`: 30 consecutive runs, all green.** Thirty
   rather than eight because this file is filesystem- and timing-sensitive by
-  construction — real open handles, `rmtree` retry loops with sleeps, renames
+  construction — real open handles, `rmtree` retry loops with sleeps, a rename
   racing a live handle. *A green result proves nothing*, and one green run of a
   file like this proves less than nothing.
-* Both fail-before disables were applied and reverted mechanically, and the
-  suite was re-run green after each revert.
+* Every fail-before disable was applied and reverted mechanically, and the
+  affected slice was re-run green after each revert.
 
 ### 5.1 Counts
 
-See §9.
+`1,395` at the R4 handoff → `1,418` here. The 23 new tests are the eight-row
+state probe, five two-invocation A-6 tests, the two-site staging-residue
+enumeration, the A-7 real-handle test and its clean-build counterpart, the
+handoff screen's residue state (grid + assertion), and the amendment register's
+missing direction.
 
 ---
 
