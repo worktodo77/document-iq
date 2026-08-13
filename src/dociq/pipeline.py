@@ -1186,8 +1186,15 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         blocked.termination = RunTermination(
             TerminalStatus.BLOCKED, str(unreadable))
         blocked.invocation.append(
-            "BLOCKED before Stage 1: an interrupted swap could not be "
-            "completed safely and this folder was left untouched.")
+            "BLOCKED before Stage 1: "
+            + (
+                "this folder's record of what the previous run published could "
+                "not be read, so this run could not tell which of its files it "
+                "would be replacing"
+                if isinstance(unreadable, emit_paths.PublishedSetUnreadable)
+                else "an interrupted swap could not be completed safely"
+            )
+            + " and this folder was left untouched.")
         return _abort(
             config=config,
             walked=RunResult(config=config),
