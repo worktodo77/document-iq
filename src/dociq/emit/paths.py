@@ -1525,19 +1525,34 @@ def commit_staging(
         # same tree and records them only in this call's return value, so a
         # rollback keyed on the plan would restore some of the tree and then hand
         # the rest to `_discard_aside_trees`.
-        for src in sorted(q for q in aside.rglob("*") if q.is_file()):
+        restore = sorted(q for q in aside.rglob("*") if q.is_file())
+
+        # CHECK EVERY DESTINATION FIRST, then move. The same lesson as step 2a,
+        # pointed the other way, and it is not hypothetical: a marker written by
+        # the build this replaced records a mid-publish state as `aside`, so a
+        # rollback driven by it meets destinations that already hold the NEW
+        # generation. Raising on the first occupied one *while renaming* would
+        # leave the previous set half restored BESIDE the part already
+        # published — the mixture this whole subsystem exists to forbid,
+        # created by the code meant to prevent it.
+        blocked = [q.relative_to(aside).as_posix() for q in restore
+                   if (root / q.relative_to(aside)).exists()]
+        if blocked:
+            raise PendingSwapUnrecoverable(_UNRECOVERABLE.format(
+                marker=marker, phase=plan.phase,
+                why=(f"the previous set cannot be put back: {len(blocked)} of "
+                     "its names are occupied at the matter root "
+                     f"({', '.join(blocked[:3])}"
+                     f"{', …' if len(blocked) > 3 else ''}), so something has "
+                     "been published into this folder that the marker's phase "
+                     "does not account for"),
+                repair=_REPAIR.format(
+                    aside=aside, staging=staging, marker=marker,
+                    phase_aside=PHASE_ASIDE),
+            ))
+        for src in restore:
             rel = src.relative_to(aside).as_posix()
             dst = root / rel
-            if dst.exists():
-                raise PendingSwapUnrecoverable(_UNRECOVERABLE.format(
-                    marker=marker, phase=plan.phase,
-                    why=(f"the previous set cannot be put back: {rel!r} is at "
-                         "the matter root and a copy of it is also under the "
-                         "set-aside name"),
-                    repair=_REPAIR.format(
-                        aside=aside, staging=staging, marker=marker,
-                        phase_aside=PHASE_ASIDE),
-                ))
             dst.parent.mkdir(parents=True, exist_ok=True)
             _rename_or_fail(src, dst)
         _discard_aside_trees(destination)

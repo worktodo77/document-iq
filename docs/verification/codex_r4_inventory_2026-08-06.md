@@ -143,6 +143,21 @@ axis where it happens to need it" is what put the missing rows out of sight.
 | 6 | same, but the aside tree is empty | **ABANDONED** | the marker can authorize nothing; nothing has moved. An empty `plan.published` lands here **and must** — a marker that publishes nothing may not set anything aside, because that is a delete before a publish |
 | 7 | otherwise (partly published **and** a claimed name is nowhere) | **REFUSE** | finishing publishes an incomplete set over a previous set already out of the folder and records it as complete; undoing destroys the part already published **(F-2)** |
 
+**F-7, found by applying the same reading to the fix itself.** The ROLL BACK
+branch renamed the set-aside tree back one file at a time and raised on the
+first destination it found occupied — step 2a's original defect, reversed.
+Everything sorting before that one had already moved, so the matter root was
+left holding part of the previous set beside part of the new one: the mixture
+this subsystem exists to forbid, created by the code meant to prevent it. It now
+checks every destination first and moves nothing if any is occupied.
+
+That state is reachable by **migration**, which is why it is a probe rather than
+a note: the build this replaces records a mid-publish state as phase `aside`, so
+a rollback driven by such a marker meets exactly it. The fail-before had to be
+built by hand with a LATE-sorting collision — a real partial publish always
+occupies the earliest names, so the pre-fix loop raised on its first step and
+moved nothing, and the obvious probe passed against the defect.
+
 Rule 5 is the one that did not exist. Rules 1, 2 and 7 are the ones the coarse
 staging axis could not state.
 
@@ -168,6 +183,7 @@ Row IDs continue the third round's. Probes are in `tests/test_emit_atomicity.py`
 | S-10 | `publishing` | empty, all landed | full | ROLL FORWARD → cleanup | ✔ probe |
 | S-12 | `published` | empty | full | FINISH | ✔ probe (B-6's state) |
 | S-13 | `published` | non-empty | full | **REFUSE** | ✔ probe (third round) |
+| **S-17** | `aside` **written by the previous build**, recording a mid-publish state | empty | full, and some names already published | **REFUSE**, nothing moved | **was WRONG — F-7.** The rollback moved the free names back first and then gave up ✔ probe |
 | **S-14b** | any | **holds names the marker never claimed** | any | **REFUSE** | **new (rule 1)** ✔ probe |
 | S-15 | unreadable | any | any | fail closed, untouched | ✔ probe (B-2) |
 | **S-15b** | readable, `superseded` names `.dociq/…` | any | any | **refused at parse** | **was WRONG — F-4.** `covering_plan` had the guard; the parser did not ✔ probe |
@@ -260,6 +276,7 @@ tests failed on behaviour rather than on a missing symbol.
 | `test_F3_a_file_saved_after_the_plan_is_not_swept_up_by_it` | the directory collapse restored | an analyst's `clean_text/analyst_note.md` renamed aside and deleted |
 | `test_F3_the_replaced_record_names_the_files_not_the_directory` | same | `stale_outputs_replaced` read `clean_text`, naming none of the files |
 | `test_F4_a_marker_cannot_name_dociqs_own_state_as_superseded` | parser guard removed | `.dociq/staging` accepted as a supersede entry |
+| `test_a_rollback_never_half_restores_over_a_published_file` (F-7, self-found) | rollback raises mid-move | `aa_free.txt` restored beside a published `zz_taken.txt` — one file of each generation at the matter root |
 
 **The test whose reach Codex named.**
 `test_a_blocked_publish_leaves_an_incomplete_set_never_a_mixed_one` defined

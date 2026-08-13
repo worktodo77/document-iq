@@ -68,6 +68,8 @@ from dociq.verify import manifest as mf
 
 from .conftest import FIXTURES
 
+NL = chr(10)
+
 STAMP = OperatorStamp("test", "2026-07-30T00:00:00Z", "test-host")
 
 
@@ -2085,3 +2087,66 @@ def test_F3_the_replaced_record_names_the_files_not_the_directory(tmp_path):
     assert any(rel.startswith("clean_text/") for rel in second.stale_removed), (
         f"the record names no clean-text file: {second.stale_removed}")
     assert "clean_text" not in second.stale_removed
+
+
+def test_a_rollback_never_half_restores_over_a_published_file(tmp_path):
+    """FAIL-BEFORE — the rollback had step 2a's original defect, reversed.
+
+    It renamed the set-aside tree back one file at a time and raised on the
+    first destination it found occupied. Everything sorting BEFORE that one had
+    already moved, so the matter root was left holding part of the PREVIOUS set
+    beside part of the new one — the mixture this subsystem exists to forbid,
+    created by the code meant to prevent it.
+
+    The state is reachable by MIGRATION, which is why it is tested rather than
+    reasoned about: the build this replaces records a mid-publish state as phase
+    ``aside``, so a rollback driven by such a marker meets exactly this. It is
+    built by hand because that is what it is — a marker written by other code —
+    and because the collision has to sort LATE for the defect to show at all: a
+    real partial publish always occupies the earliest names, so the pre-fix loop
+    raised on its first step and moved nothing. A fail-before that cannot fail is
+    the thing this project has been bitten by; the ordering here is deliberate.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    layout = OutputLayout.at(out)
+    state = out / emit_paths.STATE_DIRNAME
+    aside = state / emit_paths.ASIDE_PREFIX
+
+    # The previous set, already moved out: one name whose destination is FREE
+    # and one whose destination is occupied by a published file.
+    aside.mkdir(parents=True, exist_ok=True)
+    (aside / "aa_free.txt").write_text("OLD" + NL, encoding="utf-8", newline="")
+    (aside / "zz_taken.txt").write_text("OLD" + NL, encoding="utf-8", newline="")
+    (out / "zz_taken.txt").write_text("NEW" + NL, encoding="utf-8", newline="")
+    assert not (out / "aa_free.txt").exists()
+
+    marker = _marker_of(out)
+    marker.write_text(json.dumps({
+        "staging": emit_paths.STAGING_DIRNAME,
+        "superseded": ["aa_free.txt", "zz_taken.txt"],
+        "aside": emit_paths.ASIDE_PREFIX,
+        "phase": emit_paths.PHASE_ASIDE,
+        "published": ["aa_free.txt", "zz_taken.txt"],
+    }) + NL, encoding="utf-8", newline="")
+    staging = state / emit_paths.STAGING_DIRNAME
+    if staging.exists():
+        shutil.rmtree(staging)
+
+    frozen = _fingerprint(out)
+    aside_frozen = _fingerprint(aside)
+
+    with pytest.raises(emit_paths.PendingSwapUnrecoverable) as excinfo:
+        emit_paths.recover_pending(layout)
+    assert "occupied at the matter root" in str(excinfo.value)
+
+    assert _fingerprint(out) == frozen, (
+        "the rollback moved part of the previous set back into a folder that "
+        "already held a published file: "
+        f"{sorted(set(_fingerprint(out)) - set(frozen))}")
+    assert not (out / "aa_free.txt").exists(), (
+        "aa_free.txt was restored and then the rollback gave up on "
+        "zz_taken.txt — the matter root now holds one file of each generation")
+    assert _fingerprint(aside) == aside_frozen, (
+        "the refused rollback emptied part of the set-aside tree anyway")
+    assert emit_paths.pending_swap(layout), "nothing is left to repair from"
