@@ -38,6 +38,47 @@ Consequence for the product's positioning, flagged: §7 and D-03 make the token 
 
 | D-19 | Tesseract / the D-01 bake-off | **Written off — rapidocr is the engine, full stop (Alex, 2026-07-31).** D-01's conditional swap and acceptance criterion 9's comparison are both **cancelled, not deferred**: there is no pending Tesseract evaluation, and no future sprint owes one. Tesseract was never installed (installing it needed authorization that was not given, and the build correctly refused to install it unilaterally), so the Sprint-1 bake-off is a **rapidocr characterization** rather than a comparison — and that is now its final form. Measured on 20 real scanned MPR pages from D-12's corpus: mean page confidence **0.8628**, 3 of 17 pages below the 85% review threshold, 37% of *lines* below it, **5.74 s/page**; 3 zero-character pages verified genuinely blank (uniform white, no embedded images) rather than misses. `docs/bakeoff/ocr_bakeoff_2026-07-30.md` stands as the methodology artifact D-01 asked for, retitled to what it is. **Consequence to state plainly rather than bury: §3 and §10's amended wording already name rapidocr, so nothing in the build changes — but the tool now ships an OCR engine chosen on in-house familiarity and ONNX bundling convenience, never benchmarked against an alternative on this corpus. If OCR quality is ever challenged, that is the honest answer, and "Tesseract is the industry-recognizable name for law-firm IT review" (the original argument for the bake-off) remains unaddressed.** | 2026-07-31 |
 
+## D-32 — the swap gets ONE more generation, then it is descoped (Alex, 2026-08-06)
+
+**The cap.** The output swap has now produced five consecutive generations of
+defects: Codex rounds 1 (B-1, B-2), 2 (B-4, B-5), 3 (A-5, B-6), 4 (B-8, A-6,
+A-7), and our own pre-handoff review of round 4's fix (F-1..F-6, two of them
+HIGH data-loss). Alex ruled at round four to keep fixing; this ruling adds the
+bound he declined then, on evidence that had not existed yet.
+
+**Fix F-1 through F-6. If a SIXTH generation appears in this subsystem, stop
+fixing.** Descope the swap to Sprint-1's write-in-place behaviour, document
+every known failure mode in the register and the release note, and merge the
+rest of Sprint 2 on Alex's authorization. That is a trade of a **larger,
+better-hidden** risk for a **smaller, well-understood** one: Sprint-1's window
+is wider — a crash mid-emit leaves a mixed folder — and it is simple enough to
+reason about completely, which four rounds have shown the current design is not.
+
+**Why the bound is drawn here rather than at "when it is correct".** The
+adversarial reviewer's diagnosis is the reason: *every row the state table
+enumerates is sound.* The defects land in rows the table's axes cannot express
+— `staging` is binary (holds files / empty), and the aside-tree axis does not
+distinguish residue from a completed swap from **this** marker's partially
+completed step 1. So each round enumerates, fixes what the enumeration can see,
+and the next round finds what it could not represent. A process that cannot
+represent its own remaining failure modes does not converge by being run again,
+and "one more round" has been the answer four times.
+
+**What this ruling does NOT say.** It does not say the current design is wrong,
+and it does not authorize descoping now. Every failure found so far requires a
+Windows lock or a process death at a precise instant, and none has been observed
+in a real run. The fixes in flight are close and their shapes are known. This
+sets the stopping rule *before* the next round rather than after it, which is
+the whole point.
+
+**One fact that belongs beside this ruling:** `commit_staging`'s central
+guarantee — the whole previous set leaves the matter root before any new file
+enters — is **conditional on `published_set.json` existing**, and that file does
+not exist on the first run of this build against any pre-existing matter folder.
+That is every folder at rollout. It is disclosed in `run.published_set_inventory`
+and must be stated plainly in the relay and the release note rather than left in
+a field nobody reads.
+
 ## Sprint-2 kickoff rulings (Alex, 2026-08-01)
 
 | D-20 | Acceptance criterion 1 — how "loads into a Claude Project" is proven | **Split the criterion along the measured reality.** Criterion 1 as written assumes a matter fits a Project's direct context; Sprint 1 measured the real corpus at ~13.9–15.2M tokens, 70–100× that. **Path B (Expert Assist / Cowork reads the matter folder from disk) is proven at full scale — all 368 documents** — and is the route the criterion's "consumed by evidence-mining without format errors" clause is discharged on. **Path A (browser upload package) is proven on a deliberately scoped subset** (date- or type-scoped) that genuinely fits, and the acceptance note states the scope rather than implying full-corpus coverage. Rejected: uploading the full corpus and counting "no size rejection" as a pass — that would rest the criterion on retrieval-mode recall over 17,732 pages, which is unmeasured and would set an expectation for the analyst the tool cannot back. Criterion 1's wording is amended in requirements to match. | 2026-08-01 |
