@@ -900,6 +900,12 @@ class RealPipeline:
             # for the length of the sprint — silently defaults the field to ()
             # and tells the operator a short package is complete.
             missing=package.missing,
+            # A-17, from finding A-7. Carried across even though it describes a
+            # SUCCESS: the package published and is correct, and a complete old
+            # copy of it survives under `.dociq/` where nobody looks. A-16's
+            # `superseded_residue` never saw this one — it matches `superseded*`
+            # and the package tree is called `package_superseded`.
+            residue=package.residue,
         )
 
     # -- internals ----------------------------------------------------------

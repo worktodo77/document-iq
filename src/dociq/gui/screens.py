@@ -1361,6 +1361,16 @@ class HandoffScreen(QWidget):
         self._result_missing.setWordWrap(True)
         self._result_missing.setStyleSheet(f"color: {theme.palette.warn};")
         lay.addWidget(self._result_missing)
+        # An old package copy that survived this build (A-17 / finding A-7).
+        # Its own label, BELOW the facts and the missing-document note: the
+        # build succeeded, and this is a fact about a different folder.
+        self._result_residue = QLabel("")
+        self._result_residue.setFont(theme.body(9))
+        self._result_residue.setWordWrap(True)
+        self._result_residue.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._result_residue.setStyleSheet(f"color: {theme.palette.warn};")
+        lay.addWidget(self._result_residue)
         self._show_package(None)
 
         lay.addStretch(1)
@@ -1416,12 +1426,13 @@ class HandoffScreen(QWidget):
         """
         shown = package is not None
         for label in (self._result_head, self._result_lines,
-                      self._result_missing):
+                      self._result_missing, self._result_residue):
             label.setVisible(shown)
         if package is None:
             self._result_head.setText("")
             self._result_lines.setText("")
             self._result_missing.setText("")
+            self._result_residue.setText("")
             return
         self._result_head.setText(package.headline)
         self._result_head.setStyleSheet(
@@ -1430,6 +1441,9 @@ class HandoffScreen(QWidget):
         note = package.missing_note()
         self._result_missing.setText(note)
         self._result_missing.setVisible(bool(note))
+        residue = package.residue_note()
+        self._result_residue.setText(residue)
+        self._result_residue.setVisible(bool(residue))
 
     # -- what a test reads, since nobody has ever driven this with a mouse ---
     #
@@ -1447,6 +1461,9 @@ class HandoffScreen(QWidget):
 
     def package_missing_text(self) -> str:
         return self._result_missing.text()
+
+    def package_residue_text(self) -> str:
+        return self._result_residue.text()
 
     def _reload_scope_choices(self, view: HandoffView) -> None:
         """Populate the date and type pickers from the run's own documents.

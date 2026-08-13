@@ -489,3 +489,440 @@ def test_the_screen_and_the_disk_agree_after_a_failed_build(real_run, monkeypatc
 
 def _raise_lock(**_kwargs):
     raise OSError(LOCK_ERROR)
+
+
+# ---------------------------------------------------------------------------
+# A-6 — "build again" must not delete the only intact package
+#
+# Codex review #2, third fix round. The two renames in `_publish_package` are
+# not a transaction, and the state between them — no `upload_package/`, a
+# complete previous package under `.dociq/package_superseded/` — is a state the
+# tool's OWN failure message hands to the operator, offering "build again" as a
+# way out. The next build opened by classifying both state directories as
+# disposable residue and deleting them BEFORE assembling anything, so the
+# offered recovery destroyed the only thing worth recovering.
+#
+# Every test below is a TWO-INVOCATION test. One invocation cannot see this: the
+# damage is done by what the next build believes about what the last one left.
+# ---------------------------------------------------------------------------
+
+
+def _raise_lock_rename(_src, _dst, **_kw):
+    raise OSError(LOCK_ERROR)
+
+
+def _interrupt_between_the_two_renames(layout, docs, monkeypatch):
+    """Leave the matter in the A-6 state THROUGH THE PRODUCT'S OWN FAILURE PATH.
+
+    Not by hand: this is the state
+    ``test_a_publish_that_cannot_take_the_name_and_cannot_roll_back_says_where``
+    covers and names, so the fixture is the covered failure rather than a
+    plausible reconstruction of it. Returns the tree that must survive.
+    """
+    build_upload_package(layout, document_count=len(docs))
+    before = _tree(layout.upload_package)
+    assert len(before) > 1
+
+    real = h._retry_rename
+
+    def fail_every_publish(src, dst, **kw):
+        if dst.name == "upload_package":
+            raise OSError(LOCK_ERROR)
+        return real(src, dst, **kw)
+
+    monkeypatch.setattr(h, "_retry_rename", fail_every_publish)
+    with pytest.raises(PackageSwapError) as caught:
+        build_upload_package(layout, document_count=len(docs))
+    monkeypatch.undo()
+
+    # The premise, asserted rather than assumed.
+    assert not layout.upload_package.exists()
+    assert _tree(_state(layout) / h._SUPERSEDED_NAME) == before
+    return before, str(caught.value)
+
+
+def test_building_again_after_an_interrupted_publish_does_not_destroy_it(
+        tmp_path, monkeypatch):
+    """FAIL-BEFORE for A-6, through the product's own offered recovery.
+
+    Invocation 1 fails both renames and leaves the only intact package under
+    ``.dociq/package_superseded/`` — the state the failure message describes and
+    then offers "build again" for. Invocation 2 takes that offer and hits an
+    ordinary assembly error.
+
+    On the old code the startup sweep deleted both state directories before
+    assembling, so the end state was Codex's: no published package, no staging
+    package, no superseded package. The last good package destroyed before any
+    replacement existed. The assertion that goes red first is that a package
+    exists at all.
+    """
+    layout, docs = full_matter(tmp_path)
+    before, _message = _interrupt_between_the_two_renames(
+        layout, docs, monkeypatch)
+
+    # "Build again" — and this build fails the way ordinary builds fail.
+    monkeypatch.setattr(h, "render_readme", _raise_lock)
+    with pytest.raises(OSError):
+        build_upload_package(layout, doc_ids=(docs[0].doc_id,),
+                             scope_statement="A NARROWER SCOPE\n")
+
+    assert layout.upload_package.is_dir(), (
+        "building again destroyed the only intact package and then failed: "
+        "nothing published, nothing staged, nothing set aside")
+    assert _tree(layout.upload_package) == before, (
+        "the recovered package is not byte-identical to the one that was "
+        "moved aside and never modified")
+    assert _siblings(layout) == ["upload_package"]
+    assert not (_state(layout) / h._SUPERSEDED_NAME).exists(), (
+        "the package was restored AND left behind, so a second copy of it is "
+        "sitting under .dociq/")
+
+
+def test_the_offered_recovery_is_the_one_the_message_describes(
+        tmp_path, monkeypatch):
+    """Withdraw the CLAIM, not just the code.
+
+    The message that hands the operator this state offers two ways out. Both
+    must be true of the code, so both are asserted here rather than only the one
+    the fix touched.
+    """
+    layout, docs = full_matter(tmp_path)
+    before, message = _interrupt_between_the_two_renames(
+        layout, docs, monkeypatch)
+    assert "build again" in message
+    assert h._SUPERSEDED_NAME in message
+
+    # Way out 1, the operator's: rename it back by hand.
+    aside = _state(layout) / h._SUPERSEDED_NAME
+    aside.rename(layout.upload_package)
+    assert _tree(layout.upload_package) == before
+    layout.upload_package.rename(aside)
+
+    # Way out 2, the one the message offers: build again — and this one goes
+    # through, so the recovered package is replaced by a real new one.
+    second = build_upload_package(layout, doc_ids=(docs[0].doc_id,),
+                                  scope_statement="A NARROWER SCOPE\n")
+    assert second.root == layout.upload_package
+    assert "A NARROWER SCOPE" in (
+        layout.upload_package / README_NAME).read_text(encoding="utf-8")
+    assert set(_tree(layout.upload_package)) == set(second.files)
+    assert _siblings(layout) == ["upload_package"]
+
+
+def test_a_process_death_between_the_two_renames_is_recovered(
+        tmp_path, monkeypatch):
+    """The same state reached by the OTHER route Codex named: the process dies
+    between the two publish renames.
+
+    No exception handler ran, so nothing DocIQ does on the way out can be part
+    of the recovery. The state on disk is the whole of what the next invocation
+    has, which is the point of enumerating states rather than paths.
+    """
+    layout, docs = full_matter(tmp_path)
+    build_upload_package(layout, document_count=len(docs))
+    before = _tree(layout.upload_package)
+
+    # The kill: the rename aside happened, the publish rename never did.
+    aside = _state(layout) / h._SUPERSEDED_NAME
+    aside.parent.mkdir(parents=True, exist_ok=True)
+    layout.upload_package.rename(aside)
+    assert not layout.upload_package.exists()
+
+    monkeypatch.setattr(h, "render_readme", _raise_lock)
+    with pytest.raises(OSError):
+        build_upload_package(layout, doc_ids=(docs[0].doc_id,),
+                             scope_statement="A NARROWER SCOPE\n")
+
+    assert _tree(layout.upload_package) == before, (
+        "the package that survived a process kill did not survive the next "
+        "build's startup sweep")
+
+
+def test_a_staged_tree_beside_the_only_package_is_not_preferred_to_it(
+        tmp_path, monkeypatch):
+    """The fourth row of the table: the process died between the renames with
+    the staged package still on disk.
+
+    The staged tree may or may not have been validated — nothing on disk says
+    which — while the set-aside tree is known complete by construction. So the
+    recovery restores the KNOWN one and discards the unknown one, and it does
+    the restore first: the other order is A-6 with an extra directory in it.
+    """
+    layout, docs = full_matter(tmp_path)
+    build_upload_package(layout, document_count=len(docs))
+    before = _tree(layout.upload_package)
+
+    aside = _state(layout) / h._SUPERSEDED_NAME
+    aside.parent.mkdir(parents=True, exist_ok=True)
+    layout.upload_package.rename(aside)
+    staged = _state(layout) / h._INCOMING_NAME
+    staged.mkdir(parents=True)
+    (staged / "HALF_A_PACKAGE.txt").write_text("unvalidated", encoding="utf-8")
+
+    monkeypatch.setattr(h, "render_readme", _raise_lock)
+    with pytest.raises(OSError):
+        build_upload_package(layout, document_count=len(docs))
+
+    assert _tree(layout.upload_package) == before
+    assert "HALF_A_PACKAGE.txt" not in _tree(layout.upload_package), (
+        "an unvalidated staged tree was published over the known-good one")
+
+
+def test_an_unrecoverable_restore_deletes_nothing(tmp_path, monkeypatch):
+    """The restore itself fails — the folder is held open. The build must stop
+    with the set-aside package still on disk, not fall through into the sweep
+    that deletes it. Falling through is the whole finding.
+    """
+    layout, docs = full_matter(tmp_path)
+    before, _ = _interrupt_between_the_two_renames(layout, docs, monkeypatch)
+    aside = _state(layout) / h._SUPERSEDED_NAME
+
+    monkeypatch.setattr(h, "_retry_rename", _raise_lock_rename)
+    with pytest.raises(PackageSwapError) as caught:
+        build_upload_package(layout, document_count=len(docs))
+
+    message = str(caught.value)
+    assert h._SUPERSEDED_NAME in message, "the message does not say where it is"
+    assert "NOTHING was deleted" in message
+    assert _tree(aside) == before, (
+        "the build could not restore the only intact package and deleted it")
+
+
+# The enumeration itself, as a probe. Every state a previous invocation can
+# leave on disk, crossed: `upload_package/` present or absent, the two `.dociq/`
+# trees present or absent. The invariant under test is one sentence — if a
+# complete package existed anywhere when the build started, a complete package
+# exists at the published name when it is over, however badly the build went.
+_STATES = [
+    ("none", False, False, False),
+    ("staging-only", False, True, False),
+    ("aside-only", False, False, True),
+    ("aside-and-staging", False, True, True),
+    ("steady", True, False, False),
+    ("published-and-staging", True, True, False),
+    ("published-and-aside", True, False, True),
+    ("published-and-both", True, True, True),
+]
+
+
+@pytest.mark.parametrize("name,published,staging,aside", _STATES,
+                         ids=[s[0] for s in _STATES])
+def test_no_reachable_start_state_loses_the_only_package(
+        tmp_path, monkeypatch, name, published, staging, aside):
+    """CLASS PROBE for A-6, not a repro.
+
+    A-6 exists because the package state machine was reasoned forward through
+    assembly instead of backward from every state a previous invocation can
+    leave behind. This walks the whole cross-product and asserts the same thing
+    about each: **no start state that contained a complete package ends without
+    one.** A ninth state added later without thought fails to appear here, which
+    is the other half of what the enumeration is for.
+
+    The build is always made to fail, because a successful build hides the
+    finding: it writes a new package over whatever the sweep destroyed.
+    """
+    layout, docs = full_matter(tmp_path)
+    build_upload_package(layout, document_count=len(docs))
+    good = _tree(layout.upload_package)
+    state = _state(layout)
+    state.mkdir(parents=True, exist_ok=True)
+
+    if aside and not published:
+        # The only way this state is actually reached: the package was renamed
+        # aside and never replaced.
+        layout.upload_package.rename(state / h._SUPERSEDED_NAME)
+    else:
+        if aside:
+            (state / h._SUPERSEDED_NAME).mkdir()
+            (state / h._SUPERSEDED_NAME / "old.txt").write_text(
+                "residue", encoding="utf-8")
+        if not published:
+            assert h._remove_tree(layout.upload_package)
+    if staging:
+        (state / h._INCOMING_NAME).mkdir()
+        (state / h._INCOMING_NAME / "half.txt").write_text(
+            "unvalidated", encoding="utf-8")
+
+    had_a_package = published or aside
+    monkeypatch.setattr(h, "render_readme", _raise_lock)
+    with pytest.raises((OSError, PackageSwapError)):
+        build_upload_package(layout, document_count=len(docs))
+
+    if had_a_package:
+        assert layout.upload_package.is_dir(), (
+            f"start state {name!r} held a complete package and the build "
+            f"destroyed it before failing")
+        assert _tree(layout.upload_package) == good, (
+            f"start state {name!r} ended with a package that is not the one it "
+            f"started with")
+    else:
+        assert not layout.upload_package.exists(), (
+            f"start state {name!r} had no package and a failed build left one")
+    assert _siblings(layout) == (["upload_package"] if had_a_package else []), (
+        f"start state {name!r} left a package-shaped folder at the matter root")
+
+
+# ---------------------------------------------------------------------------
+# A-7 — cleanup residue is disclosed, not reported as an unqualified success
+# ---------------------------------------------------------------------------
+
+
+def test_an_undeletable_old_package_reaches_the_result_and_the_screen(
+        tmp_path, monkeypatch):
+    """FAIL-BEFORE for A-7, with a REAL open handle at the moment Codex named.
+
+    A scanner locks one file in the old package *after* the new one has taken
+    the published name — so the lock lands between the publish rename and the
+    cleanup, which is exactly where the discarded boolean was. The tail of
+    ``_publish_package`` called ``_remove_tree`` and threw the answer away, so a
+    complete stale copy of the previous package survived under ``.dociq/``
+    behind an unqualified "Upload package built."
+
+    Asserts BOTH halves, because the finding is that they disagreed: the
+    surviving path on disk, and the wording the operator reads.
+    """
+    layout, docs = full_matter(tmp_path)
+    build_upload_package(layout, document_count=len(docs))
+    old = _tree(layout.upload_package)
+    superseded = _state(layout) / h._SUPERSEDED_NAME
+
+    real = h._retry_rename
+    handle = {"fh": None}
+
+    def lock_the_old_package_after_publishing(src, dst, **kw):
+        real(src, dst, **kw)
+        if dst.name == "upload_package" and superseded.is_dir():
+            victim = sorted(p for p in superseded.rglob("*") if p.is_file())[0]
+            # A real Windows handle, not a stub: this is what an on-access
+            # scanner holds, and it is what makes `rmtree` give up part way.
+            handle["fh"] = victim.open("rb")
+
+    monkeypatch.setattr(h, "_retry_rename",
+                        lock_the_old_package_after_publishing)
+    try:
+        package = build_upload_package(layout, doc_ids=(docs[0].doc_id,),
+                                       scope_statement="A NARROWER SCOPE\n")
+        assert handle["fh"] is not None, "the fixture never took a handle"
+
+        # The package published and is correct — that is why this is a success.
+        assert package.root == layout.upload_package
+        assert "A NARROWER SCOPE" in (
+            layout.upload_package / README_NAME).read_text(encoding="utf-8")
+
+        # …and the old copy is still there, named.
+        assert superseded.is_dir(), (
+            "the fixture's premise is gone: the old package was removed")
+        assert package.residue == (str(superseded),), (
+            "the cleanup's answer was discarded and the result reports an "
+            "unqualified success over a surviving old package")
+
+        # The screen. Success FIRST, then the residue, then the path.
+        from dociq.gui.pipeline import PackageResult
+        from dociq.gui.view_models import package_built
+
+        view = package_built(PackageResult(
+            root=str(package.root),
+            file_count=package.check.file_count,
+            total_bytes=package.check.total_bytes,
+            scope_statement=package.scope_statement,
+            doc_count=package.doc_count,
+            residue=package.residue,
+            missing=package.missing,
+        ))
+        assert view.ok
+        assert view.headline == "Upload package built."
+        note = view.residue_note()
+        assert str(superseded) in note, (
+            "the operator is not told where the surviving old package is")
+        assert "complete and was published normally" in note
+        assert "do NOT upload it" in note
+        assert str(superseded) not in "\n".join(view.lines), (
+            "the residue was folded into the facts about the package that was "
+            "built; it is a fact about a different folder")
+    finally:
+        if handle["fh"] is not None:
+            handle["fh"].close()
+    # The bytes that survived are the OLD package's, which is what makes this a
+    # confusion hazard rather than a disk-space one.
+    assert set(_tree(superseded)) <= set(old)
+
+
+def test_a_clean_build_reports_no_residue(tmp_path):
+    """The other side of the same field. A residue note that appears on every
+    successful build is a note nobody reads on the one build where it matters.
+    """
+    layout, docs = full_matter(tmp_path)
+    build_upload_package(layout, document_count=len(docs))
+    second = build_upload_package(layout, doc_ids=(docs[0].doc_id,),
+                                  scope_statement="A NARROWER SCOPE\n")
+    assert second.residue == ()
+
+    from dociq.gui.pipeline import PackageResult
+    from dociq.gui.view_models import package_built
+
+    view = package_built(PackageResult(
+        root=str(second.root), file_count=second.check.file_count,
+        total_bytes=second.check.total_bytes,
+        scope_statement=second.scope_statement, doc_count=second.doc_count,
+        residue=second.residue, missing=second.missing,
+    ))
+    assert view.residue_note() == ""
+
+
+@pytest.mark.parametrize("fail_at", ["aside-rename", "publish-rename"])
+def test_a_staged_package_that_survives_a_failed_publish_is_named(
+        tmp_path, monkeypatch, fail_at):
+    """CLASS FIX for A-7's shape, at the sites that RAISE rather than return.
+
+    ``_remove_tree(staging)`` is on every failure path out of
+    ``_publish_package`` and its answer was discarded at all three, exactly as
+    the post-publish call discarded it. What survives is worse than what A-7
+    describes: a COMPLETE, validated, package-shaped tree under ``.dociq/`` that
+    is not the package the operator should upload — and the message they read
+    said nothing about it.
+
+    Enumerated rather than reproduced: both raising sites are driven, and the
+    third (the leftover-superseded refusal) is unreachable in the same run
+    because it precedes the rename it would have to follow.
+    """
+    layout, docs = full_matter(tmp_path)
+    build_upload_package(layout, document_count=len(docs))
+    staging = _state(layout) / h._INCOMING_NAME
+
+    real_remove = h._remove_tree
+
+    def keep_the_staged_tree(path, **kw):
+        if path.name == h._INCOMING_NAME:
+            return not path.exists()
+        return real_remove(path, **kw)
+
+    real_rename = h._retry_rename
+
+    seen = {"n": 0}
+
+    def fail(src, dst, **kw):
+        target = (h._SUPERSEDED_NAME if fail_at == "aside-rename"
+                  else "upload_package")
+        if dst.name == target:
+            seen["n"] += 1
+            # Only the first attempt on the publish name fails, so the ROLLBACK
+            # goes through and the earlier package comes back. That is the
+            # branch under test: a recovered matter, and a staged tree nobody
+            # was told about still sitting under `.dociq/`.
+            if fail_at == "aside-rename" or seen["n"] == 1:
+                raise OSError(LOCK_ERROR)
+        return real_rename(src, dst, **kw)
+
+    monkeypatch.setattr(h, "_remove_tree", keep_the_staged_tree)
+    monkeypatch.setattr(h, "_retry_rename", fail)
+    with pytest.raises(PackageSwapError) as caught:
+        build_upload_package(layout, doc_ids=(docs[0].doc_id,),
+                             scope_statement="A NARROWER SCOPE\n")
+
+    assert staging.is_dir(), "the fixture's premise is gone"
+    message = str(caught.value)
+    assert str(staging) in message, (
+        "a complete package-shaped tree survived under .dociq/ and the message "
+        "the operator reads does not mention it")
+    assert "do NOT upload it" in message
+    assert _siblings(layout) == ["upload_package"]

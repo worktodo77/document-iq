@@ -969,8 +969,47 @@ class PackageOutcomeView:
     its own statement claims is a different fact from its size, and it is the
     one the operator has to act on."""
 
+    residue: tuple[str, ...] = ()
+    """Old package trees under ``.dociq/`` the build could not delete (A-17,
+    from Codex third-fix-round finding A-7).
+
+    Never folded into :attr:`headline`, and never into :attr:`lines`. The
+    headline is the verdict — the package WAS built — and the lines are the
+    facts about the package that was built. This is a fact about something else
+    entirely: a copy of the previous package that is still on the machine."""
+
     root: str = ""
     scope_statement: str = ""
+
+    def residue_note(self) -> str:
+        """Success first, then the residue — in that order, as A-16 requires.
+
+        The order is the finding. Under delete-last nothing is removed until the
+        published name already holds the new, validated package, so an
+        undeletable set-aside tree cannot make the package wrong. Leading with
+        the residue would tell the operator their build went badly when it went
+        exactly as designed; omitting it — which is what the code did — leaves a
+        full stale package copy on a matter machine with nothing on screen
+        having said so.
+
+        It names the path because that is the only thing the operator can act
+        on, and it says do not upload it, because a folder full of
+        package-shaped files is exactly what they were told to drag into a
+        Project ten minutes earlier.
+        """
+        if not self.residue:
+            return ""
+        one = len(self.residue) == 1
+        where = "\n".join(f"  {p}" for p in self.residue)
+        return (
+            f"The package above is complete and was published normally. "
+            f"{'A copy' if one else 'Copies'} of the PREVIOUS package could not "
+            f"be deleted afterwards and {'is' if one else 'are'} still on this "
+            f"machine:\n{where}\n"
+            "That is DocIQ's own state folder, not the package — do NOT upload "
+            "it, and do not mistake it for what you just built. Delete it once "
+            "nothing is holding its files open."
+        )
 
     def missing_note(self) -> str:
         """Named and counted, never summarised away."""
@@ -1008,6 +1047,7 @@ def package_built(result: PackageResult) -> PackageOutcomeView:
             f"{_bytes_phrase(result.total_bytes)}.",
         ),
         missing=tuple(result.missing),
+        residue=tuple(result.residue),
         root=result.root,
         scope_statement=result.scope_statement,
     )

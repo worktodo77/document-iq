@@ -273,6 +273,17 @@ def _drive_handoff(window, state: str) -> int:
             build_handoff(outcome, package_available=True),
             package=package_built(replace(
                 _PACKAGE, doc_count=11, missing=("LI-00042", "LI-00043")))))
+    elif state == "built-with-residue":
+        # A-17 / Codex third-fix-round A-7. A SUCCESS with a residue: the
+        # package published and is correct, and a complete copy of the previous
+        # one could not be deleted afterwards. It is on the grid because the
+        # residue note is long, wraps, and carries an absolute path — the shape
+        # that pushes a layout sideways at the minimum window.
+        window.handoff.show_handoff(replace(
+            build_handoff(outcome, package_available=True),
+            package=package_built(replace(
+                _PACKAGE,
+                residue=(r"D:\m\out\.dociq\package_superseded",)))))
     elif state == "build-failed":
         window.handoff.show_handoff(replace(
             build_handoff(outcome, package_available=True),
@@ -295,7 +306,8 @@ GRID: tuple[tuple[str, str, object], ...] = tuple(
         ("checklist", ("complete", "two-rules", "keeps-everything",
                        "unavailable", "mismatch"), _drive_checklist),
         ("handoff", ("all", "dates", "types", "empty-scope", "unpublished",
-                     "built", "built-short", "build-failed"),
+                     "built", "built-short", "built-with-residue",
+                     "build-failed"),
          _drive_handoff),
     )
     for state in states
@@ -384,7 +396,9 @@ def test_the_grid_covers_every_screen() -> None:
     # stopped) and three package outcomes on the handoff (built, built-short,
     # build-failed). The count is asserted so a state cannot be dropped from
     # the grid by an edit that only meant to reorder it.
-    assert len(GRID) == 33
+    # 33 → 34: the third fix round added the fourth package outcome,
+    # built-with-residue (A-17, from finding A-7).
+    assert len(GRID) == 34
 
 
 @pytest.mark.parametrize("screen,state,driver", GRID,
@@ -1039,3 +1053,29 @@ def test_scope_pickers_do_not_reset_the_choice_they_are_showing(window) -> None:
     window.handoff.show_handoff(window.handoff._view)
     QApplication.processEvents()
     assert window.handoff.scope() == chosen
+
+
+def test_a_surviving_old_package_is_on_the_screen_and_the_build_still_reads_as_a_success(
+        window) -> None:
+    """A-17, from Codex third-fix-round finding A-7.
+
+    The build published a correct package AND could not delete the previous
+    copy. The screen has to carry both, in that order — a headline that reads as
+    a failure would be wrong about a build that succeeded, and no mention at all
+    was the finding: a full stale package copy on the matter machine with the
+    screen saying only "Upload package built."
+    """
+    _drive_handoff(window, "built-with-residue")
+    assert window.handoff.package_headline() == "Upload package built."
+    residue = window.handoff.package_residue_text()
+    assert r"D:\m\out\.dociq\package_superseded" in residue, (
+        "the surviving old package is nowhere on the screen")
+    assert "do NOT upload it" in residue
+    # Not smuggled into the facts about the package that WAS built.
+    assert "package_superseded" not in window.handoff.package_lines()
+
+    # …and it is cleared, not left standing, when the next outcome has none.
+    _drive_handoff(window, "built")
+    assert window.handoff.package_residue_text() == "", (
+        "a residue note from a previous build is still on screen above a build "
+        "that had none")
