@@ -3,6 +3,7 @@
 **Repository:** `worktodo77/document-iq`
 **Branch:** `build/s2-r4-inventory` (off `build/sprint-2` @ `a4973b9`)
 **Gate:** D-10, Codex review #2, **fourth** fix round
+**Branches:** `build/s2-r4-inventory` (B-8, merged to `build/sprint-2`), then `build/s2-r4-inventory2` (F-1..F-6, this note's §2 rewrite)
 **Finding:** B-8 (Codex third fix-round verdict,
 `docs/codex_reviews/sprint-2_2026-08-04_codex.md`)
 **Date:** 2026-08-06
@@ -57,93 +58,140 @@ patterns — B-8's incomplete plan — and the run says so in the processing log
 **corrupt** one fails closed (`PublishedSetUnreadable`) and takes the same
 disclosed BLOCKED path an unreadable marker takes, with the folder untouched.
 
-**Plan normalisation.** The plan is a union of a pattern expansion (which names
-directories) and a file inventory (which names their contents), so
-`covering_plan()` drops entries an ancestor already covers and collapses a
-directory **all of whose current on-disk entries the plan covers** into the
-directory itself. The containment guard is checked against the disk, so a file
-the plan does not name — an operator's note in `clean_text/`, a deliverable from
-a build older still — keeps the directory expanded and is left where it is.
-Without the collapse, a retired *directory* left an empty shell at the matter
-root that only a deletion could remove, and adding a deletion at the matter root
-is exactly what D-31 bought the right not to do.
+**Plan normalisation, and what was removed from it (F-3).** `covering_plan()`
+drops entries an ancestor already covers — pure set arithmetic over the plan,
+because the plan is a union of a pattern expansion (which names directories) and
+a file inventory (which names their contents).
+
+It briefly also **collapsed** a directory all of whose on-disk entries the plan
+covered into the directory's own name, so a retired directory left no empty
+shell. The containment guard for that read the disk **at plan time**, at the top
+of Stage 5; the rename it authorised happened after the whole of Stage 5 and
+Stage 6, which on a real matter is minutes. An analyst who saved a note into
+`clean_text/` inside that window had it renamed aside under the directory's name
+and deleted with the set-aside tree, having never been in the plan. It also
+silently coarsened `stale_outputs_replaced` from the files to `["clean_text"]`,
+so the durable record of what a re-run replaced stopped naming any of it.
+
+**Removed rather than narrowed.** Re-verifying containment immediately before the
+rename narrows the window without closing it, and what the collapse bought was
+cosmetic: an empty `retired_dir/` at the matter root holds no evidence, mixes no
+generations, and is what the pre-B-8 build already left behind for `clean_text/`.
+A cosmetic residue is a better trade than any window in which an analyst's file
+can be deleted. The plan no longer reads the disk at all beyond the single
+existence filter, and that property is stated in the docstring so a later
+refactor cannot reintroduce it without meeting the argument.
 
 ---
 
-## 2. The state enumeration
+## 2. The state enumeration — the AXES, not the rows
 
 > *"Re-enumerate the redesigned state machines from every persistent state."*
 > — Codex, third fix-round merge condition.
 
-Every round of this review found a defect that came from reasoning **forward**
-through the happy path instead of **backward from each state that can exist on
-disk**. The table is that exercise. Axes: marker present/absent × phase ×
-staging holds files / is empty-or-absent × matter root × `.dociq/superseded*`
-present/absent. The inventory is an orthogonal axis, table 2.2.
+The third round's table was checked row by row and **every row it expressed was
+sound.** An adversarial re-read then found three more data-loss states, and all
+three lived in rows the table's *axes could not express*. That is the finding
+worth carrying forward, because it is the fourth consecutive round in which this
+subsystem produced a new generation of defects inside the previous round's fix:
 
-Probes carry the row ID (`tests/test_emit_atomicity.py` §6).
+* `staging` was **binary** — holds files / empty. It could not say **which**
+  files, so a staging directory 30 files short of what the marker recorded read
+  simply as "holds files" (F-2).
+* the set-aside axis was **one column** covering both "residue from a completed
+  swap" (always expendable) and "**this** marker's partially-completed step 1"
+  (may hold the only copy of half the previous set). The marker is rewritten only
+  *after* the whole step-1 loop, so a crash inside it leaves `pending` beside a
+  half-filled aside tree — a state the table had no column for (F-1).
+* nothing expressed **"has any staged file entered the matter root yet?"**. The
+  only way to ask was to test whether a published NAME was at the root, and a
+  name is not an identity: `sources.json` is at the matter root before any swap
+  begins, because the previous run put it there (F-4).
 
-### 2.1 The matter swap (`emit/paths.py`)
+### 2.1 The widened axes
 
-| ID | marker | phase | staging | matter root | aside tree | what the next run does | correct? |
-|---|---|---|---|---|---|---|---|
-| S-01 | absent | — | absent | published set | absent | `recover_pending` no-ops; the run stages and swaps normally | ✔ |
-| S-02 | absent | — | holds files | published set | absent | no-op; `run()`'s `discard_staging` throws the orphan away — no marker exists, so nothing can publish it | ✔ |
-| S-03 | present | `pending` | holds files | previous set | absent | full swap: set aside → clear destinations → publish → delete → inventory → marker | ✔ probe |
-| S-04 | present | `pending` | holds files | previous set, partly already moved | present | idempotent: a plan name not at the root is skipped, the rest move, then publish | ✔ existing probe (`..._blocked_set_aside_...`) |
-| S-05 | present | `pending` | empty | previous set | absent | **abandoned marker.** Nothing staged ⇒ nothing may be set aside. No move, no delete outside `.dociq/`, marker cleared, **inventory deliberately not rewritten** (`plan.published` names a set that was never published) | ✔ probe |
-| S-06 | present | `pending` | empty | previous set | present (stale) | as S-05, plus the stale tree is deleted or disclosed as residue | ✔ existing probe |
-| S-07 | present | `aside` | holds files | plan names vacated | present | publish (2a finds nothing, 2b renames) → delete → inventory → marker | ✔ probe |
-| S-08 | present | `aside` | holds files | vacated **plus an unplanned occupant** | present | **2a moves the occupant aside first**, then 2b publishes. This is B-8 repro 1 | ✔ probe, real open handle |
-| S-09 | present | `aside` | **empty**, none of `published` at the root | previous set only in the aside tree | present | **ROLL BACK.** The aside tree holds the only copy; its entries are renamed back to the root and the marker is cleared | **was WRONG — fixed.** The old code ran the empty publish loop, recorded `published`, then *deleted the aside tree*: the folder was left with **no deliverables at all** |
-| S-09b | present | `aside` | empty, after step **2a** had moved an unplanned occupant into the same tree | — | present | the rollback restores **the whole tree**, not `plan.superseded` — 2a's occupants are recorded only in the return value, so a plan-keyed rollback would restore part of the tree and hand the rest to `_discard_aside_trees` | **new sibling, found by enumeration** ✔ probe |
-| S-10 | present | `aside` | empty, **all** of `published` at the root | new set | present | publish finished, only the marker update was lost: nothing moves, cleanup only | ✔ probe |
-| S-11 | present | `aside` | empty, **some** of `published` at the root | mixed by a restore | present | **REFUSE** (`PendingSwapUnrecoverable`), folder untouched, marker kept. Unreachable from the code — a publish moves one file at a time, so an interrupted one leaves the rest in staging | **new** — the old code took the S-10 branch and deleted the aside tree |
-| S-12 | present | `published` | empty | new set | present | cleanup only; nothing moves; marker cleared. B-6's state | ✔ existing probe |
-| S-13 | present | `published` | **holds files** | new set | present | **REFUSE**, folder untouched | **was WRONG — fixed.** The old code trusted the phase and ran `_remove_tree_or_fail(staging)`, deleting a complete set of deliverables as drained scratch |
-| S-14 | present, unparseable | — | any | any | any | **fail closed** (`PendingSwapUnreadable`), nothing moved; `run()` returns a disclosed BLOCKED run | ✔ existing probe (B-2) |
-| S-15 | present, `aside`/`superseded` entry escapes | — | any | any | any | refused at parse; the only names the cleanup can delete are ones `_free_aside_name` could have issued | ✔ existing probe |
-| S-16 | absent | — | absent | published set | present (residue) | no-op; `superseded_residue()` discloses it; the next swap takes `superseded.1` and neither tree is overwritten | ✔ probe |
-
-**Both corrected rows have the same shape and it is worth naming.** Neither
-S-09 nor S-13 is reachable from the code, which is exactly why nothing had
-looked at them — and both had a next step that destroyed the only intact copy of
-a complete set. They are reachable *on disk*: a backup agent restoring a folder,
-a copy that finished halfway, a cleanup script, or an operator following the
-readiness marker's own "move staging aside and delete the marker" instruction
-and doing only the first half. That instruction is in this codebase's own error
-message, so S-09 is a state DocIQ tells operators how to create.
-
-**The disclosure had to follow the states.** S-09 introduced an outcome the
-recovery's durable invocation note had never had to describe. That note asserted
-that the interrupted swap *"was completed"*, which after a rollback is the wrong
-fact about **which run's evidence an auditor is looking at** — the interrupted
-run's set is the one that did not survive. `commit_staging` now says which of
-its four outcomes happened (`ROLLED FORWARD` / `ROLLED BACK` / `NOTHING TO DO` /
-`CLEANED UP`) through a notes sink, because the return value is `()` for three of
-them and cannot discriminate. Probes:
-`test_a_rollback_is_not_disclosed_as_a_completed_swap` (and the two sibling
-readings, so the note is a discriminator rather than a label the recovery always
-prints). It sits in `run.invocation_notes`, outside hashed content.
-
-**The class assertion.** `only_old.txt` belongs to the previous set,
-`only_new.txt` to the staged one, and
-`test_no_persistent_state_lets_two_generations_share_the_matter_root` asserts
-over six constructible states that the matter root never holds both — before as
-well as after recovery — and that recovery never leaves it holding **neither**.
-That last clause is what went red on S-09.
-
-### 2.2 The inventory axis
-
-| ID | inventory | next run |
+| axis | third round | fourth round |
 |---|---|---|
-| I-1 | absent | falls back to the patterns and **discloses it** in `run.published_set_inventory`; the next successful swap writes one ✔ probe |
-| I-2 | present, fresh | complete plan ✔ probe |
-| I-3 | present but behind a surviving marker (its write was blocked) | the marker wins; the marker is retained precisely so it can ✔ probe |
-| I-4 | corrupt | `PublishedSetUnreadable` → disclosed BLOCKED run, folder untouched ✔ probe |
-| I-5 | names a path outside the matter folder | refused by `_validate_superseded_entry` at parse — the same check the marker's `superseded` list gets, and for the same reason: it selects paths that get moved ✔ |
+| `plan.phase` | `pending` / `aside` / `published` | + **`publishing`**, written after step 2a and before step 2b. At `pending` and `aside` **no staged file has been published**, full stop; at `publishing` and beyond a claimed name at the root is provably this run's, because reaching that phase required 2a to have vacated every one of those names. Identity comes from the phase, never from a name. |
+| staging | holds files / empty | the staged **names**, compared against `plan.published`: equal / short / holding names the marker never claimed |
+| set-aside | a `superseded*` tree exists / does not | **this plan's** tree holds files / does not — separately from residue trees, which are by definition already-replaced sets |
+| matter root | prose | `landed` = which of `plan.published` are at the root, **supplied only at `publishing`/`published`** where the question has an answer |
+| inventory | absent / fresh / stale / corrupt | unchanged (§2.4) |
 
----
+### 2.2 The table is the code
+
+`emit.paths.classify_swap(plan, staged, aside_holds, landed) -> SwapState` is
+pure: no disk, no I/O, one `action` and a `why` that is carried into both the
+refusal message and the durable recovery note. It is called once, at the top of
+`commit_staging`, before anything moves.
+
+Writing it as a returned value rather than as branches is what makes the table
+testable directly — `test_the_state_table_is_the_code` walks every row without
+constructing a filesystem — and the rows that matter most here are precisely the
+ones the code cannot itself produce. Three rounds of "the dispatch tests each
+axis where it happens to need it" is what put the missing rows out of sight.
+
+**The rules, in the order the classifier applies them.**
+
+| # | condition | action | why |
+|---|---|---|---|
+| 1 | staging holds a name `plan.published` does not | **REFUSE** | publishing it would put a deliverable in the folder that the durable inventory would not record — B-8 recreated one swap later |
+| 2 | phase `published` and staging non-empty | **REFUSE** | the publish raises rather than recording `published` over an unpublished file, so this was assembled by a restore or a hand edit; the old code deleted `.dociq/staging` as drained scratch |
+| 3 | phase `published` and staging empty | **FINISH** | cleanup under `.dociq/` only |
+| 4 | every claimed name is staged or already published | **ROLL FORWARD** | the set can still be published as a set |
+| 5 | nothing has been published (`landed` empty) and the set cannot be completed, and this plan's aside tree holds files | **ROLL BACK** | the aside tree is the only copy of what it holds; nothing of the new set is in the folder, so undoing costs nothing **(F-1, and S-09 folded into it)** |
+| 6 | same, but the aside tree is empty | **ABANDONED** | the marker can authorize nothing; nothing has moved. An empty `plan.published` lands here **and must** — a marker that publishes nothing may not set anything aside, because that is a delete before a publish |
+| 7 | otherwise (partly published **and** a claimed name is nowhere) | **REFUSE** | finishing publishes an incomplete set over a previous set already out of the folder and records it as complete; undoing destroys the part already published **(F-2)** |
+
+Rule 5 is the one that did not exist. Rules 1, 2 and 7 are the ones the coarse
+staging axis could not state.
+
+### 2.3 The rows, and what each one does now
+
+Row IDs continue the third round's. Probes are in `tests/test_emit_atomicity.py`
+§6 and §7.
+
+| ID | marker / phase | staging vs `plan.published` | this plan's aside tree | action | correct? |
+|---|---|---|---|---|---|
+| S-01 | absent | — | — | no-op | ✔ |
+| S-02 | absent | orphan present | — | no-op; `run()`'s `discard_staging` throws it away — no marker, so nothing can publish it | ✔ |
+| S-03 | `pending` | equal | empty | ROLL FORWARD | ✔ probe |
+| S-04 | `pending` | equal | partial | ROLL FORWARD (step 1 is idempotent) | ✔ probe |
+| **S-05** | `pending` | empty | **empty** | ABANDONED | ✔ probe |
+| **S-06b** | `pending` | empty or short | **partial** | **ROLL BACK** | **was WRONG — F-1.** `abandoned` tested staging alone; the half of the previous set that had moved was deleted, and the note said "nothing was set aside" ✔ probe |
+| S-07 | `aside` | equal | full | ROLL FORWARD | ✔ probe |
+| S-08 | `pending`→ | equal, and a name the plan did not cover is occupied at the root | — | step 2a clears it **before** any publish | ✔ probe, real open handle (B-8 repro 1) |
+| **S-09** | `aside` / `publishing` | empty | full | **ROLL BACK** | ✔ probe (third round; now rule 5) |
+| S-09b | as S-09, after 2a moved an unplanned occupant into the same tree | | | rollback restores the **whole tree**, not `plan.superseded` | ✔ probe |
+| **S-11a** | `pending` / `aside` | **short** | full | **ROLL BACK** | **was WRONG — F-2.** The short set was published over the previous one and the previous one deleted ✔ probe |
+| **S-11b** | `publishing` | **short**, and some landed | full | **REFUSE** | **was WRONG — F-2** ✔ probe |
+| S-10 | `publishing` | empty, all landed | full | ROLL FORWARD → cleanup | ✔ probe |
+| S-12 | `published` | empty | full | FINISH | ✔ probe (B-6's state) |
+| S-13 | `published` | non-empty | full | **REFUSE** | ✔ probe (third round) |
+| **S-14b** | any | **holds names the marker never claimed** | any | **REFUSE** | **new (rule 1)** ✔ probe |
+| S-15 | unreadable | any | any | fail closed, untouched | ✔ probe (B-2) |
+| **S-15b** | readable, `superseded` names `.dociq/…` | any | any | **refused at parse** | **was WRONG — F-4.** `covering_plan` had the guard; the parser did not ✔ probe |
+| S-16 | absent | — | residue only | no-op; disclosed; the next swap takes `superseded.1` | ✔ probe |
+
+### 2.4 The inventory axis
+
+Unchanged from the third round (I-1 absent → patterns + disclosure; I-2 fresh;
+I-3 behind a surviving marker → the marker wins; I-4 corrupt → BLOCKED; I-5
+escaping path → refused at parse), with one correction: `published_inventory`
+read the marker at `aside` as well as `published`, which meant it could report
+the set a **rollback is about to undo** as the set in the folder. It is now
+`published` only, which is the single state the branch exists for — the swap
+finished and the inventory write was blocked.
+
+### 2.5 The disclosure follows the states
+
+`commit_staging` reports which of its outcomes happened (`ROLLED FORWARD` /
+`ROLLED BACK` / `NOTHING TO DO` / `CLEANED UP`) with the classifier's `why`
+attached, because the return value is `()` for three of them and cannot
+discriminate. F-1's note asserted that nothing had been set aside on a state
+where half the previous set had been — a durable record saying the wrong thing
+about which run's evidence is in the folder is the failure this subsystem exists
+to prevent.
 
 ## 3. Determinism (criterion 7)
 
@@ -205,6 +253,13 @@ tests failed on behaviour rather than on a missing symbol.
 | `test_S13_published_with_a_full_staging_refuses` | state dispatch removed | `.dociq/staging` — a complete set — deleted |
 | `test_no_persistent_state_..._share_the_matter_root[S09]` | state dispatch removed | "recovery left the matter root holding NEITHER generation" |
 | `test_S09_rollback_restores_an_UNPLANNED_occupant_too` | rollback keyed on `plan.superseded` | `unplanned.txt` destroyed by the cleanup that follows the rollback |
+| `test_F1_a_pending_marker_beside_a_part_moved_previous_set_rolls_back` | `abandoned` tests staging alone | the half of the previous set that had moved was deleted |
+| `test_F1_the_note_does_not_say_nothing_was_set_aside` | same | the durable note read *"nothing had been set aside"* over a half-moved set |
+| `test_F2_a_short_staging_directory_never_publishes_over_the_previous_set` | "holds files" is the whole staging axis | a short set published over the previous one, which was then deleted |
+| `test_F2_a_short_staging_directory_mid_publish_refuses` | same | finished an incomplete set and recorded it complete |
+| `test_F3_a_file_saved_after_the_plan_is_not_swept_up_by_it` | the directory collapse restored | an analyst's `clean_text/analyst_note.md` renamed aside and deleted |
+| `test_F3_the_replaced_record_names_the_files_not_the_directory` | same | `stale_outputs_replaced` read `clean_text`, naming none of the files |
+| `test_F4_a_marker_cannot_name_dociqs_own_state_as_superseded` | parser guard removed | `.dociq/staging` accepted as a supersede entry |
 
 **The test whose reach Codex named.**
 `test_a_blocked_publish_leaves_an_incomplete_set_never_a_mixed_one` defined
@@ -215,7 +270,31 @@ mixture assertions unchanged: they have to be satisfied by 2a rather than by the
 fixture. The fixture asserts its own premise (the withheld name *does* have a
 staged replacement), so the test cannot silently stop covering the branch.
 
-## 7. Not proven / not claimed
+## 7. Recorded, NOT fixed — concurrent runs on one matter folder
+
+**There is no inter-process lock on the matter folder, and nothing in the code
+excludes two `run()` calls against the same one.** A second run reaching
+`staging_layout()` deletes `.dociq/staging/` — including a first run's complete
+staged set, between its `mark_ready()` and its `commit_staging()`. That is an
+in-process route into F-1's premise: the marker exists, the previous set is
+being set aside, and the staged set vanishes underneath it.
+
+The fixes above make that **survivable** rather than silent — the classifier
+sees a staging directory that cannot satisfy the marker and either rolls the
+previous set back or refuses, and it says which in the durable note. It does not
+make it *correct*: the second run then proceeds to build its own set in a folder
+the first run believes it owns, and the two runs' `stale_outputs_replaced`
+records describe a folder neither of them saw.
+
+Closing it needs a decision rather than a patch — an exclusive lock file under
+`.dociq/` that fails the second run closed, versus letting the second run wait,
+versus declaring one-run-per-folder an operating condition and detecting
+violations after the fact. Each has a different answer for a crashed run that
+left a lock behind, which is the case that decides whether operators end up
+deleting lock files by hand. **That is Alex's ruling, not this fix round's**, and
+it is recorded here rather than closed quietly.
+
+## 8. Not proven / not claimed
 
 * **The bootstrap gap is real and is disclosed, not closed.** A folder whose last
   publication predates the inventory has no record of what is in it, and no code
@@ -230,7 +309,7 @@ staged replacement), so the test cannot silently stop covering the branch.
   touches neither. No `amendments.toml` entry was needed: `contracts.py`,
   `gui/pipeline.py` and `emit/handoff.py` are untouched (`git status` in §8).
 
-## 8. Files changed
+## 9. Files changed
 
 ```
 src/dociq/emit/paths.py        M1 (PUBLISHED_NAME, published_inventory,
