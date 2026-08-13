@@ -184,7 +184,8 @@ tests = ["tests/test_seam_population.py"]
 # Same two-step as A-16: the wiring lands with this entry, so the adopting
 # commit id is recorded in the next commit. A commit cannot name itself.
 [amendment.A-17]
-status = "raised"
+status = "applied"
+adopted_in = "0e31730"
 title = "A-16's residue disclosure has a blind spot exactly the width of the package path"
 raised_by = "Codex third fix round, finding A-7"
 wired_in = { "src/dociq/gui/pipeline.py" = ["PackageResult"], "src/dociq/adapter.py" = ["PackageResult"] }
