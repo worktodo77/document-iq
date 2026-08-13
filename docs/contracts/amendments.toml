@@ -180,3 +180,12 @@ title = "a completed swap's undeletable residue has nowhere to reach the operato
 raised_by = "the D-31 delete-last redesign, correctly declining to route it through hashed content"
 wired_in = { "src/dociq/gui/pipeline.py" = ["RunOutcome"], "src/dociq/adapter.py" = ["RunOutcome"] }
 tests = ["tests/test_seam_population.py"]
+
+# Same two-step as A-16: the wiring lands with this entry, so the adopting
+# commit id is recorded in the next commit. A commit cannot name itself.
+[amendment.A-17]
+status = "raised"
+title = "A-16's residue disclosure has a blind spot exactly the width of the package path"
+raised_by = "Codex third fix round, finding A-7"
+wired_in = { "src/dociq/gui/pipeline.py" = ["PackageResult"], "src/dociq/adapter.py" = ["PackageResult"] }
+tests = ["tests/test_package_swap.py"]

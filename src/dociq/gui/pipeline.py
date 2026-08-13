@@ -467,6 +467,24 @@ class PackageResult:
     scope_statement: str
     doc_count: int = 0
 
+    residue: tuple[str, ...] = ()
+    """Old package trees under ``.dociq/`` this build could not delete
+    (amendment A-17, from Codex third-fix-round finding A-7).
+
+    The package's exact analogue of :attr:`RunOutcome.superseded_residue`, and
+    it exists because A-16 did NOT cover it: ``emit.paths.superseded_residue()``
+    recognizes matter-swap directories named ``superseded*`` and not
+    ``package_superseded``. So the field that was supposed to make undeletable
+    residue visible had a blind spot the exact width of the package path, and
+    the GUI said only "Upload package built" while a full stale copy of a
+    previous package sat on the matter machine.
+
+    Rendered success-FIRST, in that order, exactly as A-16 requires: the
+    package published, it is correct, and a named old copy remains. A partial
+    old package on a machine an operator uploads from is a retention problem and
+    a confusion problem, not a build failure, and calling it either of the other
+    two would be wrong."""
+
     missing: tuple[str, ...] = ()
     """Doc IDs the operator asked for that have no ``clean_text`` file (B5).
 
