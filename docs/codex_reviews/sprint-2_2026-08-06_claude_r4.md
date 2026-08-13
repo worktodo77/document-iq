@@ -54,6 +54,8 @@ A-5 and B-6 are reported as *unreachable* rather than *fixed* deliberately, and 
 
 Step 1 takes the whole previous set out before step 2 puts any of the new one in, so the matter root holds **one run's files at every instant**: incomplete is reachable, **mixed is not**. Step 3 sits below the publish, so its failure is a disclosed residue.
 
+> **WITHDRAWN, 2026-08-06 — Codex review #2, third fix round, B-8.** The paragraph above and item 2's "destinations are free because step 1 emptied them" were **false**. Step 1 emptied the names this build's `_STALE_PATTERNS` enumerate, not the previous set: an occupant the plan missed was moved aside lazily, *after* earlier staged files had already landed, and a retired output with no staged successor was never noticed at all. Codex reproduced both with a real Windows open handle. The claim now holds because the plan is built from a durable inventory of what the last run published and because the publish phase clears every destination in a complete pass first — see `docs/verification/codex_r4_inventory_2026-08-06.md`.
+
 **Why A-5 is unreachable:** the prior package is renamed, never deleted, so a rollback restores bytes nothing modified. There is no partly-deleted backup to call intact.
 
 **Why B-6 is unreachable:** three independent guards, the disk-readable one primary — the plan can only select paths to *rename into* `.dociq/`; an empty staging directory means nothing may be set aside; and the phase reads `published`. Recovery's only destructive call is inside `.dociq/`, so a stale marker cannot authorize destroying a set already in place.
