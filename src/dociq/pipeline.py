@@ -673,9 +673,15 @@ def _stale_deliverables(
     read and the patterns are then the only knowledge there is; the run says so
     (``published_set_inventory`` in the log's ``run`` block).
 
-    Entries are filtered to what is ON DISK and normalised so that a directory
-    and its contents are not both listed — see
-    :func:`~dociq.emit.paths.covering_plan`. Passing ``None`` reads the inventory
+    Entries are filtered to what is ON DISK once, here, and normalised so that a
+    directory and its contents are not both listed — see
+    :func:`~dociq.emit.paths.covering_plan`, which does no further disk reading
+    for the reason F-3 gives: this function runs at the TOP of Stage 5 and the
+    renames it plans happen after Stage 6, so anything decided from the disk here
+    is minutes stale by the time it is acted on. Existence-filtering is safe
+    across that window in the direction that matters — a name that has since
+    disappeared is skipped by the swap, and a name that has since appeared is
+    handled by the swap's own pre-publish destination sweep. Passing ``None`` reads the inventory
     from the folder; ``dociq.pipeline.run`` passes the value it read at the top
     of the run, inside the block that turns an unreadable one into a disclosed
     BLOCKED run rather than a traceback.
@@ -700,7 +706,7 @@ def _stale_deliverables(
         # that was already gone.
         if (layout.root / rel).exists():
             found.append(rel)
-    return emit_paths.covering_plan(found, layout.root)
+    return emit_paths.covering_plan(found)
 
 
 def _log_reconciliation(
