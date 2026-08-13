@@ -233,11 +233,26 @@ staged replacement), so the test cannot silently stop covering the branch.
 ## 8. Files changed
 
 ```
-src/dociq/emit/paths.py        M1 + M2 + the S-09/S-11/S-13 dispatch
-src/dociq/pipeline.py          plan union, inventory read at the top of run(),
-                               run.published_set_inventory disclosure
-tests/test_emit_atomicity.py   §5 B-8 (6 tests), §6 the state enumeration (9 + 6)
+src/dociq/emit/paths.py        M1 (PUBLISHED_NAME, published_inventory,
+                               _write_inventory, SwapPlan.published),
+                               M2 (commit_staging step 2a),
+                               the S-09/S-09b/S-11/S-13 dispatch,
+                               covering_plan, the outcome notes sink
+src/dociq/pipeline.py          plan union, inventory read at the top of run()
+                               inside the fail-closed block,
+                               run.published_set_inventory disclosure,
+                               the recovery-outcome invocation note
+tests/test_emit_atomicity.py   §5 B-8 (6 tests), §6 the state enumeration
 tests/test_incomplete_runs.py  one assertion widened for plan normalisation
 docs/verification/codex_r3_deletelast_2026-08-05.md   withdrawal
 docs/codex_reviews/sprint-2_2026-08-06_claude_r4.md   withdrawal
+docs/decisions/decision_register.md   D-31 implementation note
 ```
+
+Commits: `4a1cb5e` (B-8 + the state dispatch), `5fe998d` (the BLOCKED message
+names the right file), `0c95901` (the recovery says which outcome it reached).
+
+**Untouched, and checked:** `src/dociq/contracts.py`, `src/dociq/gui/pipeline.py`
+and `src/dociq/emit/handoff.py` — frozen or owned by the agent doing A-6/A-7. No
+`amendments.toml` entry is required because no frozen surface changed;
+`tools/check_amendments.py` passes (19 entries, all applied ones wired).
