@@ -114,6 +114,18 @@ readiness marker's own "move staging aside and delete the marker" instruction
 and doing only the first half. That instruction is in this codebase's own error
 message, so S-09 is a state DocIQ tells operators how to create.
 
+**The disclosure had to follow the states.** S-09 introduced an outcome the
+recovery's durable invocation note had never had to describe. That note asserted
+that the interrupted swap *"was completed"*, which after a rollback is the wrong
+fact about **which run's evidence an auditor is looking at** — the interrupted
+run's set is the one that did not survive. `commit_staging` now says which of
+its four outcomes happened (`ROLLED FORWARD` / `ROLLED BACK` / `NOTHING TO DO` /
+`CLEANED UP`) through a notes sink, because the return value is `()` for three of
+them and cannot discriminate. Probes:
+`test_a_rollback_is_not_disclosed_as_a_completed_swap` (and the two sibling
+readings, so the note is a discriminator rather than a label the recovery always
+prints). It sits in `run.invocation_notes`, outside hashed content.
+
 **The class assertion.** `only_old.txt` belongs to the previous set,
 `only_new.txt` to the staged one, and
 `test_no_persistent_state_lets_two_generations_share_the_matter_root` asserts
@@ -224,7 +236,7 @@ staged replacement), so the test cannot silently stop covering the branch.
 src/dociq/emit/paths.py        M1 + M2 + the S-09/S-11/S-13 dispatch
 src/dociq/pipeline.py          plan union, inventory read at the top of run(),
                                run.published_set_inventory disclosure
-tests/test_emit_atomicity.py   §5 B-8 (6 tests), §6 the state enumeration (6 + 6)
+tests/test_emit_atomicity.py   §5 B-8 (6 tests), §6 the state enumeration (9 + 6)
 tests/test_incomplete_runs.py  one assertion widened for plan normalisation
 docs/verification/codex_r3_deletelast_2026-08-05.md   withdrawal
 docs/codex_reviews/sprint-2_2026-08-06_claude_r4.md   withdrawal

@@ -26,6 +26,20 @@ delete the newly published set). Every fix was correct and every fix opened the
 next window, **because the design deleted before it published, so every failure
 mode was "half-deleted".**
 
+**AND THEN B-8** (third fix round), which is a different class and is why this
+paragraph does not end here. Delete-last was implemented correctly and the thing
+it renamed aside was **not the previous set** — it was the names *this build's*
+output patterns enumerate. A deliverable an older build wrote under a retired
+name either survived a successful swap or was moved aside lazily, after new
+files had already landed. So the swap now builds its plan from
+:func:`published_inventory`, a durable record of what the last run actually
+published, and clears every destination in a complete pass before publishing
+anything. Re-enumerating the states backwards from the disk — the exercise that
+round required — found three more whose next step destroyed a complete set; they
+are the ``PHASE_ASIDE``/``PHASE_PUBLISHED`` dispatch in :func:`commit_staging`.
+The table is in ``docs/verification/codex_r4_inventory_2026-08-06.md`` §2, and it
+is the thing to read before changing this module.
+
 So the swap no longer deletes anything at the matter root. It **renames**. The
 current set is renamed aside into ``.dociq/``, the staged set is renamed into
 place, and only then is what was moved aside deleted. The substitution carries
@@ -1118,7 +1132,9 @@ def _staged_files(staging: Path) -> list[Path]:
     return out
 
 
-def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
+def commit_staging(
+    destination: OutputLayout, notes: list[str] | None = None
+) -> tuple[str, ...]:
     """Replace the matter folder's deliverables with the staged ones.
 
     Returns the paths the matter folder no longer holds — the ones renamed
@@ -1210,6 +1226,21 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
     roll-forward that completes it. Closing the incompleteness window entirely
     needs a published-set indirection that §8's fixed paths currently forbid.
     """
+    def note(what: str) -> None:
+        """Say WHICH of this function's outcomes happened.
+
+        A sink rather than a return value because the return value has one
+        meaning already — the names that left the matter folder — and it is ``()``
+        for three different outcomes, including the rollback. The caller's
+        durable disclosure used to assert that an interrupted swap "was
+        completed", which the rollback below makes false: the interrupted run's
+        set is the one that did NOT survive. A recovery that describes itself
+        wrongly in the processing log is the same class of defect as one that
+        does the wrong thing, one layer out.
+        """
+        if notes is not None:
+            notes.append(what)
+
     marker = _marker_path(destination)
     if not marker.is_file():
         return ()
@@ -1309,6 +1340,11 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
             # Nothing left the matter folder: the set that was moved aside is
             # back in it, and the inventory that described it was never
             # rewritten, so it is still true.
+            note("ROLLED BACK: the interrupted run's staged set was gone from "
+                 "the staging directory, so the previous run's set — which was "
+                 "waiting intact under .dociq/ — was moved back into place. "
+                 "This folder holds the PREVIOUS run's deliverables, not the "
+                 "interrupted run's")
             return ()
         if len(landed) != len(plan.published):
             raise PendingSwapUnrecoverable(_UNRECOVERABLE.format(
@@ -1452,6 +1488,18 @@ def commit_staging(destination: OutputLayout) -> tuple[str, ...]:
         else:
             inventory_written = True
 
+    if abandoned:
+        note("NOTHING TO DO: the readiness marker outlived its own swap. The "
+             "staging directory was empty, so nothing could be published and "
+             "nothing was set aside; only DocIQ's own state under .dociq/ was "
+             "cleaned up")
+    elif moved or plan.phase != PHASE_PUBLISHED:
+        note("ROLLED FORWARD: the interrupted run's staged set was published "
+             "into this folder and the set it replaced was moved aside")
+    else:
+        note("CLEANED UP: the interrupted run's staged set was already fully "
+             "published; only DocIQ's own state under .dociq/ remained")
+
     _discard_aside_trees(destination)
     try:
         _remove_tree_or_fail(staging)
@@ -1504,7 +1552,9 @@ def _discard_aside_trees(destination: OutputLayout) -> tuple[str, ...]:
     return tuple(survivors)
 
 
-def recover_pending(destination: OutputLayout) -> tuple[str, ...]:
+def recover_pending(
+    destination: OutputLayout, notes: list[str] | None = None
+) -> tuple[str, ...]:
     """Finish an interrupted swap, if there is one.
 
     Safe to call always, in the sense that it does nothing when no swap is
@@ -1526,4 +1576,4 @@ def recover_pending(destination: OutputLayout) -> tuple[str, ...]:
     """
     if not pending_swap(destination):
         return ()
-    return commit_staging(destination)
+    return commit_staging(destination, notes)

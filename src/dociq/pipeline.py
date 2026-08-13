@@ -1157,8 +1157,9 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # made a completed roll-forward silent whenever the folder had been empty,
     # which is the case an operator is least likely to reconstruct unaided.
     was_pending = emit_paths.pending_swap(layout)
+    recovery_notes: list[str] = []
     try:
-        recovered = emit_paths.recover_pending(layout)
+        recovered = emit_paths.recover_pending(layout, recovery_notes)
         # The DURABLE INVENTORY of the set this folder currently holds (B-8),
         # read AFTER the roll-forward — before it, the folder is mid-swap and
         # the inventory describes whichever side of the swap has the names.
@@ -1299,11 +1300,22 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         # whose deliverables were completed by a LATER run's recovery rather
         # than by the run that produced them is exactly the kind of thing an
         # auditor should not have to infer.
+        #
+        # WHICH outcome, not just "recovered". The recovery can also ROLL BACK —
+        # if the interrupted run's staged set was gone, the previous run's set
+        # is restored and the interrupted run's deliverables are the ones that
+        # did not survive. This sentence used to assert that the swap "was
+        # completed", which is false in that case, and a durable record that
+        # says the wrong thing about which run's evidence is in the folder is
+        # the failure this whole subsystem exists to prevent.
         walk_notes.invocation.append(
-            f"RECOVERED: a previous run had finished writing its deliverables "
-            f"but was interrupted before its swap was fully wound up; it was "
-            f"completed before this run started ({len(recovered)} superseded "
-            "file(s) replaced by the recovery itself).")
+            "RECOVERED: a previous run had finished writing its deliverables "
+            "but was interrupted before its swap was fully wound up. It was "
+            "resolved before this run started, and the folder held ONE complete "
+            f"set as a result ({len(recovered)} superseded file(s) replaced by "
+            "the recovery itself). "
+            + (recovery_notes[0] + "." if recovery_notes else
+               "The outcome was not recorded."))
     stage(1)
     walked = walker.run(walk_config, opts.walk, walk_notes)
     stage(2, f"{len(walked.documents)} document(s) read")

@@ -1612,3 +1612,72 @@ def test_S09_rollback_restores_an_UNPLANNED_occupant_too(tmp_path, monkeypatch):
     assert (out / "unplanned.txt").read_text(encoding="utf-8") == "OLD\n"
     assert not emit_paths.pending_swap(layout)
     assert not aside.exists()
+
+
+def test_a_rollback_is_not_disclosed_as_a_completed_swap(tmp_path, monkeypatch):
+    """The recovery's DURABLE description has to match what the recovery did.
+
+    S-09 introduced an outcome the disclosure had never had to describe: the
+    interrupted run's staged set is gone and the PREVIOUS run's set is restored,
+    so the deliverables in the folder are not the ones the interrupted run
+    wrote. The invocation note asserted "it was completed", which is precisely
+    the wrong fact about which run's evidence an auditor is looking at.
+
+    Enumerated with the state, not after it: a recovery that describes itself
+    wrongly in the processing log is the same class of defect as one that does
+    the wrong thing, one layer out.
+    """
+    out = tmp_path / "matter"
+    _run(out)
+    before = _fingerprint(out)
+    layout, staging = _stage_with(
+        tmp_path, out, tuple(sorted(before)), {"only_new.txt": "NEW\n"})
+    _stop_at_phase_aside(layout, staging, monkeypatch)
+    shutil.rmtree(staging)
+
+    notes: list[str] = []
+    emit_paths.recover_pending(layout, notes)
+    assert notes and notes[0].startswith("ROLLED BACK"), notes
+
+    # And the same fact reaches the next run's durable record.
+    layout2, staging2 = _stage_with(
+        tmp_path, out, ("sources.json",), {"only_new.txt": "NEW\n"})
+    _stop_at_phase_aside(layout2, staging2, monkeypatch)
+    shutil.rmtree(staging2)
+    recovered_run = _run(out)
+    payload = json.loads(
+        recovered_run.layout.processing_log.read_text(encoding="utf-8"))
+    invocation = " ".join(payload["run"]["invocation_notes"])
+    assert "RECOVERED" in invocation
+    assert "ROLLED BACK" in invocation, (
+        "the durable record does not say the interrupted run's set was the one "
+        f"that did not survive: {invocation!r}")
+    assert "invocation_notes" not in json.dumps(payload["content"]), (
+        "the recovery outcome reached the hashed content (criterion 7)")
+
+
+def test_an_ordinary_roll_forward_says_so(tmp_path):
+    """The sibling reading, so the note above is a discriminator rather than a
+    label the recovery always prints."""
+    out = tmp_path / "matter"
+    _run(out)
+    layout, staging = _stage_with(
+        tmp_path, out, ("sources.json",), {"only_new.txt": "NEW\n"})
+    notes: list[str] = []
+    emit_paths.recover_pending(layout, notes)
+    assert notes and notes[0].startswith("ROLLED FORWARD"), notes
+    assert (out / "only_new.txt").is_file()
+
+
+def test_a_marker_that_outlived_its_swap_says_nothing_to_do(tmp_path):
+    out = tmp_path / "matter"
+    _run(out)
+    layout = OutputLayout.at(out)
+    emit_paths.mark_ready(layout, ("sources.json",))
+    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
+    if staging.exists():
+        shutil.rmtree(staging)
+    notes: list[str] = []
+    emit_paths.recover_pending(layout, notes)
+    assert notes and notes[0].startswith("NOTHING TO DO"), notes
+    assert (out / "sources.json").is_file()
