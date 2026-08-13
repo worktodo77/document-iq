@@ -1134,3 +1134,71 @@ than taken during a merge-gate fix round on a frozen, shared module.
 `src/dociq/contracts.py` is frozen and was being edited by a parallel track
 during this fix round. Applying it here would have been a conflict on a module
 whose whole point is that it does not move under people.
+
+---
+
+## A-16 — a completed swap's undeletable residue has nowhere to reach the operator
+
+**Raised by:** the D-31 delete-last redesign, 2026-08-05
+**Affects:** `dociq/gui/pipeline.py` — `RunOutcome.superseded_residue`; wired by
+`dociq/adapter.py`
+**Proposed severity:** MINOR — a new optional field on a non-contract seam record
+**Status:** **APPLIED 2026-08-05 at `f7358a7`**
+
+### The case
+
+D-31 made the matter swap delete-last: the previous deliverable set is renamed
+aside under `.dociq/`, the staged set is renamed into place, and the set-aside
+tree is removed only afterwards. A failure of that last step therefore cannot
+make the matter folder wrong — it leaves one complete, correct set at the root
+and a clearly-named stale one under `.dociq/`. **The run published. The evidence
+is right.**
+
+That is a success with a residue, and there was nowhere to say so. Nobody opens
+`.dociq/`, so the residue was disk that filled for reasons no operator could
+see, and — worse for this tool — a stale copy of a previous run's deliverables
+sitting on a matter machine with nothing on screen having mentioned it.
+
+It is deliberately NOT routed through `RunResult.warnings`: those become hashed
+`content`, so a run that hit a transient antivirus lock and one that did not
+would produce different bytes for the same evidence. That is criterion 7's
+boundary, and this project has twice had to unpick something from hashed content
+that belonged in the run record instead.
+
+---
+
+## A-17 — A-16's residue disclosure has a blind spot exactly the width of the package path
+
+**Raised by:** Codex review #2, third fix round, finding A-7, 2026-08-06
+**Affects:** `dociq/gui/pipeline.py` — `PackageResult.residue`; wired by
+`dociq/adapter.py`, `dociq/emit/handoff.py` (`UploadPackage.residue`),
+`dociq/gui/view_models.py` and `dociq/gui/screens.py`
+**Proposed severity:** MINOR — a new optional field on a non-contract seam record
+**Status:** **APPLIED 2026-08-06 at `0e31730`** (the seam field); the emit,
+view-model and screen halves land in the fourth fix round.
+
+### The case
+
+A-16 was written for the matter swap and was believed to cover the package swap
+too. It does not. `emit.paths.superseded_residue()` — the scanner A-16's field is
+populated from — recognizes matter-swap directories named `superseded*`, and the
+package's set-aside tree is called `package_superseded`. So the field built to
+make undeletable residue visible had a blind spot exactly the width of the
+package path.
+
+Underneath it, `_publish_package()`'s post-publish cleanup called
+`_remove_tree(package_superseded)` and **discarded the boolean** — the boolean
+that helper exists to return, precisely so that no caller would assume a removal
+happened. Codex's reproduction: a scanner locks one file in the old package
+after the new one has taken the published name, `rmtree` gives up part way,
+and `_publish_package()` returns an ordinary success. `upload_package/`
+correctly published, `.dociq/package_superseded/` still on disk, nothing in the
+result carrying it, the A-16 scanner returning `()`, and the screen saying only
+*"Upload package built."*
+
+It is rendered **success FIRST, in that order**, exactly as A-16 requires: the
+package published, it is correct, and a named old copy remains. A stale package
+copy on a machine an operator uploads from is a retention problem and a
+confusion problem — a folder full of package-shaped files, ten minutes after
+they were told to drag one into a Project — and not a build failure. Calling it
+either of the other two would be wrong.

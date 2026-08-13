@@ -245,6 +245,30 @@ class UploadPackage:
     """The statement written into the package, returned verbatim so the screen
     shows the operator exactly what the recipient will read (A-12)."""
 
+    residue: tuple[str, ...] = ()
+    """Old package trees under ``.dociq/`` this build published over and could
+    NOT delete (Codex review #2, third fix round, finding A-7).
+
+    **A success with a residue, in that order.** The publish order is
+    delete-last (see :func:`_publish_package`), so by the time anything is
+    deleted the published name already holds the new, validated package. A
+    failure of that last step therefore cannot make the package wrong; it leaves
+    a complete stale copy of the PREVIOUS package under ``.dociq/``.
+
+    It exists because the boolean was being discarded. ``_remove_tree`` was
+    written to answer with the state of the disk precisely so that no caller
+    would assume a removal happened — and this caller then dropped the answer on
+    the floor and returned an unqualified success. A-16 did not cover it:
+    :func:`dociq.emit.paths.superseded_residue` recognizes matter-swap
+    directories named ``superseded*``, not ``package_superseded``, so the field
+    built to surface undeletable residue had a blind spot exactly the width of
+    the package path.
+
+    Nobody opens ``.dociq/``. Left unreported this is a full copy of a previous
+    package sitting on the matter machine with nothing on screen having
+    mentioned it — a retention and confusion problem, not a build failure, and
+    calling it either of the other two would be wrong."""
+
     missing: tuple[str, ...] = ()
     """Doc IDs that were asked for and have no ``clean_text`` file.
 
@@ -594,12 +618,23 @@ def build_upload_package(
     root — package-shaped folders sitting beside the deliverables, in the space
     §7 reserves for what Expert Assist reads. The publish order and what each
     failure leaves behind are in :func:`_publish_package`.
+
+    **The build opens by RECOVERING, not by cleaning** (finding A-6).
+    :func:`_recover_interrupted_publish` runs before the residue sweep and
+    carries the enumeration of every state a previous invocation can leave on
+    disk — including the one whose only safe action is "restore, do not delete".
     """
     lim = limits or ProjectLimits()
     published = layout.upload_package
     state = _dociq_dir(layout)
     staging = state / _INCOMING_NAME
     superseded = state / _SUPERSEDED_NAME
+
+    # RECOVERY RUNS FIRST — before a single byte is classified as residue
+    # (finding A-6). One of the states an earlier invocation can leave behind is
+    # one in which `.dociq/package_superseded/` is the only intact package in
+    # the matter, and the loop below would delete it as scratch.
+    _recover_interrupted_publish(published, superseded)
 
     # Residue from an earlier attempt that died between these same steps. It is
     # removed BEFORE anything is assembled, and a failure to remove it stops the
@@ -639,6 +674,105 @@ def build_upload_package(
         ) from exc
 
     return _publish_package(assembled, staging, published, superseded)
+
+
+def _staging_residue_note(staging: Path) -> str:
+    """The same discarded-boolean class as A-7, at the three sites that raise.
+
+    ``_remove_tree(staging)`` is called on every failure path out of
+    :func:`_publish_package` and its answer was thrown away at all three. A
+    validated package tree that survives under ``.dociq/package_staging/`` is
+    package-shaped, complete and NOT the one the operator should upload — the
+    same confusion hazard A-7 names, reached through a failure instead of
+    through a success.
+
+    Not a raise and not a separate field: these sites are already raising, and
+    the operator reads one message. This is the sentence that gets appended to
+    it when the removal did not happen, and it is empty when it did.
+    """
+    if not staging.exists():
+        return ""
+    return (f" The package this attempt assembled could also not be cleaned up "
+            f"and is still at {staging} — do NOT upload it; it is DocIQ's own "
+            f"working folder, not the package.")
+
+
+def _recover_interrupted_publish(published: Path, superseded: Path) -> None:
+    """Put back a package the LAST invocation moved aside and never replaced.
+
+    **Finding A-6, and it is a fix to the order rather than to a step.** The two
+    renames in :func:`_publish_package` are not a transaction. Between them —
+    and after a rollback rename that itself failed — the matter is in a state
+    with no ``upload_package/`` and a complete previous package sitting under
+    ``.dociq/package_superseded/``. That directory is then the ONLY intact
+    package in the matter, and the tail of that failure path says so on screen.
+
+    The next build used to open by classifying both state directories as
+    disposable residue and deleting them, before assembling anything. So the
+    recovery DocIQ offered the operator — *build again* — destroyed the only
+    thing worth recovering, and an ordinary assembly error after that left them
+    with no package at all: none published, none staged, none set aside. That is
+    delete-before-publish, inside the redesign whose whole point was to delete
+    last.
+
+    **The state machine, enumerated backwards from what a previous invocation
+    can leave on disk.** ``P`` = ``upload_package/``, ``S`` =
+    ``.dociq/package_staging/``, ``U`` = ``.dociq/package_superseded/``:
+
+    ==== ==== ==== ================================ =======================
+    P    S    U    how it is reached                what must happen next
+    ==== ==== ==== ================================ =======================
+    no   no   no   first ever build; a first build  build; nothing to lose
+                   that failed
+    no   yes  no   died during assembly, no prior    discard S, build
+                   package existed
+    no   no   yes  **the A-6 state** — died between  RESTORE U, then build
+                   the two renames, or the rollback
+                   rename also failed
+    no   yes  yes  same, with the staged package     RESTORE U, discard S,
+                   still there                       then build
+    yes  no   no   the ordinary steady state         build
+    yes  yes  no   died during assembly over an      discard S, build
+                   existing package
+    yes  no   yes  post-publish cleanup failed —     discard U (residue),
+                   ``P`` is the NEW package          build
+    yes  yes  yes  as above with staging residue     discard both, build
+    ==== ==== ==== ================================ =======================
+
+    Only the two ``P`` absent, ``U`` present rows need anything new, and what
+    they need is the same thing: restore before deleting. Every row with ``P``
+    present is safe to clean, because ``P`` is only ever reached by renaming a
+    fully assembled and validated tree onto it.
+
+    **Why the restored tree is known to be complete, rather than hoped to be.**
+    ``U`` is created by exactly one operation — renaming a complete published
+    package — and is destroyed by exactly one, ``_remove_tree``. With this
+    function in front of the cleanup, ``_remove_tree`` is never pointed at ``U``
+    while ``P`` is absent: the post-publish cleanup runs only after ``P`` holds
+    the new package, and the pre-build cleanup now runs only after this
+    restore. So "``P`` absent and ``U`` present" implies ``U`` is intact, by
+    construction. An empty ``U`` is not a package and is left to the cleanup.
+
+    A failure to restore raises rather than falling through, because falling
+    through reaches the deletion this exists to prevent.
+    """
+    if published.exists() or not superseded.is_dir():
+        return
+    if not any(p.is_file() for p in superseded.rglob("*")):
+        # An empty directory under the set-aside name is scratch, not a package.
+        return
+    try:
+        _retry_rename(superseded, published)
+    except OSError as exc:
+        raise PackageSwapError(
+            f"A previous package build was interrupted after it moved the "
+            f"earlier package aside, so {superseded} is currently the only "
+            f"intact package in this matter and there is no {published.name} "
+            f"folder. This build tried to put it back first and could not: "
+            f"{exc}. NOTHING was deleted and no new package was built. Close "
+            f"anything holding that folder open and try again, or rename it to "
+            f"{published.name} yourself."
+        ) from exc
 
 
 def _publish_package(assembled: UploadPackage, staging: Path, published: Path,
@@ -693,6 +827,7 @@ def _publish_package(assembled: UploadPackage, staging: Path, published: Path,
                 f"{superseded} is left over from an earlier package build and "
                 f"could not be removed, so nothing was published. The package "
                 f"folder was NOT touched and still holds the earlier build."
+                + _staging_residue_note(staging)
             )
         try:
             _retry_rename(published, superseded)
@@ -703,6 +838,7 @@ def _publish_package(assembled: UploadPackage, staging: Path, published: Path,
                 f"could not be moved aside to make room for it: {exc}. Nothing "
                 f"was published and the package folder still holds the earlier "
                 f"build."
+                + _staging_residue_note(staging)
             ) from exc
         moved_aside = True
 
@@ -729,18 +865,26 @@ def _publish_package(assembled: UploadPackage, staging: Path, published: Path,
                if restored else
                (f"The earlier build is intact at {superseded} — it was moved "
                 f"aside and never modified — and there is no package at "
-                f"{published.name}. Rename that folder back, or build again."
+                f"{published.name}. Rename that folder back, or build again — "
+                f"the next build puts it back BEFORE it assembles anything, so "
+                f"it is still there if that build fails too."
                 if moved_aside else
                 "There was no earlier package, and no package folder remains — "
                 "build again."))
+            + _staging_residue_note(staging)
         ) from exc
 
     # Published. Everything below is cleanup under `.dociq/` and cannot make the
     # folder wrong, so a failure is a disclosed residue rather than an error:
     # reporting "the package was NOT built" about a package that was built,
     # validated and published is the false-headline shape of finding A-4.
-    _remove_tree(superseded)
-    return replace(assembled, root=published, readme=published / README_NAME)
+    # …and a disclosed residue is disclosed, not discarded (finding A-7). This
+    # call site had the boolean `_remove_tree` exists to return and dropped it,
+    # so a stale copy of the whole previous package could survive under
+    # `.dociq/` behind an unqualified "Upload package built."
+    residue = () if _remove_tree(superseded) else (str(superseded),)
+    return replace(assembled, root=published, readme=published / README_NAME,
+                   residue=residue)
 
 
 def _assemble_package(

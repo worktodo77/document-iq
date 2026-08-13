@@ -78,3 +78,39 @@ def test_the_two_halves_of_the_register_agree_on_status():
         f"the prose register still calls these RAISED while the machine-readable "
         f"registry calls them applied: {conflicts} — a reviewer reading the file "
         f"they were pointed at cannot tell which is true")
+
+
+# The three below are the register's state on 2026-08-06, named rather than
+# skipped. A-04, A-05a and A-11b were recorded machine-readably and never
+# written up in prose; they predate this test and are not this round's to
+# author. Naming them is the point — an allowlist that says "and anything else
+# we forget" is the omission this whole file exists to catch, one level up.
+_PROSE_GAPS_AS_OF_2026_08_06 = {"A-04", "A-05a", "A-11b"}
+
+
+def test_every_machine_readable_amendment_is_written_up_in_prose():
+    """The OTHER direction, which nothing checked.
+
+    ``test_every_amendment_in_the_prose_register_has_a_machine_readable_entry``
+    catches a prose entry with no machine half. It cannot catch the reverse, and
+    the reverse is what happened: A-16 and A-17 were adopted with immutable
+    commit ids in ``amendments.toml`` while ``amendments.md`` — **the file a
+    reviewer is sent to** — stopped at A-15. A reviewer reading it would have
+    concluded that no amendment had been raised for two fix rounds.
+
+    Same class as finding D-2, with the halves swapped: two registers, one
+    complete, and only one direction of the comparison checked.
+    """
+    import re
+    import tomllib
+
+    prose = (ROOT / "docs" / "contracts" / "amendments.md").read_text(
+        encoding="utf-8")
+    with (ROOT / "docs" / "contracts" / "amendments.toml").open("rb") as fh:
+        entries = set(tomllib.load(fh).get("amendment", {}))
+
+    headings = set(re.findall(r"^## (A-\d{2}[a-z]?) —", prose, re.MULTILINE))
+    missing = sorted(entries - headings - _PROSE_GAPS_AS_OF_2026_08_06)
+    assert not missing, (
+        f"amendments adopted in the machine-readable registry with nothing in "
+        f"the prose register a reviewer is pointed at: {missing}")
