@@ -8,9 +8,16 @@ stale-deliverable purge, emission, accounting, manifest — and both could repor
 success, because zero pages in equals zero pages kept plus zero pages dropped
 and a partial corpus balances against itself.
 
-The consequence is not a status-display bug. A blocked run purges the previous
-run's deliverables and writes an empty set over them, so a failed disk check
-destroys the last good reduction of a matter. That is provenance loss.
+The consequence was not a status-display bug. A blocked run purged the previous
+run's deliverables and wrote an empty set over them, so a failed disk check
+destroyed the last good reduction of a matter. That is provenance loss.
+
+*(Both sentences are past tense on purpose. The purge itself is gone as well as
+the status defect: a run that does not complete never reaches Stage 5's
+publication at all, so the previous set is untouched. The set-aside protocol
+that once stood behind this sentence was removed by D-32 — what guarantees it
+now is the abort path, not a rename. See :func:`dociq.emit.paths.publish_staging`
+for the window that remains once publication does start.)*
 
 This module is the fix's vocabulary: one small record and the operator-facing
 prose that goes with it.
@@ -44,10 +51,44 @@ from .contracts import RunResult, TerminalStatus
 __all__ = [
     "TerminalStatus",
     "RunTermination",
+    "RunAborted",
+    "StatusProse",
+    "STATUS_PROSE",
     "COMPLETED",
     "INCOMPLETE_DIR",
     "STATUS_FILENAME",
 ]
+
+
+class RunAborted(Exception):
+    """The operator abandoned the run from inside a callback the pipeline made.
+
+    Stage 1's cancellation is polled — :class:`~dociq.ingest.walker.WalkOptions`
+    carries a ``cancelled`` check and the walk asks it between files. Stage 3's
+    Bates confirmation cannot work that way: the pipeline is *blocked inside the
+    operator's answer*, and there is no later poll to reach. Closing the window
+    while that prompt is open therefore needs a way out of the callback, and it
+    must not be a return value — ``BatesConfirm`` returns ``bool``, and every
+    bool it can return is a ruling. "The operator walked away" is not a ruling,
+    and recording it as a refusal would put a decision in the log that nobody
+    made.
+
+    It lives here, in the module that owns how a run ENDS, for two reasons. It
+    is the vocabulary of termination, not of Bates — any future mid-run question
+    needs the same escape. And the GUI may raise it: Track C may not import
+    ``identify``, ``ingest`` or ``emit``, but it already imports this module for
+    :class:`RunTermination`, so the exception is reachable from both sides of
+    the seam without widening the import rule by one package.
+
+    :mod:`dociq.pipeline` catches it and takes the ORDINARY cancellation path —
+    nothing published, the previous run's deliverables untouched,
+    ``incomplete_run/`` written. It is not a crash and must never be reported as
+    one.
+    """
+
+    def __init__(self, reason: str = "") -> None:
+        super().__init__(reason or "the operator stopped the run")
+        self.reason = reason or "the operator stopped the run"
 
 INCOMPLETE_DIR = "incomplete_run"
 """Sub-directory of the output root where an aborted run records itself.
@@ -60,6 +101,89 @@ last COMPLETE run's audit trail, untouched."""
 
 STATUS_FILENAME = "run_status.json"
 """The machine-readable record of an aborted run, inside :data:`INCOMPLETE_DIR`."""
+
+
+@dataclass(frozen=True, slots=True)
+class StatusProse:
+    """The operator-facing words for ONE terminal status.
+
+    Two sentences, because the two are wrong in different ways when they are
+    shared. ``lead`` says what happened to the run; ``coverage`` says what the
+    figures printed beside it do and do not cover, and what state that leaves
+    the output folder in.
+    """
+
+    lead: str
+    coverage: str
+
+    def headline(self, reason: str = "") -> str:
+        return f"{self.lead} {reason}".strip()
+
+
+STATUS_PROSE: dict[TerminalStatus, StatusProse] = {
+    TerminalStatus.COMPLETED: StatusProse(
+        lead="Run status: completed — the walk covered every file found.",
+        coverage="",
+    ),
+    TerminalStatus.BLOCKED: StatusProse(
+        lead=(
+            "RUN BLOCKED — NO DELIVERABLES WERE WRITTEN and the previous run's "
+            "outputs in this folder were left exactly as they were."
+        ),
+        coverage=(
+            "The figures below describe only what DocIQ established before it "
+            "was blocked; this run never established a corpus it could "
+            "publish. Nothing in the output folder was changed; a full record "
+            "of this attempt is in incomplete_run/."
+        ),
+    ),
+    TerminalStatus.CANCELLED: StatusProse(
+        lead=(
+            "RUN CANCELLED — NO DELIVERABLES WERE WRITTEN and the previous "
+            "run's outputs in this folder were left exactly as they were."
+        ),
+        coverage=(
+            "The figures below describe only what was read before the run "
+            "stopped. Nothing in the output folder was changed; a full record "
+            "of this attempt is in incomplete_run/."
+        ),
+    ),
+    TerminalStatus.REFUSED: StatusProse(
+        lead=(
+            "PUBLICATION REFUSED — DocIQ read the COMPLETE set and then refused "
+            "to publish it at its own §4 Stage 6 integrity gate. Nobody stopped "
+            "this run. NO DELIVERABLES WERE WRITTEN and the previous run's "
+            "outputs in this folder were left exactly as they were."
+        ),
+        coverage=(
+            "The figures below describe the COMPLETE corpus this run read and "
+            "identified — the set was rejected, not cut short. Nothing in the "
+            "output folder was changed; a full record of this attempt, "
+            "including which gate refused it, is in incomplete_run/."
+        ),
+    ),
+}
+"""Every :class:`~dociq.contracts.TerminalStatus`, rendered explicitly.
+
+**A total map, enforced below.** Codex review #2 fix round, finding A-3, and
+this is the fifth instance of one class: a contract enum gains a member and the
+places that turn it into words are never grepped for (A-12, A-14, B-3, A-11b
+were the others). A renderer written as ``"BLOCKED" if … else "CANCELLED"``
+absorbs a new member in silence and prints a word that is false. A renderer
+written as a lookup into this table cannot: the assertion on the next lines
+fails at import, and :meth:`RunTermination.headline` raises rather than
+guesses.
+"""
+
+_UNRENDERED = set(TerminalStatus) - set(STATUS_PROSE)
+if _UNRENDERED:  # pragma: no cover — an import-time tripwire, not a branch
+    raise AssertionError(
+        "TerminalStatus member(s) with no operator-facing prose: "
+        + ", ".join(sorted(m.name for m in _UNRENDERED))
+        + ". Add an entry to dociq.runstate.STATUS_PROSE — a terminal status "
+          "that reaches an operator without its own wording is finding A-3."
+    )
+del _UNRENDERED
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,15 +210,37 @@ class RunTermination:
         return self.complete
 
     def headline(self) -> str:
-        """One line, for the summary screen, the PDF and the log."""
-        if self.complete:
-            return "Run status: completed — the walk covered every file found."
-        word = "BLOCKED" if self.status is TerminalStatus.BLOCKED else "CANCELLED"
-        return (
-            f"RUN {word} — NO DELIVERABLES WERE WRITTEN and the previous "
-            f"run's outputs in this folder were left exactly as they were. "
-            f"{self.reason}"
-        ).strip()
+        """One line, for the summary screen, the PDF and the log.
+
+        A **total** lookup in :data:`STATUS_PROSE`, not an ``if`` chain with a
+        trailing ``else``. Codex review #2 fix round, finding A-3: this method
+        recognized ``COMPLETED`` and ``BLOCKED`` and let *every other* status
+        fall through to the word ``CANCELLED``. Amendment A-15 added
+        :attr:`~dociq.contracts.TerminalStatus.REFUSED` and did not touch this
+        renderer, so a run whose complete corpus DocIQ itself rejected at its
+        §4 Stage 6 gate printed ``RUN CANCELLED`` — telling the operator that
+        somebody stopped the run, when nobody did.
+
+        The fallback is what made that silent, so there is no fallback. A
+        member with no entry raises :class:`KeyError` at
+        :data:`STATUS_PROSE`'s own import-time check, before any text is
+        rendered.
+        """
+        return STATUS_PROSE[self.status].headline(self.reason)
+
+    def coverage_note(self) -> str:
+        """What the figures beside this status DO and DO NOT cover, plus folder
+        state. Empty for a completed run.
+
+        Separated from :meth:`headline` because the second sentence was where
+        the other half of A-3 lived: the summary screen appended "the figures
+        below describe only what was read before the run stopped" to *every*
+        non-complete status. That is true of a cancelled run and false of a
+        refused one — a refused run did not stop part-way, it read and
+        identified the complete corpus and rejected publication at its own
+        gate. Same table, same totality guarantee.
+        """
+        return STATUS_PROSE[self.status].coverage
 
     def stamp(self, result: RunResult) -> RunResult:
         """Return ``result`` carrying THIS termination in its contract fields.

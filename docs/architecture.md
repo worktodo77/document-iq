@@ -100,7 +100,10 @@ bake-off ruling folded → **Codex review #1** (whole pipeline core).
 
 **Sprint 2 — integration, packaging, acceptance.**
 Real-pipeline wiring under the GUI; profiling checklist UI live; Analyze-in-
-Claude Paths A/B; PyInstaller single exe with bundled ONNX models; offline
+Claude Paths A/B; PyInstaller one-folder build with bundled ONNX models,
+shipped as a zip (**D-22 amended §10's "single exe"**: `--onefile` re-extracts a
+~390 MB payload on every launch and is the pattern endpoint protection
+quarantines); offline
 verification (network disabled); full MODEC end-to-end acceptance run →
 **Codex review #2 = merge gate**, merge on Alex's authorization. Exit gate:
 acceptance criteria 1, 6–9.

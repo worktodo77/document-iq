@@ -170,6 +170,15 @@ def test_every_marker_the_extractor_emits_is_one_the_retry_looks_for():
     wording is invisible to the retry, so the wording lives in constants and
     the constants are the matcher's input — asserted here so the two cannot
     drift apart in a later edit."""
+    # The loop below is the whole test, so an EMPTY registry would execute no
+    # assertions and certify a retry that looks for nothing. The count is
+    # bounded rather than pinned: an exact number would fail on every
+    # legitimate addition and teach the next reader to just bump it.
+    assert len(ex.TRANSIENT_MARKERS) >= 8, (
+        f"the transient-marker registry has shrunk to "
+        f"{len(ex.TRANSIENT_MARKERS)} — the serial re-read recognizes fewer "
+        f"degradations than it did, and this test would pass on an empty one"
+    )
     for marker in ex.TRANSIENT_MARKERS:
         assert ex.has_transient_marker(f"prefix: {marker} and a tail")
     assert not ex.has_transient_marker("XLSX has no page boundaries")

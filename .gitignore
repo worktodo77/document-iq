@@ -3,8 +3,11 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
-build/
-dist/
+# Root-anchored. Unanchored, `build/` also ignores docs/build/ — which silently
+# swallowed the packaging documentation on its first commit. setuptools only
+# ever writes these at the repository root.
+/build/
+/dist/
 .venv/
 venv/
 
@@ -15,8 +18,14 @@ venv/
 .coverage
 htmlcov/
 
-# PyInstaller
+# PyInstaller. packaging/DocumentIQ.spec is COMMITTED — it is the reproducible
+# half of the build. Only its outputs are ignored.
 *.spec.bak
+build_out/
+
+# Track F verification runs write measured output here; the notes are committed,
+# the raw runs are not (they contain client file names).
+verification_runs/
 
 # OS
 Thumbs.db

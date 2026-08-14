@@ -1,4 +1,4 @@
-"""A deterministic stand-in for the real pipeline (Sprint 1 only).
+"""A deterministic stand-in for the real pipeline.
 
 It exists so the shell can be built, rendered and tested before Track A's spine
 lands, and it is deliberately the *only* place in the GUI that manufactures
@@ -9,19 +9,32 @@ Deterministic on purpose: no randomness, no clock, no filesystem read. The same
 call returns byte-identical records every time, so a screen render is a
 regression test rather than a snapshot of whatever the mock felt like producing.
 
-Scaled to the corpus that actually exists (decision register, "Corpus reality vs
-the spec's assumption": 298 PDF / 53 DOCX / 17 PPTX / 7 DOC, 17,732 PDF pages),
-because the design decision that matters most — that a fully reduced matter
-still does not fit in direct context — is only exercised at that size.
+Scaled to the corpus DocIQ actually emitted on its first full run — 368
+documents, 18,556 pages (the source folder is 298 PDF / 53 DOCX / 17 PPTX / 7
+DOC; see the decision register, "Corpus reality vs the spec's assumption") —
+because the design decision that matters most, that a fully reduced matter still
+does not fit in direct context, is only exercised at that size.
 
-Sprint 2 deletes this module and :func:`dociq.gui.pipeline.get_pipeline` returns
-the real adapter instead.
+**Sprint 2 did not delete this module, and the plan that said it would is
+withdrawn.** :func:`dociq.gui.pipeline.get_pipeline` now returns
+:class:`dociq.adapter.RealPipeline`, and the mock is installed by
+:func:`~dociq.gui.pipeline.set_pipeline` instead — by ``tests/test_gui_states.py``
+and ``tests/test_view_models.py``, which are the only thing that can demonstrate
+the seam still holds (a seam with one implementation is an interface nobody has
+tested), and by ``python -m dociq.gui.app --mock`` for reviewing a screen without
+a corpus to hand. Its :meth:`MockPipeline.disclosure` is what keeps that safe.
+
+Every number in here remains a FIXTURE and none of it is measured. Nothing in
+this module may be imported by the real adapter, and nothing here may grow a
+second life as a default — that is what :meth:`MockPipeline.disclosure` is
+policing, and it is why the real adapter's disclosure is empty.
 """
 
 from __future__ import annotations
 
 import re
 import time
+from dataclasses import replace
 
 from dociq.contracts import (
     Disposition,
@@ -77,23 +90,66 @@ nothing derived from it is displayed as fact. Do not replace these numbers with
 a guessed band."""
 
 # The measured record, for the disclosure the shell shows above every screen.
-MEASURED_DOCUMENTS = 298
-MEASURED_PAGES = 17_732
-MEASURED_CHARS = 49_031_833
-MEASURED_PRETOKENS = 19_388_495
-"""Track B's full-corpus pre-token count under DocIQ's own approximate split.
+#
+# ALL FOUR COME FROM ONE RUN and must be replaced together: the criteria-1-and-8
+# acceptance run of 2026-08-02 (decision register, "§10 measured again, from
+# scratch, WITH OCR"), which is the most recent full-corpus run and the first
+# from-scratch OCR-on one. Mixing a page count from one run with a pre-token
+# count from another would produce a per-page density no run measured, in a
+# banner whose entire purpose is to state a measured fact.
+MEASURED_DOCUMENTS = 368
+MEASURED_PAGES = 18_556
+MEASURED_CHARS = 50_251_852
+MEASURED_PRETOKENS = 17_266_810
+"""The full-corpus pre-token count **of the text DocIQ actually emits**, under
+DocIQ's own approximate split. Source: the acceptance run of 2026-08-02, 368
+documents, 18,556 pages, 2.91 chars/pre-token.
+
+**This constant was 17,252,003 and MEASURED_PAGES was 18,521**, from the first
+full pipeline run (2026-07-31). Both were superseded by the acceptance run, which
+processed 35 more pages — a difference the register records as *consistent with*
+the open PowerPoint finding and not an explanation of it. The banner said "the
+measured record" while quoting the earlier run, which is the Sprint-1 burn in
+miniature, so the figures move together to the run that is current.
 
 **Not a token floor.** Naming it one was the defect in Codex review #1 finding
-B-6. It is a structural measurement of the source text; the token figure it
-implies depends on assumptions stated in :mod:`dociq.verify.tokens`."""
+B-6. It is a structural measurement of the emitted text; the token figure it
+implies depends on assumptions stated in :mod:`dociq.verify.tokens`.
+
+**This constant was 19,388,495 and that figure is SUPERSEDED for any statement
+about the deliverable** (decision register, 2026-07-31). It came from
+``tools/calibrate_tokens.py``, which reads with PyMuPDF, skips whitespace-only
+pages, applies no normalization, runs no OCR, and covers the 298 PDFs only — so
+it describes what the source PDFs contain under a different reader, not what
+DocIQ ships. On 131 identical pages PyMuPDF yields 16.7% more pre-tokens than
+the pypdf text DocIQ extracts, and contract normalization removes about 5% more.
+
+Corrected here because the shell renders these numbers in a banner that says
+"the measured record", above every screen. A superseded measurement presented as
+the current one is a false claim whether or not the code that computes it is
+right, and the fixture is the only place the shell can be wrong about a fact it
+did not compute — which is exactly why the disclosure exists."""
 
 AUTOMATIC_SAVING_SHARE = 0.14
-"""Share of the record removed as exact-hash duplicates and page furniture.
+"""Share of the record the FIXTURE attributes to a locked, tool-made lever.
 
-**ILLUSTRATIVE** — the mock models no duplicates; Track A's inventory (§4 Stage
-1) produces the real figure. Held as a share rather than an absolute so it
-cannot silently stop matching the corpus it is applied to. Its own lever,
-because a mechanical saving must never be merged into the expert's total."""
+Named for what it is rather than for a mechanism. This line read "Share of the
+record removed as exact-hash duplicates and page furniture", which asserts a
+behavior `adapter._plan` withdraws — DocIQ removes neither.
+
+**ILLUSTRATIVE, AND THERE IS NO REAL FIGURE FOR IT TO BECOME.** The mock models
+no duplicates, and the sentence that used to stand here — "Track A's inventory
+(§4 Stage 1) produces the real figure" — implied a saving the product does not
+make. `adapter._plan` withdraws it in terms: DocIQ *detects* exact-hash
+duplicates and warns about them, and **removes neither them nor page furniture**.
+Every page of every duplicate copy is extracted, written to `clean_text/` and
+counted in the accounting identity, so the real adapter emits no automatic lever
+at all. This constant exists so the Sprint-1 shell can exercise the locked-row
+layout, and the disclosure banner is what keeps that honest.
+
+Held as a share rather than an absolute so it cannot silently stop matching the
+corpus it is applied to. Its own lever, because a mechanical saving must never be
+merged into the expert's total."""
 
 MINUTES_PER_GIGABYTE = 18
 """**ILLUSTRATIVE** wall-clock rate behind the "about N minutes" line beside the
@@ -102,9 +158,11 @@ MPRs and a folder of 40 emails are not the same job. Replaced by a measured rate
 once Sprint 2 has a timed end-to-end run."""
 
 PROFILES: tuple[ProfileInfo, ...] = (
-    ProfileInfo("modec-mpr", "1.3", "MODEC monthly progress report", 4),
-    ProfileInfo("petrobras-cer", "1.0", "Petrobras change/extension request", 2),
-    ProfileInfo("none", "-", "No profile — keep every page", 0),
+    ProfileInfo("modec-mpr", "1.3", "MODEC monthly progress report",
+                section_rules=4),
+    ProfileInfo("petrobras-cer", "1.0", "Petrobras change/extension request",
+                section_rules=2),
+    ProfileInfo("none", "-", "No profile — keep every page", section_rules=0),
 )
 
 # (section, plain label, dropped by default under the MPR profile)
@@ -242,6 +300,38 @@ def _section(page_no: int, total: int) -> str:
     return "Progress by Discipline"
 
 
+_DATE_RE = re.compile(r"(\d{4})-(\d{2})(?:-(\d{2}))?")
+
+
+def _fixture_dates(rel_path: str) -> tuple[str, ...]:
+    """ISO dates a real Stage-3 pass would have detected in the document.
+
+    Read off the fixture's own filenames so the set is deterministic AND has
+    genuine holes: correspondence and quarterly cost reports carry no ISO date,
+    which is what makes the handoff screen's "documents with no detected date
+    are not in a date-scoped package" caution exercisable rather than
+    theoretical.
+    """
+    match = _DATE_RE.search(rel_path)
+    if match is None:
+        return ()
+    year, month, day = match.groups()
+    return (f"{year}-{month}-{day or '01'}",)
+
+
+def _fixture_doc_type(rel_path: str) -> str | None:
+    """Document type from the fixture's folder — a filename pattern, which is
+    what the contract permits (``DocumentRecord.doc_type``: "from the active
+    profile or a filename pattern. Never inferred by AI")."""
+    folder = rel_path.split("/", 1)[0]
+    return {
+        "MPR": "Monthly progress report",
+        "Correspondence": "Correspondence",
+        "Meetings": "Meeting minutes",
+        "Cost": "Cost report",
+    }.get(folder)
+
+
 def _build_document(index: int, rel_path: str, pages: int, scanned: int,
                     status: ProcessingStatus, apply_profile: bool,
                     profile: ProfileInfo | None) -> DocumentRecord:
@@ -285,7 +375,8 @@ def _build_document(index: int, rel_path: str, pages: int, scanned: int,
         ext=ext,
         pages=tuple(records),
         status=status,
-        doc_type=profile.label if (apply_profile and profile) else None,
+        detected_dates=_fixture_dates(rel_path),
+        doc_type=_fixture_doc_type(rel_path),
         profile_id=profile.profile_id if (apply_profile and profile) else None,
         profile_version=profile.version if (apply_profile and profile) else None,
         li_file_no=f"{6000 + index * 7}",
@@ -383,14 +474,71 @@ def _build_plan(documents: tuple[DocumentRecord, ...],
     )
 
 
+_PROFILE_SOURCE = (
+    "Section rules read from the profile in the DocIQ profile library. Page "
+    "and token figures are projected from the fixture corpus, not counted "
+    "from a run of this matter."
+)
+
+_PROFILE_BASIS = TokenBasis(
+    provenance=PROVENANCE_STRUCTURAL + ", projected across the fixture corpus",
+    is_structural=True,
+)
+
+
+def _profile_levers() -> tuple[ReductionLever, ...]:
+    """The checklist's rows, measured off the fixture without a run.
+
+    ``estimated=True`` on every row and it is not a formality: this is what a
+    profile WOULD remove, projected before any page of this matter has been
+    read. Standing in the same column as a completed run's counted figures
+    without saying so is the claim ``ReductionLever.estimated`` exists to stop.
+    """
+    structural: dict[str, int] = {}
+    pages: dict[str, int] = {}
+    for index, (_rel, page_count, _scanned, _status) in enumerate(_CORPUS):
+        for page_no in range(1, page_count + 1):
+            key = _section(page_no, page_count)
+            structural[key] = (structural.get(key, 0)
+                               + _structural_tokens(_page_text(index, page_no)))
+            pages[key] = pages.get(key, 0) + 1
+    levers = [
+        ReductionLever(
+            key=name,
+            label=_LABELS[name],
+            tokens=structural.get(name, 0),
+            pages=pages.get(name, 0),
+            kind=LEVER_EXPERT,
+            engaged=name in _DEFAULT_DROPS,
+            estimated=True,
+        )
+        for name, _label in _LEVER_SECTIONS
+        if pages.get(name, 0)
+    ]
+    levers.append(ReductionLever(
+        key="automatic",
+        label="Duplicate copies and page furniture",
+        tokens=round(sum(structural.values()) * AUTOMATIC_SAVING_SHARE),
+        pages=round(sum(pages.values()) * AUTOMATIC_SAVING_SHARE),
+        kind=LEVER_AUTOMATIC,
+        engaged=True,
+        estimated=True,
+    ))
+    return tuple(levers)
+
+
+_PROFILE_LEVERS = _profile_levers()
+
+
 def at_measured_scale(plan: ReductionPlan) -> ReductionPlan:
     """The same plan, scaled up to the measured record's structural estimate.
 
-    The fixture corpus is 8,387 pages; the record Track B measured is 17,732
-    PDF pages whose measured structure implies roughly 19.4M tokens (an
-    estimate, not a floor) — about 97× direct-context capacity, not 3.6×. The screens have to be reviewed at the magnitude they
-    will actually meet, because a two-digit multiplier and a three-digit one are
-    not the same layout problem.
+    The fixture corpus is 8,387 pages; the record the pipeline actually emitted
+    is 18,556 pages over 368 documents, whose measured structure implies roughly
+    17.3M tokens (an estimate, not a floor) — about 86× direct-context capacity,
+    not 3.6×. The screens have to be reviewed at the magnitude they will actually
+    meet, because a two-digit multiplier and a three-digit one are not the same
+    layout problem.
 
     Shape-preserving and clearly named: this is the fixture at real scale, not a
     second set of invented figures.
@@ -401,9 +549,8 @@ def at_measured_scale(plan: ReductionPlan) -> ReductionPlan:
     return ReductionPlan(
         full_tokens=MEASURED_PRETOKENS,
         levers=tuple(
-            ReductionLever(le.key, le.label, round(le.tokens * factor),
-                           round(le.pages * factor), le.kind, le.engaged,
-                           le.estimated)
+            replace(le, tokens=round(le.tokens * factor),
+                    pages=round(le.pages * factor))
             for le in plan.levers
         ),
         capacity=plan.capacity,
@@ -436,7 +583,11 @@ class MockPipeline:
         return (
             f"Sample data — Sprint-1 shell. These figures come from a fixture of "
             f"{len(_CORPUS)} documents / {pages:,} pages, not from a real run. "
-            f"The measured record is {MEASURED_DOCUMENTS} PDFs / "
+            # "documents", not "PDFs": 368 is the document count and only 298
+            # of them are PDFs. The banner's whole job is to be the one place on
+            # screen that states a measured fact, so it does not get to be loose
+            # about which fact it is stating.
+            f"The measured record is {MEASURED_DOCUMENTS} documents / "
             f"{MEASURED_PAGES:,} pages implying an estimated "
             f"{MEASURED_PRETOKENS / 1e6:.1f}M tokens — about {factor:.0f}× "
             "direct-context capacity."
@@ -444,6 +595,55 @@ class MockPipeline:
 
     def profiles(self) -> tuple[ProfileInfo, ...]:
         return PROFILES
+
+    # -- adapter hooks (docs/contracts/amendments.md A-11 and A-12) -----------
+    #
+    # A-11 and A-12 are APPLIED (2026-08-01) and both of these are now on
+    # ``PipelineAPI``. The comment here used to read "NOT part of PipelineAPI …
+    # raised as amendments and duck-typed in the meantime", and cited A-13 —
+    # which is the DIRECT_CONTEXT_TOKENS docstring, not a hook — for the §8 pair.
+    # Both claims are withdrawn.
+    #
+    # The GUI still asks with ``getattr`` and renders the absence, and that stays:
+    # A-12 explicitly permits an adapter with no Path A to OMIT ``build_package``
+    # rather than return an empty result, so absence is a supported state to be
+    # shown, not a gap to be assumed away.
+
+    def profile_rules(
+        self, profile: ProfileInfo
+    ) -> tuple[tuple[ReductionLever, ...], TokenBasis, str]:
+        """The §6 checklist's rows: what this profile keeps and drops.
+
+        Sliced to the profile's own declared rule count rather than always
+        returning all four fixture sections — a checklist that showed rules a
+        profile does not carry is the same defect as one that hides rules it
+        does, and the screen's completeness check has to be exercised by a mock
+        that can actually disagree with itself.
+        """
+        if profile.section_rules <= 0:
+            return (), _PROFILE_BASIS, _PROFILE_SOURCE
+        levers = tuple(
+            lever for lever in _PROFILE_LEVERS if not lever.locked
+        )[: profile.section_rules]
+        automatic = tuple(le for le in _PROFILE_LEVERS if le.locked)
+        return levers + automatic, _PROFILE_BASIS, _PROFILE_SOURCE
+
+    def matter_layout_note(self, outcome: RunOutcome) -> str:
+        """§8 Path B: what is in the matter folder, in the pipeline's words.
+
+        The real adapter reads this from ``emit.handoff.expert_assist_layout``,
+        which CHECKS the folder rather than describing it from memory. The mock
+        states the layout it would write and says it checked nothing, because a
+        stand-in that reports a verified folder is a stand-in that has told the
+        operator something false.
+        """
+        return (
+            "Point Claude at this folder. It holds clean_text/ (one text file "
+            "per document, original page numbers in the markers), "
+            "sources.json, document_index.csv and processing_log.json — the "
+            "layout Expert Assist's evidence-mining skill expects, with no "
+            "rearrangement. Sample data: nothing on disk was checked."
+        )
 
     def preview_folder(self, path: str) -> FolderPreview:
         by_ext: dict[str, int] = {}
@@ -463,7 +663,22 @@ class MockPipeline:
                          / 1e9 * MINUTES_PER_GIGABYTE)),
         )
 
-    def run(self, request: RunRequest, on_progress, should_cancel) -> RunOutcome:
+    def run(self, request: RunRequest, on_progress, should_cancel,
+            confirm_bates=None) -> RunOutcome:
+        """``confirm_bates`` is ACCEPTED AND NEVER CALLED, deliberately.
+
+        The mock's corpus is unstamped — every page carries ``bates=None`` — and
+        §4 Stage 3 says an unstamped set produces no proposal, no prompt and no
+        warning. A mock that invented a proposal so the confirmation screen
+        could be seen would be showing the operator a locator that is not in any
+        production, which is the single thing the stand-in must never do.
+
+        The parameter is present because the seam declares it (A-14) and the
+        window now always passes it: an implementation that dropped it would
+        raise ``TypeError`` inside the worker and surface as "run failed".
+        ``tests/test_bates_confirmation.py`` asserts every implementation
+        carries it.
+        """
         profile = request.profile
         apply_profile = bool(profile and profile.profile_id != "none")
         total = len(_CORPUS) + len(_UNSUPPORTED)

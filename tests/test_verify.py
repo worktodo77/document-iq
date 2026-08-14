@@ -217,3 +217,104 @@ def test_pptx_extraction_never_touches_notes_slide_on_a_deck_without_notes(
     got = _ex.extract("deck.pptx", buf.getvalue())
     assert got.status is not ProcessingStatus.FAILED
     assert len(got.pages) == 1
+
+
+# ---------------------------------------------------------------------------
+# C6 — what criterion 7's proof covers, made assertable
+# ---------------------------------------------------------------------------
+
+
+def test_the_determinism_report_says_which_REGIME_produced_it():
+    """A report that cannot say whether its repetitions were sequential or
+    contended is a report that will be quoted as covering both.
+
+    The acceptance run of 2026-08-02 is the evidence the two regimes differ: the
+    shipped per-file timeout was crossed by 2 documents idle and 6 under load.
+    Until ``concurrency`` existed every repetition in this module was sequential,
+    so the one regime documented as behaving differently was the one nothing
+    exercised.
+    """
+    from dociq.verify import determinism
+
+    seq = determinism.DeterminismReport(runs=8, concurrency=1)
+    con = determinism.DeterminismReport(runs=8, concurrency=4)
+    assert "sequential" in seq.render()
+    assert "CONTENDED" in con.render() and "4 at a time" in con.render()
+    assert "sequential" not in con.render()
+    assert '"concurrency": 4' in determinism.prove_json(con)
+
+
+def test_concurrency_is_carried_into_the_report_not_silently_dropped(
+    tmp_path, monkeypatch
+):
+    """FAIL-BEFORE, watched RED: with ``concurrency`` accepted and not stored on
+    the report, the render says "sequential" for a contended proof — a wider
+    claim than the run supports, which is the whole class this package is about.
+    """
+    from dociq.verify import determinism
+
+    seen: list[int] = []
+
+    def fake_one_run(src, out, seed):
+        seen.append(1)
+        return "stub: no subject"
+
+    monkeypatch.setattr(determinism, "_one_run", fake_one_run)
+    rep = determinism.prove(tmp_path, runs=4, workdir=tmp_path / "d",
+                            concurrency=3)
+    assert rep.concurrency == 3
+    assert "CONTENDED" in rep.render()
+    assert len(seen) == 4, "every repetition must still run exactly once"
+
+
+def test_concurrency_is_clamped_to_the_run_count_and_to_one():
+    """No silent cap and no silent zero: asking for more parallelism than there
+    are repetitions is not an error, and asking for none must not mean "run
+    nothing"."""
+    from dociq.verify import determinism
+
+    for asked, runs, expected in ((0, 4, 1), (-3, 4, 1), (9, 4, 4), (2, 4, 2)):
+        rep = determinism.DeterminismReport(
+            runs=runs, concurrency=max(1, min(asked, runs)))
+        assert rep.concurrency == expected
+
+
+def test_concurrency_actually_OVERLAPS_the_repetitions(tmp_path, monkeypatch):
+    """"CONTENDED" in the report must not be a label on sequential work.
+
+    ``concurrency`` is only meaningful if the repetitions genuinely overlap, so
+    this measures the observed overlap rather than trusting the parameter. The
+    stub records how many repetitions are in flight at once; at ``concurrency=4``
+    the peak must exceed 1, and at ``concurrency=1`` it must be exactly 1 — the
+    second half is what makes the first half an assertion rather than a
+    coincidence of scheduling.
+
+    FAIL-BEFORE, watched RED: with the ThreadPoolExecutor branch replaced by the
+    sequential list comprehension, the peak is 1 and this goes red.
+    """
+    import threading
+    import time
+
+    from dociq.verify import determinism
+
+    for asked, must_overlap in ((4, True), (1, False)):
+        lock = threading.Lock()
+        state = {"live": 0, "peak": 0}
+
+        def fake_one_run(src, out, seed):
+            with lock:
+                state["live"] += 1
+                state["peak"] = max(state["peak"], state["live"])
+            time.sleep(0.05)
+            with lock:
+                state["live"] -= 1
+            return "stub: no subject"
+
+        monkeypatch.setattr(determinism, "_one_run", fake_one_run)
+        determinism.prove(tmp_path, runs=4, workdir=tmp_path / f"d{asked}",
+                          concurrency=asked)
+        if must_overlap:
+            assert state["peak"] > 1, (
+                "the report would say CONTENDED for work that never overlapped")
+        else:
+            assert state["peak"] == 1

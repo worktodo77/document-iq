@@ -27,6 +27,7 @@ import pytest
 
 from dociq import pipeline
 from dociq.contracts import ContractViolation, RunConfig
+from dociq.emit import paths as emit_paths
 from dociq.emit.paths import OutputLayout
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
@@ -95,6 +96,60 @@ def test_a_failed_disk_preflight_is_blocked_and_writes_nothing(tmp_path, monkeyp
     assert blocked.ok is False
     assert _fingerprint(out) == before, (
         "a blocked run altered the previous complete run's deliverables")
+
+
+@pytest.mark.parametrize("where", ["inside", "same", "parent"])
+def test_a_run_may_not_eat_its_own_output(tmp_path, where):
+    """MEASURED before it was fixed, not hypothesized.
+
+    A one-document matter, run twice with the output folder inside the source
+    folder, inventoried 1 document the first time and **6** the second: `a.txt`
+    plus the first run's `clean_text/DIQ-000001.txt`, its `document_index.csv`
+    and three files of its `upload_package/`. The page count, the token figures
+    and the index then describe a corpus that is partly DocIQ's own output, and
+    every re-run compounds it. Only `.dociq/` was ever excluded, because it is
+    scratch.
+
+    All three overlapping arrangements are refused, not just the one that was
+    measured — the reverse nesting matters too, because publication removes the
+    previous run's deliverables BY NAME and a source folder underneath the
+    output root could have an operator's own `document_index.csv` deleted.
+    Under D-32 that deletion is outright, with nothing set aside to recover it
+    from, so the refusal carries more weight than when it was written.
+    """
+    matter = tmp_path / "matter"
+    (matter / "docs").mkdir(parents=True)
+    (matter / "docs" / "a.txt").write_text("Notice of delay.\n",
+                                           encoding="utf-8", newline="\n")
+    source, out = {
+        "inside": (matter, matter / "out"),
+        "same": (matter, matter),
+        "parent": (matter / "docs", matter),
+    }[where]
+
+    blocked = _run(out, source=source)
+
+    assert blocked.termination.status is TerminalStatus.BLOCKED
+    assert blocked.published is False
+    assert blocked.ok is False
+    assert "will not run this way" in blocked.termination.reason
+    assert not (out / "sources.json").exists(), "a refused run published"
+    assert (matter / "docs" / "a.txt").is_file(), "a refused run deleted input"
+
+
+def test_the_overlap_check_resolves_the_path_rather_than_comparing_strings(tmp_path):
+    """The same folder reaches DocIQ as ``C:\\m``, ``c:\\m\\``, ``C:\\m\\.`` and
+    ``C:\\m\\docs\\..`` — a string comparison calls three of those four a
+    different folder, and the check would then pass on the arrangement it
+    exists to refuse."""
+    matter = tmp_path / "matter"
+    (matter / "docs").mkdir(parents=True)
+    (matter / "docs" / "a.txt").write_text("x\n", encoding="utf-8", newline="\n")
+
+    for spelling in (matter / "out", matter / "docs" / ".." / "out",
+                     Path(str(matter).upper()) / "out"):
+        blocked = _run(spelling, source=matter)
+        assert blocked.termination.status is TerminalStatus.BLOCKED, spelling
 
 
 def test_an_unreachable_source_folder_is_blocked_not_an_empty_green_run(tmp_path):
@@ -185,13 +240,13 @@ def test_every_return_in_the_walk_carries_a_stamped_terminal_status():
     the contract's COMPLETED default means such a return fails OPEN and
     silently.
 
-    Asserted from the source, because behaviour can only cover the paths
+    Asserted from the source, because behavior can only cover the paths
     someone thought to exercise — which is precisely how round 1 shipped this.
     """
     returns = _walk_run_returns()
-    assert len(returns) == 4, (
+    assert len(returns) == 5, (
         f"walker.run has {len(returns)} return statements; this test knows "
-        "about 4 (three preflights and the normal return).")
+        "about 5 (four preflights and the normal return).")
 
     for r in returns:
         call = r.value
@@ -231,25 +286,48 @@ def test_blocked_result_sets_the_notes_and_the_contract_from_one_value():
     [TerminalStatus.BLOCKED, TerminalStatus.CANCELLED],
 )
 def test_the_purge_refuses_any_run_that_did_not_complete(tmp_path, status):
-    """The second, independent defence.
+    """The second and third independent defences.
 
     The pipeline returns before Stage 5 on an aborted run, so this raise is
     unreachable from the shipped path. It exists because the ordering is the
-    kind of thing a refactor moves: the function that does the deleting takes a
-    proof of completion as a required argument and checks it, so destroying a
-    prior corpus cannot be reached by rearranging call order.
+    kind of thing a refactor moves: the function that decides what gets deleted
+    takes a proof of completion as a required argument and checks it, so
+    destroying a prior corpus cannot be reached by rearranging call order.
+
+    Sprint 2 moved the deletion itself into publication
+    (:func:`dociq.emit.paths.publish_staging`), so the guarded function is now
+    the ENUMERATOR — and publication adds a third defence of its own: it
+    refuses an empty staging directory rather than emptying the matter folder
+    into nothing.
+
+    **The third defence used to be "no readiness marker, no deletion", and that
+    marker is gone (D-32).** The replacement is not weaker in the case that
+    matters here — an aborted run never calls publication at all — but it is
+    narrower, and the difference is stated rather than glossed: nothing on disk
+    now stands between a caller that reaches :func:`publish_staging` and the
+    deletion. The proof-of-completion argument on the enumerator, checked below,
+    is what remains.
     """
     layout = OutputLayout.at(tmp_path).ensure()
     victim = layout.index_csv
     victim.write_text("Doc ID\n", encoding="utf-8", newline="")
 
     with pytest.raises(ContractViolation):
-        pipeline._purge_stale_deliverables(
+        pipeline._stale_deliverables(
             layout, RunTermination(status, "stopped"))
-    assert victim.exists(), "the refused purge deleted a file anyway"
+    assert victim.exists(), "the refused enumeration deleted a file anyway"
 
-    removed = pipeline._purge_stale_deliverables(layout, COMPLETED)
-    assert "document_index.csv" in removed
+    # Third defence: an empty staging directory publishes nothing rather than
+    # emptying the folder. The plan is handed in deliberately — this is the
+    # shape of the accident the guard exists for.
+    with pytest.raises(emit_paths.PublicationFailed):
+        emit_paths.publish_staging(layout, ("document_index.csv",))
+    assert victim.exists(), (
+        "publication removed a deliverable with nothing staged to replace it")
+
+    listed = pipeline._stale_deliverables(layout, COMPLETED)
+    assert "document_index.csv" in listed
+    assert victim.exists(), "enumerating must not delete"
 
 
 # ---------------------------------------------------------------------------
@@ -324,10 +402,14 @@ def test_there_is_exactly_one_terminal_status_enumeration():
     from dociq import contracts, runstate
 
     assert runstate.TerminalStatus is contracts.TerminalStatus
-    assert (
-        len({id(m) for m in contracts.TerminalStatus}
-            | {id(m) for m in runstate.TerminalStatus}) == 3
-    )
+    # Counted from the enum rather than pinned to a literal. The literal was 3
+    # and A-15 added REFUSED, so the test failed for the one reason it must not:
+    # a legitimate new member is not a second enumeration. What A-07 forbids is
+    # runstate declaring its OWN members, which the identity comparison above
+    # already establishes and this now states without a number to bump.
+    members = {id(m) for m in contracts.TerminalStatus}
+    assert members == {id(m) for m in runstate.TerminalStatus}
+    assert len(members) == len(list(contracts.TerminalStatus))
 
 
 @pytest.mark.parametrize("case", ["completed", "missing-root", "cancelled",
@@ -520,7 +602,8 @@ def test_an_incomplete_record_never_makes_a_later_good_run_fail_its_own_gate(
     assert good.manifest.unclassified == []
     # The record of a failed attempt does not sit beside a good output set.
     assert not (out / INCOMPLETE_DIR / "run_status.json").exists()
-    assert any(r.startswith(f"{INCOMPLETE_DIR}/") for r in good.stale_removed)
+    assert any(r.startswith(f"{INCOMPLETE_DIR}/") for r in good.stale_removed), (
+        good.stale_removed)
 
 
 def test_the_manifest_classifies_an_incomplete_run_record_rather_than_flagging_it(

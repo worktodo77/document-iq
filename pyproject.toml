@@ -18,7 +18,10 @@ authors = [{ name = "Long International, Inc." }]
 # naive dependency on that package does not pull them in. DocIQ vendors the
 # extractor and declares everything it touches — including the libraries that
 # are only reachable through an optional import path. Nothing here is optional:
-# a single-file offline exe cannot degrade to "that format needs a pip install".
+# a bundled offline build cannot degrade to "that format needs a pip install".
+# (Was "a single-file offline exe". D-22 amended the deliverable to a one-folder
+# `--onedir` build shipped as a zip; the reason for declaring every dependency is
+# unchanged and does not depend on the packaging shape.)
 #
 # Versions are lower-bounded at what Sprint 1 was built and proven against
 # (venv resolved 2026-07-30, Python 3.14.5) and upper-bounded at the next major
@@ -27,7 +30,8 @@ dependencies = [
     # PDF — pypdf for the native text layer, PyMuPDF for rasterization
     "pypdf>=6.14.2,<7",
     "pymupdf>=1.28.0,<2",
-    # OCR — ONNX-based so the models bundle cleanly into a single exe (D-01)
+    # OCR — ONNX-based so the models bundle cleanly into the PyInstaller build
+    # (D-01; one folder shipped as a zip, per D-22)
     "rapidocr-onnxruntime>=1.2.3,<2",
     "onnxruntime>=1.28.0,<2",
     # Headless: the GUI build must not pull opencv's Qt bindings, which would
@@ -52,6 +56,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=9.1.1,<10",
+]
+build = [
+    # Packaging only (D-22 one-folder build, D-26). Not a runtime dependency:
+    # the shipped artifact contains no PyInstaller.
+    "pyinstaller==6.20.0",
 ]
 
 [project.scripts]

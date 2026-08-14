@@ -47,10 +47,25 @@ def _load_fonts() -> None:
         print(f"[render] WARNING: fonts not registered, renders will substitute: "
               f"{', '.join(missing)}")
 
-from dociq.gui.main_window import DETAIL, PROGRESS, SETUP, SUMMARY, MainWindow  # noqa: E402
+from dociq.gui.main_window import (  # noqa: E402
+    CHECKLIST,
+    DETAIL,
+    HANDOFF,
+    PROGRESS,
+    SETUP,
+    SUMMARY,
+    MainWindow,
+)
 from dociq.gui.mock_pipeline import MockPipeline, at_measured_scale  # noqa: E402
-from dociq.gui.view_models import FLAG_OCR, FLAG_RECONCILIATION  # noqa: E402
-from dociq.gui.pipeline import RunRequest  # noqa: E402
+from dociq.gui.view_models import (  # noqa: E402
+    FLAG_OCR,
+    FLAG_RECONCILIATION,
+    SCOPE_DATES,
+    SCOPE_TYPES,
+    PackageScope,
+    build_profile_checklist,
+)
+from dociq.gui.pipeline import ProfileInfo, RunRequest  # noqa: E402
 
 SIZE = (1180, 800)
 TALL = 1100
@@ -167,6 +182,58 @@ def render(out: Path) -> int:
     window.resize(SIZE[0], TALL)
     window.show_outcome(pipeline.run(plain, lambda _e: None, lambda: False))
     _grab(window, out / "07_summary_no_profile.png")
+
+    # 8 — the §6 profiling checklist (E-1). Four states, because the empty and
+    #     the disagreeing ones are the states that decide whether an expert can
+    #     defend an omission, and they are the ones nobody reviews by accident.
+    window.resize(SIZE[0], TALL)
+    window.show_profile_checklist(pipeline.profiles()[0])
+    _grab(window, out / "08_checklist_complete.png")
+
+    window.show_profile_checklist(pipeline.profiles()[2])
+    _grab(window, out / "08b_checklist_keeps_everything.png")
+
+    window.checklist.show_checklist(build_profile_checklist(
+        ProfileInfo("mystery", "0.1", "A profile whose rules did not load",
+                    section_rules=4)))
+    window.stack.setCurrentIndex(CHECKLIST)
+    _grab(window, out / "08c_checklist_rules_unavailable.png")
+
+    levers = pipeline.profile_rules(pipeline.profiles()[0])[0]
+    window.checklist.show_checklist(build_profile_checklist(
+        ProfileInfo("modec-mpr", "1.3", "MODEC monthly progress report",
+                    section_rules=9),
+        levers))
+    window.stack.setCurrentIndex(CHECKLIST)
+    _grab(window, out / "08d_checklist_rule_count_disagrees.png")
+
+    # 9 — Analyze in Claude (E-3). Path B leads; Path A is scoped, and the
+    #     scoped renders are the point of the screen.
+    window.show_outcome(outcome)
+    window.show_handoff()
+    _grab(window, out / "09_handoff_full_scope.png")
+
+    window._rescope(PackageScope(SCOPE_DATES, "2021-01-01", "2021-12-31"))
+    _grab(window, out / "09b_handoff_date_scoped_subset.png")
+
+    window._rescope(PackageScope(SCOPE_TYPES,
+                                 doc_types=("Monthly progress report",)))
+    _grab(window, out / "09c_handoff_type_scoped_subset.png")
+
+    # 9d — a pipeline that CAN build the package, so the enabled action is
+    #      reviewable too. Named for what it is: the mock writes nothing.
+    class _WithBuilder(MockPipeline):
+        def build_package(self, outcome, doc_ids, scope_statement):
+            return None
+
+    built = MainWindow(pipeline=_WithBuilder())
+    built.resize(SIZE[0], TALL)
+    built.show()
+    built.show_outcome(outcome)
+    built.show_handoff()
+    built._rescope(PackageScope(SCOPE_DATES, "2021-01-01", "2021-12-31"))
+    _grab(built, out / "09d_handoff_package_buildable.png")
+    built.close()
 
     window.close()
     return 0

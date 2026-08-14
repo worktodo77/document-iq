@@ -1,0 +1,192 @@
+#
+
+# The machine-readable half of the amendment register.
+#
+# `amendments.md` is the argument — why an amendment was needed, what it cost,
+# what it uncovered. That prose is the part worth reading and it is not being
+# replaced. But prose cannot be checked, and two amendments in one sprint proved
+# that matters:
+#
+#   A-12 was raised by two tracks and applied by neither. Every agent behaved
+#   correctly and the product shipped a permanently disabled button.
+#
+#   A-14 was raised, applied, wired, measured and shipped -- and then had no
+#   entry in amendments.md for a day, while the Codex relay pointed reviewers at
+#   that file to read it.
+#
+# So each entry states what it would mean for the amendment to be REALLY
+# applied, in terms a script can verify: the symbols that must exist in the
+# modules it claims to have changed, the commit that adopted it, and the tests
+# that hold it. `tools/check_amendments.py` fails when any of those is a claim
+# rather than a fact -- including when an amendment is referenced somewhere in
+# the repo and has no entry here at all.
+#
+# `wired_in` is the load-bearing field. It is the difference between "the seam
+# declares this" and "the product does this", which is precisely the distance
+# nothing was measuring.
+
+# ---------------------------------------------------------------------------
+# Sprint 1 (A-01 .. A-10). Backfilled 2026-08-04, when the check above was
+# written and immediately reported all ten as referenced-but-absent -- the same
+# omission it was built to catch on A-14, ten times over and eighteen months of
+# reading habit deep. `adopted_in` is the Sprint-1 merge commit: these were
+# applied across many commits on `build/sprint-1`, and the merge is the point at
+# which they became true of `main`. Recorded at that granularity rather than
+# guessed at a finer one.
+# ---------------------------------------------------------------------------
+
+[amendment.A-01]
+status = "applied"
+title = "RunResult cannot carry the token estimate"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/contracts.py" = ["TokenEstimate"] }
+tests = ["tests/test_contracts.py", "tests/test_tokens.py"]
+
+[amendment.A-02]
+status = "applied"
+title = "RunResult cannot carry the master-index reconciliation"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/contracts.py" = ["ReconciliationReport"] }
+tests = ["tests/test_contracts.py", "tests/test_masterindex.py"]
+
+[amendment.A-03]
+status = "applied"
+title = "nowhere to carry 'the configured ratio was refuted'"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/contracts.py" = ["TokenEstimate"] }
+tests = ["tests/test_contracts.py", "tests/test_tokens.py"]
+
+[amendment.A-04]
+status = "applied"
+title = "the recorded configuration omitted environment-controlled settings that change output"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/contracts.py" = ["EffectiveLimits"] }
+tests = ["tests/test_contracts.py", "tests/test_run_identity.py"]
+
+[amendment.A-05]
+status = "applied"
+title = "two gaps found while closing Codex review #1 findings B-2 and B-6"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/contracts.py" = ["RunConfig"] }
+tests = ["tests/test_contracts.py", "tests/test_tokens.py"]
+
+[amendment.A-05a]
+status = "applied"
+title = "structural_tokens is not a bound in either direction; its assumptions travel in provenance"
+raised_by = "Sprint 1, as a sub-amendment of A-05 closing Codex review #1 finding B-6"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/contracts.py" = ["TokenEstimate"] }
+tests = ["tests/test_contracts.py", "tests/test_tokens.py"]
+
+[amendment.A-06]
+status = "applied"
+title = "RunResult cannot say whether the run COMPLETED"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/runstate.py" = ["TerminalStatus"] }
+tests = ["tests/test_contracts.py", "tests/test_incomplete_runs.py"]
+
+[amendment.A-07]
+status = "applied"
+title = "one TerminalStatus, actually populated, and NOT in the corpus identity"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/runstate.py" = ["TerminalStatus"] }
+tests = ["tests/test_contracts.py", "tests/test_incomplete_runs.py"]
+
+[amendment.A-08]
+status = "applied"
+title = "the run identity omits the ordered profile set, and four things claim to be the identity"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/contracts.py" = ["RunConfig"] }
+tests = ["tests/test_contracts.py", "tests/test_run_identity.py"]
+
+[amendment.A-09]
+status = "applied"
+title = "EffectiveLimits recorded float deadlines at whole-second resolution"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/contracts.py" = ["EffectiveLimits"] }
+tests = ["tests/test_contracts.py"]
+
+[amendment.A-10]
+status = "applied"
+title = "1.4.0's replacement token fields were never populated"
+adopted_in = "e7fd4eb"
+wired_in = { "src/dociq/contracts.py" = ["TokenEstimate"] }
+tests = ["tests/test_contracts.py", "tests/test_tokens.py"]
+
+[amendment.A-11]
+status = "applied"
+title = "the seam cannot deliver a profile's section rules before a run"
+raised_by = "Track E"
+adopted_in = "18f4d65"
+wired_in = { "src/dociq/gui/pipeline.py" = ["profile_rules"], "src/dociq/adapter.py" = ["profile_rules"] }
+tests = ["tests/test_gui_screen_states.py", "tests/test_adapter.py"]
+
+# A-11b was invisible to `tools/check_amendments.py` for a reason worth writing
+# down: its reference pattern is `\bA-(\d{2})\b`, and "A-11b" does not match it.
+# So the one amendment in the register with a letter suffix was the one nothing
+# checked -- and it is the one that turned out to be declared on the seam and
+# populated by no adapter and rendered by no screen, for the length of the
+# sprint. `adopted_in` is the commit that actually wired it, not the one that
+# declared it.
+[amendment.A-11b]
+status = "applied"
+title = "the checklist attributes a DROP by rule identity and never shows what it matches or who approved it"
+raised_by = "Track E, which proposed both fields and declined to apply them"
+adopted_in = "91fed8d"
+wired_in = { "src/dociq/adapter.py" = ["_section_rules", "_rule_text"], "src/dociq/gui/view_models.py" = ["matched_by", "expert_note"], "src/dociq/gui/screens.py" = ["ProfileChecklistScreen"] }
+tests = ["tests/test_seam_population.py", "tests/test_view_models.py"]
+
+[amendment.A-12]
+status = "applied"
+title = "the seam cannot carry the section 8 handoff"
+raised_by = "Track D and Track E, and applied by neither until acceptance"
+adopted_in = "18f4d65"
+wired_in = { "src/dociq/gui/pipeline.py" = ["PackageResult", "matter_layout_note", "build_package"], "src/dociq/adapter.py" = ["matter_layout_note", "build_package"] }
+tests = ["tests/test_emit.py", "tests/test_gui_screen_states.py"]
+
+[amendment.A-13]
+status = "applied"
+title = "DIRECT_CONTEXT_TOKENS' docstring asserted the figure was unruled; D-21 ruled it"
+raised_by = "Track E"
+adopted_in = "18f4d65"
+wired_in = { "src/dociq/gui/pipeline.py" = ["DIRECT_CONTEXT_TOKENS"] }
+tests = ["tests/test_gui_screen_states.py"]
+
+[amendment.A-14]
+status = "applied"
+title = "the seam cannot carry section 4 Stage 3's Bates confirmation"
+raised_by = "Track D, as a stop-the-line, and left unapplied for the length of the sprint"
+adopted_in = "3a44f2e"
+wired_in = { "src/dociq/gui/pipeline.py" = ["BatesProposal", "BatesConfirm", "confirm_bates"], "src/dociq/pipeline.py" = ["confirm_bates"], "src/dociq/gui/screens.py" = ["BatesConfirmScreen"] }
+tests = ["tests/test_bates_confirmation.py"]
+
+[amendment.A-15]
+status = "applied"
+adopted_in = "b1eac7e"
+title = "a Stage-6 gate refusal is not a BLOCKED run; TerminalStatus needs REFUSED"
+raised_by = "the Codex review #2 fix round (B-1), on a frozen and concurrently-edited module"
+wired_in = { "src/dociq/contracts.py" = ["TerminalStatus"] }
+tests = ["tests/test_publication_gate.py"]
+
+# A-16's wiring lands in the SAME commit that adds this entry, so its adopting
+# commit id cannot exist yet — a commit cannot name itself. Recorded as "raised"
+# for exactly one commit and flipped to "applied" with the real id in the next.
+# The checker rejecting the "PENDING" placeholder is how this constraint
+# surfaced; it also rejects "HEAD", which is the D-2 hole that made the rule.
+[amendment.A-16]
+status = "applied"
+adopted_in = "f7358a7"
+title = "a completed swap's undeletable residue has nowhere to reach the operator"
+raised_by = "the D-31 delete-last redesign, correctly declining to route it through hashed content"
+wired_in = { "src/dociq/gui/pipeline.py" = ["RunOutcome"], "src/dociq/adapter.py" = ["RunOutcome"] }
+tests = ["tests/test_seam_population.py"]
+
+# Same two-step as A-16: the wiring lands with this entry, so the adopting
+# commit id is recorded in the next commit. A commit cannot name itself.
+[amendment.A-17]
+status = "applied"
+adopted_in = "0e31730"
+title = "A-16's residue disclosure has a blind spot exactly the width of the package path"
+raised_by = "Codex third fix round, finding A-7"
+wired_in = { "src/dociq/gui/pipeline.py" = ["PackageResult"], "src/dociq/adapter.py" = ["PackageResult"], "src/dociq/emit/handoff.py" = ["UploadPackage"], "src/dociq/gui/view_models.py" = ["PackageOutcomeView"] }
+tests = ["tests/test_package_swap.py", "tests/test_gui_screen_states.py"]

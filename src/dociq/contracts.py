@@ -235,6 +235,28 @@ class TerminalStatus(str, enum.Enum):
     """Stopped part-way by the operator; documents gathered so far are real but
     the set is partial."""
 
+    REFUSED = "refused"
+    """The run produced a complete corpus and **§4 Stage 6 refused to publish
+    it** (amendment A-15, from Codex review #2 finding B-1).
+
+    A distinct member rather than a fourth way into :attr:`BLOCKED`, and the
+    difference is not bookkeeping. A blocked run never established a corpus —
+    the preflight refused, the root was unreachable, the inventory could not be
+    enumerated. A refused run established one, assigned an identifier to every
+    document, and then failed its own gate: page accounting did not reconcile,
+    or the manifest carried an output it could not classify. Those are opposite
+    facts about the same folder, and an operator reading "the run never
+    established a corpus" about a run that issued 368 Doc IDs would be reading
+    something false.
+
+    Correct by construction on both derived properties: :attr:`complete` and
+    ``publishable`` are defined against ``COMPLETED``, so a new member is
+    unpublishable and incomplete without either being restated. That is the
+    whole reason a member was preferred to a flag — the alternative, leaving
+    the termination ``COMPLETED``, would print *"Run status: completed — the
+    walk covered every file found"* at the top of a refused run's
+    ``run_status.json``."""
+
     @property
     def complete(self) -> bool:
         return self is TerminalStatus.COMPLETED

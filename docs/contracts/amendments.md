@@ -201,7 +201,16 @@ A-02 land, because it would have nowhere to read these values from.
 **Raised by:** the B-2/B-6 fix package, 2026-07-31, against contract **v1.3.0**
 **Affects:** `TokenEstimate.floor_tokens` (documentation), `EffectiveLimits`
 **Proposed severity:** MINOR for the first, DISPOSITION-ONLY for the second
-**Status:** RAISED, not applied. `contracts.py` was not modified by this package.
+**Status:** **APPLIED** — `contracts.py:49` documents `floor_tokens` as
+"reserved and withdrawn", which is (a); `EffectiveLimits` carries the settings
+that are (b). Adopted with the Sprint-1 merge, `e7fd4eb`.
+
+> This line read "RAISED, not applied" from 2026-07-31 until 2026-08-04, while
+> the change it describes was already in the module. It was found by the
+> status-agreement test written for Codex fix-round finding D-2 — on that test's
+> FIRST run, against a different amendment than the one that prompted it. Two
+> independent stale-status entries, neither noticed by anyone reading the file,
+> is the argument for comparing the halves mechanically rather than carefully.
 
 ### (a) `TokenEstimate.floor_tokens` documents a claim that has been withdrawn
 
@@ -636,3 +645,589 @@ they should not be attributed to Codex:
   different caps, a different OCR model or with OCR disabled could be replayed
   into a run whose manifest then hashed the new settings. It now uses the same
   identity projection that validates the evidence it replays.
+
+---
+
+## A-11 — the seam cannot deliver a profile's section rules before a run
+
+**Raised by:** Track E (GUI, Sprint 2), 2026-08-01
+**Affects:** `dociq/gui/pipeline.py` — `PipelineAPI`, `ProfileInfo`
+**Proposed severity:** MINOR (additive protocol method, no existing field changes)
+
+### The case
+
+§6 requires a profiling checklist: an expert reviews each recurring section, its
+frequency, its page count, and its KEEP/DROP disposition, and *approves the
+omissions* before a run commits. Principle 3 is what makes that load-bearing —
+an omission the expert never saw is, downstream, indistinguishable from a
+document that went missing.
+
+The seam offers `PipelineAPI.profiles() -> tuple[ProfileInfo, ...]`, and
+`ProfileInfo` carries only `section_rules: int` — *how many* rules a profile
+holds, never *which*. `ReductionLever` is the right shape for a rule row and
+already crosses the seam, but only inside a `ReductionPlan` on a `RunOutcome`,
+i.e. **after** the run the checklist is supposed to gate.
+
+### Why a local workaround would be wrong
+
+The GUI could read the profile YAML itself. That would import `dociq.profiles`,
+which `tests/test_import_graph.py` forbids, and would put a second profile
+parser in the product — disagreeing with the pipeline's the first time either
+changed, in the one screen whose entire value is that it agrees.
+
+### Proposed shape
+
+```python
+class PipelineAPI(Protocol):
+    def profile_rules(
+        self, profile: ProfileInfo
+    ) -> tuple[tuple[ReductionLever, ...], TokenBasis, str]:
+        """The profile's KEEP/DROP rules, what each is worth, and — in the
+        pipeline's own words — where the rules and figures came from.
+
+        Rows for a profile that has not been run against this matter carry
+        ``estimated=True``: they are projections, not counts.
+        """
+```
+
+Returning existing types keeps the amendment additive. A default in the protocol
+(`return (), TokenBasis(), ""`) would let Track D adopt it lazily.
+
+### What Track E did in the meantime
+
+The checklist screen consumes exactly the tuple above, obtained by duck-typed
+`getattr(pipeline, "profile_rules", None)`. A pipeline that does not offer it
+renders `CHECKLIST_NO_RULES` — a loud empty state that **disables approval** —
+rather than an empty list that reads as "nothing is dropped". The mock supplies
+the hook so the state grid exercises both branches.
+
+### Related gap, same screen: rules carry no stated reason
+
+§6 gives a profile a free-text notes field ("why sections were dropped, who
+approved") and D-05 puts a copy of the profile in the matter folder as the
+record of that decision. Neither reaches the GUI. `ReductionLever` has no field
+for the rule's own text or the profile's note, so the checklist attributes each
+drop by rule *identity* (`<profile_id> v<version> → section "<key>" → DROP`)
+and cannot show the pattern that matched or the note the expert wrote.
+
+Proposed, additive, both defaulted to `""`:
+
+```python
+@dataclass(frozen=True, slots=True)
+class ReductionLever:
+    ...
+    rule: str = ""   # the profile's own matching rule, verbatim
+    note: str = ""   # the profile's notes field for this section
+```
+
+Not applied here. Rule identity is a true attribution and is enough to ship;
+the note is what makes the omission *defensible in the expert's own words*, and
+that is worth an amendment rather than a GUI-authored paraphrase.
+
+---
+
+## A-12 — the seam cannot carry the §8 handoff
+
+**Raised by:** Track E (GUI, Sprint 2), 2026-08-01
+**Affects:** `dociq/gui/pipeline.py` — `PipelineAPI`, `RunOutcome`
+**Proposed severity:** MINOR (two additive protocol methods)
+
+### The case
+
+§9 acceptance criterion 8 requires "Analyze in Claude" to be a real action, and
+§8 defines the two sanctioned routes. Both need something the seam has no way to
+express:
+
+* **Path B** needs the pipeline's statement of what is in the matter folder.
+  `emit/handoff.py::expert_assist_layout` already produces exactly this and
+  *checks the folder* rather than describing it from memory — `present`,
+  `missing`, `instructions`. None of it crosses the seam; `RunOutcome` carries
+  only `output_root: str`.
+* **Path A** needs the package to be *built*. That is emit-layer work
+  (`build_upload_package`), and D-20 adds a requirement the existing function
+  does not have: the package is a **deliberately scoped subset**, and the scope
+  must be stated **inside the package**, because downstream nobody can tell a
+  subset from a whole record unless the package says so.
+
+### Why a local workaround would be wrong
+
+Writing `upload_package/` from a widget would import `dociq.emit` (forbidden),
+and would put a second copy of §8's "only these files are uploaded" rule in the
+product — the rule whose failure mode is DocIQ's own audit trail being uploaded
+into the evidence corpus.
+
+Describing the matter folder from the GUI's own knowledge of the layout would be
+a claim about disk made by something that did not look at disk. Path B's whole
+argument is that DocIQ writes where Expert Assist already reads; asserting that
+without checking is exactly the assertion that would be worth checking.
+
+### Proposed shape
+
+```python
+class PipelineAPI(Protocol):
+    def matter_layout_note(self, outcome: RunOutcome) -> str:
+        """What is in the matter folder and what to point Claude at, in the
+        pipeline's words, having checked. "" when it did not look."""
+
+    def build_package(
+        self, outcome: RunOutcome, doc_ids: tuple[str, ...],
+        scope_statement: str,
+    ) -> "PackageResult":
+        """Assemble §8 Path A's upload_package/ for exactly ``doc_ids``, with
+        ``scope_statement`` written into README_START_HERE.txt ahead of
+        everything else (D-20)."""
+```
+
+`build_upload_package` would gain a `doc_ids` filter and a `scope_statement`
+that `render_readme` emits first. `PackageResult` can be a presentation record
+in the seam (root path, file count, total bytes, unenforced limits) — the same
+treatment `Reconciliation` already gets.
+
+### What Track E did in the meantime
+
+Both are duck-typed hooks. Absent `matter_layout_note`, Path B says the pipeline
+confirmed nothing and the operator should check the folder. Absent
+`build_package`, the Path A button is **disabled with the reason on screen**
+(`PATH_A_UNAVAILABLE`) rather than greyed out silently. The scope selection, the
+subset arithmetic and the scope statement are all built and rendered verbatim
+now, so adopting the amendment is a wiring change, not a design change.
+
+---
+
+## A-13 — `DIRECT_CONTEXT_TOKENS`' docstring asserts the figure is unruled; D-21 ruled it
+
+**Raised by:** Track E (GUI, Sprint 2), 2026-08-01
+**Affects:** `dociq/gui/pipeline.py` — `DIRECT_CONTEXT_TOKENS` docstring only
+**Proposed severity:** TRIVIAL (documentation; no code or field changes)
+
+### The case
+
+The docstring reads: "**UNCONFIRMED.** Alex has not ruled this threshold and it
+is not measured; 200K is a working placeholder."
+
+D-21 (2026-08-01) rules it: **keep 200,000**, and render it as a named, sourced
+reference line called "Claude Project direct context", never as a budget or a
+target. So the first sentence is now false — the threshold *is* ruled. What
+remains true, and must not be lost in the correction, is that it is **not
+measured and not confirmed against Anthropic's published limits**.
+
+Raised rather than edited because the file is frozen and shared with Track D,
+and because it is a *claim*, not an identifier: withdrawing it means correcting
+the sentence, not deleting the constant.
+
+### Proposed wording
+
+> **RULED D-21 (2026-08-01), NOT MEASURED.** 200,000 is the working figure Alex
+> ruled to keep, rendered as a named, sourced reference line — "Claude Project
+> direct context" — and never as a budget or a target (D-15: over-capacity is
+> the expected state). It has not been confirmed against Anthropic's published
+> limits. It is a single named constant precisely so that confirming it is a
+> one-line change — the literal appears nowhere else, and no screen may inline
+> it.
+
+### What Track E did in the meantime
+
+The GUI names the line `CAPACITY_LABEL` and sources it `CAPACITY_SOURCE` in
+`view_models.py`, both stating D-21 and both stating that it is unconfirmed. The
+waterfall row previously read "unconfirmed", which was right under the old
+docstring and understates the ruling under the new one; it now reads
+"reference, not a target" with the source in its tooltip and in a line under the
+headline. No literal `200_000` appears anywhere in `dociq/gui/`, and
+`tests/test_gui_screen_states.py` asserts it.
+
+---
+
+## A-11, A-12, A-13 — APPLIED (2026-08-01)
+
+Raised by Track E; applied centrally to `src/dociq/gui/pipeline.py` on
+`build/sprint-2` so Tracks D, E and F receive one seam rather than three. The
+cases are recorded above as Track E argued them; what follows is what was
+actually applied, and the one defect applying it uncovered.
+
+**A-11 — APPLIED as proposed.** `PipelineAPI.profile_rules(profile)` returns
+`(levers, basis, source)`. Track E already consumes exactly this tuple through a
+duck-typed hook whose absence *renders* as a loud empty state that disables
+approval, so adoption is wiring.
+
+**A-11b — APPLIED, and NOT as Track E left it.** Track E proposed `rule` and
+`note` on `ReductionLever` but declined to apply them, on the reasoning that
+rule identity is a true attribution and enough to ship. It is enough to ship;
+it is not enough to *defend*. §6 gives a profile a notes field for why a
+section was dropped and who approved it, and D-05 puts a copy of the profile in
+the matter folder precisely so that sentence survives. An omission an expert
+cannot explain in their own words is an omission they cannot defend, and the
+alternative — a widget paraphrasing the rationale — is the tool putting words
+in the expert's mouth about evidence. Both fields are carried verbatim.
+
+> **CORRECTION, 2026-08-04 — "APPLIED" was true of the seam and false of the
+> product.** `rule` and `note` were added to `ReductionLever`, documented,
+> preserved across `with_toggled`, and covered by two probes — and **no adapter
+> ever populated them and no screen ever rendered them.** All three
+> construction sites in `adapter.py` left both at `""`, including
+> `profile_rules`, which is the §6 checklist path this amendment exists for. So
+> the checklist could show that a DROP rule existed and never what it catches or
+> who approved it — the exact gap the paragraph above says is the difference
+> between shipping and defending.
+>
+> Found by the seam-population probe built for Codex review #2's B-3
+> (`tests/test_seam_population.py`), which enumerates every field of every seam
+> presentation record and requires each to be named at every construction site
+> in the adapter or ruled exempt. **This is the same failure as A-12, A-14 and
+> B-3 — the fourth instance in one sprint** — and it is the reason the probe
+> enumerates rather than checking the field that happened to be reported.
+>
+> Now populated (`rule=rule.pattern`, `note=rule.notes`, and from the run's own
+> profiles for the post-run waterfall) and rendered by
+> `ProfileChecklistScreen._row_widget` through `ChecklistRow.matched_by()` and
+> `ChecklistRow.expert_note()`. Both watched RED before the fix.
+
+**A-12 — APPLIED as proposed**, plus `PackageResult` as a presentation record
+in the seam (`root`, `file_count`, `total_bytes`, `scope_statement`,
+`doc_count`), the same treatment `Reconciliation` already gets.
+`scope_statement` is the same sentence written INTO the package, not a second
+one rendered beside it: under D-20 every Path A package is a subset unless it
+says otherwise, and two sentences that can drift is how a subset comes to look
+like a whole record.
+
+`build_package` may be OMITTED by an adapter that does not offer Path A, rather
+than returning an empty result. The GUI probes for it and disables the action
+with the reason on screen; a stand-in that silently returned nothing would
+leave the operator pressing a button that appears to work.
+
+**A-13 — APPLIED with Track E's wording.** The docstring asserted the threshold
+was unruled, which D-21 made false. Corrected, not deleted: what remains true —
+that 200,000 is unmeasured and unconfirmed against Anthropic's published limits
+— is the part a reader needs.
+
+### The defect applying A-11b uncovered
+
+`ReductionPlan.with_toggled` rebuilt `ReductionLever` by listing its fields
+positionally. That was correct on the day it was written and silently lossy for
+every field added afterwards — so the moment `rule` and `note` existed, an
+expert's stated reason for an omission would have been on screen before a click
+and gone after it. Nothing would have raised.
+
+**Class, not repro.** Four sites rebuilt the record from its parts — the seam,
+the mock's measured-scale rescale, and two screen-state tests. A lossy rebuild
+inside a *fixture* is worse than one in the product: it produces a passing test
+of the wrong record. All four now use `dataclasses.replace`.
+
+Two probes, both watched RED under perturbation before being trusted:
+
+- `test_toggling_preserves_every_lever_field_except_engaged` — generated from
+  `dataclasses.fields(ReductionLever)`, so a field added next year is covered
+  the moment it exists. Asserting only `rule` and `note` would have been a test
+  of this amendment rather than of the defect.
+- `test_no_lever_rebuild_site_lists_fields_positionally` — walks the **AST** of
+  every module in `src/` and `tests/`. Its first version used a regex and
+  **missed the very rebuild that motivated it**: the call was
+  `ReductionLever(lever.key, ...)` and the pattern stopped at the dot. Recorded
+  because it is the general lesson — a regex over source is a guess about
+  syntax.
+
+#### Correction, 2026-08-03 — both claims above were overstated
+
+Withdrawn rather than quietly patched, because the wrong part is the *claim*,
+not only the code.
+
+1. **"All four now use `dataclasses.replace`" understated the scope of the
+   defect.** Four `ReductionLever` sites were fixed. The class was
+   "a frozen presentation record rebuilt by listing its fields", and it was
+   never only `ReductionLever` — `ReductionPlan.with_toggled` rebuilds
+   **`ReductionPlan`** positionally in the very method that was fixed, and
+   `tests/test_view_models.py` rebuilt **`RunOutcome`** from six of its eight
+   fields, a lossy rebuild inside a fixture of exactly the kind the paragraph
+   above calls worse than one in the product. Neither was seen.
+2. **"cannot be fooled by one [a regex]" claimed too much.** The AST probe
+   named a single record. A probe that polices one of thirteen frozen records
+   in the seam is not un-foolable; it is narrow, and its narrowness is invisible
+   from its name.
+
+Both are now closed by construction. `test_no_seam_record_is_rebuilt_with_
+optional_fields_positionally` enumerates the frozen presentation records from
+`dociq.gui.pipeline` itself — every record the seam *defines*, so one added
+tomorrow is policed the moment it exists — and flags any positional argument
+**beyond a record's required fields**. That is the precise line: required fields
+must be supplied at every call site, so a new required field breaks them loudly;
+every field added to a shipped frozen record carries a default, and a default is
+what a rebuild that stopped listing fields silently falls back to.
+
+`ReductionPlan.with_toggled` is **not fixed here**. `src/dociq/gui/pipeline.py`
+is frozen and shared with parallel work, so the site is REPORTED: it is covered
+by `test_the_frozen_seam_module_has_no_positional_rebuild`, marked
+`xfail(strict=True)` so that the day the seam owner fixes it the test turns red
+and the marker must be removed. It is lossless today at 4 of 4 fields and
+silently lossy on the next one.
+
+---
+
+## A-14 — the seam cannot carry §4 Stage 3's Bates confirmation
+
+**Raised by:** Track D (Sprint 2), 2026-08-01, as a stop-the-line
+**Applied by:** the seam owner, 2026-08-03, at `3a44f2e`
+**Affects:** `dociq/gui/pipeline.py` — `PipelineAPI.run`, plus two new records
+**Severity:** MINOR (one additive record, one callable alias, one optional parameter)
+
+> **This entry was written on 2026-08-04, a day after the amendment was applied
+> and shipped.** For that day the register was the only place A-14 did not
+> exist: it was in the seam, in three commit messages, in the decision register,
+> and in the Codex relay — which pointed reviewers *here* for it. Codex found
+> the gap immediately. Recorded rather than backdated, because this is the
+> second-order instance of the exact failure A-14 itself is the first-order
+> instance of, and the pair is the argument for the registry in
+> `tools/check_amendments.py`.
+
+### The case
+
+§4 Stage 3 requires a detected Bates format to be confirmed **with the
+operator** on first detection. `PipelineOptions.auto_confirm_bates` existed for
+headless callers and recorded a warning when it fired, but nothing on the seam
+could ask a human. So `RealPipeline` passed `auto_confirm_bates=False`, no
+screen asked, `_bates_decision` returned `PENDING`, and `apply_bates_reported`
+returned every document unchanged.
+
+**Measured cost, on real MNFV production (10 documents / 369 pages) through
+`RealPipeline`:** `confirm_bates=None` — the shipped state — produced **0 of 369
+pages with a locator, with OCR on and with OCR off**. With an operator
+confirmation: **328 pages, 88.889%**. Both `None` runs warned that a format *was
+detected and not applied*. The pipeline could see the stamps the entire time.
+
+Acceptance criterion 4's 92.130% was measured through
+`tools/bates_acceptance.py`, which constructs `BatesDecision(status=CONFIRMED,
+…)` directly — a code path the product could not reach.
+
+### Applied shape
+
+```python
+@dataclass(frozen=True, slots=True)
+class BatesProposal:
+    pattern: str
+    example: str = ""          # a real locator off a real page
+    documents: int = 0
+    pages: int = 0
+    coverage_pct: float = 0.0
+    alternatives: tuple[str, ...] = ()
+
+BatesConfirm = Callable[[BatesProposal], bool]
+
+class PipelineAPI(Protocol):
+    def run(self, request, on_progress, should_cancel,
+            confirm_bates: "BatesConfirm | None" = None) -> RunOutcome: ...
+```
+
+Deliberately more than the pattern: **an operator cannot confirm a regex.** They
+can confirm *"MNFV 02636, on 15 of 33 pages across 20 documents"*.
+`alternatives` is present because a multi-series production is exactly the
+condition D-28 refuses prefix repair on, and the operator must see that rather
+than have it decided for them.
+
+`confirm_bates` is **optional with a `None` default** so every existing caller —
+the tests, the headless harnesses, the self-test — kept working; a required
+parameter would have broken the only implementations that can demonstrate the
+seam holds.
+
+### Three outcomes, kept apart
+
+`None` means **nobody was asked**, which is not a refusal. An operator
+confirmation records `decided_by="operator (username)"`; a refusal records
+status `REJECTED` with a warning stating *"This matter is NOT unstamped — the
+stamps are on the pages and were read"*; nobody-asked records the machine
+confirmation it always did. A machine-confirmed pattern and an expert-confirmed
+one are not the same evidentiary object, and an unstamped production and a
+stamped one whose format was declined are different facts about the record.
+
+An operator who walks away raises `runstate.RunAborted` rather than returning a
+`bool` — routed to the existing abort path, so nothing is published and the
+previous run's deliverables are untouched.
+
+### The defect the wiring uncovered
+
+`alternatives` was first fed the detector's runner-up **shapes** (`ranked[1:4]`,
+no threshold). On the client corpus that was `('retained 90095 49 00001',
+'Check 0001')` — so the screen would have told the operator, as fact, that their
+**single-series production was multi-series** and that D-28 therefore refused
+prefix repair on it. A confident, specific, wrong statement about their
+evidence. It now uses `identify.bates.matter_prefixes`, computed once per run
+and shared with `apply_bates_reported`'s own gate. **Found by running against
+the real production, not by reasoning about the code** — and the seam docstring
+for that field already explained why it mattered while the wiring behind it was
+wrong.
+
+---
+
+## A-15 — `TerminalStatus.BLOCKED` enumerates three ways in; the gate refusal is a fourth
+
+**Raised by:** the Codex review #2 fix round (B-1), 2026-08-04
+**Affects:** `dociq/contracts.py` — `TerminalStatus.BLOCKED` docstring, and
+optionally a new `TerminalStatus.REFUSED` member
+**Proposed severity:** TRIVIAL as a docstring correction; MINOR as a new member
+**Status:** **APPLIED 2026-08-04 at `b1eac7e`** — `TerminalStatus.REFUSED`
+exists, `_refuse_publication` records it, and the B-2 unreadable-marker case
+correctly stays `BLOCKED` because it fails before a corpus exists.
+
+> This line read "RAISED, NOT APPLIED" for the length of a fix round *after the
+> amendment was applied*, while `amendments.toml` said `applied` — so the two
+> halves of the register contradicted each other, in the file a reviewer is sent
+> to. Codex filed it as D-2. The registry was built to stop exactly this and did
+> not, because nothing compared the two halves' STATUS; `tests/test_amendments.py`
+> only checked that every prose entry had a machine-readable one. It compares
+> status now.
+
+### The case
+
+Codex B-1 found that §4 Stage 6 computed its checks and published regardless.
+The fix refuses publication when page accounting is red, when the manifest
+carries an unclassified output, or when the corpus is out of canonical order —
+`dociq.pipeline._refuse_publication`.
+
+A refused run has to END somehow, and the vocabulary for that is
+`TerminalStatus`. It is recorded as `BLOCKED`, which is defensible on the value's
+own prose — "the run never established a corpus it could publish" is precisely
+what happened — and which produces exactly the right operator sentence:
+
+> RUN BLOCKED — NO DELIVERABLES WERE WRITTEN and the previous run's outputs in
+> this folder were left exactly as they were.
+
+But the docstring then says **"Three ways in: the disk preflight refused, the
+source root was not reachable, or the inventory could not be enumerated."** That
+enumeration is now short by one, and an enumeration that is quietly short is the
+`fix-the-class` failure this project keeps re-finding: a reader auditing every
+route into `BLOCKED` would audit three of four.
+
+The alternative considered and rejected was leaving the termination `COMPLETED`
+and carrying the refusal only in `PipelineOutcome.published=False`. The walk
+*did* complete, so that is arguable — but `RunTermination.headline()` would then
+print "Run status: completed — the walk covered every file found." at the top of
+a refused run's `run_status.json` and its summary PDF, and
+`RunTermination.as_jsonable()` would write `"published": true` into the log of a
+run that published nothing. A status that reads correctly to a machine and lies
+to the operator is the worse of the two.
+
+### Proposed wording — the minimum
+
+Add a fourth item to `TerminalStatus.BLOCKED`'s docstring:
+
+> ...or — added by A-15 — **§4 Stage 6 refused to publish**: the walk completed
+> and a full set was built in staging, and that set failed its own gates
+> (page-accounting discrepancy, an output the byte-identical claim does not
+> classify, or a corpus out of canonical order). The staged set is discarded and
+> the folder's existing deliverables are untouched, which is why this is a
+> *blocked* run and not a completed one.
+
+### Proposed wording — the better shape
+
+A distinct member, so the four routes stop sharing one word:
+
+```python
+REFUSED = "refused"
+"""The run built a complete set and its own Stage-6 gates rejected it."""
+```
+
+`RunTermination.complete` and `.publishable` are already derived from
+`status is COMPLETED`, so a new member is correct by construction on both. The
+cost is every consumer that switches on the enum — `RunTermination.headline`,
+the GUI's failure state, the summary banner — which is why it is raised rather
+than taken during a merge-gate fix round on a frozen, shared module.
+
+### Why it is raised, not applied
+
+`src/dociq/contracts.py` is frozen and was being edited by a parallel track
+during this fix round. Applying it here would have been a conflict on a module
+whose whole point is that it does not move under people.
+
+---
+
+## A-16 — a completed swap's undeletable residue has nowhere to reach the operator
+
+**Raised by:** the D-31 delete-last redesign, 2026-08-05
+**Affects:** `dociq/gui/pipeline.py` — `RunOutcome.superseded_residue`; wired by
+`dociq/adapter.py`
+**Proposed severity:** MINOR — a new optional field on a non-contract seam record
+**Status:** **APPLIED 2026-08-05 at `f7358a7`** — still applied, still wired, and
+carrying something narrower than the case below describes. See the D-32 note.
+
+### D-32 (2026-08-06) — the field survives, its subject matter shrank
+
+**The amendment is NOT withdrawn and the entry is NOT deleted.**
+`RunOutcome.superseded_residue` still exists, is still populated by
+`dociq/adapter.py`, and is still rendered success-first. What changed is what it
+can contain: D-32 deleted the set-aside protocol, so there are no
+`.dociq/superseded*` trees for this build to leave. The field now carries
+`dociq.emit.paths.state_residue()`'s answer — on the success path, a drained
+`.dociq/staging/` that could not be removed after every file had been moved out
+of it. **Empty directories, not a stale copy of a previous run's deliverables.**
+That is a smaller thing than the case below argues for, and it is stated rather
+than left for a reader to discover that the field is usually empty.
+
+The NAME is deliberately unchanged. Renaming a seam field that this amendment
+wired end to end is a contract change, and the descope has no business making
+one; the mismatch is explained at both ends (`gui/pipeline.py` and
+`pipeline.py`) instead. **This is a stop-the-line item disclosed, not a registry
+entry quietly edited** — if the name is to change, that is a new amendment.
+
+The reasoning about hashed content in the last paragraph below is unaffected and
+still binding.
+
+### The case (as raised under D-31, whose design no longer exists)
+
+D-31 made the matter swap delete-last: the previous deliverable set is renamed
+aside under `.dociq/`, the staged set is renamed into place, and the set-aside
+tree is removed only afterwards. A failure of that last step therefore cannot
+make the matter folder wrong — it leaves one complete, correct set at the root
+and a clearly-named stale one under `.dociq/`. **The run published. The evidence
+is right.**
+
+That is a success with a residue, and there was nowhere to say so. Nobody opens
+`.dociq/`, so the residue was disk that filled for reasons no operator could
+see, and — worse for this tool — a stale copy of a previous run's deliverables
+sitting on a matter machine with nothing on screen having mentioned it.
+
+It is deliberately NOT routed through `RunResult.warnings`: those become hashed
+`content`, so a run that hit a transient antivirus lock and one that did not
+would produce different bytes for the same evidence. That is criterion 7's
+boundary, and this project has twice had to unpick something from hashed content
+that belonged in the run record instead.
+
+---
+
+## A-17 — A-16's residue disclosure has a blind spot exactly the width of the package path
+
+**Raised by:** Codex review #2, third fix round, finding A-7, 2026-08-06
+**Unaffected by D-32:** the package's own delete-last publish is a separate
+mechanism in `dociq/emit/handoff.py`, it was reviewed on its own terms and found
+sound, and the descope did not touch it. `package_superseded` trees are still
+created and still reported. The one sentence that changed is the cross-reference:
+A-16's blind spot is now described against `state_residue()` rather than the
+deleted `superseded_residue()`.
+**Affects:** `dociq/gui/pipeline.py` — `PackageResult.residue`; wired by
+`dociq/adapter.py`, `dociq/emit/handoff.py` (`UploadPackage.residue`),
+`dociq/gui/view_models.py` and `dociq/gui/screens.py`
+**Proposed severity:** MINOR — a new optional field on a non-contract seam record
+**Status:** **APPLIED 2026-08-06 at `0e31730`** (the seam field); the emit,
+view-model and screen halves land in the fourth fix round.
+
+### The case
+
+A-16 was written for the matter swap and was believed to cover the package swap
+too. It does not. `emit.paths.superseded_residue()` — the scanner A-16's field is
+populated from — recognizes matter-swap directories named `superseded*`, and the
+package's set-aside tree is called `package_superseded`. So the field built to
+make undeletable residue visible had a blind spot exactly the width of the
+package path.
+
+Underneath it, `_publish_package()`'s post-publish cleanup called
+`_remove_tree(package_superseded)` and **discarded the boolean** — the boolean
+that helper exists to return, precisely so that no caller would assume a removal
+happened. Codex's reproduction: a scanner locks one file in the old package
+after the new one has taken the published name, `rmtree` gives up part way,
+and `_publish_package()` returns an ordinary success. `upload_package/`
+correctly published, `.dociq/package_superseded/` still on disk, nothing in the
+result carrying it, the A-16 scanner returning `()`, and the screen saying only
+*"Upload package built."*
+
+It is rendered **success FIRST, in that order**, exactly as A-16 requires: the
+package published, it is correct, and a named old copy remains. A stale package
+copy on a machine an operator uploads from is a retention problem and a
+confusion problem — a folder full of package-shaped files, ten minutes after
+they were told to drag one into a Project — and not a build failure. Calling it
+either of the other two would be wrong.

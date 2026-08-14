@@ -28,9 +28,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Mapping, Sequence
 
 from dociq.contracts import (
     ContractViolation,
@@ -66,34 +67,90 @@ from dociq.emit.indexbook import (
     write_reconciliation_csv,
 )
 from dociq.emit.log import LogBundle, build_log, write_processing_log
+from dociq.emit import paths as emit_paths
 from dociq.emit.paths import OutputLayout
 from dociq.emit.summary import build_summary_data, write_run_summary
 from dociq.identify.bates import (
     BatesDecision,
     BatesPatternError,
+    BatesProposal,
     BatesRange,
     DecisionStatus,
-    apply_bates,
+    apply_bates_reported,
     document_ranges,
+    matter_prefixes,
     parse_pattern,
     propose_format,
     ranges_by_sort_key,
 )
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
-from dociq.profiles.apply import apply_profiles
+from dociq.profiles.apply import DropLogEntry, apply_profiles
 from dociq.profiles.model import FormatProfile, OperatorStamp, operator_stamp, write_matter_copy
 from dociq.runstate import (
     COMPLETED,
     INCOMPLETE_DIR,
     STATUS_FILENAME,
+    RunAborted,
     RunTermination,
+    TerminalStatus,
 )
 from dociq.verify import accounting, manifest as mf
 from dociq.verify.tokens import TokenEstimate as MeasuredEstimate
 from dociq.verify.tokens import estimate_for_texts
 
-__all__ = ["OCR_DISABLED", "PipelineOptions", "PipelineOutcome", "run"]
+__all__ = [
+    "OCR_DISABLED",
+    "PipelineOptions",
+    "PipelineOutcome",
+    "StageProgress",
+    "STAGES",
+    "run",
+]
+
+STAGES: tuple[tuple[int, str], ...] = (
+    (1, "Reading the folder"),
+    (2, "Extracting text"),
+    (3, "Bates numbers and document IDs"),
+    (4, "Applying the profile"),
+    (5, "Writing the deliverables"),
+    (6, "Checking the results"),
+)
+"""§4's six stages, in plain language, numbered as §4 numbers them.
+
+Named here rather than in a screen because the stage a run is in is the
+pipeline's fact, not the GUI's — and because the measured reality makes the
+numbering load-bearing rather than decorative. The acceptance run of 2026-08-02
+— from scratch, OCR on, through the shipped adapter — measured Stages 1-2 at
+**99.70% of run time** and everything after them at **18.5 seconds combined**
+(0.30% of the run); a progress bar driven only by the walk therefore sits at
+99.7% for the whole of the rest of the run, which reads as a hang. Stages 3-6 are
+short, and they still have to say they are happening.
+
+The register's earlier §10 restatement (2026-07-31) put the same two figures at
+99.1% and 25.7 s, from a run that resumed 62 documents from an interrupted
+attempt. That pair is superseded, not reconciled: **why the post-extraction work
+took 25.7 s once and 18.5 s once over the same corpus is not established** — the
+two runs differ in resumption, in machine load and in 35 pages, and no
+measurement separates them. What both runs agree on, which is all this docstring
+needs, is that the tail is under 1% of the wall clock. Optimizing anything but
+extraction is optimizing under 1% of the run.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class StageProgress:
+    """Which of §4's stages the run is in. Reporting only — it never reaches
+    disk, never enters hashed content, and no output depends on it."""
+
+    stage: int
+    name: str
+    detail: str = ""
+    total: int = len(STAGES)
+
+    @property
+    def headline(self) -> str:
+        return f"Step {self.stage} of {self.total} — {self.name}"
 
 OCR_DISABLED = "disabled"
 """``RunConfig.ocr_engine`` for a run that read no image page.
@@ -118,21 +175,77 @@ class PipelineOptions:
     master_index_path: str | None = None
     profiles: tuple[FormatProfile, ...] = ()
     bates_decision: BatesDecision | None = None
+    confirm_bates: Callable[[BatesProposal, tuple[str, ...]], bool] | None = None
+    """ASK the operator to confirm a detected Bates format (§4 Stage 3, A-14).
+
+    Called as ``confirm_bates(proposal, other_prefixes)``. The second argument
+    is **D-28's own census** — every OTHER prefix in this matter that clears the
+    same two bars a proposal has to clear — and it is a separate argument rather
+    than a field of ``proposal`` because ``BatesProposal.alternatives`` is not
+    it. Those are the runner-up *shapes*, ``ranked[1:4]``, with no threshold
+    applied at all: on the MNFV production they come back as ``Check 0001`` and
+    ``retained 90095 49 00001``, two stray lines. Telling an operator that the
+    production is multi-series — and that D-28 therefore refuses prefix repair —
+    on the strength of a stray line would be a false statement about the record
+    made in the one place the operator is being asked to rule.
+
+    Sprint 2 shipped without this and the cost was total: the GUI had no way to
+    ask, so every GUI run left :attr:`auto_confirm_bates` False, the decision
+    stayed PENDING, and ``apply_bates_reported`` returned every document
+    unchanged. **A Bates-stamped production came out of the product with no
+    locators at all** while the acceptance harness measured 92.130% coverage
+    through a code path — a hand-built CONFIRMED decision — the product could not
+    reach. Rehearsal finding A4.
+
+    Three outcomes, and they are three, not two:
+
+    * returns ``True``  — the OPERATOR confirmed. Recorded as theirs.
+    * returns ``False`` — the operator DECLINED. A ruling, recorded as one; an
+      unstamped production and a stamped one whose format was declined are
+      different facts about the record.
+    * ``None`` (this field unset) — *nobody was asked*. The run falls through to
+      :attr:`auto_confirm_bates`, exactly as before.
+
+    Raising :class:`~dociq.runstate.RunAborted` from it abandons the run: the
+    prompt is the one place the pipeline blocks on a human, so it is the one
+    place that needs a way out that is not a ruling.
+
+    It takes precedence over :attr:`auto_confirm_bates`. A caller that supplies
+    both has an operator, and an operator's answer is never overridden by a
+    machine's.
+    """
+
     auto_confirm_bates: bool = False
     """Accept the detected Bates format without asking.
 
     §4 Stage 3 says the format is confirmed with the operator on first
-    detection, and the GUI will do exactly that. This exists for the headless
-    paths — the acceptance harness and the self-test — which have no operator to
-    ask. It is recorded in the run's warnings whenever it fires, because a
-    machine-confirmed pattern and an expert-confirmed one are not the same
-    evidentiary object."""
+    detection, and :attr:`confirm_bates` is how the GUI does that. This remains
+    for the genuinely headless paths — the acceptance harness and the self-test
+    — which have no operator to ask. It is recorded in the run's warnings
+    whenever it fires, because a machine-confirmed pattern and an expert-
+    confirmed one are not the same evidentiary object."""
 
     stamp: OperatorStamp | None = None
     previous_ledger: str | Path | None = None
     """Ledger of a previous run, for the D-04 renumbering check. Defaults to
     whatever ``doc_ids_issued.json`` is already sitting in the output root —
     which is the re-run case D-04 (b) is actually about."""
+
+    on_stage: Callable[["StageProgress"], None] | None = None
+    """Called once as each of §4's stages begins, and once when the run ends.
+
+    :class:`~dociq.ingest.walker.WalkOptions` already carries a within-stage
+    progress hook, and it covers Stages 1-2 — which are **99.70% of the wall
+    clock** (acceptance run, 2026-08-02) and 0% of the remaining four stages.
+    The figure here read "Stage 1 … 99.1%" and was wrong twice over: 99.1% is the
+    superseded 2026-07-31 pair, and it was the combined Stages **1-2** figure in
+    the register even then, not Stage 1's. Without this, every GUI progress bar stops
+    at the walk's last tick and stays there while Bates detection, identifier
+    assignment, reconciliation, classification, all of §7's emit and the
+    accounting and manifest gates run. Reporting only: nothing here reaches
+    disk, and an exception raised by the callback is not caught, because a
+    consumer that cannot render progress is a bug in the consumer.
+    """
 
     write_workbook: bool = True
     write_summary_pdf: bool = True
@@ -163,6 +276,25 @@ class PipelineOutcome:
     stale_removed: tuple[str, ...] = ()
     """Deliverables of a previous run that this one replaced. Recorded in the
     log's ``run`` section, never in its hashed content."""
+    superseded_residue: tuple[str, ...] = ()
+    """``.dociq/`` trees this run left behind (amendment A-16, after D-32).
+
+    **The name is older than what it now carries** and is kept because it is a
+    seam field that amendment A-16 wired end to end; renaming it is a contract
+    change, and a misleading name explained in place is cheaper than a
+    contract amendment nobody asked for. It named the set-aside trees of the
+    swap protocol D-32 removed. It now names what
+    :func:`~dociq.emit.paths.state_residue` finds: on this field, populated on
+    the success path, that is a **drained staging tree the publication could not
+    remove** — the matter folder holds one complete, correct set and
+    ``.dociq/staging/`` holds empty directories. A residue, not a failed run,
+    surfaced because nobody opens ``.dociq/``.
+
+    Measured AFTER publication, which is why the log cannot carry it: the log is
+    written into staging and sealed before publication happens. What the log
+    carries is ``run.state_residue_before_run`` — what an EARLIER run left,
+    measured at the top of this one. Stated rather than left to be
+    discovered."""
     bates_ranges: dict[tuple[str, str, int], BatesRange] = field(default_factory=dict)
     timings_s: tuple[tuple[str, float], ...] = ()
     """Per-stage wall clock, in stage order. Reporting only — it never reaches
@@ -347,6 +479,7 @@ def _bates_decision(
     config: RunConfig,
     stamp: OperatorStamp,
     warnings: list[str],
+    prefix_census: Callable[[], tuple[str, ...]] | None = None,
 ) -> BatesDecision | None:
     """Stage 3's decision, or ``None`` for an unstamped set.
 
@@ -396,6 +529,50 @@ def _bates_decision(
     proposal = propose_format(documents)
     if proposal is None:
         return None
+    if options.confirm_bates is not None:
+        # D-28's census, and only when there is something to ask about — it is
+        # a second full candidate sweep of the corpus and an unstamped matter
+        # must not pay for it. `others` is what makes the screen's multi-series
+        # sentence TRUE rather than plausible; see the field's docstring.
+        census = prefix_census() if prefix_census is not None \
+            else matter_prefixes(documents)
+        others = tuple(p for p in census if p != proposal.format.prefix)
+        # §4 Stage 3, as written: the format is confirmed WITH THE OPERATOR on
+        # first detection. The call may raise RunAborted; it is deliberately not
+        # caught here, because "the operator walked away" is not a Bates
+        # decision and this function's job is to return one. `run` catches it.
+        if options.confirm_bates(proposal, others):
+            warnings.append(
+                f"Bates format {proposal.format.label} was CONFIRMED BY THE "
+                f"OPERATOR ({stamp.username}) at §4 Stage 3 of this run, on "
+                f"{proposal.coverage_pct}% page coverage "
+                f"({proposal.pages_matched} of {proposal.pages_scanned} pages "
+                f"across {proposal.documents_matched} document(s))."
+            )
+            return BatesDecision(
+                DecisionStatus.CONFIRMED,
+                proposal.format,
+                f"operator ({stamp.username})",
+                stamp.saved_at,
+            )
+        # A refusal is a DECISION, and the run has to be able to say so. It is
+        # not "no Bates present": DocIQ read the stamps, put them to the
+        # operator, and was told not to use them. Recording that as an unstamped
+        # matter would erase the ruling and the evidence both.
+        warnings.append(
+            f"Bates format {proposal.format.label} was DETECTED on "
+            f"{proposal.coverage_pct}% of pages and DECLINED by the operator "
+            f"({stamp.username}) at §4 Stage 3. No locators were written. This "
+            "matter is NOT unstamped — the stamps are on the pages and were "
+            "read; they were ruled not to be this production's format."
+        )
+        return BatesDecision(
+            DecisionStatus.REJECTED,
+            proposal.format,
+            f"operator ({stamp.username})",
+            stamp.saved_at,
+            note="declined at §4 Stage 3",
+        )
     if not options.auto_confirm_bates:
         warnings.append(
             f"Bates format {proposal.format.label} was detected on "
@@ -447,54 +624,139 @@ _STALE_PATTERNS = (
     mf.MANIFEST_NAME,
     "profile/*.yaml",
     f"{INCOMPLETE_DIR}/*",
+    "upload_package/*",
 )
-"""Deliverables a re-run replaces. ``upload_package/`` is absent because
-:func:`~dociq.emit.handoff.build_upload_package` already rebuilds it from
-scratch, and ``doc_ids_issued.json`` is absent because it is this run's *input*
-to the D-04 renumbering check — deleting it would silence the one warning the
-re-run case exists to produce.
+"""Deliverables a re-run replaces.
 
-``incomplete_run/*`` IS purged: once a complete run has written this folder, the
+``doc_ids_issued.json`` is absent because it is this run's *input* to the D-04
+renumbering check — deleting it would silence the one warning the re-run case
+exists to produce. (It is still replaced: the run stages a new one, and
+publication moves it over the old.)
+
+``upload_package/*`` is listed **as its FILES, never as the directory** — and
+that distinction is the whole of Codex finding A-8. A plan entry naming a
+directory is decided at the top of Stage 5 and acted on after Stage 6, minutes
+later on a real corpus, and `publish_staging` then removes whatever the
+directory contains — including a file the plan never named. An analyst who saves
+`upload_package/cover_letter.docx` while the run is working loses it, and
+`stale_outputs_replaced` never says so.
+
+This is exactly the defect that was fixed for ``clean_text`` (finding F-3) and
+left standing for its sibling, which D-32's own register entry named and which
+the F-3 regression test did not cover because it asserted only on
+``clean_text``. Costs an empty ``upload_package/`` shell when a re-run produces
+no package — the same cosmetic residue ``clean_text`` already accepts, and the
+same trade: a directory nobody named is not the tool's to delete.
+
+The package IS still replaced. :func:`~dociq.emit.handoff.build_upload_package` rebuilds
+the package from scratch — but since deliverables are built in staging it
+rebuilds it *in staging*, so the destination's copy is no longer touched by the
+emit at all. Left unlisted, a re-run that produced fewer documents would leave the previous run's
+extra ``upload_package/LI-06999.txt`` sitting in a folder an operator uploads
+whole. The claim that the rebuild covers it was true of the old write path and is
+withdrawn with it.
+
+``incomplete_run/*`` IS listed: once a complete run has written this folder, the
 record of an earlier aborted attempt describes a state the folder is no longer
-in, and leaving it would put a "RUN BLOCKED" artifact beside a good output set."""
+in, and leaving it would put a "RUN BLOCKED" artifact beside a good output set.
+
+**These names are DELETED, and this list is the only knowledge publication has**
+(D-32). Every entry is a name :func:`~dociq.emit.paths.publish_staging` removes
+from the matter folder before the staged set is moved in. The set-aside rename
+that used to stand between "stale" and "gone" is removed, and so is the durable
+inventory of what the last run actually published — so a deliverable an OLDER
+DocIQ wrote under a name this list does not match is **left in the matter
+folder**, permanently and undetected (Codex review #2, finding B-8, knowingly
+reopened). A name added to this list must therefore be treated as permanent:
+retiring an output means leaving its pattern here forever, not deleting the
+line."""
 
 
-def _purge_stale_deliverables(
-    layout: OutputLayout, termination: RunTermination
+def _stale_deliverables(
+    layout: OutputLayout,
+    termination: RunTermination,
 ) -> tuple[str, ...]:
-    """Remove the previous run's deliverables from the destination.
+    """ENUMERATE the previous run's deliverables this run supersedes.
 
-    Re-running a matter means replacing its outputs, and a leftover
-    ``clean_text/LI-06881.txt`` from a run against an older master index is
-    worse than a missing one: it sits in the folder Expert Assist reads, under
-    an identifier this run gave to a different document.
+    Split from the removal (which is
+    :func:`~dociq.emit.paths.publish_staging`) because the two happen at
+    different times: the list has to be in the processing log, and the log is
+    written *before* publication. It carries the same required, validated
+    ``termination`` argument as the removal always has, so the guard sits on the
+    function that decides what gets deleted as well as on the one that deletes
+    it.
 
-    ``termination`` is a REQUIRED argument, and it is checked here rather than
-    only at the call site (Codex B-1). Destroying a complete prior corpus
-    because a preflight check failed is the worst outcome this pipeline can
-    produce, so the guard is a property of the function that does the deleting:
-    the only way to call it is to hand it a proof that the run completed, and
-    the proof is validated. :func:`run` also returns before Stage 5 on any
-    non-complete termination, so the ordering and the argument are two
-    independent defences and the raise below is unreachable from the shipped
-    path.
+    **One source, and its limit is the point** (D-32). :data:`_STALE_PATTERNS`
+    is what THIS BUILD knows how to write. The durable inventory of what the
+    last run actually published — which could name a deliverable an older DocIQ
+    left under a retired name — was part of the publication protocol D-32
+    removed, and went with it. B-8's second case is therefore live again and is
+    recorded as a known limitation rather than left to be rediscovered: a file at
+    a name this build no longer writes stays in the folder.
 
-    Nothing is deleted silently — the list goes into the log's ``run`` section,
-    which is outside the hashed content precisely because a first run and a
-    re-run must not differ inside it.
+    Entries are filtered to what is ON DISK once, here. This function runs at the
+    TOP of Stage 5 and the removals it plans happen after Stage 6, which on a
+    real matter is minutes — so a name that has since disappeared is skipped by
+    publication, and a name that has since appeared is not removed at all. The
+    second is the direction that matters: a file an analyst saves into the matter
+    folder mid-run at a name no pattern matched is not in this plan and is not
+    touched.
     """
     if not termination.publishable:
         raise ContractViolation(
-            "refusing to remove a previous run's deliverables for a run that "
-            f"ended {termination.status.value}: {termination.reason}"
+            "refusing to list a previous run's deliverables for replacement for "
+            f"a run that ended {termination.status.value}: {termination.reason}"
         )
-    removed: list[str] = []
+    # FILES ONLY, recursing into any directory a pattern matches. A plan entry
+    # that names a directory is decided here, at the top of Stage 5, and acted
+    # on after Stage 6 — minutes later on a real matter — and publication then
+    # removes whatever the directory holds AT THAT MOMENT, including a file the
+    # plan never named.
+    #
+    # This is the third generation of one defect. F-3 fixed it for `clean_text`
+    # by making that pattern a glob; A-8 found `upload_package` still bare;
+    # A-8's second round found that `upload_package/*` matches DIRECTORIES too,
+    # so a pre-existing `upload_package/analyst_notes/` was planned whole and
+    # recursively deleted. Each fix corrected the pattern list, which is the
+    # wrong layer — the patterns are a list someone must keep right, and this
+    # loop is the place the property can be made true for every pattern at once.
+    #
+    # So the invariant is established HERE and cannot be reintroduced by editing
+    # `_STALE_PATTERNS`: whatever a pattern matches, the plan names files.
+    found: list[str] = []
     for pattern in _STALE_PATTERNS:
         for path in sorted(layout.root.glob(pattern)):
             if path.is_file():
-                removed.append(path.relative_to(layout.root).as_posix())
-                path.unlink()
-    return tuple(removed)
+                found.append(path.relative_to(layout.root).as_posix())
+            elif path.is_dir():
+                found.extend(
+                    child.relative_to(layout.root).as_posix()
+                    for child in sorted(path.rglob("*")) if child.is_file()
+                )
+    return tuple(sorted(set(found)))
+
+
+def _log_reconciliation(
+    report: ReconciliationReport | None, *, index_supplied: bool
+) -> ReconciliationReport | None:
+    """The reconciliation projection the log's hashed ``content`` records.
+
+    **One projection, two callers** (Codex review #2, second fix round, B-7).
+    The published path passed ``report if index is not None else None`` and
+    :func:`_abort` passed the always-created no-index report, so an ordinary
+    matter *without* a master index produced a refused log whose
+    ``content.reconciliation`` was an object where the published log's was
+    ``null`` — two different hashed identities for the same evidence, and the
+    refused log's own ``content_sha256`` therefore disagreed with the
+    ``log_content_sha256`` embedded in the manifest it carries. A verifier had
+    to choose which of one file's two hashes to believe.
+
+    The rule itself is unchanged and is stated here rather than at two call
+    sites: **reconciliation is a fact about the master index**, so a run given
+    no index records ``null`` — not an empty report, which would say
+    "reconciliation ran and matched nothing".
+    """
+    return report if index_supplied else None
 
 
 def _abort(
@@ -506,11 +768,24 @@ def _abort(
     stamp: OperatorStamp,
     opts: PipelineOptions,
     timings: list[tuple[str, float]],
+    result: RunResult | None = None,
+    assignment: AssignmentResult | None = None,
+    reconciliation: ReconciliationReport | None = None,
+    index_supplied: bool = False,
+    manifest: mf.Manifest | None = None,
+    accounting_report: accounting.AccountingReport | None = None,
+    renumbering: Sequence[RenumberWarning] = (),
+    drops: Sequence[DropLogEntry] = (),
+    bates_decision: BatesDecision | None = None,
+    bates_ranges: dict[tuple[str, str, int], BatesRange] | None = None,
+    content_warnings: Sequence[str] | None = None,
+    output_hashes: Mapping[str, str] | None = None,
+    staged_bundle: LogBundle | None = None,
 ) -> PipelineOutcome:
     """End a run that did not complete, WITHOUT publishing anything.
 
     Codex review #1, finding B-1. Everything Stage 5 would do is skipped: no
-    purge, no ``clean_text/``, no index, no ``sources.json``, no
+    publication, no ``clean_text/``, no index, no ``sources.json``, no
     ``processing_log.json``, no ``run_summary.pdf``, no ``output_manifest.json``
     and no issued-ID ledger. Whatever the last COMPLETE run left in this folder
     is exactly as it was, which is the point of the finding.
@@ -526,20 +801,49 @@ def _abort(
 
     They live in a sub-directory rather than beside the deliverables so that no
     name an incomplete run writes can collide with a name a complete run wrote.
-    A subsequent complete run purges the directory (``_STALE_PATTERNS``), and
-    the manifest classifies it as excluded so it can never make a later, good
-    run report an unclassified output.
+    A subsequent complete run replaces the directory (``_STALE_PATTERNS`` — it
+    is removed with the rest of the superseded set), and the
+    manifest classifies it as excluded so it can never make a later, good run
+    report an unclassified output.
+
+    **The optional arguments** (Codex review #2, finding B-1). This started as
+    the Stage-1 abort and is now also the STAGE-6 REFUSAL, where a run walked
+    the whole corpus, built a complete set in staging, and was refused
+    publication because its own gates went red. That run knows things a Stage-1
+    abort cannot — the assigned identifiers, the reconciliation, the manifest of
+    the set it built, the accounting report that condemned it — and blanking
+    them would make the quarantined record say "no identifier was issued" about
+    a run that issued nine thousand.
+
+    They are overrides on ONE function rather than a second unpublishing path on
+    purpose: the whole of Codex review #1's B-1 was that a second publication
+    rule is a second chance to get publication wrong. Everything that decides
+    *not* to publish returns from here, so ``published=False``,
+    ``incomplete_dir``, the quarantined log, the status file and the failing
+    ``<run>`` discrepancy are written once and cannot drift between the cases.
     """
     termination = walk_notes.termination
     documents = walked.documents
     warnings = list(walk_notes.messages()) + list(walked.warnings)
+    # The list that becomes hashed `content.warnings`. A Stage-1 abort has only
+    # the walk's own warnings and passes nothing, so it keeps the line above. A
+    # STAGE-6 REFUSAL walked the whole corpus and assigned identifiers, so it
+    # hands over the same list the published log records — otherwise the refused
+    # log's content is missing the assignment and drop warnings the published
+    # one carries, and the two hashes for the same evidence disagree again one
+    # field over from B-7's (Codex review #2, second fix round).
+    hashed_warnings = (
+        list(content_warnings) if content_warnings is not None else warnings
+    )
 
     # Stamped from the SAME termination the outcome carries (round-2 F-1).
     # This construction site took the contract's COMPLETED default, so an
     # aborted run handed a consumer a machine result that contradicted the
     # wrapper around it, the log beside it and the run_status.json under it.
     result = walk_notes.termination.stamp(
-        RunResult(
+        result
+        if result is not None
+        else RunResult(
             config=config,
             documents=documents,
             unsupported=walked.unsupported,
@@ -551,7 +855,10 @@ def _abort(
     # offered these as alternatives; doing both means a consumer that only reads
     # `accounting.ok` — the property `PipelineOutcome.ok` used to be derived
     # from on its own — still cannot mistake this for a good run.
-    report_acc = accounting.check(result)
+    report_acc = (
+        accounting_report if accounting_report is not None
+        else accounting.check(result)
+    )
     report_acc.discrepancies.insert(
         0,
         accounting.Discrepancy(
@@ -573,24 +880,107 @@ def _abort(
         if p.disposition is Disposition.KEEP
     )
 
-    bundle = build_log(
-        config,
-        documents,
-        unsupported=walked.unsupported,
-        token_estimate=after,
-        warnings=list(walked.warnings),
-        stamp=stamp,
-        run_notes={
-            **termination.as_jsonable(),
-            "published": False,
-            "deliverables_note": (
-                "This run wrote NO deliverables. The files in the parent folder, "
-                "if any, belong to the last run that completed."
+    # Everything this run actually established goes into the quarantined log
+    # (Codex review #2 fix round, B-5). Before this, `_abort` accepted the
+    # assignment, the reconciliation, the manifest and the accounting report,
+    # returned all four on the in-memory outcome, and passed NONE of them here —
+    # so `incomplete_run/processing_log.json`, the durable record the handoff
+    # said preserves the diagnosis, serialized `doc_ids.assignments` as `[]` and
+    # `reconciliation` as `null` for a run that had assigned an identifier to
+    # every document, and carried no trace of the discrepancies that refused it.
+    #
+    # The split across the two sections is the determinism rule, not a
+    # preference: the assignment, the reconciliation, the drops, the profiles
+    # and the Bates section are facts about the INPUTS and belong in hashed
+    # `content`; the gate outcome, the manifest of the discarded staging set and
+    # the wall clock are facts about this INVOCATION and are handed to
+    # `build_log` as `run`-section arguments. A refused run and an unrefused run
+    # over the same corpus must still agree on `content_sha256`.
+    #
+    # B-7 (second fix round) added three arguments to this call, and all three
+    # are here for one property: the quarantined log's own `content_sha256` must
+    # equal the `run.output_manifest.log_content_sha256` it carries. That
+    # manifest was built over the STAGED log — the published-style one this run
+    # wrote into `.dociq/staging/` before Stage 6 refused it — so any field on
+    # which this rebuild disagrees with that one gives a single durable audit
+    # file two identities for its own hashed content. `reconciliation` went
+    # through `_log_reconciliation` (the projection the published path uses),
+    # `warnings` became the published list rather than the walk's subset, and
+    # `output_hashes` — the hashes of the set this run actually built — stopped
+    # being blanked to `{}`.
+    run_notes: dict[str, object] = {
+        **termination.as_jsonable(),
+        "published": False,
+        "deliverables_note": (
+            "This run wrote NO deliverables. The files in the parent folder, "
+            "if any, belong to the last run that completed."
+        ),
+        "load_dependent_extraction": list(walk_notes.load_dependent),
+        "invocation_notes": list(walk_notes.invocation),
+    }
+    def _build() -> LogBundle:
+        return build_log(
+            config,
+            documents,
+            unsupported=walked.unsupported,
+            assignment=assignment,
+            reconciliation=_log_reconciliation(
+                reconciliation, index_supplied=index_supplied),
+            renumbering=renumbering,
+            drops=drops,
+            profiles=opts.profiles,
+            bates_decision=bates_decision,
+            bates_ranges=bates_ranges,
+            token_estimate=after,
+            warnings=hashed_warnings,
+            stamp=stamp,
+            accounting_report=report_acc,
+            manifest=manifest,
+            timings_s=timings,
+            output_hashes=output_hashes,
+            run_notes=run_notes,
+        )
+
+    bundle = _build()
+    # The property above, ENFORCED rather than asserted in prose. The rebuild is
+    # a genuinely independent computation from the same inputs, so this compares
+    # two answers rather than an answer with itself; and where they disagree the
+    # STAGED content wins, because that is the one the embedded manifest hash was
+    # taken over and an audit file must not carry two hashes for one section.
+    #
+    # A disagreement is a defect, and it is DISCLOSED rather than raised: this
+    # code path is already handling a refused run, and turning a projection drift
+    # into a traceback would replace an operator's refusal report with a crash.
+    # It surfaces as a named `<run>` discrepancy and a run note listing the keys
+    # — and it is disclosed by REBUILDING, because `build_log` copies both the
+    # notes and the accounting report at call time, so a discrepancy appended
+    # afterwards would reach the in-memory outcome and never reach the file.
+    # That is the B-5 class, and it is not being reintroduced by its own fix.
+    if staged_bundle is not None and bundle.content != staged_bundle.content:
+        drifted = sorted(
+            k for k in set(bundle.content) | set(staged_bundle.content)
+            if bundle.content.get(k) != staged_bundle.content.get(k)
+        )
+        run_notes["log_content_projection_drift"] = drifted
+        report_acc.discrepancies.insert(
+            1,
+            accounting.Discrepancy(
+                "<run>",
+                "log-content-projection-drift",
+                "the quarantined log's hashed content was rebuilt from the same "
+                "inputs as the staged log and disagreed on: "
+                + ", ".join(drifted)
+                + ". The staged projection is recorded, because the manifest's "
+                "log_content_sha256 was taken over it — but the two projections "
+                "must agree and this run proves they do not.",
             ),
-            "load_dependent_extraction": list(walk_notes.load_dependent),
-            "invocation_notes": list(walk_notes.invocation),
-        },
-    )
+        )
+        rebuilt = _build()
+        bundle = LogBundle(
+            run=rebuilt.run,
+            content=staged_bundle.content,
+            content_sha256=staged_bundle.content_sha256,
+        )
     write_processing_log(bundle, quarantine)
 
     (quarantine.root / STATUS_FILENAME).write_text(
@@ -641,8 +1031,8 @@ def _abort(
         result=result,
         layout=layout,
         accounting=report_acc,
-        manifest=mf.Manifest(),
-        assignment=AssignmentResult(
+        manifest=manifest if manifest is not None else mf.Manifest(),
+        assignment=assignment if assignment is not None else AssignmentResult(
             documents=documents,
             regime=IdRegime.NATIVE,
             assignments=(),
@@ -652,14 +1042,16 @@ def _abort(
             warnings=(f"no identifier was issued: the run ended "
                       f"{termination.status.value}",),
         ),
-        reconciliation=ReconciliationReport(
-            matched=(),
-            folder_only=(),
-            index_only=(),
-            snapshot=None,
-            root_prefix=None,
-            warnings=(f"reconciliation was not run: the run ended "
-                      f"{termination.status.value}",),
+        reconciliation=(
+            reconciliation if reconciliation is not None else ReconciliationReport(
+                matched=(),
+                folder_only=(),
+                index_only=(),
+                snapshot=None,
+                root_prefix=None,
+                warnings=(f"reconciliation was not run: the run ended "
+                          f"{termination.status.value}",),
+            )
         ),
         log=bundle,
         walk_notes=walk_notes,
@@ -667,6 +1059,110 @@ def _abort(
         published=False,
         incomplete_dir=quarantine.root,
         timings_s=tuple(timings),
+    )
+
+
+def _refuse_publication(
+    *,
+    effective: RunConfig,
+    result: RunResult,
+    walk_notes: walker.RunNotes,
+    layout: OutputLayout,
+    stamp: OperatorStamp,
+    opts: PipelineOptions,
+    timings: list[tuple[str, float]],
+    assignment: AssignmentResult,
+    reconciliation: ReconciliationReport,
+    index_supplied: bool,
+    report_acc: accounting.AccountingReport,
+    manifest: mf.Manifest,
+    refusals: list[tuple[str, str]],
+    content_warnings: Sequence[str],
+    output_hashes: Mapping[str, str],
+    staged_bundle: LogBundle,
+    renumbering: Sequence[RenumberWarning] = (),
+    drops: Sequence[DropLogEntry] = (),
+    bates_decision: BatesDecision | None = None,
+    bates_ranges: dict[tuple[str, str, int], BatesRange] | None = None,
+) -> PipelineOutcome:
+    """Stage 6 went red: REFUSE to publish (Codex review #2, finding B-1).
+
+    Three things happen and their order is the guarantee, exactly as it is on
+    the success side:
+
+    1. **Staging is discarded.** It is a set that failed its own audit, and
+       leaving it under a matter folder is leaving a set that failed its audit
+       where a later hand could find it. Nothing in the destination is touched:
+       :func:`~dociq.emit.paths.publish_staging` is a direct call that this path
+       never makes, so the previous run's deliverables stay byte-for-byte as
+       they were. **This is the constraint that kept staging alive through
+       D-32** — the gate audits the staged set, so a red gate costs the operator
+       a run and never an evidence set.
+    2. **The refusal becomes the terminal status**, so every consumer that
+       already knows how to read one — the log's ``run`` section, the GUI's
+       failure state, ``run_status.json``, the summary banner — sees it without
+       learning a new vocabulary.
+    3. **The record is written under** ``incomplete_run/``, through the same
+       :func:`_abort` that every other unpublished run goes through.
+
+    **On the status value.** Recorded as ``REFUSED`` (amendment **A-15**,
+    applied by the seam owner 2026-08-04). This shipped briefly as ``BLOCKED``,
+    which was honest but wrong in one direction that matters: a blocked run
+    never established a corpus, and a refused run established one and assigned
+    an identifier to every document before failing its own gate. Reporting "the
+    run never established a corpus it could publish" about a run that issued a
+    Doc ID per document says something false about the folder.
+
+    The alternative considered and rejected was leaving the termination
+    ``COMPLETED`` and carrying the refusal only in ``published=False`` — which
+    would have printed "Run status: completed — the walk covered every file
+    found." at the top of a refused run's ``run_status.json``.
+    """
+    emit_paths.discard_staging(layout)
+
+    detail = "; ".join(why for _, why in refusals)
+    walk_notes.termination = RunTermination(
+        TerminalStatus.REFUSED,
+        f"§4 Stage 6 REFUSED to publish this run: {detail}. The set this run "
+        f"built was discarded and the deliverables already in this folder were "
+        f"not touched.",
+    )
+    walk_notes.invocation.append(
+        "PUBLICATION REFUSED at §4 Stage 6 — the run completed its walk and "
+        "built a full set, and that set failed the Stage-6 gates: "
+        + ", ".join(kind for kind, _ in refusals)
+    )
+    # Each failing gate is its own `<run>` discrepancy, so a reader of the
+    # accounting report alone learns which gate refused rather than only that
+    # something did. `_abort` inserts the terminal-status line above these.
+    for kind, why in reversed(refusals):
+        report_acc.discrepancies.insert(
+            0, accounting.Discrepancy("<run>", f"refused-{kind}", why))
+
+    return _abort(
+        config=effective,
+        walked=result,
+        walk_notes=walk_notes,
+        layout=layout,
+        stamp=stamp,
+        opts=opts,
+        timings=timings,
+        result=result,
+        assignment=assignment,
+        reconciliation=reconciliation,
+        index_supplied=index_supplied,
+        manifest=manifest,
+        accounting_report=report_acc,
+        renumbering=renumbering,
+        drops=drops,
+        bates_decision=bates_decision,
+        bates_ranges=bates_ranges,
+        # The three that make the quarantined log's own hash agree with the
+        # manifest hash it carries, and the staged bundle they are checked
+        # against (B-7). See the note at the `build_log` call in `_abort`.
+        content_warnings=content_warnings,
+        output_hashes=output_hashes,
+        staged_bundle=staged_bundle,
     )
 
 
@@ -679,6 +1175,24 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
 
     def mark(stage: str, t0: float) -> None:
         timings.append((stage, round(time.monotonic() - t0, 3)))
+
+    def stage(number: int, detail: str = "") -> None:
+        if opts.on_stage is not None:
+            opts.on_stage(StageProgress(number, dict(STAGES)[number], detail))
+
+    # What an EARLIER run left under `.dociq/`, measured before this run touches
+    # the folder — which is the only moment it can be measured, because the next
+    # two statements create this run's own staging tree.
+    #
+    # A surviving `.dociq/staging/` is the on-disk signature of D-32's accepted
+    # window: a run that died or was cancelled between building its set and
+    # publishing it. It is disclosed in the log rather than silently discarded,
+    # because the run that left it wrote no record of itself.
+    #
+    # There is no roll-forward, no marker to read, and no folder state that can
+    # block a run. D-32 removed all three; see `emit.paths` for what that costs.
+    residue_before = emit_paths.state_residue(layout)
+    emit_paths.discard_staging(layout)
 
     index = opts.master_index
     if index is None and opts.master_index_path:
@@ -767,12 +1281,14 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # ---- Stages 1-2 --------------------------------------------------------
     t = time.monotonic()
     walk_notes = walker.RunNotes()
+    stage(1)
     walked = walker.run(walk_config, opts.walk, walk_notes)
+    stage(2, f"{len(walked.documents)} document(s) read")
     mark("walk_extract", t)
 
     # Codex B-1. A blocked or cancelled walk stops HERE, before Stage 3 and
-    # therefore long before Stage 5's purge. Every later stage — assignment,
-    # the purge, emission, accounting, the manifest — is unreachable for a run
+    # therefore long before Stage 5. Every later stage — assignment,
+    # emission, accounting, the manifest, publication — is unreachable for a run
     # that did not complete, so none of them needs to know about the case, and
     # none of them can be the place a future edit reintroduces it.
     if not walk_notes.termination.publishable:
@@ -793,9 +1309,75 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     documents: tuple[DocumentRecord, ...] = walked.documents
 
     # ---- Stage 3 -----------------------------------------------------------
+    stage(3)
     t = time.monotonic()
-    decision = _bates_decision(documents, opts, config, stamp, warnings)
-    documents = apply_bates(documents, decision)
+    # D-28's census, computed AT MOST ONCE per run and shared by the two places
+    # that need it — the confirmation prompt and the repair gate. It is a full
+    # candidate sweep of the corpus; two of them on an 18,000-page record is a
+    # measurable cost paid for nothing, and two INDEPENDENT ones would be two
+    # answers to "is this matter multi-series?" that could disagree.
+    _census: list[tuple[str, ...]] = []
+
+    def census() -> tuple[str, ...]:
+        if not _census:
+            _census.append(matter_prefixes(documents))
+        return _census[0]
+
+    try:
+        decision = _bates_decision(documents, opts, config, stamp, warnings,
+                                   census)
+    except RunAborted as aborted:
+        # The ONE place the pipeline blocks on a human, and therefore the one
+        # place a cancellation cannot be a poll. It takes the ordinary abort
+        # path — nothing published, the previous run's deliverables untouched,
+        # incomplete_run/ written — rather than a new one: a run abandoned at
+        # Stage 3 is not a different kind of aborted run from one abandoned at
+        # Stage 1, and a second publication rule is a second chance to get
+        # publication wrong (Codex B-1).
+        walk_notes.termination = RunTermination(
+            TerminalStatus.CANCELLED,
+            f"the run was stopped at §4 Stage 3, while the Bates format was "
+            f"waiting to be confirmed: {aborted.reason}",
+        )
+        walk_notes.invocation.append(
+            "CANCELLED at the Bates confirmation: the format was detected and "
+            "no ruling was made on it."
+        )
+        return _abort(
+            config=walk_config,
+            walked=walked,
+            walk_notes=walk_notes,
+            layout=layout,
+            stamp=stamp,
+            opts=opts,
+            timings=timings,
+        )
+    applied = apply_bates_reported(
+        documents, decision,
+        # The census the prompt was answered against, when there was a prompt.
+        # `apply_bates_reported` computes its own when handed None, and that is
+        # still the right default — but a run that already asked the operator
+        # must gate the repair on the SAME census it showed them.
+        matter_prefix_census=_census[0] if _census else None)
+    documents = applied.documents
+    # D-28's repair is disclosed, never silent. §4 requires misses to be
+    # flagged and never quietly corrected; prefix repair is a narrow ruled
+    # exception to that, so the run says how many locators it repaired and the
+    # refusal — when the matter carries more than one prefix — is a warning in
+    # its own right rather than an absence an operator has to notice.
+    if applied.normalized:
+        rules = Counter(n.rule for n in applied.normalized)
+        warnings.append(
+            f"{len(applied.normalized)} Bates locator(s) were REPAIRED under "
+            f"D-28: the page's own reading differed from the confirmed format "
+            f"in the prefix alone, by "
+            + "; ".join(f"{r} ({n})" for r, n in sorted(rules.items()))
+            + f". Examples: "
+            + ", ".join(f"{n.read} -> {n.applied}"
+                        for n in applied.normalized[:3])
+        )
+    elif applied.refused_reason and len(applied.matter_prefixes) > 1:
+        warnings.append(applied.refused_reason)
     ranges = document_ranges(documents)
     mark("bates", t)
 
@@ -848,6 +1430,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     mark("assign_reconcile", t)
 
     # ---- Stage 4 -----------------------------------------------------------
+    stage(4)
     t = time.monotonic()
     applied = apply_profiles(documents, opts.profiles)
     documents = applied.documents
@@ -944,35 +1527,59 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     )
 
     # ---- Stage 5 -----------------------------------------------------------
+    #
+    # EVERYTHING below is written into `stage_out`, a staging directory inside
+    # the matter folder, and moved into place in one go at the end (Sprint-1
+    # merge readiness, NOT PROVEN item 8). The previous shape — purge the
+    # destination, then emit into it — meant that a crash anywhere in emit left
+    # a folder holding some of the old run's deliverables and some of the new
+    # one's, under Doc IDs that need not agree, with nothing on disk saying so.
+    #
+    # The staging path is NOT part of any hashed artifact and must never become
+    # one. `_hashes_of` keys on paths relative to the layout root, `sources.json`
+    # stores paths relative to the layout root, and the recorded configuration
+    # keeps `output_root` pointing at the DESTINATION — a run staged at a
+    # different path is not a different run. This is the same class of mistake as
+    # the output root inside the log's hashed content in Sprint 1, and
+    # `tests/test_emit_atomicity.py` proves byte-identity across two
+    # destinations, which is the only check that would catch it.
+    stage(5)
     t = time.monotonic()
-    stale = _purge_stale_deliverables(layout, walk_notes.termination)
+    stale = _stale_deliverables(layout, walk_notes.termination)
+    stage_out = emit_paths.staging_layout(layout)
     written: list[Path] = []
     # Clean text is for EXTRACTED documents only. An unsupported file has no
     # text to write and must not appear in ``sources.json``, which is the map
     # Expert Assist reads to find a document's content — a Doc ID pointing at a
     # file that was never read would be worse than its absence. It appears in
     # the index instead, which is the inventory (B-7).
-    text_result = write_clean_text(documents, layout)
-    written.extend(layout.root / rel for _, rel in text_result.sources)
-    written.append(write_sources_json(text_result, layout))
+    text_result = write_clean_text(documents, stage_out)
+    written.extend(stage_out.root / rel for _, rel in text_result.sources)
+    written.append(write_sources_json(text_result, stage_out))
     rows = build_index_rows(documents + unsupported, bates_ranges=ranges)
-    written.append(write_index_csv(rows, layout))
+    written.append(write_index_csv(rows, stage_out))
     if index is not None:
-        written.append(write_reconciliation_csv(report, layout))
+        written.append(write_reconciliation_csv(report, stage_out))
     for profile in opts.profiles:
-        written.append(write_matter_copy(profile, layout.root))
+        written.append(write_matter_copy(profile, stage_out.root))
 
-    # The ledger is read above, before this line overwrites it: comparing a run
-    # against the ledger it just wrote would report that nothing was renumbered,
-    # every time, forever.
-    written.append(ledger.write(layout.issued_ids))
+    # The ledger is read above, from the DESTINATION, before this line writes the
+    # new one into staging: comparing a run against the ledger it just wrote
+    # would report that nothing was renumbered, every time, forever.
+    written.append(ledger.write(stage_out.issued_ids))
 
+    # Captured in a name because the REFUSAL path needs the same value: a run
+    # refused at Stage 6 built this same set and its quarantined log has to
+    # record the same `content.output_hashes`, or its own `content_sha256`
+    # disagrees with the `log_content_sha256` the manifest took over this very
+    # log (B-7).
+    staged_hashes = _hashes_of(written, stage_out)
     bundle = build_log(
         effective,
         documents,
         unsupported=unsupported,
         assignment=assignment,
-        reconciliation=report if index is not None else None,
+        reconciliation=_log_reconciliation(report, index_supplied=index is not None),
         renumbering=renumbering,
         drops=applied.drops,
         profiles=opts.profiles,
@@ -981,7 +1588,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         token_estimate=after,
         warnings=warnings,
         stamp=stamp,
-        output_hashes=_hashes_of(written, layout),
+        output_hashes=staged_hashes,
         run_notes={
             # The terminal status is recorded on EVERY run, not only on the
             # ones that end badly (Codex B-1). A consumer must be able to ask
@@ -1004,17 +1611,43 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 "ocr_page_workers": ex._OCR_PAGE_WORKERS,
                 "disk_headroom_x100": round(walker._DISK_HEADROOM * 100),
             },
-            "stale_outputs_removed": list(stale),
+            "stale_outputs_replaced": list(stale),
+            # WHAT PUBLICATION KNEW, and what it could not know (D-32). The plan
+            # above is this build's own output patterns and nothing else — the
+            # durable inventory of what the last run actually published went out
+            # with the publication protocol. So a deliverable an older DocIQ
+            # wrote at a name this build no longer writes is still in this
+            # folder, and no field can name it. Recorded as a standing statement
+            # about the design rather than as a per-run finding, because it is
+            # true of every run of this build. `run`, not `content`: a fact
+            # about this folder's history, not about the evidence.
+            "stale_outputs_plan_source": (
+                "this build's output patterns only; a deliverable an older "
+                "build wrote under a name this build does not write remains in "
+                "this folder and is not detected (D-32, reopening B-8)"
+            ),
+            # What an EARLIER run left under `.dociq/`, measured at the top of
+            # this run and discarded immediately afterwards. A `staging` tree
+            # here means a previous run died or was cancelled between building
+            # its set and publishing it — which under D-32 may also mean that
+            # run left this folder holding part of two runs' evidence. Nothing
+            # detects that; this is the only trace of it.
+            #
+            # This run's OWN residue cannot appear here: the log is written into
+            # staging and sealed before publication. The operator sees it on
+            # screen through `PipelineOutcome.superseded_residue`, and the next
+            # run records it here.
+            "state_residue_before_run": list(residue_before),
             "load_dependent_extraction": list(walk_notes.load_dependent),
             "invocation_notes": list(walk_notes.invocation),
         },
     )
-    write_processing_log(bundle, layout)
+    write_processing_log(bundle, stage_out)
 
     if opts.write_workbook:
         write_index_xlsx(
             rows,
-            layout,
+            stage_out,
             report if index is not None else None,
             matter_name=opts.matter_name,
         )
@@ -1037,26 +1670,160 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 warnings=tuple(all_warnings),
                 termination=walk_notes.termination,
             ),
-            layout,
+            stage_out,
         )
     if opts.write_package:
         build_upload_package(
-            layout,
+            stage_out,
             matter_name=opts.matter_name,
             document_count=len(documents),
             page_count=result.pages_in,
             estimate=after,
             has_bates=any(r.pages_with_bates for r in ranges.values()),
             id_regime=effective.id_regime.value,
+            # The run's own package is the whole extracted record, so it takes
+            # the whole-record scope statement (D-20). It is stated rather than
+            # left implicit precisely because a package with no scope line is
+            # indistinguishable from a subset once it has been uploaded — and
+            # the §5 listed-only files are named, because they are the one thing
+            # a "complete production" claim would silently be wrong about.
+            doc_ids=None,
+            unsupported=len(unsupported),
         )
     mark("emit", t)
 
     # ---- Stage 6 (the gates) ----------------------------------------------
+    #
+    # Run against STAGING, before anything reaches the matter folder. The
+    # manifest is a hash of the set this run produced, so building it over the
+    # destination would have it hash whatever a previous run left behind that
+    # this one does not replace — and running the gates before publication means a
+    # set that fails them never displaces a set that passed.
+    stage(6)
     t = time.monotonic()
     report_acc = accounting.check(result)
-    man = mf.build(layout.root, config=effective)
-    mf.write(layout.root, man)
+    man = mf.build(stage_out.root, config=effective)
+    mf.write(stage_out.root, man)
+    # The disagreements, not the boolean. A refusal that cannot name the
+    # documents it refused over is the class D-30 came out of.
+    disorder = corpus_sort_disagreements(result)
     mark("verify", t)
+
+    # ---- The gate ----------------------------------------------------------
+    #
+    # Codex review #2, finding B-1. Everything above COMPUTED these checks; only
+    # this decides anything with them. Until it existed, Stage 6 detected a
+    # page-accounting discrepancy or an unclassified artifact and then marked
+    # published it regardless, so a red set replaced the last good deliverables
+    # and `PipelineOutcome.ok` reported the fact afterwards to an in-memory
+    # caller who need never look. Observation is not a gate. The heading said
+    # "the gates" and the relay said the set was "gated there, marked, then
+    # swapped"; that claim was false and is withdrawn with the behavior it
+    # described.
+    #
+    # **This gate is why staging survived D-32.** The descope removed the
+    # publication protocol and kept the staging directory, because B-1's fix
+    # lives here: the audit runs over the staged set, so a failure costs a run
+    # rather than an evidence set.
+    #
+    # `corpus_sort_check` joins them here rather than staying the module-level
+    # function nothing called. It was written as a Stage-6 check, was reachable
+    # from no code path in the product, and is exactly the same defect one step
+    # further along: a check that never runs cannot fail differently from a
+    # check whose result is ignored.
+    refusals: list[tuple[str, str]] = []
+    if not report_acc.ok:
+        refusals.append((
+            "accounting",
+            f"§4 Stage 6's page accounting reports "
+            f"{len(report_acc.discrepancies)} discrepancy(ies); the first is "
+            f"{report_acc.discrepancies[0]}",
+        ))
+    if man.unclassified:
+        refusals.append((
+            "unclassified-output",
+            f"the byte-identical claim does not classify "
+            f"{len(man.unclassified)} output(s): "
+            f"{', '.join(sorted(man.unclassified)[:5])}",
+        ))
+    if man.log_content_sha256 is None:
+        # The class-B sibling, found by enumerating the other places that
+        # substitute a permissive default for state they could not read.
+        # `manifest._log_content_hash` returns None when `processing_log.json`
+        # is missing or unparseable, and `corpus_sha256` folds it in as
+        # `self.log_content_sha256 or ""` — so an unreadable log produced a
+        # manifest that silently omitted one of the claim's two halves and a
+        # corpus hash that could not be told apart from a run whose log hashed
+        # to nothing. Stage 5 always writes that file into this very staging
+        # directory, so there is no legitimate None here. Measured: without this
+        # gate the run publishes AND reports ok=True, because
+        # `PipelineOutcome.ok` does not look at the field either.
+        refusals.append((
+            "log-content-hash",
+            f"{mf.LOG_NAME}'s '{mf.LOG_CONTENT_KEY}' section could not be "
+            f"hashed, so the byte-identical claim would be published missing "
+            f"half of what it claims",
+        ))
+    if disorder:
+        refusals.append((
+            "corpus-order",
+            "the corpus is not in canonical order, so the run's identity and "
+            "its Doc ID assignment do not agree on the sequence of documents: "
+            + "; ".join(disorder),
+        ))
+    if refusals:
+        return _refuse_publication(
+            effective=effective,
+            result=result,
+            walk_notes=walk_notes,
+            layout=layout,
+            stamp=stamp,
+            opts=opts,
+            timings=timings,
+            assignment=assignment,
+            reconciliation=report,
+            index_supplied=index is not None,
+            report_acc=report_acc,
+            manifest=man,
+            refusals=refusals,
+            # The three that keep the quarantined log's hashed `content` equal
+            # to the STAGED log's — the one `man.log_content_sha256` was taken
+            # over — so the refused record does not give two identities for its
+            # own content (B-7).
+            content_warnings=warnings,
+            output_hashes=staged_hashes,
+            staged_bundle=bundle,
+            # Everything else Stage 6 had in hand. A refused run walked the
+            # whole corpus: it has the renumbering comparison, the drop log, the
+            # Bates decision and its per-document ranges, and leaving them at
+            # this call site would put them in the same class as the assignment
+            # and the reconciliation B-5 found — established by the run, present
+            # in memory, absent from the record that outlives it.
+            renumbering=renumbering,
+            drops=applied.drops,
+            bates_decision=decision,
+            bates_ranges=ranges,
+        )
+
+    # ---- Publication -------------------------------------------------------
+    #
+    # ONE statement, reached only by a set that PASSED the gate above.
+    #
+    # `publish_staging` removes the deliverables named in `stale` and then moves
+    # the staged set into place. A crash before this line leaves the matter
+    # folder exactly as the last complete run left it. A crash INSIDE it leaves
+    # the folder holding part of the previous run's evidence and part of this
+    # one's, permanently and undetected — that is D-32's accepted window, and it
+    # is stated at full width on `emit.paths.publish_staging` rather than here,
+    # so that the one place it is described is the place a reader changing the
+    # code will be standing.
+    #
+    # `PublicationFailed` is NOT caught. Its message says what state the folder
+    # is in and where the complete staged set still is; converting it into a
+    # refused run would file a mixed matter folder under a status that means
+    # "nothing was touched".
+    publication = emit_paths.publish_staging(layout, stale)
+    residue = publication.residue
 
     return PipelineOutcome(
         result=result,
@@ -1069,6 +1836,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         walk_notes=walk_notes,
         renumbering=renumbering,
         stale_removed=stale,
+        superseded_residue=residue,
         bates_ranges=ranges,
         timings_s=tuple(timings),
         termination=walk_notes.termination,
@@ -1083,6 +1851,15 @@ def _bates_note(
     stamped = sum(r.pages_with_bates for r in ranges.values())
     if decision is None:
         return "No Bates stamps detected — absence is normal (§4 Stage 3)."
+    if decision.status is DecisionStatus.REJECTED:
+        # NOT the same sentence as PENDING. "Not yet confirmed" and "the
+        # operator declined it" are different facts about the record, and the
+        # summary an expert forwards must not blur them into one.
+        label = decision.format.label if decision.format else "the format"
+        return (
+            f"A Bates format ({label}) was detected and DECLINED by the "
+            "operator (§4 Stage 3); no locators were written."
+        )
     if not decision.applies:
         return (
             "A Bates format was detected but not applied: the operator has not "
@@ -1102,8 +1879,48 @@ def ocr_page_count(result: RunResult) -> int:
     )
 
 
+def corpus_sort_disagreements(result: RunResult) -> tuple[str, ...]:
+    """WHERE the corpus departs from canonical order — not merely that it does.
+
+    Found by enumerating the class D-30 came out of: a probe that reports a
+    tally, a boolean or a status and discards the evidence behind it. This one
+    returned a bare ``bool``, and it gates PUBLICATION — so a run could be
+    refused with "the corpus is not in canonical order" over nine thousand
+    documents and nothing on disk saying which two were the wrong way round.
+    "Accounting failed is unactionable at 9,000 documents" is the reasoning
+    :mod:`dociq.verify.accounting` was built on; this check was the same shape
+    and had not had it applied.
+
+    Each entry names the position, the Doc ID found there, and the Doc ID
+    canonical order puts there. Capped at the first ten with the total stated,
+    because a fully reversed corpus would otherwise produce a discrepancy per
+    document — and the cap is disclosed in the text rather than being a silent
+    truncation.
+    """
+    ordered = sorted(result.documents, key=document_sort_key)
+    out: list[str] = []
+    total = 0
+    for i, (found, want) in enumerate(zip(result.documents, ordered)):
+        if found is want:
+            continue
+        total += 1
+        if len(out) < 10:
+            out.append(
+                f"position {i}: {found.doc_id or found.rel_path!r} is here, "
+                f"canonical order puts {want.doc_id or want.rel_path!r}")
+    if total > len(out):
+        out.append(f"... and {total - len(out)} further position(s) "
+                   f"({total} in all)")
+    return tuple(out)
+
+
 def corpus_sort_check(result: RunResult) -> bool:
     """Documents are in canonical order. Cheap, and it catches an emitter that
-    sorted its own way."""
-    ordered = sorted(result.documents, key=document_sort_key)
-    return list(result.documents) == ordered
+    sorted its own way.
+
+    Kept as the boolean the gate reads; :func:`corpus_sort_disagreements` is
+    the evidence the refusal quotes. Derived from that function rather than
+    reimplementing the comparison, so the two cannot disagree about whether the
+    corpus is ordered.
+    """
+    return not corpus_sort_disagreements(result)

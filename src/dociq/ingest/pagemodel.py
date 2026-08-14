@@ -68,6 +68,16 @@ def ocr_stats(confidences: list[float], threshold: float) -> tuple[float, int, i
     return mean, n, low
 
 
+M_OCR_BLANK = "ocr: no text recovered"
+"""Per-page disclosure: this page was routed to OCR and recovered nothing.
+
+Named rather than inlined because it is now load-bearing beyond disclosure —
+:func:`dociq.ingest.extract.ocr_yield` counts it as an OCR ATTEMPT, and a run in
+which every attempt carries it is what a dead engine looks like. A literal
+repeated in two modules is a literal that eventually differs in one of them.
+"""
+
+
 def make_page(
     page_no: int,
     text: str,
@@ -93,7 +103,7 @@ def make_page(
         conf, n_lines, n_low = ocr_stats(confidences or [], conf_threshold)
         if not clean:
             # Routed to OCR, recovered nothing. Disclosure, never silence.
-            extra = ("ocr: no text recovered",)
+            extra = (M_OCR_BLANK,)
             record_kind, record_conf = PageKind.EMPTY, None
         else:
             record_kind, record_conf = PageKind.OCR, conf

@@ -38,6 +38,486 @@ Consequence for the product's positioning, flagged: §7 and D-03 make the token 
 
 | D-19 | Tesseract / the D-01 bake-off | **Written off — rapidocr is the engine, full stop (Alex, 2026-07-31).** D-01's conditional swap and acceptance criterion 9's comparison are both **cancelled, not deferred**: there is no pending Tesseract evaluation, and no future sprint owes one. Tesseract was never installed (installing it needed authorization that was not given, and the build correctly refused to install it unilaterally), so the Sprint-1 bake-off is a **rapidocr characterization** rather than a comparison — and that is now its final form. Measured on 20 real scanned MPR pages from D-12's corpus: mean page confidence **0.8628**, 3 of 17 pages below the 85% review threshold, 37% of *lines* below it, **5.74 s/page**; 3 zero-character pages verified genuinely blank (uniform white, no embedded images) rather than misses. `docs/bakeoff/ocr_bakeoff_2026-07-30.md` stands as the methodology artifact D-01 asked for, retitled to what it is. **Consequence to state plainly rather than bury: §3 and §10's amended wording already name rapidocr, so nothing in the build changes — but the tool now ships an OCR engine chosen on in-house familiarity and ONNX bundling convenience, never benchmarked against an alternative on this corpus. If OCR quality is ever challenged, that is the honest answer, and "Tesseract is the industry-recognizable name for law-firm IT review" (the original argument for the bake-off) remains unaddressed.** | 2026-07-31 |
 
+## MEASURED: the "~20 minutes per suite" claim was wrong by 4x, and it was our own doing (2026-08-14)
+
+Timed on a verified-quiet machine, one full suite each:
+
+| tree | full suite |
+|---|---|
+| pre-descope `2728c96` | **4m40s** |
+| post-descope (merged) | **4m22s** |
+
+**Two relays told Codex a single full pass exceeds ten minutes and that its
+six-minute cap therefore could not see one finish. Both statements are false.**
+At 4m40s the cap was adequate. What actually happened is that our own parallel
+agents were saturating the machine underneath Codex's review — up to twelve
+concurrent pytest processes at times — so the runs Codex could not complete, and
+several we characterized as flaky, were starved by our fan-out rather than slow
+by nature.
+
+The test deletion explains **18 seconds of the gap**, not the four-fold
+difference. This was contention, start to finish.
+
+**Consequences worth carrying beyond this sprint:**
+
+1. **Timing claims made while agents are running are worthless**, and we made
+   several. Any figure quoted to a reviewer must come from a machine verified
+   quiet, and must say so.
+2. **We blamed the reviewer's tooling for our own load.** Codex was right not to
+   count its capped run as green, and right again not to accept our explanation
+   for why it capped.
+3. **The offline-probe "flake" chased across three rounds was of this family** —
+   an implementing agent proved it by building a six-way concurrent probe, which
+   then passed 6/6, leaving the original two failures **unreproduced and
+   unattributed** rather than closed. That is recorded honestly in §9.4 of
+   `docs/verification/d32_descope_2026-08-06.md` and remains open.
+
+## MERGE GATE PASSED — Codex review #2, 2026-08-14 at `57c7cc0`
+
+**PASSED, no new findings.** D-10 designated this review the merge gate for the
+whole programme. It ran **four verdict rounds plus two internal adversarial
+reviews**, and every A/B finding is closed except one, which is open by ruling.
+
+| round | findings | outcome |
+|---|---|---|
+| 1 | 2A / 3B / 1D | all closed |
+| 2 | 2A / 2B / 1D | all closed |
+| 3 | 1A / 2B | B-7 closed; A-5, B-6 moot under D-31 |
+| 4 | 1A / 2B (A-8, B-9, D-3) | all closed |
+| internal | F-1..F-6, F-A..F-I | closed, or moot under D-32 |
+
+**Codex's own closing words on the last three:** A-8 closed — *"the planner now
+emits file paths only… I withdraw my stronger interpretation; that was not the
+original TOCTOU property."* B-9 closed — *"safe guidance is pinned three
+independent ways."* D-3 closed.
+
+**Independent verification at the passing tip:** full suite **1,392 passed, 1
+skipped in 4m53s**; focused A-8/B-9 tests passed; amendment registry green;
+`git diff --check` green; worktree clean.
+
+### What passes with the merge, stated as it is
+
+- **B-8 is OPEN and owner-accepted.** Not mitigated, not closed. A deliverable
+  an older build wrote under a retired name stays in the matter folder
+  permanently. Codex: *"I would not hold the merge solely to restore the removed
+  inventory."* It is a live risk carried by D-32's ruling, not a solved problem.
+- **Criterion 4 NOT MET** (D-29). 92.130% is a projection; the last measured
+  full-corpus figure is **91.512%**. Never quote the projection flat.
+- **The offline-probe failures remain unreproduced and unattributed.** Codex's
+  run passing them does not close them and neither side treats it as closing
+  them.
+- **The publication window is WIDER than the design it replaced**, permanently
+  so, and no claim is made that the new design is correct — only that it is
+  small enough to enumerate.
+- Never observed on a real matter: an interrupted publication. Never performed:
+  a mouse-driven GUI pass, and an upload actually accepted by a Claude Project.
+
+**Merging `build/sprint-2` to `main` requires Alex's explicit authorization.
+The gate passing does not confer it and it is never inferred.**
+
+## D-32 EXECUTED — the swap is descoped (Alex, 2026-08-06)
+
+**The sixth generation arrived, and the rule fired.** A second adversarial
+review of the widened dispatch returned **nine findings (F-A .. F-I)**, one
+MEDIUM-HIGH data-loss: `classify_swap` computes `landed` at `PHASE_PUBLISHED`
+and never reads it, so a completed swap whose root deliverables are then removed
+externally classifies as FINISH, records a set that is not there, and **deletes
+the only complete set on disk**. The old build had an analogous refusal; it was
+dropped without a replacement. And **F-C is F-3 left undone for its sibling** —
+the argument for removing the directory collapse was made at length while
+`_STALE_PATTERNS` still named `upload_package` as a bare directory, so the same
+mechanism deletes an analyst's file saved there mid-run.
+
+Alex ruled: **execute D-32 as written.**
+
+**Counted honestly.** The implementing agent flagged, unprompted and against its
+own interest, that F-7 was self-found *inside* the fix round rather than by a new
+review, and asked that the count not be settled quietly in its favour. It is not
+counted. The sixth generation is F-A..F-I, found by an independent review of the
+code that fixed the fifth.
+
+**Scope of the descope, decided at execution and open to correction:** what is
+removed is the **multi-phase set-aside / rollback state machine** — `classify_swap`,
+the `pending → aside → publishing → published` marker protocol, the durable
+`published_set.json` inventory, and the roll-back and roll-forward paths. What is
+**kept**, because each passed review on its own terms and none is part of the
+unsettled machinery:
+
+- **B-1's publication gate.** A red Stage 6 must still refuse to publish. That
+  finding was accepted and its fix is not what failed to converge.
+- **The package's assemble-in-`incoming` order** and A-6's recover-before-cleanup,
+  which the sixth review checked and found sound.
+- **A-16 / A-17's residue disclosure**, to whatever extent residue remains
+  possible under the simpler design.
+
+**What this costs, stated rather than discovered later.** Sprint-1's window is
+**wider**: a crash between removing the previous deliverables and writing the new
+ones leaves a partly-replaced matter folder. That is a bigger hole than any of
+the nine findings above. It is accepted because it is **one** hole, it is
+describable in a sentence, and six reviews have now shown the alternative hides
+holes rather than closing them. The release note and the Codex relay must say
+this in those words — a simpler design with a larger known risk, chosen over a
+complex one with a smaller unknown one.
+
+### DONE, on `build/s2-descope` (2026-08-06)
+
+**The rule, in one sentence:** *publication deletes the previous run's
+deliverables from the matter folder and then moves each staged file onto its
+final name, in that order, once — with no marker, no set-aside copy, no
+inventory, and no recovery.*
+
+**The window, stated where the ruling asked for it:** a process that dies between
+the first removal and the last move leaves the matter folder holding part of two
+runs' evidence, **permanently** — nothing on disk records that a publication was
+in progress, and no later run detects or repairs it. On the measured corpus that
+window is thousands of file operations wide, so **seconds, not milliseconds**.
+~~The complete new set survives under `.dociq/staging/`~~ **FALSE — withdrawn
+2026-08-14, Codex finding D-3.** A file already moved is no longer in staging,
+so once publication has begun the new set survives **split between the matter
+root and `.dociq/staging/`**, and staging alone cannot reconstruct the run. The
+claim is true only on the REMOVAL path, before any file has moved. The crash
+tests assert staging *exists*; they never asserted it was complete, so the
+tests were right and the sentence describing them was not. What is true: the
+remainder survives under `.dociq/staging/` and the next run discloses
+having found it (`run.state_residue_before_run`), which is the only trace.
+
+`emit/paths.py` went **1,827 → 568 lines**. Kept, each on its own terms: B-1's
+publication gate (and therefore the staging directory it audits), the package's
+own publish order (A-6/A-7), residue disclosure (A-16) in the narrower form
+residue now takes, and criterion 7.
+
+**Two things the scope note did not anticipate, decided at execution and open to
+correction.** First, **B-8's fix is withdrawn with the inventory that carried
+it** — the set-aside plan is again this build's own output patterns only, so a
+deliverable an older build wrote under a retired name stays in the folder
+permanently. It is disclosed in every run log and pinned by a test that asserts
+the file *survives*. Second, **A-16's seam field keeps a name that no longer
+describes its contents** (`RunOutcome.superseded_residue`); renaming a wired seam
+field is a contract amendment this descope had no authority to make, so the
+mismatch is explained at both ends and flagged rather than fixed. **No amendment
+was orphaned and no registry entry was deleted.**
+
+Full record, including everything nothing supports:
+`docs/verification/d32_descope_2026-08-06.md`.
+
+## D-32 — the swap gets ONE more generation, then it is descoped (Alex, 2026-08-06)
+
+**The cap.** The output swap has now produced five consecutive generations of
+defects: Codex rounds 1 (B-1, B-2), 2 (B-4, B-5), 3 (A-5, B-6), 4 (B-8, A-6,
+A-7), and our own pre-handoff review of round 4's fix (F-1..F-6, two of them
+HIGH data-loss). Alex ruled at round four to keep fixing; this ruling adds the
+bound he declined then, on evidence that had not existed yet.
+
+**Fix F-1 through F-6. If a SIXTH generation appears in this subsystem, stop
+fixing.** Descope the swap to Sprint-1's write-in-place behaviour, document
+every known failure mode in the register and the release note, and merge the
+rest of Sprint 2 on Alex's authorization. That is a trade of a **larger,
+better-hidden** risk for a **smaller, well-understood** one: Sprint-1's window
+is wider — a crash mid-emit leaves a mixed folder — and it is simple enough to
+reason about completely, which four rounds have shown the current design is not.
+
+**Why the bound is drawn here rather than at "when it is correct".** The
+adversarial reviewer's diagnosis is the reason: *every row the state table
+enumerates is sound.* The defects land in rows the table's axes cannot express
+— `staging` is binary (holds files / empty), and the aside-tree axis does not
+distinguish residue from a completed swap from **this** marker's partially
+completed step 1. So each round enumerates, fixes what the enumeration can see,
+and the next round finds what it could not represent. A process that cannot
+represent its own remaining failure modes does not converge by being run again,
+and "one more round" has been the answer four times.
+
+**What this ruling does NOT say.** It does not say the current design is wrong,
+and it does not authorize descoping now. Every failure found so far requires a
+Windows lock or a process death at a precise instant, and none has been observed
+in a real run. The fixes in flight are close and their shapes are known. This
+sets the stopping rule *before* the next round rather than after it, which is
+the whole point.
+
+**One fact that belongs beside this ruling:** `commit_staging`'s central
+guarantee — the whole previous set leaves the matter root before any new file
+enters — is **conditional on `published_set.json` existing**, and that file does
+not exist on the first run of this build against any pre-existing matter folder.
+That is every folder at rollout. It is disclosed in `run.published_set_inventory`
+and must be stated plainly in the relay and the release note rather than left in
+a field nobody reads.
+
+## Sprint-2 kickoff rulings (Alex, 2026-08-01)
+
+| D-20 | Acceptance criterion 1 — how "loads into a Claude Project" is proven | **Split the criterion along the measured reality.** Criterion 1 as written assumes a matter fits a Project's direct context; Sprint 1 measured the real corpus at ~13.9–15.2M tokens, 70–100× that. **Path B (Expert Assist / Cowork reads the matter folder from disk) is proven at full scale — all 368 documents** — and is the route the criterion's "consumed by evidence-mining without format errors" clause is discharged on. **Path A (browser upload package) is proven on a deliberately scoped subset** (date- or type-scoped) that genuinely fits, and the acceptance note states the scope rather than implying full-corpus coverage. Rejected: uploading the full corpus and counting "no size rejection" as a pass — that would rest the criterion on retrieval-mode recall over 17,732 pages, which is unmeasured and would set an expectation for the analyst the tool cannot back. Criterion 1's wording is amended in requirements to match. | 2026-08-01 |
+
+| D-21 | The reduction waterfall's capacity line (`DIRECT_CONTEXT_TOKENS`, UNCONFIRMED since Sprint 1) | **Keep 200,000, and render it as a NAMED, SOURCED REFERENCE LINE — "Claude Project direct context" — never as a budget or a target.** The constant stays exactly where the seam put it (one named symbol, no inlined literals) so a future change is one line. The waterfall must not imply that getting under the line is the goal: D-15 already rules over-capacity the **expected** state, and D-20 makes Path B the route that does not care about the line at all. Wording on screen must let an expert who drops four section types describe *what was dropped and why*, not "reduced to fit". Rejected: making the line operator-settable (a knob whose wrong setting silently rescales every figure on screen), and removing it (guts D-14's point — the operator loses the only signal that the reduction accomplished anything). | 2026-08-01 |
+
+| D-22 | §10 "PyInstaller single exe" vs. the bundled ONNX payload | **AMENDED to a one-folder build shipped as a zip** (`--onedir`: `DocumentIQ.exe` plus its payload, unpacked once). The bundled OCR models push the payload past ~100 MB, and `--onefile` unpacks the whole of that to a temp directory on **every** launch — multi-second cold starts, and a temp-extract-then-execute pattern that is precisely what endpoint protection on a locked-down law-firm machine quarantines. A tool that does not open at a client site has no other qualities. §10's "single exe" wording is amended with this reasoning recorded; the deliverable is one zip, which preserves the intent (one thing to hand over) without the failure mode. Deferred, not rejected: an Inno Setup installer with the D-08 icon registered — it adds an installer toolchain and a code-signing question Sprint 2 has not budgeted. | 2026-08-01 |
+
+| D-23 | Acceptance criterion 4 — how Bates ground truth is established on MNFV | **Sequence-continuity proof over the whole set + a hand-checked stratified sample of ~100 pages.** MNFV is image-only, so every candidate ground-truth number is itself OCR of a footer stamp; a sample alone cannot see a systematic off-by-one or a document-boundary error, and a full hand-check does not scale. So: machine-verify the *structural* property over every stamped page — each document's Bates range monotonic, gapless within the document, non-overlapping across documents, contiguous across the production — which catches the whole error class; then hand-verify a stratified sample against the page images for absolute correctness. The ≥99% figure is stated **with its method**, and misses are flagged rather than silently corrected (§4). The acceptance note must state plainly that ground truth is OCR-derived and what the continuity proof does and does not establish. | 2026-08-01 |
+
+### CORRECTION to D-13 and D-23's premise — the MNFV ground truth is not all OCR-derived (Track F, 2026-08-01)
+
+D-13 calls the MNFV set "image-only" and D-23 builds its whole method on the
+consequence: "every candidate ground-truth number is itself OCR of a footer
+stamp". **That is true of part of the set and false of the larger part**, and
+the correction is recorded here rather than left in a verification note because
+D-23's ruling text asserts it.
+
+`Desktop\Files for Claude\20240529` holds two different things:
+
+| set | documents | pages | ground truth |
+|---|---|---|---|
+| `20240510 Initial Discl` — a standard e-discovery production, prefix `iiCON` | 2,138 | 11,561 | its own **load files** (`.OPT` / `.LFP` / `.DAT` / `.LST`) — the producing party's authoritative page-level numbering, generated when the stamps were burned in, **not** a re-reading of them. The PDFs also carry the vendor's embedded text layer, so DocIQ reads their stamps on the native path, not through OCR. |
+| `Initial Disclosures` + `Supplemental` — combined PDFs, prefix `MNFV` | 16 PDFs | 2,963 | **filename ranges only** — document-level and weak. D-23's caveat applies here in full, and was measured to bite: the filenames pad to four digits (`MNFV 0919`) while the stamp burned into the page pads to five (`MNFV 00919`). |
+
+**D-23's METHOD is unaffected and was followed as ruled** — continuity over the
+whole set, plus a hand-checked stratified sample. What changes is the strength
+of the resulting number: the page-level figure for the 2,138-document
+production rests on authoritative, non-OCR ground truth. The two sets are
+reported separately and never averaged, because the average would be the
+flattering figure and the less honest one. Detail and results in
+`docs/verification/track_f_sprint2_2026-08-01.md` §4.
+
+| D-24 | Built-in profiles — should DocIQ ship any DROP rules? | **Ship STANDARD TEMPLATES keyed to PAGE TYPE, not to any corpus project (Alex, 2026-08-01).** Track D shipped no built-in profiles at all, reasoning that `SectionRule.validate()` refuses a DROP rule without a "who approved" field, so a profile in the box would be an omission decision no expert made. The reasoning is sound and the outcome is not: an analyst opening a matter gets the evidentiary guarantees and none of the reduction until somebody authors YAML. Ruling: there **should** be standard templates for what *types of pages* get dropped, and they must **not be attributable to any of the corpus projects** — no "MODEC MPR profile", no "Petrobras CER profile", because a template named after a matter implies decisions taken on that matter. ⏳ **The template content is NOT yet designed** — Alex: "we will need to figure this out." Open sub-questions for a dedicated design pass: which page types are generic enough to be safe defaults (photo logs? transmittal sheets? distribution lists?); how a template satisfies the approver check without naming an expert who never saw the matter; and whether templates arrive pre-engaged or as an explicit opt-in the checklist forces the expert through. Until that pass lands, Track D's "no profile — keep every page" remains the only built-in, which is the safe direction to be wrong in. | 2026-08-01 |
+
+| D-25 | Acceptance criterion 4 shortfall — 91.5% against a ≥99% bar | **Close it with TARGETED FOOTER RE-OCR, not an engine swap (Alex, 2026-08-01).** Track F measured criterion 4 against the MNFV production's own load files: **593/648 = 91.512% overall, 0 wrong, 0 false positives, 55 missed** — decomposing to **100.000% on native-text pages (568/568)** and **31.250% on OCR'd pages (25/80)**. Every shortfall is an absent locator, never an incorrect one. The residue is rapidocr failing to read a small footer stamp on a whole-page pass optimized for body text. Ruling: treat the Bates stamp as **its own recognition problem** — crop the footer zone and re-OCR it at much higher resolution with settings suited to a short alphanumeric string — rather than reopening D-19. Rejected: reopening the Tesseract benchmark (would reverse a ruling one day old and cost sprint time) and conceding the criterion on scanned productions (Bates detection exists precisely for that class of matter). **Recorded plainly: this is the first concrete cost of D-19's "the shipped OCR engine has never been benchmarked against an alternative", and the targeted fix may not reach 99% either — that will be known only after it is built and measured. If it does not, D-19 is back on the table on evidence.** | 2026-08-01 |
+
+| D-26 | Build environment — PyInstaller and the opencv mismatch | **Both authorized (Alex, 2026-08-01).** Install `pyinstaller==6.20.0` into `document-iq\.venv` and declare it in `pyproject.toml` as a build-time dependency, replacing Track F's scratch-directory `PYTHONPATH` workaround — packaging is a Codex #2 merge-gate deliverable and "reproducible from a committed spec plus a documented command" was not true while the build depended on an undocumented staging step. Also remove the stray non-headless `opencv-python` that was installed alongside `opencv-python-headless` and winning at import, so the venv matches its declaration again. That mismatch is exactly the class of gap D-11 was created to close, and the packaged build has already demonstrated the failure mode concretely: it silently produced **no OCR at all** — models present, `ocr_available()` returning True, every scanned page empty — because an import resolved differently than expected. | 2026-08-01 |
+
+## Correction — D-23's premise was wrong (2026-08-01)
+
+D-23 ruled the Bates ground-truth method on the stated basis that "MNFV is
+image-only, so every candidate ground-truth number is itself OCR of a footer
+stamp." **That premise is false.** The MNFV production is a 2,138-document set
+shipping `.OPT` / `.LFP` / `.DAT` / `.LST` load files and an embedded text
+layer, so its ground truth is **authoritative**, not OCR-derived — Track F
+scored criterion 4 against the load files rather than against its own reading.
+
+The **method is unaffected and stands**: whole-set sequence continuity plus a
+hand-checked sample is the right shape regardless of where truth comes from,
+and the continuity half earned itself immediately — it found a real defect in
+the client's own production (`MNFV 2836-2899` and `MNFV 2890-2953` overlap by
+10 numbers), which was flagged and not corrected. What changes is the *stated
+reason*: the acceptance note must not claim ground truth is OCR-derived when it
+is not, and the blind hand-check (100/100 read, 0 disagreements) is
+corroboration of the load files rather than the primary source it was ruled to
+be.
+
+Recorded rather than quietly amended in place, because the ruling was made on a
+factual claim about client material and the claim was checked and found wrong.
+
+| D-27 | Schedule / activity tables — the corpus's largest lever | **Offer as a DROP lever, DEFAULT OFF (Alex, 2026-08-01).** Measured over 36 real documents / 1,535 pages / 3.34M characters: schedule and activity tables are **33.9% of the corpus text across 258 pages** — the only category whose removal changes whether a matter fits, and roughly **170× the photographs**. They are P6 activity listings pasted into progress reports, and where the native `.xer` files are already in evidence the pasted grid is a lossy render of a better source. Ruling: the template recognizes them as a section type and offers them in the checklist with that reason stated on the row, but never drops them unless the expert engages the lever. Rejected: defaulting the lever ON where schedule files are present in the matter folder (it would make a substantive evidentiary decision on a file-presence heuristic, and a pasted table that *differs* from the native file is itself evidence); and refusing to offer them at all (forfeits the only lever that materially reduces this corpus and makes the reduction feature close to cosmetic). | 2026-08-01 |
+
+### OUTCOME of D-25 — the targeted fix was built, and it does NOT close criterion 4 (2026-08-01)
+
+D-25 ruled targeted footer re-OCR and recorded that "the targeted fix may not
+reach 99% either — that will be known only after it is built and measured. If it
+does not, D-19 is back on the table on evidence."
+
+**It was built and measured. It does not, and here is the evidence.**
+
+The pass works as ruled: on pages where the whole-page recognition returned
+nothing, a 400 dpi tiled crop of the physical stamp band returns a reading. But
+the reading is wrong in one specific, repeatable way — **rapidocr reads this
+production's stamp DIGITS correctly and cannot resolve its PREFIX.** It returns
+`iCON004926`, `jiCON004926`, `liCON002291`, `TiCON005000` for a stamp that reads
+`iiCON004926`. Measured over pages drawn from the baseline's own miss list: at
+400 dpi, exact recovery is **1 of 12** and **1 of 10** on two independent
+subsets, with the six digits correct nearly every time.
+
+**It is not a resolution problem, a cropping problem or a preprocessing
+problem**, and each was tested rather than assumed: 600 dpi and 800 dpi score
+*below* 400; widening the detector's box (`unclip_ratio` 2.2 and 3.0,
+`box_thresh` 0.3) recovers nothing; Otsu binarization gains a little on the
+prefix and truncates a digit run elsewhere. It is the recognition model.
+
+That makes this the first hard, page-level cost of D-19's "never benchmarked
+against an alternative on this corpus", and **D-19 is therefore back on the
+table on evidence, exactly as D-25 provided for.**
+
+**One alternative would close it without reopening D-19, and it needs a
+ruling.** A confirmed production's prefix carries no per-page information — every
+page has the same one — so a recovered token whose digits, digit width,
+separator and suffix match the confirmed format exactly, and whose prefix is a
+near-miss of it, could be normalized to the confirmed prefix. It could not point
+at a different page. It was **not** done unilaterally: §4 requires misses to be
+flagged rather than silently corrected, and `bates.py` deliberately holds that
+`iiCON` and `IICON` are two formats and neither is applied to the other's pages.
+
+Full method, the five defects the work found and fixed, the cost measurements,
+and — importantly — the two measurements that did NOT complete (the harness
+after-number and the Petrobras negative control, both blocked by machine
+contention, both with their commands written out) are in
+`docs/verification/bates_d25_2026-08-01.md`.
+
+## Measured: where the tokens actually are, and what recognizes them (2026-08-01)
+
+Design pass for D-24, over 36 documents / 1,535 pages / 3,337,999 characters of
+the real record. Full analysis in `docs/design/section_taxonomy.md`.
+
+| category (deterministically detectable) | pages | share of text |
+|---|---:|---:|
+| narrative & everything else | 1,140 | 52.5% |
+| **schedule / activity tables** | 258 | **33.9%** |
+| page furniture (repeated header/footer lines) | — | 8.0% |
+| table of contents | 65 | 5.4% |
+| photo / figure / divider pages | 54 | **0.2%** |
+| empty / image-only | 18 | 0.0% |
+
+**Two results that change the design.**
+
+**Photographs are worth 0.2%, not the headline saving.** The Sprint-1 mockups
+advertise "Photo logs" as the largest expert lever at −2.49M tokens; that is
+wrong by about two orders of magnitude. A photo page carries almost no *text*,
+and tokens come from text. Photo logs are a **page-count** lever, not a token
+lever — and Path B, which D-20 makes the primary route, does not care about page
+count. The waterfall must stop showing a token saving the corpus cannot support.
+
+**A heading regex finds letterhead, not sections.** Matching heading-shaped
+lines returns, in frequency order, `FPSO ALMIRANTE BARROSO MV32` (1,017),
+`PETROBRAS` (981), `WEEKLY PROGRESS REPORT NO. #` (320), then document and
+revision numbers. The obvious recognition mechanism is **excluded on measurement**
+— it would have looked reasonable, passed review, and silently dropped the wrong
+pages.
+
+**What works instead: the document's own outline.** 40% of the PDFs carry PDF
+bookmarks with a real section vocabulary — `EXECUTIVE SUMMARY`, `PROGRESS
+PHOTOS`, `HSE`, `CRITICAL PATH NARRATIVE`, `APPENDICES`, `OVERALL PROGRESS
+S-CURVE`. Where an outline exists the section→page map is a **lookup, not an
+inference**, and it is the document's own statement about itself. Recognition is
+therefore tiered — outline → the document's own TOC → measurable page-class rules
+→ expert-entered page ranges — with the tier recorded per page, because the tiers
+are not equally strong and rendering them identically would be this feature's
+quiet lie.
+
+**Honest consequence:** the real reduction story on this corpus is furniture and
+TOC (13.4%, safe, largely automatic) plus schedule tables (33.9%, the expert's
+call under D-27). Everything else is a rounding error. That is a smaller and more
+defensible claim than the mockups make, and it is the claim the product should
+make.
+
+| D-28 | Bates prefix normalization vs. reopening D-19 | **Normalize ONLY where the matter has exactly ONE confirmed prefix (Alex, 2026-08-02).** D-25's targeted footer re-OCR was built and **did not close criterion 4** — 91.512% unchanged. The wall is precise and was characterized page by page: rapidocr **reads the digits correctly and cannot resolve the `ii` prefix**, returning `iCON004926`, `jiCON004926`, `liCON002291`, `TiCON005000` for `iiCON…`. Exact recovery at 400 dpi is **1 in 12**; 600 and 800 dpi score *below* 400; detector-box widening scores 0 of 10. Ruling: repair the prefix when digits, digit width, separator and suffix match the confirmed format exactly and only a near-miss prefix differs — **and only when the matter carries exactly one confirmed prefix.** On a multi-prefix production, refuse outright and flag as today. The third condition is the ruling: it makes the wrong-series failure **structurally impossible** rather than merely unlikely, and the risk is concrete rather than theoretical — Track F found the MNFV set carries three prefix renderings, and a page filed under the wrong series is a locator an expert cites verbatim and cannot defend. Normalization is **disclosed, never silent**: §4's "flagged, not silently corrected" stands as the rule and this is a narrow ruled exception, so every repaired locator is recorded and distinguishable from a directly-read one. **Consequence to state rather than bury: if MNFV's acceptance subset is multi-prefix, D-28 refuses on it and criterion 4 remains NOT MET on the acceptance corpus** — the criterion would then be met on single-series matters and open on the hard case. D-19 was considered and not reopened; Tesseract stays written off, and the "never benchmarked against an alternative" liability recorded in D-19 now has its **first concrete page-level cost** on the record. | 2026-08-02 |
+
+### OUTCOME of D-28 — built as ruled; the gate decides the acceptance corpus (2026-08-02)
+
+D-28 is implemented in `dociq.identify.bates` with all three ruled conditions
+plus a fourth that follows from where the damage comes from, and the whole thing
+is reachable only through `apply_bates_reported`, which returns the disclosure.
+
+**The distance rule, written so an expert can apply it by hand.** A read prefix
+is a near miss of the confirmed prefix when EXACTLY ONE of these holds:
+
+* **substitution** — same length, differing at exactly one position, and the two
+  characters there are in the same stated confusable group (`jiCON` for
+  `iiCON`; the first group is thin verticals `i I j J l L 1 | ! t T f r`,
+  which is the class this corpus produced);
+* **a doubled character read as single** — the read is the confirmed prefix with
+  one character deleted, and that character was identical to its neighbour
+  (`iCON` for `iiCON`);
+* **a single character read as doubled** — the same in the other direction.
+
+Refused: two or more edits; any edit touching a **digit** (with a separator-less
+format the prefix abuts the number, and collapsing `iiCON0` to `iiCON` would
+move a digit out of a seven-digit number and produce a locator for a page that
+does not exist); an insertion or deletion that is not a doubling; and **a pure
+case change** — `iiCON` and `IICON` are two formats by deliberate rule elsewhere
+in this module, and repair must not fold them back together through a side door.
+
+**Three defects were found by writing the tests.** The case-only acceptance
+above was one. The second: a caller that streams documents one at a time — the
+acceptance harness does, to bound memory — silently asked the single-prefix gate
+about ONE DOCUMENT rather than the matter, which is exactly how a partial view
+reports "one prefix" for a matter that has four; the census is now an explicit
+parameter and the harness computes it over the whole sample. The third: the
+census uses the same grammar as detection, and that grammar reads `sheet 137` as
+prefix `sheet`, so ordinary numbered page text can register as a second
+"prefix" and switch repair off. That is the conservative direction and it is
+left as it is, but it is recorded because an operator reading the refusal should
+not be surprised by a prefix that is an English word.
+
+**The gate is what decides the acceptance corpus, and the answer is measured
+rather than argued** — see `docs/verification/bates_d25_2026-08-01.md` §3 for
+the census over the MNFV subset and what criterion 4 does as a result.
+
+## Acceptance criteria 1 and 8 — DISCHARGED on the real corpus (2026-08-02)
+
+One full-corpus run from scratch through `RealPipeline` (what the GUI calls),
+shipped defaults, no environment overrides, not resumed.
+
+- **6,182.4 s = 103.0 min**; 368 documents, 7 listed-only (`.doc`, per D-02)
+- **18,556 pages in = 18,556 kept + 0 dropped — zero discrepancy**
+- 17,266,810 pre-tokens / 50,251,852 chars; `corpus_sha256 b326d92e…`
+- Stages 1–2 = **99.70%** of the run; everything DocIQ adds after extraction = **18.5 s**
+- **Path B**: all four deliverables found in place, no rearrangement; §7's format
+  contract asserted over the whole corpus — 18,556 markers parsed (equal to
+  `pages_in`), `sources.json` resolving for all 368 — **zero format errors**.
+- **Path A**: whole-record package 371 files / 51.2 MB, plus a scoped subset
+  chosen through the GUI's own scope model — **15 of 368 documents, 0.57 MB,
+  154–168K tokens**, against 206 date windows measured of which 14 fit.
+
+**The gap found on the way: amendment A-12 was raised by Track D *and* Track E
+and applied by neither.** `RealPipeline` had no `matter_layout_note` and no
+`build_package`, so Path A's button was permanently disabled behind its own
+"this pipeline does not offer it" message and Path B showed the mock's words.
+Both were built before the criteria could be discharged. §8's "only the
+sanctioned files are uploaded" rule was implemented and never checked; it now
+raises. A subset package would have carried the whole matter's `sources.json`
+naming 353 documents that resolve to nothing, and printed the **whole corpus's**
+token figure in a 15-document README — where the capacity sentence derives from
+it, so the error would have arrived as advice.
+
+**NOT proven, and not to be written up as if it were:** *"accepted by a Claude
+Project" was never observed.* Uploading is a network action and nothing was
+uploaded; file types, sizes, count, structure and the README are proven, and
+that half needs a person with a browser. The 30 MB per-file limit is an
+assumption; the file-count limit is not enforced and says so. The 103-minute
+wall clock is an **upper bound** — another OCR job held the machine throughout —
+so a clean idle-machine figure still does not exist. Expert Assist itself was not
+run against the folder: the format contract was proven, not the skill. One run,
+so no determinism claim rests on it.
+
+**Open, deliberately not fixed:** the shipped 3,600 s per-file timeout fired on
+**six** documents, not the two previously recorded, and all six were recovered in
+full by the serial re-read. That makes it **load-dependent** and points at the
+extraction pool rather than at the files. The default was not raised — the root
+cause is unidentified, the right value is unknown, and it is a hashed
+run-identity input under A-04, so it is a ruling rather than a side effect of an
+acceptance note.
+
+| D-29 | Acceptance criterion 4 — final disposition for Sprint 2 | **SHIP AS NOT MET, carried into Codex review #2 as a known open item (Alex, 2026-08-03).** Every avenue short of changing the OCR engine has been built and run. **Read the composition of the headline figure before quoting it:** **597/648 = 92.130% is a PROJECTION, not a measurement.** It is `568 + 29`, where **568/568 native is Track F's earlier full-corpus measurement** and **29/80 OCR'd = 36.250% is measured** in `docs/verification/artifacts/bates_after_2026-08-02.json` over a deliberately OCR-heavy 61-document / 122-page subset (whose own headline accuracy is 58.197% and is **not** comparable to a full-corpus figure). The subset carries every page that can move — its OCR denominator, 80, equals the full corpus's — which is what makes the arithmetic sound, and it is still arithmetic. The last end-to-end **measured** full-corpus number remains Track F's **593/648 = 91.512%**. Constant across every variant: **0 wrong, 0 false positives.** D-25's band pass recovered 4 pages. D-28's repair **refused on the acceptance corpus exactly as its gate was designed to** — MNFV carries three proposable prefixes (`iCON`, `iiCON`, `jiCON`). The limitation: **on a scanned production an expert gets a locator on roughly a third of OCR'd pages, and never a wrong one.** ⚠️ **And read this next to it:** at the time D-29 was ruled, the figure **through the shipped GUI was 0%** — §4 Stage 3's operator confirmation had never been built, so the format never reached CONFIRMED and no page received a locator. **CLOSED 2026-08-03** by the A-14 confirmation screen; measured on a real MNFV subset (10 documents / 369 pages) through `RealPipeline`: **0.000% before, 88.889% after (328 pages)**. That is a locator-COVERAGE figure for one subset and is **not** comparable to the 92.130% accuracy projection above. D-19's Tesseract benchmark was offered and declined twice; the "never benchmarked" liability stands with a measured page-level cost attached. | 2026-08-03 |
+| D-30 | Criterion 6 — a whole pipeline run creates a child process, and the probe that was supposed to catch it never said so | **PERMIT THAT ONE CALL, NARROWLY AND BY NAME (Alex, 2026-08-04).** For three review rounds `test_no_fetch_client_is_loaded_by_a_WHOLE_PIPELINE_RUN` failed intermittently and was reported to Codex as an unexplained **criterion-6 outbound risk**. It was not one. The probe printed a COUNT of guard attempts and threw away the stacks `NetworkGuard` records for every one — so it folded the socket guard and the child-process guard into a single number and labelled the sum "outbound". Measured 2026-08-04 with the stacks retained, 75 probe runs across three concurrent loops: **12 tripped, 84 attempts, every one of them `subprocess.Popen('ver', shell=True)`, and `ATTEMPTS_NET` was 0 in every single run.** It is `platform.uname()`'s one-per-interpreter Windows version probe, reached transitively — `extract.ocr_model_dir()` imports `rapidocr_onnxruntime`, which imports `onnxruntime`, which calls `platform.system()` at import time. Ruling: permit **exactly that call**, as a named exemption carrying its reason (`offline.PERMITTED_SPAWNS`), and keep every other process creation raising. The permission is matched **by identity, not by category** — this entry point, this exact command string, `shell=True`, called from `_syscmd_ver` in the standard library's own `platform.py`, within four frames. Rejected explicitly: "allow spawns during import", "allow short commands", "allow anything from site-packages" — each readmits the whole class the child-process guard was added for. The guard's founding argument is unchanged and stays in the code: a spawned child is an execution the guard can no longer observe. **Criterion 6's claim becomes more specific, not weaker** — it now reads "no network attempts, and no process creation except one named Windows version probe inside a dependency's import, disclosed by name", and that sentence lives in `offline.CRITERION_6_CLAIM` so the code and the documents cannot drift. A permitted spawn is **recorded with its stack** in `guard.exempted` and named in `guard.render()` even on a clean report, because a permission nobody can see is indistinguishable from a hole. If the exemption ever stops matching it must **fail, not widen**: `tests/test_offline.py` perturbs each of the six identity components in turn and proves every one is load-bearing. | 2026-08-04 |
+
+## Bates: the negative control, and what closed the merge gate (2026-08-03)
+
+The merge gate on the Bates work was never the accuracy number — it was whether
+raising footer OCR resolution and permitting prefix repair would start
+**inventing** stamps on unstamped material. Measured over the full Petrobras
+corpus, **298 documents / 17,732 pages**: `(none proposed — CORRECT; 450
+stamp-shaped lines seen, none clearing the 50% per-document bar)`,
+**0 false positives, 100.0%**. That is the property §4's "absence is normal, not
+an error" depends on, and it survived both changes.
+
+**Evidence, committed rather than asserted.** Both runs' machine output is in
+the repository: `docs/verification/artifacts/bates_negative_control_2026-08-02.json`
+and `bates_after_2026-08-02.json`. An earlier version of these two sections
+stated the results while the JSON sat untracked in a worktree and the
+verification note still read "did not complete" — so the register asserted
+figures the repository could not support. The numbers were real and the
+evidence was not landed, which is indistinguishable from the numbers being
+invented by anyone reading the repo. Caught by the rehearsal review in one
+grep, which is exactly how the external reviewer would have found it.
+
+**D-28's gate fired on real material rather than in a test.** A near-miss prefix
+counts toward the single-prefix census — twenty one-page documents misread as
+`jiCON…` register as a *second* prefix — so a matter that OCR has confused into
+looking multi-series refuses repair. That is the ruling working, not an
+oversight, and it is the reason the repair could never have quietly closed the
+gap on this corpus.
+
+Three defects were found while writing the tests for it, one of which is worth
+keeping: **the single-prefix gate initially asked its question about ONE
+DOCUMENT**, which reports "one prefix" for a matter carrying four. The safety
+condition would have been decoration precisely where it mattered. The census is
+now computed matter-wide and passed in explicitly.
+
+| D-31 | The publish/swap design — patch the fourth window or remove the class (NON-CONVERGENCE) | **REDESIGN TO DELETE-LAST (Alex, 2026-08-05).** Invoked under the standing non-convergence rule, one round later than the rule allows. Codex review #2 has now run three fix rounds, and **each round found a new defect inside the previous round's fix**, all in one subsystem and all one class: *a destructive filesystem step that cannot be proven complete when antivirus, a scanner, or Windows delete-on-close interferes.* Round 1 → B-1/B-2 (unconditional publish; permissive marker read). Round 2 → B-4/B-5 (unproven `rmtree`; diagnosis missing from the durable log). Round 3 → **B-6** (a marker whose `unlink` returned but whose name survived authorizes the next recovery to delete the newly published set), **A-5** (a partly-deleted backup renamed back and reported to the operator as "intact"), B-7 (log projection). Every fix was correct and every fix opened the next window, because **the design deletes before it publishes, so every failure mode is "half-deleted".** Ruling: stop defending windows and make them unreachable. **Never delete before publishing** — build the new set under a staging name, **rename** the current set aside, **rename** the new set into place, and only then delete what was moved aside. The substitution that carries the design is **rename in place of delete**: a rename on one volume either happened or did not, and its outcome is readable from the names on disk, whereas a delete under lock is neither provable nor reversible. A crash or a blocked delete then leaves a clearly-named stale folder **beside a complete published set** — never a mixture, and never a destructively-modified backup presented as intact. A-5 and B-6 stop being reachable rather than being defended against. Rejected: fixing the three findings as filed (the last three rounds are the evidence for what happens next), and descoping the hardening with the windows disclosed (this is the code that decides whether an expert's matter folder holds one run's evidence or two runs mixed). **Implementation note, 2026-08-06 (Codex review #2, third fix round, B-8):** the ruling is unchanged and the first implementation of it did NOT meet it. "Rename the current set aside" was implemented as "rename aside the names this build's output patterns enumerate", which is not the current set: a deliverable an older build wrote under a retired name either survived a successful swap or was moved aside lazily, after new files had already landed. The plan is now built from a durable inventory of what the last run actually published (`.dociq/published_set.json`), and the publish phase clears every destination in a complete pass before renaming anything in. Enumerating the swap's persistent states backwards, as that round's merge condition required, found two more states whose next step destroyed a complete set. See `docs/verification/codex_r4_inventory_2026-08-06.md`. | 2026-08-05 |
+
 ## Sprint-1 verification log
 
 **Track B master-index robustness (2026-07-30).** The Track B critic found a
@@ -198,6 +678,77 @@ loudly, never silently — so that default is too tight for this corpus.
 
 The consequence for where effort goes is unambiguous: **optimizing anything but
 extraction is optimizing 0.9% of the run.**
+
+## §10 measured again, from scratch, WITH OCR (2026-08-02)
+
+The acceptance run for criteria 1 and 8 is the first completed **from-scratch**
+full-corpus run with OCR enabled. It bears on three things this register
+asserts, and they are corrected here rather than left to be found in a
+verification note.
+
+| | previous entry | this run |
+|---|---|---|
+| documents / pages | 368 / 18,521 | **368 / 18,556** |
+| from-scratch OCR-on wall clock | *"not established"*; ≈100 min an upper bound | **6,182.4 s = 103.0 min** |
+| everything after extraction | 25.7 s | **18.5 s (0.30% of the run)** |
+| documents exceeding the 3,600 s per-file limit | 2 | **6** |
+
+**The wall clock is still not an idle-machine figure.** Another agent's OCR job
+and repeated `pytest` processes ran on the same box throughout; sampled CPU load
+was 100% for most of the window. 103.0 minutes is what this corpus cost under
+contention, so it **corroborates** the ≈100-minute upper bound rather than
+replacing it with a rate. §10's 60-minute target remains missed and is still not
+restated as a general target.
+
+**The per-file timeout is load-dependent, which is more than "too tight".** Two
+documents crossed it on an idle machine and six on a contended one, and all six
+were **recovered in full by the serial re-read** (228, 222, 186, 189, 191 and
+187 pages, "no degradation"). That the same files succeed alone and fail in the
+pool points at the extraction pool rather than at the files, which is the
+Sprint-2 performance question the register already records as unidentified. The
+default was deliberately **not** changed on this evidence: it is a hashed
+run-identity input (A-04), the right value is unknown, and picking one from the
+contended case would be picking the wrong one. Reasoning recorded in
+`docs/verification/acceptance_1_8_2026-08-01.md` §9.3 so it can be overturned.
+
+**The 35-page difference is consistent with the open PowerPoint finding and does
+not close it.** Sprint-1 recorded "a 9 MB PowerPoint extracted as 35 pages on
+one full-corpus run and failed on another"; this run's page count is exactly 35
+higher and all 17 `.pptx` documents processed `Full`. The earlier run's
+per-document counts are not in hand, so the coincidence of the number is the
+whole of the evidence. **The byte-identical claim is still not demonstrated on
+the real corpus.**
+
+**One document failed and it is the document's fault.**
+`Weekly Progress Reports/Topside Weekly Progress Report/CER-1-345.docx` failed in
+the pool *and* on the serial re-read — its content sniffs as a zip-family
+container that is not a readable Word file. Recorded `Failed` in the index.
+
+## Acceptance criteria 1 and 8 — discharged (2026-08-02)
+
+Both discharged in `docs/verification/acceptance_1_8_2026-08-01.md`, on
+amendment A-12, which Track D and Track E had both raised and neither had
+applied — **no upload package had ever been built**.
+
+* **Criterion 1, Path B — proven at full scale.** All 368 documents;
+  `expert_assist_layout` checked the folder on disk and found all four
+  deliverables where Expert Assist reads them, with no rearrangement; the §7
+  format contract was then asserted over the whole corpus — 18,556 markers
+  parsed (equal to `pages_in`), `sources.json` resolving for every document,
+  **zero format errors**.
+* **Criterion 1, Path A — proven on a stated subset.** 206 date windows
+  measured, 14 fit the 200,000-token reference line, the widest taken: 15 of 368
+  documents, 154–168K tokens. The widest *non*-fitting window is 189 documents
+  at 6.4–6.9M tokens, ~32–35× the line — D-20's premise, measured on this
+  corpus.
+* **Criterion 8 — proven as far as an offline tool can, and no further.** Both
+  packages built from the real run and inspected; only `.txt` / `.json` / `.csv`
+  present; largest file 1.05 MB (whole record) and 77 KB (subset) against a
+  30 MB assumption; §8's "only the sanctioned files" rule now **raises** rather
+  than being merely implemented. **"Accepted by a Claude Project" was NOT
+  observed** — uploading is a network action Principle 4 forbids and §12
+  excludes. That half of criterion 8 needs a person with a browser, and the note
+  says so rather than claiming it.
 
 ## Corpus reality vs. the spec's assumption (recorded 2026-07-30)
 

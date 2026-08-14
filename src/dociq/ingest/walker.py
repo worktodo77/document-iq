@@ -397,6 +397,76 @@ def _iter_files(root: Path, *, recursive: bool,
     return files
 
 
+def list_files(root: Path, *, recursive: bool = True) -> list[Path]:
+    """Every file a run over ``root`` would inventory. No hashing, no reading.
+
+    Public so the GUI's folder preview counts exactly what the walk will count.
+    A preview with its own traversal would be a second definition of "what is in
+    this folder" — and the two would differ precisely where it matters most: a
+    junction loop, a directory that will not list, an entry that cannot be
+    stat'd. There is one traversal, and this is the way to ask it a cheap
+    question.
+
+    Enumeration failures are swallowed here, and only here: a preview is a
+    glance at a folder the operator may not even choose, so it must not raise.
+    The run itself uses :func:`scan`, which records them and BLOCKS — a preview
+    that under-counts is a wrong estimate, while a run that under-counts is a
+    false completeness claim, and the two deserve different treatment.
+
+    DocIQ's own run state is excluded by :func:`is_run_state`, exactly as
+    :func:`scan` excludes it. That is not hypothetical tidiness: an operator who
+    puts the output folder inside the matter folder — which the setup screen
+    permits and which is an obvious thing to do — otherwise gets a preview that
+    counts a previous run's journal and staging files as documents.
+    """
+    return [p for p in _iter_files(root, recursive=recursive)
+            if not is_run_state(p)]
+
+
+def _root_overlap(source: Path, output: Path) -> str:
+    """Why these two roots may not be used together, or ``""``.
+
+    Resolved with ``os.path.realpath`` on both sides rather than compared as
+    strings: on Windows the same folder reaches DocIQ as ``C:\\m``, ``c:\\m\\``,
+    a mapped drive letter, a UNC path and a junction, and a string comparison
+    calls four of those five a different folder.
+    """
+    try:
+        src = Path(os.path.realpath(source))
+        out = Path(os.path.realpath(output))
+    except OSError:  # pragma: no cover — realpath does not raise for a string
+        return ""
+    if src == out:
+        relationship = "the same folder as"
+    elif out.is_relative_to(src):
+        relationship = "inside"
+    elif src.is_relative_to(out):
+        relationship = "a parent of"
+    else:
+        return ""
+    return (
+        f"The output folder is {relationship} the source folder "
+        f"(source: {source}; output: {output}). DocIQ will not run this way, "
+        "because the second run over such a matter would read the FIRST run's "
+        "deliverables as evidence — its clean_text files, its document index "
+        "and its upload package would be inventoried as documents, and the page "
+        "count, the token estimate and the index would all describe a corpus "
+        "that is partly DocIQ's own output. Nothing was scanned and nothing was "
+        "written. Choose an output folder outside the matter folder, or point "
+        "the source at the sub-folder that holds only the documents."
+    )
+
+
+def is_run_state(path: Path) -> bool:
+    """Whether a path is DocIQ's own scratch rather than evidence.
+
+    One predicate, used by the inventory and by the preview both. Two copies of
+    this test would eventually disagree, and the disagreement would show up as a
+    file count on screen that the run then contradicts.
+    """
+    return STATE_DIR in path.parts
+
+
 def scan(root: Path, *, recursive: bool = True,
         notes: list[str] | None = None,
         run_notes: RunNotes | None = None,
@@ -426,7 +496,7 @@ def scan(root: Path, *, recursive: bool = True,
     entries: list[FileEntry] = []
     for p in _iter_files(root, recursive=recursive, notes=notes,
                          failures=failures):
-        if STATE_DIR in p.parts:  # our own run state is not evidence
+        if is_run_state(p):  # our own run state is not evidence
             continue
         ext = p.suffix.lower()
         rel = rel_path_of(p, root)
@@ -1076,7 +1146,7 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
         return notes.termination.stamp(
             RunResult(config=config, warnings=(reason,) + extra))
 
-    # Preflight 1 of 3 (Codex B-1). A source root that is not there produces an
+    # Preflight 1 of 4 (Codex B-1). A source root that is not there produces an
     # empty scan, which used to look exactly like a folder containing nothing:
     # the run went green, and — because the pipeline purges before it emits —
     # the previous complete reduction of that matter was deleted and replaced
@@ -1089,11 +1159,37 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
             "available. Nothing was scanned; check the path and re-run.")
         return blocked_result(blocked)
 
+    # Preflight 2 of 4. MEASURED, not hypothesized: a one-document matter run
+    # twice with the output folder inside the source folder inventoried 1
+    # document the first time and SIX the second — `a.txt` plus the first run's
+    # `clean_text/DIQ-000001.txt`, its `document_index.csv` and three files of
+    # its `upload_package/`. The page count, the token estimate, the index and
+    # `clean_text/` all then describe a corpus that is partly DocIQ's own output,
+    # and every re-run compounds it. Only `.dociq/` was ever excluded, because it
+    # is scratch; the DELIVERABLES were not, because until now nothing said they
+    # could be sitting under the source root.
+    #
+    # It blocks rather than quietly excluding the output folder. Excluding is the
+    # friendlier behavior and may well be the right final answer, but it decides
+    # what a corpus IS — it would change the corpus hash of any matter already
+    # arranged this way, silently, with no bad input anywhere. That is a ruling,
+    # not a bug fix, so the run fails closed and names both remedies.
+    #
+    # The reverse nesting is refused for the same reason and a second one:
+    # publication removes the previous run's deliverables by name, so a source
+    # folder underneath the output root could have an operator's own
+    # `document_index.csv` deleted by a re-run. That reason got STRONGER under
+    # D-32 — the names are now deleted outright rather than renamed aside, so
+    # there is nothing to recover such a file from.
+    overlap = _root_overlap(root, output_root)
+    if overlap:
+        return blocked_result(overlap)
+
     entries = scan(root, recursive=opts.recursive, notes=scan_notes,
                    run_notes=notes, failures=scan_failures)
     warnings.extend(sorted(scan_notes))
 
-    # Preflight 2 of 3 (Codex review #1 round 2, F-2). A directory that would
+    # Preflight 3 of 4 (Codex review #1 round 2, F-2). A directory that would
     # not list is not a degradation this run can disclose and carry on past.
     #
     # DocIQ's product is a completeness claim over a folder, and a subtree it
@@ -1123,7 +1219,7 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
         warnings.append(f"duplicate content (sha256 {h[:12]}…): "
                         + ", ".join(paths))
 
-    # Preflight 3 of 3. Same class as the two checks above: the run never
+    # Preflight 4 of 4. Same class as the three checks above: the run never
     # starts, so it has nothing to publish and nothing it may replace.
     disk = preflight_disk(entries, output_root)
     if disk:
@@ -1215,10 +1311,20 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
     # child records of an archive right by luck.
     produced: dict[str, list[DocumentRecord]] = {}
 
+    n_pages = 0
+    n_ocr_pages = 0
+
     def emit_progress(current: str) -> None:
         if opts.progress:
+            # ``pages`` and ``ocr_pages`` are here so a progress line can say
+            # what was read rather than only how many files were opened. The
+            # seam's ProgressEvent asks for plain language — "read 148 pages",
+            # "OCR — 12 pages" — and a consumer cannot write that sentence from
+            # a file count. Counted from the records as they complete, so it
+            # costs nothing and cannot disagree with what the run produced.
             opts.progress({"done": done_n, "total": len(todo), "file": current,
                            "failed": n_failed_so_far,
+                           "pages": n_pages, "ocr_pages": n_ocr_pages,
                            "elapsed_s": round(time.monotonic() - t0, 1)})
 
     if todo:
@@ -1260,6 +1366,9 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
                     journal.add(e.rel_path, recs)
                     n_failed_so_far += sum(
                         1 for r in recs if r.status is ProcessingStatus.FAILED)
+                    n_pages += sum(len(r.pages) for r in recs)
+                    n_ocr_pages += sum(1 for r in recs for p in r.pages
+                                       if p.kind is PageKind.OCR)
                     done_n += 1
                 # Watchdog on EXECUTION time only. A future still waiting for a
                 # worker is merely queued, not stuck — ageing those out
@@ -1353,6 +1462,23 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
     # went back and read.
     n_failed_so_far = sum(1 for d in documents
                           if d.status is ProcessingStatus.FAILED)
+    # The page counts are recomputed from the FINAL records for the same reason
+    # the failure count is: the serial retry replaces a document's records
+    # wholesale, so the running totals accumulated in the pool loop can describe
+    # pages that no longer exist. A closing tick that disagrees with the
+    # deliverable is a defect, not a rounding difference.
+    n_pages = sum(len(d.pages) for d in documents)
+    n_ocr_pages = sum(1 for d in documents for p in d.pages
+                      if p.kind is PageKind.OCR)
+    # The run-level OCR alarm. Computed HERE, over the final corpus, because
+    # this is the only scale at which "every attempt recovered nothing" is
+    # visible: per-document notes say "N page(s) routed to OCR recovered no
+    # text", which reads as a few bad scans one document at a time and is
+    # usually right. A dead engine looks exactly like that, document by
+    # document, and looks like nothing else across the whole run.
+    dead_ocr = ex.ocr_yield_warning(documents)
+    if dead_ocr:
+        warnings.append(dead_ocr)
     emit_progress("")
     # Stamped, not defaulted — and this is the site Codex's F-1 probe did NOT
     # reach, found by enumerating the class rather than the repro. The two

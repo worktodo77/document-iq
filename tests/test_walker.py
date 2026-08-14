@@ -476,3 +476,43 @@ def test_both_walk_modes_share_one_classification_path(tmp_path, monkeypatch):
         return [(e.rel_path, e.tier, e.unreadable) for e in entries], sorted(notes)
 
     assert inventory(True) == inventory(False)
+
+
+# --- B4: the run-level dead-OCR alarm, through a real walk ------------------
+
+
+@pytest.fixture
+def _one_scan(tmp_path):
+    """A folder holding only the scanned fixture, so OCR is the only work."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "scan.pdf").write_bytes(
+        (FIXTURES / "02_scanned_instruction.pdf").read_bytes())
+    return src
+
+
+def _ocr_run(src, tmp_path, out):
+    cfg = RunConfig(source_root=str(src), output_root=str(tmp_path / out),
+                    ocr_engine_version=ex.ocr_engine_version())
+    return walker.run(cfg, walker.WalkOptions(ocr_enabled=True, resume=False))
+
+
+def test_a_run_whose_ocr_recovered_nothing_at_all_says_so(
+        _one_scan, tmp_path, monkeypatch):
+    """FAIL-BEFORE: the run completed with per-document notes only, and those
+    read as "a few unreadable scans" — the innocent explanation, offered first.
+    A dead engine reaches the operator as an ordinary result."""
+    monkeypatch.setattr(ex, "_page_array", lambda page: "X")
+    monkeypatch.setattr(ex, "_ocr_array", lambda arr: ("", []))
+    result = _ocr_run(_one_scan, tmp_path, "dead")
+    assert any("dead OCR engine" in w for w in result.warnings), result.warnings
+
+
+def test_a_working_engine_raises_no_alarm(_one_scan, tmp_path, monkeypatch):
+    """The other half. An alarm that also fires on a healthy run is an alarm
+    that gets ignored on the run that matters."""
+    monkeypatch.setattr(ex, "_page_array", lambda page: "X")
+    monkeypatch.setattr(ex, "_ocr_array",
+                        lambda arr: ("SITE INSTRUCTION 44", [0.93]))
+    result = _ocr_run(_one_scan, tmp_path, "alive")
+    assert not any("dead OCR engine" in w for w in result.warnings)

@@ -35,7 +35,6 @@ import csv
 import dataclasses
 import json
 import shutil
-import socket
 import sys
 import os
 import tempfile
@@ -95,18 +94,25 @@ class _Check:
 
 
 def _fixture_root(work: Path) -> Path:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "fixtures"))
-    import make_fixtures
+    """Build the synthetic corpus, from the source tree or from the bundle.
+
+    The fixture builder is shipped INSIDE the packaged build so
+    ``DocumentIQ-cli.exe --selftest`` runs the same gate on the artifact that
+    actually goes to a client. A gate that can only run from a checkout proves
+    the checkout.
+    """
+    if getattr(sys, "frozen", False):
+        import make_fixtures  # bundled into the PYZ by packaging/DocumentIQ.spec
+    else:
+        sys.path.insert(
+            0, str(Path(__file__).resolve().parents[2] / "tests" / "fixtures"))
+        import make_fixtures  # type: ignore[no-redef]
 
     return make_fixtures.build(work / "fixtures")
 
 
 def _check_no_network(chk: _Check) -> None:
-    """Principle 4. Prove the OCR path needs no socket by taking sockets away.
-
-    ``socket.socket`` is replaced with a raiser for the duration, so any
-    outbound attempt — the model download the vendored code used to permit —
-    fails loudly instead of quietly succeeding on a connected machine.
+    """Principle 4. Prove the OCR path makes no outbound call — by counting.
 
     Critically, the shared ``_OCR_ENGINE`` singleton is torn down first. By
     the time this runs, Stage 1-2 has already OCR'd the fixture corpus and
@@ -114,50 +120,93 @@ def _check_no_network(chk: _Check) -> None:
     prove that *inference* needs no socket; the historical hazard this
     guards against (``enable_os_trust()``) lived in *construction* — a
     cold-cache model load — which a warm-engine probe never exercises. Forcing
-    a fresh ``RapidOCR(...)`` build under the blocked socket is the only way
-    this check is honest about what it claims.
+    a fresh ``RapidOCR(...)`` build under the guard is the only way this check
+    is honest about what it claims.
+
+    **Changed 2026-08-01 (Track F).** This check used to replace
+    ``socket.socket`` with a raiser and assert only that OCR still produced
+    lines. That is a weaker claim than §10 makes: a library that attempts a
+    fetch inside ``try/except Exception`` passes a blocking probe in silence
+    and still writes an outbound packet the moment the block is lifted on a
+    client machine. :mod:`dociq.verify.offline` records every attempt across
+    the whole guarded class and the assertion is now ``guard.clean`` — zero
+    attempts — with "OCR still worked" kept as a second, separate check so a
+    guard that broke OCR outright cannot read as a pass.
     """
-    real = socket.socket
+    from .verify import offline
 
-    class _Blocked(Exception):
-        pass
-
-    def _no_socket(*a, **k):
-        raise _Blocked("network access attempted during OCR")
-
-    from .ingest.extract import ocr_models_present
-
-    ok, msg = ocr_models_present()
+    ok, msg = ex.ocr_models_present()
     if not chk.expect(ok, "OCR models present locally", msg or str(ex.ocr_model_dir())):
         return
-    was_warm = ex._OCR_ENGINE is not None
-    ex._OCR_ENGINE = None  # force a genuine cold construction under the block
-    socket.socket = _no_socket  # type: ignore[assignment]
-    try:
-        from PIL import Image, ImageDraw
-        import numpy as np
+    chk.expect(not offline.audit_siblings(),
+               "every outbound-capable socket entry point is guarded or "
+               "accounted for",
+               f"{len(offline.enumerate_guarded_entry_points())} guarded: "
+               + ", ".join(offline.enumerate_guarded_entry_points()))
 
-        img = Image.new("L", (600, 120), 255)
-        ImageDraw.Draw(img).text((10, 40), "OFFLINE OCR CHECK 2024", fill=0)
-        arr = np.repeat(np.array(img)[:, :, None], 3, axis=2)
-        text, confs = ex._ocr_array(arr)
-        chk.expect(bool(confs),
-                   "OCR ran with sockets disabled, including cold engine "
-                   "construction" + (" (previously warm; reset for this "
-                   "check)" if was_warm else ""),
+    was_warm = ex._OCR_ENGINE is not None
+    ex._OCR_ENGINE = None  # force a genuine cold construction under the guard
+    confs: list = []
+    text = ""
+    failure: str | None = None
+    with offline.no_network() as guard:
+        try:
+            from PIL import Image, ImageDraw
+            import numpy as np
+
+            img = Image.new("L", (600, 120), 255)
+            ImageDraw.Draw(img).text((10, 40), "OFFLINE OCR CHECK 2024", fill=0)
+            arr = np.repeat(np.array(img)[:, :, None], 3, axis=2)
+            text, confs = ex._ocr_array(arr)
+        except Exception as exc:  # pragma: no cover — engine-level failure
+            failure = f"{type(exc).__name__}: {exc}"
+    # The permitted spawns are named on a PASS as well as a failure (ruling
+    # D-30). Reporting only `render()`'s first line would print "no outbound or
+    # child-process attempt" and silently drop the fact that one child process
+    # WAS permitted — and an exemption an operator cannot see in the selftest
+    # output is indistinguishable, to that operator, from a hole. This is the
+    # same defect one layer up that produced D-30: a check that reports a status
+    # and discards what the status was about.
+    permitted = ""
+    if guard.exempted:
+        names = sorted({e.exemption.describe() for e in guard.exempted})
+        permitted = (f" — {len(guard.exempted)} PERMITTED spawn(s) under a "
+                     f"named exemption: " + "; ".join(names))
+    chk.expect(guard.clean,
+               "ZERO outbound attempts during cold OCR engine construction "
+               "and inference" + (" (engine was warm; reset for this check)"
+                                  if was_warm else ""),
+               guard.render().splitlines()[0] + permitted)
+    if not guard.clean or guard.exempted:
+        print(guard.render())
+    if failure:
+        chk.fail("OCR ran under the network guard", failure)
+    else:
+        chk.expect(bool(confs), "OCR ran under the network guard",
                    f"{len(confs)} line(s), text {text[:40]!r}")
-    except _Blocked as exc:
-        chk.fail("OCR ran with sockets disabled", str(exc))
-    except Exception as exc:  # pragma: no cover — engine-level failure
-        chk.fail("OCR ran with sockets disabled", f"{type(exc).__name__}: {exc}")
-    finally:
-        socket.socket = real  # type: ignore[assignment]
+    loaded = offline.audit_model_fetch_imports()
+    chk.expect(not loaded,
+               "no fetch-client module was imported by this run",
+               ("none of " + ", ".join(offline.MODEL_FETCH_MODULES))
+               if not loaded else "LOADED: " + ", ".join(loaded))
+    # Disclosed, not failed: reportlab and python-pptx import stdlib transport
+    # at import time and never call it. The zero-attempt count above is the
+    # assurance; this line exists so the fact is on the record rather than
+    # rediscovered as a surprise.
+    chk.ok("stdlib transport imported by reportlab / python-pptx (disclosed)",
+           ", ".join(offline.audit_transport_imports()) or "none")
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="dociq.selftest")
     ap.add_argument("--runs", type=int, default=8,
                     help="determinism repetitions (default 8)")
+    ap.add_argument("--concurrency", type=int, default=1,
+                    help="how many determinism repetitions run AT ONCE "
+                         "(default 1 = sequential). Above 1 exercises the "
+                         "contended regime the 2026-08-02 acceptance run "
+                         "documented as behaving differently; the default stays "
+                         "sequential so the gate's wall clock is unchanged")
     ap.add_argument("--keep", action="store_true", help="keep the work directory")
     args = ap.parse_args(argv)
 
@@ -439,8 +488,15 @@ def main(argv: list[str] | None = None) -> int:
                    "; ".join(f"{k}" for k in sorted(man.excluded)))
 
         print("\nPrinciple 5 — determinism (over the REAL emit layer)")
-        det = determinism.prove(src, runs=args.runs, workdir=work / "det")
-        chk.expect(det.ok, f"outputs byte-identical over {args.runs} runs",
+        det = determinism.prove(src, runs=args.runs, workdir=work / "det",
+                                concurrency=args.concurrency)
+        # The regime is named in the check text, not only in the detail line: a
+        # gate that reports "byte-identical over 8 runs" without saying the runs
+        # were sequential is a claim wider than the thing measured.
+        regime = ("sequential" if args.concurrency <= 1
+                  else f"{args.concurrency} at a time, CONTENDED")
+        chk.expect(det.ok,
+                   f"outputs byte-identical over {args.runs} runs ({regime})",
                    det.render().splitlines()[0])
         if not det.ok:
             print(det.render())

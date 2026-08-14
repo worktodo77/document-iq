@@ -24,7 +24,7 @@ Track C may not import ``ingest``, ``identify``, ``docid``, ``profiles``,
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from dociq.contracts import RunConfig, RunResult
@@ -34,10 +34,37 @@ DIRECT_CONTEXT_TOKENS = 200_000
 """How much text a Claude Project holds in direct context before it falls back
 to retrieval mode — the reference row at the foot of the reduction waterfall.
 
-**UNCONFIRMED.** Alex has not ruled this threshold and it is not measured; 200K
-is a working placeholder. It is a single named constant precisely so that
-confirming it is a one-line change — the literal appears nowhere else, and no
-screen may inline it.
+**RULED D-21 (2026-08-01), NOT MEASURED.** 200,000 is the working figure Alex
+ruled to keep, rendered as a named, sourced reference line — "Claude Project
+direct context" — and never as a budget or a target (D-15: over-capacity is the
+expected state). It has NOT been confirmed against Anthropic's published limits.
+It is a single named constant so that a screen never inlines it, and
+``tests/test_gui_screen_states.py`` asserts no ``200_000`` appears anywhere
+under ``dociq/gui/``.
+
+**Confirming the figure is NOT a one-line change, and an earlier version of
+this docstring said it was.** Two further literals hold the same number for
+different jobs: ``verify.tokens.DIRECT_CONTEXT_TOKENS``, the default limit
+``TokenEstimate.capacity()`` falls back to, and
+``emit.handoff.ProjectLimits.direct_context_tokens``, the limit an upload
+package is checked against. They are deliberately separate — the seam's is a
+*display reference line*, the emit layer's is an *operator-configurable package
+constraint*, and collapsing them would let a caller's override of one silently
+move the other. Unifying them by importing this constant into ``verify`` and
+``emit`` would invert the dependency direction the pagemodel freeze protects,
+so the duplication is kept and disclosed rather than removed.
+
+But it means confirming 200,000 against Anthropic's published limits means
+changing three — and it once meant a package telling its operator *"Fits
+directly in a Claude Project"* while telling the recipient, in the README they
+actually read, *"About 181–197% of direct-context capacity — the Project will
+operate in retrieval (RAG) mode."* That defect is fixed in ``emit/handoff.py``
+(one verdict, one limit, regression-tested); this note exists so the next
+person to touch the figure knows how many places it lives in.
+
+Amendment A-13. The previous docstring said the threshold was unruled, which
+D-21 made false; the sentence was corrected rather than deleted, because what
+remains true — that it is unmeasured — is the part a reader needs.
 """
 
 
@@ -192,6 +219,23 @@ class ReductionLever:
     same column, in the same type, is a claim the run cannot support — and the
     reader has no way to tell which is which unless the row says so."""
 
+    rule: str = ""
+    """The profile's own matching rule for this section, verbatim (A-11b).
+
+    Attribution by rule *identity* — "profile X v1 → section 'photo_logs' →
+    DROP" — is true but tells the expert nothing about what actually matched.
+    This is the pattern itself, so the checklist can show what a DROP catches
+    rather than only that one exists."""
+
+    note: str = ""
+    """The profile's §6 notes field for this section: why it is dropped and who
+    approved it (A-11b).
+
+    This is what makes an omission defensible **in the expert's own words**
+    rather than in the tool's. It is carried verbatim and never paraphrased by
+    a widget — a GUI-authored rationale for an evidentiary omission would be the
+    tool putting words in the expert's mouth."""
+
     @property
     def locked(self) -> bool:
         return self.kind == LEVER_AUTOMATIC
@@ -214,15 +258,33 @@ class ReductionPlan:
 
     def with_toggled(self, key: str) -> "ReductionPlan":
         """A copy with one expert lever flipped. Locked levers ignore the call
-        rather than raising: a click on a locked row is a question, not a bug."""
+        rather than raising: a click on a locked row is a question, not a bug.
+
+        Rebuilt with :func:`dataclasses.replace`, NOT by re-listing the fields
+        positionally. The positional form was correct until A-11b added ``rule``
+        and ``note``, at which point every toggle would have silently dropped an
+        expert's stated reason for an omission — visible on screen before the
+        click and gone after it. Field-by-field reconstruction of a frozen
+        record is a defect waiting for the next field; ``replace`` cannot have
+        that failure mode. ``tests/test_view_models.py`` asserts the property
+        over every field rather than over the two this amendment happened to
+        add.
+
+        **And the fix missed its own method.** The amendment claimed all four
+        rebuild sites were corrected; the return statement below rebuilt
+        ``ReductionPlan`` positionally, inside the very method whose lesson was
+        that positional reconstruction of a frozen record is a defect waiting
+        for the next field. Lossless at 4 of 4 fields and silently lossy on the
+        fifth. Found by the rehearsal review, not by the probe written to catch
+        exactly this — which is why the probe now enumerates every frozen
+        presentation record in this module rather than the one record that
+        happened to fail first."""
         levers = tuple(
             lever if (lever.key != key or lever.locked)
-            else ReductionLever(lever.key, lever.label, lever.tokens,
-                                lever.pages, lever.kind, not lever.engaged,
-                                lever.estimated)
+            else replace(lever, engaged=not lever.engaged)
             for lever in self.levers
         )
-        return ReductionPlan(self.full_tokens, levers, self.capacity, self.basis)
+        return replace(self, levers=levers)
 
     @property
     def engaged(self) -> tuple[ReductionLever, ...]:
@@ -304,6 +366,139 @@ class RunOutcome:
     """Whether this run wrote the §7 deliverables. False for every non-complete
     termination — see :attr:`termination`."""
 
+    superseded_residue: tuple[str, ...] = ()
+    """``.dociq/`` trees a completed run could not delete (amendment A-16).
+
+    **The name predates what it carries.** It was written for the set-aside
+    trees of the publication protocol D-32 removed, and it is kept unchanged
+    because renaming a wired seam field is a contract amendment, which this
+    descope has no business making. What it now carries is
+    :func:`dociq.emit.paths.state_residue`'s answer on the success path: a
+    drained ``.dociq/staging/`` that could not be removed after every file had
+    been moved out of it.
+
+    **This is a success with a residue, not a failure**, and the screen must say
+    so in that order. The matter folder holds one complete, correct set; what
+    remains under ``.dociq/`` is empty directories. The run published. The
+    evidence is right.
+
+    It crosses the seam because **nobody opens ``.dociq/``**. Left unsurfaced it
+    is disk that fills for reasons no operator can see, and — worse for this
+    tool — a stale copy of a previous run's deliverables sitting on the matter
+    machine with nothing on screen having mentioned it.
+
+    Deliberately NOT routed through ``RunResult.warnings``: those become hashed
+    ``content``, and a run that hit a transient lock and one that did not would
+    then produce different bytes for the same evidence. That is criterion 7's
+    whole boundary, and this project has twice had to unpick something from
+    hashed content that belonged in the run record instead."""
+
+
+@dataclass(frozen=True, slots=True)
+class BatesProposal:
+    """A detected Bates format, put to the operator for confirmation (A-14).
+
+    §4 Stage 3 requires the format to be confirmed **with the operator** on
+    first detection. Sprint 2 shipped without this and the cost was total:
+    ``auto_confirm_bates`` is False for a GUI run, so the format never reached
+    CONFIRMED, so ``apply_bates_reported`` returned every document unchanged and
+    **a Bates-stamped production produced no locators at all**. The acceptance
+    harness reached criterion 4's headline figure at all only because it
+    constructs the confirmed decision directly — a code path the product could
+    not reach.
+
+    That figure is **92.130%, and it is a PROJECTION** (D-29): 568 native from
+    an earlier full-corpus measurement plus 29 OCR'd measured on a subset. The
+    last end-to-end **measured** full-corpus number is **91.512%**. Stated here
+    because this docstring is where a reader meets the number, and an earlier
+    draft of this very paragraph called it "measured" — the same defect the
+    rehearsal review had just caught in the decision register, reintroduced in
+    the commit that fixed it.
+
+    The record is deliberately not just the pattern. An operator cannot confirm
+    a regex; they can confirm *"iiCON000123, on 15 of 33 pages across 20
+    documents"*, which is what :attr:`example` and the coverage fields are for.
+    """
+
+    pattern: str
+    """The detected format, in the pipeline's own words."""
+
+    example: str = ""
+    """A real locator read off a real page — the thing the operator recognizes."""
+
+    documents: int = 0
+    pages: int = 0
+    coverage_pct: float = 0.0
+    """Share of sampled pages the format matched. Shown because a format that
+    matched a third of pages and one that matched all of them are different
+    propositions, and the operator is the only one who can say which is
+    acceptable for the matter in hand."""
+
+    alternatives: tuple[str, ...] = ()
+    """Other prefixes seen in the same matter. Non-empty means the production is
+    multi-series, which is exactly the condition D-28 refuses prefix repair on —
+    so the operator must see it rather than have it decided for them."""
+
+
+BatesConfirm = Callable[[BatesProposal], bool]
+"""Ask the operator to confirm a detected Bates format. ``True`` confirms.
+
+``None`` means *nobody was asked*, which is NOT the same as a refusal and must
+not be recorded as one: a headless run records a machine confirmation and says
+so, because a machine-confirmed pattern and an expert-confirmed one are not the
+same evidentiary object.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class PackageResult:
+    """What §8 Path A actually wrote (amendment A-12).
+
+    A presentation record, like :class:`Reconciliation` — the GUI never touches
+    ``emit`` and never writes a file, so this is how it learns what exists.
+
+    :attr:`scope_statement` is not decoration and not a caption. **D-20 rules
+    that Path A is proven on a deliberately scoped SUBSET**, so every package is
+    a subset unless it says otherwise, and downstream nobody can tell a subset
+    from a whole record by looking at it. The statement is written INTO the
+    package ahead of everything else; this field is the same sentence, so the
+    screen shows the operator exactly what the recipient will read rather than
+    a second sentence that could drift from it.
+    """
+
+    root: str
+    file_count: int
+    total_bytes: int
+    scope_statement: str
+    doc_count: int = 0
+
+    residue: tuple[str, ...] = ()
+    """Old package trees under ``.dociq/`` this build could not delete
+    (amendment A-17, from Codex third-fix-round finding A-7).
+
+    The package's exact analogue of :attr:`RunOutcome.superseded_residue`, and
+    it exists because A-16 did NOT cover it: ``emit.paths.state_residue()``
+    recognizes DocIQ's own state trees and not ``package_superseded``. So the field that was supposed to make undeletable
+    residue visible had a blind spot the exact width of the package path, and
+    the GUI said only "Upload package built" while a full stale copy of a
+    previous package sat on the matter machine.
+
+    Rendered success-FIRST, in that order, exactly as A-16 requires: the
+    package published, it is correct, and a named old copy remains. A partial
+    old package on a machine an operator uploads from is a retention problem and
+    a confusion problem, not a build failure, and calling it either of the other
+    two would be wrong."""
+
+    missing: tuple[str, ...] = ()
+    """Doc IDs the operator asked for that have no ``clean_text`` file (B5).
+
+    ``build_upload_package`` has always computed this, with a docstring saying
+    it is "reported rather than silently skipped… the operator is the only one
+    who can say whether it matters" — and then it reached no screen, because
+    there was nowhere on the seam to put it. A package quietly missing
+    documents the operator selected is the same failure class as a subset that
+    does not say it is a subset: the recipient cannot tell."""
+
 
 @dataclass(frozen=True, slots=True)
 class RunRequest:
@@ -347,7 +542,80 @@ class PipelineAPI(Protocol):
         request: RunRequest,
         on_progress: ProgressCallback,
         should_cancel: CancelCheck,
+        confirm_bates: "BatesConfirm | None" = None,
     ) -> RunOutcome:
+        """Run the pipeline.
+
+        ``confirm_bates`` carries §4 Stage 3's operator confirmation across the
+        seam (A-14). It is **optional with a None default** so that every
+        existing caller — the tests, the headless harnesses, the self-test —
+        keeps working unchanged; adding it as a required parameter would have
+        broken the only implementations that can demonstrate the seam holds.
+
+        ``None`` means no operator is available, and the pipeline then records a
+        *machine* confirmation in the run's warnings. It must never be recorded
+        as an operator confirmation, and a refusal must never be silently
+        treated as "no Bates present" — an unstamped production and a stamped
+        one whose format was declined are different facts about the record.
+        """
+        ...
+
+    def profile_rules(
+        self, profile: ProfileInfo
+    ) -> tuple[tuple[ReductionLever, ...], TokenBasis, str]:
+        """The profile's KEEP/DROP rules, what each is worth, and — in the
+        pipeline's own words — where the rules and the figures came from
+        (amendment A-11).
+
+        §6's checklist gates a run: the expert approves the omissions BEFORE the
+        pipeline commits to them, which means the rules must cross the seam
+        before there is a :class:`RunOutcome` to carry them. ``ProfileInfo``
+        says only HOW MANY rules a profile holds, never which.
+
+        Rows for a profile that has not been run against this matter carry
+        ``estimated=True`` — they are projections, not counts.
+
+        An adapter that cannot supply these returns ``((), TokenBasis(), "")``.
+        The screen renders that as a loud empty state that DISABLES approval,
+        because an empty checklist that says it is empty is safe and one that
+        looks complete is not.
+        """
+        ...
+
+    def matter_layout_note(self, outcome: RunOutcome) -> str:
+        """§8 Path B: what is in the matter folder and what to point Claude at,
+        in the pipeline's words, HAVING CHECKED (amendment A-12).
+
+        ``emit.handoff.expert_assist_layout`` inspects the folder rather than
+        describing it from memory, and that distinction is the whole point:
+        Path B's claim is that DocIQ writes where Expert Assist already reads,
+        and asserting that without looking is precisely the assertion worth
+        checking. Returns "" when the adapter did not look — the screen then
+        says so instead of implying a verified folder.
+        """
+        ...
+
+    def build_package(
+        self,
+        outcome: RunOutcome,
+        doc_ids: tuple[str, ...],
+        scope_statement: str,
+    ) -> PackageResult:
+        """§8 Path A: assemble ``upload_package/`` for exactly ``doc_ids``, with
+        ``scope_statement`` written into the package ahead of everything else
+        (amendment A-12, D-20).
+
+        Emit-layer work, deliberately: the GUI may not import ``emit``, and a
+        second copy of §8's "only these files are uploaded" rule in a widget
+        would fail by uploading DocIQ's own audit trail into the evidence
+        corpus.
+
+        An adapter that does not offer Path A may omit this method entirely
+        rather than returning an empty result — the GUI probes for it and
+        disables the action WITH THE REASON ON SCREEN. A stand-in silently
+        returning nothing would leave the operator pressing a button that
+        appears to work.
+        """
         ...
 
     def disclosure(self) -> str:
@@ -373,16 +641,25 @@ def set_pipeline(pipeline: PipelineAPI | None) -> None:
 
 
 def get_pipeline() -> PipelineAPI:
-    """THE SWAP POINT.
+    """THE SWAP POINT — **swapped** (Sprint 2).
 
-    Sprint 1 returns the mock. Sprint 2 returns the real adapter, and that is
-    the entire integration change on the GUI side.
+    Returns the real adapter, :class:`dociq.adapter.RealPipeline`. The mock is
+    still installable through :func:`set_pipeline`, and that is how
+    ``tests/test_gui_states.py`` and ``tests/test_view_models.py`` keep proving
+    the seam holds: they are the only thing that can, because they are the only
+    consumer that runs against both sides of it.
+
+    The import is function-local and stays that way. ``dociq.adapter`` imports
+    six pipeline packages, and ``tests/test_import_graph.py`` asserts that
+    importing the whole GUI pulls in none of them — a module-level import here
+    would make merely opening the window drag in ``rapidocr``, and would break
+    the freeze's Track-C rule at its only remaining seam.
     """
     if _OVERRIDE is not None:
         return _OVERRIDE
-    from dociq.gui.mock_pipeline import MockPipeline
+    from dociq.adapter import RealPipeline
 
-    return MockPipeline()
+    return RealPipeline()
 
 
 def config_from(request: RunRequest) -> RunConfig:
@@ -411,6 +688,9 @@ __all__ = [
     "TokenEstimate",
     "ReconciliationRow",
     "Reconciliation",
+    "PackageResult",
+    "BatesProposal",
+    "BatesConfirm",
     "RunOutcome",
     "RunRequest",
     "ProgressEvent",

@@ -508,3 +508,99 @@ def test_an_unparseable_email_date_header_is_disclosed():
         "the lost date anchor was not disclosed: " + repr(got.notes))
     # Disclosed, deliberately NOT marked: nothing DocIQ read is missing.
     assert not ex.has_evidence_marker(" ".join(got.notes))
+
+
+# --- B4: a dead OCR engine must not look like a few bad pages ---------------
+#
+# ``ocr_available()`` imports two modules and stats three .onnx files. It never
+# constructs the engine and never runs inference, so it cannot tell a working
+# engine from one that returns nothing on every page — and the Sprint-2 burn was
+# INSIDE inference, under ``_ocr_pdf_pages``'s per-page ``except Exception``.
+# The instance was fixed; the class — "presence stands in for capability, and
+# nothing looks at the run as a whole" — was not.
+#
+# Enumeration of what could have raised this and did not:
+#   ocr_available()                 presence only; passes a dead engine
+#   _ocr_pdf_pages per-page except  one page at a time; no run-level view
+#   per-document note               "N page(s) ... recovered no text", and the
+#                                   innocent reading (bad scans) comes first
+#   selftest's cold-construction    the real capability probe — and
+#     inference probe               `build.py --skip-verify` bypasses it
+# The backstop added here is the last one: a signal over the WHOLE run.
+
+
+def _ocr_page_rec(page_no, text, **kw):
+    from dociq.contracts import PageKind, PageRecord
+
+    from dociq.ingest.pagemodel import M_OCR_BLANK
+    if text.strip():
+        kw.setdefault("ocr_conf", 0.9)
+        kw.setdefault("ocr_line_count", 1)
+        return PageRecord(page_no=page_no, text=text, kind=PageKind.OCR, **kw)
+    # What make_page actually produces for a page routed to OCR that recovered
+    # nothing: EMPTY (the only kind allowed to carry no ocr_conf), with the
+    # disclosure note. Building it as PageKind.OCR would be testing a record
+    # the pipeline cannot emit.
+    kw.setdefault("notes", (M_OCR_BLANK,))
+    return PageRecord(page_no=page_no, text=text, kind=PageKind.EMPTY, **kw)
+
+
+def _doc_with(pages):
+    from tests.fixtures import document
+
+    return document("scan.pdf", tuple(pages), doc_id="LI-1")
+
+
+def test_a_run_where_every_ocr_attempt_recovered_nothing_raises_an_alarm():
+    """FAIL-BEFORE: nothing in the run said anything. Each document carried
+    "N page(s) routed to OCR recovered no text", which reads as bad scans."""
+    docs = (_doc_with([_ocr_page_rec(1, ""), _ocr_page_rec(2, "   ")]),
+            _doc_with([_ocr_page_rec(1, "")]))
+    assert ex.ocr_yield(docs) == (3, 0)
+    warning = ex.ocr_yield_warning(docs)
+    assert warning is not None
+    assert "3 page(s)" in warning
+    assert "dead OCR engine" in warning
+    assert "selftest" in warning
+
+
+def test_one_unreadable_page_among_readable_ones_raises_nothing():
+    """The alarm must MEAN "every attempt", or it fires on ordinary scans and
+    is turned off."""
+    docs = (_doc_with([_ocr_page_rec(1, "SITE INSTRUCTION 44"),
+                       _ocr_page_rec(2, "")]),)
+    assert ex.ocr_yield(docs) == (2, 1)
+    assert ex.ocr_yield_warning(docs) is None
+
+
+def test_a_run_that_never_used_ocr_raises_nothing():
+    from dociq.contracts import PageKind, PageRecord
+
+    docs = (_doc_with([PageRecord(page_no=1, text="native text",
+                                  kind=PageKind.NATIVE)]),)
+    assert ex.ocr_yield(docs) == (0, 0)
+    assert ex.ocr_yield_warning(docs) is None
+
+
+def test_a_page_ocr_could_not_even_rasterize_counts_as_an_attempt():
+    """It is an attempt that recovered nothing, and it is the exact shape a
+    dead engine produces. Counting only PageKind.OCR would have let a run in
+    which EVERY page failed to rasterize report no attempts and no alarm."""
+    from dociq.contracts import PageKind, PageRecord
+
+    failed = PageRecord(page_no=1, text="", kind=PageKind.NATIVE,
+                        notes=(f"{ex.M_OCR_PAGE} to rasterize or read",))
+    docs = (_doc_with([failed]),)
+    assert ex.ocr_yield(docs) == (1, 0)
+    assert ex.ocr_yield_warning(docs) is not None
+
+
+def test_ocr_available_no_longer_claims_a_capability_it_never_checks():
+    """Withdraw the CLAIM. The function is unchanged in behaviour on purpose —
+    it is a presence check and that is all it can be cheaply — but its docstring
+    is what a maintainer reads before deciding whether a further check is
+    needed, and it said nothing about the gap."""
+    doc = ex.ocr_available.__doc__ or ""
+    assert "PRESENCE check, not a capability check" in doc
+    assert "never runs inference" in doc
+    assert "ocr_yield" in doc
