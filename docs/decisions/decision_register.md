@@ -38,6 +38,50 @@ Consequence for the product's positioning, flagged: §7 and D-03 make the token 
 
 | D-19 | Tesseract / the D-01 bake-off | **Written off — rapidocr is the engine, full stop (Alex, 2026-07-31).** D-01's conditional swap and acceptance criterion 9's comparison are both **cancelled, not deferred**: there is no pending Tesseract evaluation, and no future sprint owes one. Tesseract was never installed (installing it needed authorization that was not given, and the build correctly refused to install it unilaterally), so the Sprint-1 bake-off is a **rapidocr characterization** rather than a comparison — and that is now its final form. Measured on 20 real scanned MPR pages from D-12's corpus: mean page confidence **0.8628**, 3 of 17 pages below the 85% review threshold, 37% of *lines* below it, **5.74 s/page**; 3 zero-character pages verified genuinely blank (uniform white, no embedded images) rather than misses. `docs/bakeoff/ocr_bakeoff_2026-07-30.md` stands as the methodology artifact D-01 asked for, retitled to what it is. **Consequence to state plainly rather than bury: §3 and §10's amended wording already name rapidocr, so nothing in the build changes — but the tool now ships an OCR engine chosen on in-house familiarity and ONNX bundling convenience, never benchmarked against an alternative on this corpus. If OCR quality is ever challenged, that is the honest answer, and "Tesseract is the industry-recognizable name for law-firm IT review" (the original argument for the bake-off) remains unaddressed.** | 2026-07-31 |
 
+## D-32 EXECUTED — the swap is descoped (Alex, 2026-08-06)
+
+**The sixth generation arrived, and the rule fired.** A second adversarial
+review of the widened dispatch returned **nine findings (F-A .. F-I)**, one
+MEDIUM-HIGH data-loss: `classify_swap` computes `landed` at `PHASE_PUBLISHED`
+and never reads it, so a completed swap whose root deliverables are then removed
+externally classifies as FINISH, records a set that is not there, and **deletes
+the only complete set on disk**. The old build had an analogous refusal; it was
+dropped without a replacement. And **F-C is F-3 left undone for its sibling** —
+the argument for removing the directory collapse was made at length while
+`_STALE_PATTERNS` still named `upload_package` as a bare directory, so the same
+mechanism deletes an analyst's file saved there mid-run.
+
+Alex ruled: **execute D-32 as written.**
+
+**Counted honestly.** The implementing agent flagged, unprompted and against its
+own interest, that F-7 was self-found *inside* the fix round rather than by a new
+review, and asked that the count not be settled quietly in its favour. It is not
+counted. The sixth generation is F-A..F-I, found by an independent review of the
+code that fixed the fifth.
+
+**Scope of the descope, decided at execution and open to correction:** what is
+removed is the **multi-phase set-aside / rollback state machine** — `classify_swap`,
+the `pending → aside → publishing → published` marker protocol, the durable
+`published_set.json` inventory, and the roll-back and roll-forward paths. What is
+**kept**, because each passed review on its own terms and none is part of the
+unsettled machinery:
+
+- **B-1's publication gate.** A red Stage 6 must still refuse to publish. That
+  finding was accepted and its fix is not what failed to converge.
+- **The package's assemble-in-`incoming` order** and A-6's recover-before-cleanup,
+  which the sixth review checked and found sound.
+- **A-16 / A-17's residue disclosure**, to whatever extent residue remains
+  possible under the simpler design.
+
+**What this costs, stated rather than discovered later.** Sprint-1's window is
+**wider**: a crash between removing the previous deliverables and writing the new
+ones leaves a partly-replaced matter folder. That is a bigger hole than any of
+the nine findings above. It is accepted because it is **one** hole, it is
+describable in a sentence, and six reviews have now shown the alternative hides
+holes rather than closing them. The release note and the Codex relay must say
+this in those words — a simpler design with a larger known risk, chosen over a
+complex one with a smaller unknown one.
+
 ## D-32 — the swap gets ONE more generation, then it is descoped (Alex, 2026-08-06)
 
 **The cap.** The output swap has now produced five consecutive generations of
