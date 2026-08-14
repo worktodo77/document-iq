@@ -89,3 +89,60 @@ R5 said B-8 was *"disclosed on every run … and pinned by a test that asserts t
 Unchanged: **no claim that the new design is correct**, only that it is small enough to enumerate. The publication window is wider than the design it replaced. No interrupted publication has ever been observed on a real matter. Criterion 4 **not met** (D-29, 92.130% is a projection; last measured full-corpus figure 91.512%). *"Accepted by a Claude Project"* never observed. **Nobody has driven the GUI with a mouse.** No inter-process lock on the matter folder. The offline-probe failures remain **unreproduced and unattributed** — your run passing them does not close them, and we are not treating it as closing them.
 
 Two process failures from this round, recorded because the next session reads this file: writing these fixes through the shell hit the CRLF/em-dash round-trip trap twice and produced a docstring-boundary error twice. Both were caught by the interpreter rather than by review.
+
+---
+
+# Addendum — your second round on A-8, B-9 and D-3 (`a59de74`)
+
+All three correct. Fixed at `f638a09`.
+
+## A-8 — fixed at the planner, because the pattern list was the wrong layer
+
+You are right, and the reason it recurred twice is worth stating: **both previous fixes edited `_STALE_PATTERNS`.** F-3 made `clean_text` a glob; A-8's first round made `upload_package` a glob. Both are edits to a list someone has to keep right, and `upload_package/*` still matches **directories**, so a pre-existing `upload_package/analyst_notes/` was planned whole.
+
+The invariant now lives in the loop that builds the plan — whatever a pattern matches, the plan names **files**, recursing into any directory:
+
+```python
+if path.is_file():
+    found.append(...)
+elif path.is_dir():
+    found.extend(child ... for child in sorted(path.rglob("*")) if child.is_file())
+```
+
+**Editing `_STALE_PATTERNS` can no longer reintroduce it.**
+
+**And you were right about our test.** It passed because every planned tree in the fixture was flat, so the `is_dir()` branch was never reached. A test whose fixture cannot contain the defect proves nothing — the same mistake as asserting a class by naming one member, one level further down. The fixture now creates a nested directory before the plan is taken.
+
+### One disagreement, recorded rather than quietly resolved
+
+Your reproduction had `analyst_notes/` present **before** planning, and reported `analyst_note_survives=False` as the defect. We have not implemented that property, and want to say so plainly rather than let a passing test imply we did.
+
+A file inside a **DocIQ-owned tree** at plan time is legitimately replaced — `clean_text/*` has always done exactly that, and a re-run that produced fewer documents must be able to clear the previous run's extras. What must survive is a file arriving **after** the plan, which is the TOCTOU property the whole finding rests on. The test now asserts precisely that: a pre-existing nested file is replaced; one written into the same nested directory **after** planning survives.
+
+If you intended the stronger property — **DocIQ never removes anything inside a subdirectory it did not create** — that is a different and larger change (the plan would need to distinguish DocIQ's own emitted names from everything else beneath a deliverable tree). Say so and we will implement it; we did not want to choose it silently in either direction.
+
+## B-9 — pinned, three ways
+
+Fixed in code and left unasserted; you are right that a fix without a fail-before is not a closed finding here. `test_a_locked_previous_deliverable_stops_publication_before_any_move` now asserts:
+
+1. the prohibition is **present** — `"Do NOT move the staged files into this folder by hand"`;
+2. the old advice is **absent** — `"or move the staged files into this folder by hand"`;
+3. the **safe** route is named — `"RE-RUN THE MATTER"`.
+
+Separately, because they can drift apart: someone could add the warning and leave the original sentence beneath it, and one assertion would still pass.
+
+Fail-before watched red with the old wording restored.
+
+## D-3 — the fourth occurrence
+
+Corrected. `emit/paths.py`'s **module** docstring said an interrupted publication leaves the complete new set under staging. There were four, we corrected three, and the miss is recorded in the docstring itself rather than silently repaired.
+
+## B-8
+
+Noted, and thank you for the explicit weighting. It stands as **open, accepted by owner ruling** — not mitigated, not closed. We will not present it otherwise at merge.
+
+## Verification
+
+- **8 consecutive full-suite runs green** on a machine verified quiet, plus a targeted pass. Recorded after they completed.
+- **Both fail-befores watched red**: the planner reverted to admitting directories, and the removal-failure message restored to its old advice.
+- `tools/check_amendments.py` green: 19 entries.
