@@ -1,5 +1,51 @@
 # Codex review #2, findings B-1 and B-2 — what was fixed and what was measured
 
+
+> ## ⚠️ SUPERSEDED BY D-32 (2026-08-06) — the publication protocol described here was DELETED
+>
+> The **multi-phase publication protocol this document describes no longer
+> exists.** Alex ruled **D-32** on 2026-08-06 after a sixth consecutive
+> generation of defects in the same subsystem, and it was executed on
+> `build/s2-descope`. Deleted, not disabled and not deferred:
+> `classify_swap` and its state table; the `pending → aside → publishing →
+> published` marker protocol in `.dociq/staging_ready.json`; the durable
+> `.dociq/published_set.json` inventory; the `.dociq/superseded*` set-aside
+> trees; and the roll-forward / roll-back recovery paths.
+>
+> **The rule that replaced it, in one sentence:** publication deletes the
+> previous run's deliverables from the matter folder and then moves each staged
+> file onto its final name, in that order, once — with no marker, no set-aside
+> copy, no inventory, and no recovery.
+>
+> **The window that rule leaves open:** a process that dies between the first
+> removal and the last move leaves the matter folder holding part of two runs'
+> evidence, **permanently** — nothing records that a publication was in
+> progress, and no later run detects or repairs it.
+>
+> What survived and is still true: §4 Stage 6's publication gate (B-1), the
+> package's own assemble-in-`incoming` / recover-before-cleanup order (A-6/A-7),
+> and residue disclosure (A-16/A-17) in the narrower form residue now takes.
+>
+> Current: `src/dociq/emit/paths.py`'s module docstring,
+> `docs/decisions/decision_register.md` ("D-32 EXECUTED"), and
+> `docs/verification/d32_descope_2026-08-06.md`.
+>
+> **B-1 SURVIVES IN FULL. B-2 IS GONE WITH THE MARKER IT WAS ABOUT.** This note
+> covers both, and they part company at D-32.
+>
+> **Still true:** a red §4 Stage 6 refuses to publish, routes through `_abort`,
+> produces `TerminalStatus.REFUSED` and `incomplete_run/`, and never touches the
+> deliverables already in the folder. That is why the staging directory survived
+> the descope at all — the gate audits the staged set.
+>
+> **Now false:** everything about the readiness marker. There is no
+> `staging_ready.json`, so there is no atomic write of it, no fail-closed read of
+> it, and no `PendingSwapUnreadable`. No state on disk can make a run
+> unpublishable before it starts, and the `unreadable-swap-marker` route was
+> deleted from `tests/test_publication_gate.py`'s unpublishable-route
+> enumeration rather than left to pass vacuously.
+
+
 **Branch:** `build/s2-fix-gate` (off `build/sprint-2` @ `e02c292`)
 **Date:** 2026-08-04
 **Scope:** B-1 and B-2 only. A-1, A-2 and B-3 are another agent's, on the GUI

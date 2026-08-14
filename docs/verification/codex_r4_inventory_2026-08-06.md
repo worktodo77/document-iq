@@ -1,5 +1,47 @@
 # B-8 — the set-aside plan is the complete previous set, and it leaves first
 
+
+> ## ⚠️ SUPERSEDED BY D-32 (2026-08-06) — the publication protocol described here was DELETED
+>
+> The **multi-phase publication protocol this document describes no longer
+> exists.** Alex ruled **D-32** on 2026-08-06 after a sixth consecutive
+> generation of defects in the same subsystem, and it was executed on
+> `build/s2-descope`. Deleted, not disabled and not deferred:
+> `classify_swap` and its state table; the `pending → aside → publishing →
+> published` marker protocol in `.dociq/staging_ready.json`; the durable
+> `.dociq/published_set.json` inventory; the `.dociq/superseded*` set-aside
+> trees; and the roll-forward / roll-back recovery paths.
+>
+> **The rule that replaced it, in one sentence:** publication deletes the
+> previous run's deliverables from the matter folder and then moves each staged
+> file onto its final name, in that order, once — with no marker, no set-aside
+> copy, no inventory, and no recovery.
+>
+> **The window that rule leaves open:** a process that dies between the first
+> removal and the last move leaves the matter folder holding part of two runs'
+> evidence, **permanently** — nothing records that a publication was in
+> progress, and no later run detects or repairs it.
+>
+> What survived and is still true: §4 Stage 6's publication gate (B-1), the
+> package's own assemble-in-`incoming` / recover-before-cleanup order (A-6/A-7),
+> and residue disclosure (A-16/A-17) in the narrower form residue now takes.
+>
+> Current: `src/dociq/emit/paths.py`'s module docstring,
+> `docs/decisions/decision_register.md` ("D-32 EXECUTED"), and
+> `docs/verification/d32_descope_2026-08-06.md`.
+>
+> **Specifically FALSE now, not merely out of date.** §2's state table is the
+> enumeration of a machine that no longer exists; there are no phases, no
+> marker and no set-aside axis to enumerate. B-8's fix is **withdrawn with the
+> inventory that carried it**: the set-aside plan is once again this build's own
+> output patterns only, so a deliverable an older build wrote under a retired
+> name is left in the matter folder permanently. That is disclosed in the run
+> log (`run.stale_outputs_plan_source`) and pinned by
+> `tests/test_emit_atomicity.py::test_a_retired_output_from_an_older_build_is_LEFT_in_the_folder`.
+> Every claim here about `published_set.json`, `covering_plan`, `PHASE_*`,
+> `SwapPlan`, `SwapState` or roll-back describes deleted code.
+
+
 **Repository:** `worktodo77/document-iq`
 **Branch:** `build/s2-r4-inventory` (off `build/sprint-2` @ `a4973b9`)
 **Gate:** D-10, Codex review #2, **fourth** fix round

@@ -100,6 +100,14 @@ _INCOMING_NAME = "package_staging"
 """Where a package is ASSEMBLED, under ``.dociq/``. Never the folder an operator
 uploads, and — since D-31 — never a sibling of it either.
 
+**D-31 is cited throughout this module and the citations are still live.** D-32
+(2026-08-06) descoped the MATTER folder's publication protocol, not this one. The
+package's delete-last publish, its ``.dociq/`` working directories and its
+recover-before-cleanup order were reviewed on their own terms (A-6, A-7), found
+sound by the sixth review generation, and are unchanged. A reader arriving from
+``emit/paths.py`` — where every D-31 mechanism was deleted — should not read
+these references as describing removed code.
+
 It used to be ``upload_package.incoming/`` **at the matter root**, next to the
 deliverables. That put a folder full of package-shaped files where §7 says only
 deliverables live, and where an operator glancing at the matter folder could
@@ -254,6 +262,11 @@ class UploadPackage:
     deleted the published name already holds the new, validated package. A
     failure of that last step therefore cannot make the package wrong; it leaves
     a complete stale copy of the PREVIOUS package under ``.dociq/``.
+
+    **Unaffected by D-32.** The descope removed the MATTER folder's publication
+    protocol; the package's own delete-last publish is a separate mechanism in
+    this module, it was reviewed on its own terms and found sound, and it stays
+    exactly as it is.
 
     It exists because the boolean was being discarded. ``_remove_tree`` was
     written to answer with the state of the disk precisely so that no caller

@@ -1,10 +1,23 @@
-"""Publication is REFUSED, not merely reported on — Codex review #2, B-1 and B-2.
+"""Publication is REFUSED, not merely reported on — Codex review #2, B-1.
+
+**D-32 (2026-08-06): B-1 SURVIVES IN FULL; B-2 IS GONE WITH THE MARKER IT WAS
+ABOUT.** The descope deleted the publication protocol — readiness marker, phase
+machine, durable inventory, set-aside trees, recovery — and every B-2 test in
+this file went with it, because there is nothing left to corrupt or to read
+fail-closed. The ``unreadable-swap-marker`` route was removed from the
+unpublishable-route enumeration rather than left to pass vacuously: no state on
+disk can make a run unpublishable before it starts.
+
+B-1's fix is untouched, and it is now the whole reason the staging directory
+still exists — the gate audits the STAGED set, so a red gate costs a run and
+never an evidence set. The B-2 section below is kept as the record of a finding
+whose fix was withdrawn with its subject matter.
 
 Two findings, one sentence between them: *state was computed and then not acted
 on*.
 
 **B-1.** §4 Stage 6 computed page accounting and built the manifest, and then
-called ``mark_ready`` and ``commit_staging`` unconditionally. A red set replaced
+published unconditionally. A red set replaced
 the last good deliverables, and ``PipelineOutcome.ok`` reported the fact
 afterwards to an in-memory caller who need never look. The heading said "the
 gates" and the Sprint-2 relay said the set was "gated there, marked, then
@@ -140,9 +153,9 @@ GATES = {
 
 @pytest.mark.parametrize("gate", sorted(GATES))
 def test_a_red_stage_6_gate_refuses_to_publish(tmp_path, monkeypatch, gate):
-    """FAIL-BEFORE: with the unconditional ``mark_ready`` / ``commit_staging``
-    pair restored, every one of these three publishes the red set over the good
-    one and returns ``ok=False`` about a folder that has already been replaced.
+    """FAIL-BEFORE: with the unconditional ``publish_staging`` call restored,
+    every one of these three publishes the red set over the good one and returns
+    ``ok=False`` about a folder that has already been replaced.
 
     What is asserted is deliberately not "``ok`` is False" — that was true
     before the fix and is exactly the observation Codex refused to accept as a
@@ -165,11 +178,8 @@ def test_a_red_stage_6_gate_refuses_to_publish(tmp_path, monkeypatch, gate):
     assert _deliverables(out) == before, (
         f"the {gate} gate went red and the matter folder changed anyway; the "
         f"last good deliverables must survive a refused run byte for byte")
-    assert not emit_paths.pending_swap(OutputLayout.at(out)), (
-        "a refused run wrote a readiness marker — the one thing that "
-        "authorizes deleting the previous run's files")
     assert not (out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME).exists(), (
-        "the refused set was left staged, where a later hand could mark it ready")
+        "the refused set was left staged, where a later hand could publish it")
 
 
 @pytest.mark.parametrize("gate", sorted(GATES))
@@ -242,213 +252,15 @@ def test_the_gate_does_not_reach_the_hashed_content(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# B-2 — the marker. Atomic to write, fail-closed to read.
-# ---------------------------------------------------------------------------
-
-
-def test_a_crash_while_writing_the_marker_leaves_no_marker(tmp_path, monkeypatch):
-    """FAIL-BEFORE: with ``mark_ready`` calling ``write_text_deterministic``
-    directly, this leaves ``staging_ready.json`` holding half a JSON document —
-    which is the exact input the permissive reader then guessed through."""
-    out = tmp_path / "matter"
-    layout = OutputLayout.at(out).ensure()
-
-    real_open = emit_paths.Path.open
-
-    def die_halfway(self, *a, **kw):
-        fh = real_open(self, *a, **kw)
-        if self.name.startswith(emit_paths.MARKER_NAME):
-            real_write = fh.write
-
-            def half(text):
-                real_write(text[: len(text) // 2])
-                raise KeyboardInterrupt("the process was killed mid-write")
-
-            fh.write = half  # type: ignore[method-assign]
-        return fh
-
-    monkeypatch.setattr(emit_paths.Path, "open", die_halfway)
-    with pytest.raises(KeyboardInterrupt):
-        emit_paths.mark_ready(layout, ("document_index.csv",))
-    monkeypatch.undo()
-
-    state = out / emit_paths.STATE_DIRNAME
-    assert not emit_paths.pending_swap(layout), (
-        "a half-written marker exists, and its existence authorizes deletion")
-    litter = [p.name for p in state.glob("*") if p.is_file()]
-    assert litter == [], f"the failed write left {litter} beside the marker"
-
-
-def test_a_marker_that_survives_is_always_complete(tmp_path):
-    """The other half of the same property: what is on disk after a successful
-    write is the whole document, and it round-trips."""
-    out = tmp_path / "matter"
-    layout = OutputLayout.at(out).ensure()
-    marker = emit_paths.mark_ready(layout, ("document_index.csv", "clean_text"))
-    payload = json.loads(marker.read_text(encoding="utf-8"))
-    assert payload["superseded"] == ["clean_text", "document_index.csv"]
-    assert payload["staging"] == emit_paths.STAGING_DIRNAME
-    assert marker.read_bytes().endswith(b"}\n")
-
-
-@pytest.mark.parametrize(
-    "corrupt",
-    [
-        pytest.param('{"staging": "staging", "superseded": ["clean',
-                     id="truncated-mid-write"),
-        pytest.param("", id="zero-length"),
-        pytest.param('{"staging": "staging"}', id="no-superseded-key"),
-        pytest.param('{"staging": "staging", "superseded": "clean_text"}',
-                     id="superseded-not-a-list"),
-        pytest.param('{"staging": "staging", "superseded": [17]}',
-                     id="entry-not-a-string"),
-        pytest.param('["staging"]', id="top-level-not-an-object"),
-        pytest.param('{"staging": "staging", "superseded": ["../../victim.txt"]}',
-                     id="entry-escapes-the-matter-folder"),
-        pytest.param('{"staging": "staging", "superseded": ["C:/Windows/notepad.exe"]}',
-                     id="entry-is-absolute"),
-    ],
-)
-def test_an_unreadable_marker_moves_and_deletes_nothing(tmp_path, corrupt):
-    """FAIL-BEFORE: with ``except (OSError, ValueError): superseded = ()``
-    restored, the first six of these move the staged set into the matter folder,
-    delete the marker, and report success.
-
-    The last two are the same defect one layer down and were never handled at
-    all: a supersede entry was joined to the matter root and unlinked unchecked,
-    so a corrupt or hand-edited marker could delete outside the output folder.
-    """
-    out = tmp_path / "matter"
-    layout = OutputLayout.at(out).ensure()
-    (out / "document_index.csv").write_text("Doc ID\n", encoding="utf-8", newline="")
-    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
-    (staging / "clean_text").mkdir(parents=True)
-    (staging / "sources.json").write_text("{}\n", encoding="utf-8", newline="")
-    victim = tmp_path / "victim.txt"
-    victim.write_text("not DocIQ's to delete\n", encoding="utf-8", newline="")
-
-    marker = out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME
-    marker.write_text(corrupt, encoding="utf-8", newline="")
-    before = _deliverables(out)
-
-    with pytest.raises(emit_paths.PendingSwapUnreadable) as caught:
-        emit_paths.commit_staging(layout)
-
-    assert "REFUSING" in str(caught.value)
-    assert emit_paths.STAGING_DIRNAME in str(caught.value), (
-        "the refusal must name where the complete set is waiting")
-    assert _deliverables(out) == before, "the refused swap changed the folder"
-    assert marker.is_file(), "the refused swap deleted the evidence of itself"
-    assert (staging / "sources.json").is_file(), (
-        "the refused swap moved the staged set anyway")
-    assert victim.is_file(), "a marker entry deleted a file outside the matter folder"
-
-
-def test_mark_ready_refuses_to_record_an_escaping_supersede_entry(tmp_path):
-    """Checked on the way in as well as on the way out. The marker is the only
-    input to a deletion, so both ends of it are validated rather than one."""
-    layout = OutputLayout.at(tmp_path / "matter").ensure()
-    for bad in ("../victim.txt", "C:/Windows/notepad.exe", "/etc/passwd", ""):
-        with pytest.raises(ValueError):
-            emit_paths.mark_ready(layout, (bad,))
-    assert not emit_paths.pending_swap(layout), (
-        "a marker was written before its entries were validated")
-
-
-def test_a_truncated_marker_cannot_publish_a_mixed_set_on_a_shrinking_rerun(tmp_path):
-    """Codex's scenario, at full size and end to end.
-
-    Run 1 publishes the whole fixture corpus. Run 2 legitimately SHRINKS the
-    output — a smaller source set, so fewer ``clean_text/`` files — finishes
-    staging, and dies while writing the marker. The next run must not be able to
-    turn that into a folder holding run 2's files beside run 1's leftovers.
-
-    FAIL-BEFORE: with the permissive read restored, the next run moves run 2's
-    files over the destination, leaves every ``clean_text/`` file run 1 wrote
-    that run 2 did not, deletes the marker, and reports a published, ``ok`` run.
-    The folder then carries a manifest describing a set it is not.
-    """
-    out = tmp_path / "matter"
-    big = _run(out)
-    assert big.published
-    before = _deliverables(out)
-    big_texts = {r for r in before if r.startswith("clean_text/")}
-
-    # A genuinely smaller run: two source documents instead of fourteen.
-    small_src = tmp_path / "small_source"
-    small_src.mkdir()
-    for name in ("08_daily_log.txt", "07_ncr_log.csv"):
-        shutil.copy2(FIXTURES / name, small_src / name)
-    small_out = tmp_path / "small"
-    assert _run(small_out, source=small_src).published
-    small_texts = {
-        p.relative_to(small_out).as_posix()
-        for p in (small_out / "clean_text").rglob("*") if p.is_file()
-    }
-    assert len(small_texts) < len(big_texts), (
-        "the rerun did not actually shrink, so this proves nothing")
-
-    # Run 2 stages its complete, smaller set — and dies writing the marker.
-    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
-    shutil.copytree(small_out, staging,
-                    ignore=shutil.ignore_patterns(emit_paths.STATE_DIRNAME))
-    marker = out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME
-    marker.write_text('{"staging": "staging", "superseded": ["clean_te',
-                      encoding="utf-8", newline="")
-
-    # The recovery IN ISOLATION first, because that is where the mixing happens
-    # and an end-to-end assertion cannot see it: run 3 walks the same source as
-    # run 1, so it republishes the same seventeen files either way and the
-    # folder-comparison below is satisfied by a mixed set and a clean one alike.
-    # Measured on the pre-fix code at this point: seventeen clean_text files
-    # visible, a manifest claiming four, fifteen stale survivors, marker deleted.
-    with pytest.raises(emit_paths.PendingSwapUnreadable):
-        emit_paths.recover_pending(OutputLayout.at(out))
-    mid = {
-        p.relative_to(out).as_posix()
-        for p in (out / "clean_text").rglob("*") if p.is_file()
-    }
-    assert mid == big_texts, (
-        f"the recovery published a MIXED set: {len(mid)} clean_text files "
-        f"visible, from a run that produced {len(small_texts)}")
-
-    third = _run(out)
-
-    assert not third.published, "a run published on top of an unreadable swap"
-    assert third.termination.status is TerminalStatus.BLOCKED
-    assert "REFUSING" in third.termination.reason
-    assert _deliverables(out) == before, (
-        "the visible matter folder is no longer the last good set — the mixed "
-        "set this test exists to forbid")
-    assert marker.is_file(), "the marker that records the pending swap was deleted"
-    assert (staging / "sources.json").is_file(), (
-        "the complete staged set was discarded by a run that refused to use it")
-
-    # And it is recoverable rather than a dead end: a readable marker puts the
-    # folder back on a road the code can reason about, and the shrink then
-    # happens properly — run 1's extra clean_text files are REMOVED, not left.
-    superseded = sorted(
-        p.relative_to(out).as_posix()
-        for p in out.iterdir()
-        if p.name not in (emit_paths.STATE_DIRNAME, "doc_ids_issued.json")
-    )
-    emit_paths.mark_ready(OutputLayout.at(out), tuple(superseded))
-    assert emit_paths.recover_pending(OutputLayout.at(out))
-    survived = {
-        p.relative_to(out).as_posix()
-        for p in (out / "clean_text").rglob("*") if p.is_file()
-    }
-    assert survived == small_texts, (
-        f"the roll-forward left {sorted(survived - small_texts)} behind from "
-        f"the larger run")
-
-
-# ---------------------------------------------------------------------------
-# The CLASS, not the two repros
+# The CLASS, not the repro
 # ---------------------------------------------------------------------------
 #
-# B-1 and B-2 are one sentence: state was computed and then not acted on. The
-# two probes below hold the class rather than the instances.
+# B-1 is one sentence: state was computed and then not acted on. The two probes
+# below hold the class rather than the instance.
+#
+# B-2's marker probes are GONE (D-32) — with the readiness marker they tested.
+# They are deleted rather than adapted because there is nothing left to adapt
+# them to: publication is a direct call that writes no state to disk.
 
 
 _REAL_MF_BUILD = mf.build
@@ -463,16 +275,6 @@ def _force_no_log_hash(monkeypatch, out):
         return man
 
     monkeypatch.setattr("dociq.pipeline.mf.build", build)
-    return {}
-
-
-def _force_unreadable_marker(monkeypatch, out):
-    layout = OutputLayout.at(out).ensure()
-    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
-    staging.mkdir(parents=True, exist_ok=True)
-    (staging / "sources.json").write_text("{}\n", encoding="utf-8", newline="")
-    (out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME).write_text(
-        '{"superseded": ["clean', encoding="utf-8", newline="")
     return {}
 
 
@@ -491,7 +293,9 @@ UNPUBLISHABLE = {
     "gate-unclassified": lambda mp, out: (_force_unclassified(mp), {})[1],
     "gate-corpus-order": lambda mp, out: (_force_out_of_order(mp), {})[1],
     "gate-log-content-hash": _force_no_log_hash,
-    "unreadable-swap-marker": _force_unreadable_marker,
+    # `unreadable-swap-marker` is GONE with the marker it corrupted (D-32).
+    # There is no longer any folder state that can make a run unpublishable
+    # before it starts — a route REMOVED, not a route missed.
 }
 
 
@@ -531,13 +335,17 @@ def test_the_swap_is_unreachable_without_passing_the_gate(tmp_path):
 
     The runtime invariant above proves the gate WORKS; this proves it is still
     in the road. They fail differently: deleting the ``if refusals`` block
-    breaks both, but reordering the gate below ``mark_ready`` — which is exactly
-    what the pre-fix code was — could leave a red set published while every
-    forced-gate test above still passed by luck of what it asserted.
+    breaks both, but reordering the gate below ``publish_staging`` — which is
+    exactly what the pre-fix code was — could leave a red set published while
+    every forced-gate test above still passed by luck of what it asserted.
 
     It is deliberately a source check and not a coverage trick: there is no
-    runtime observation that distinguishes "the swap ran after the gate" from
-    "the swap ran, and the gate happened to be green".
+    runtime observation that distinguishes "publication ran after the gate" from
+    "publication ran, and the gate happened to be green".
+
+    **This probe is why staging survived D-32.** The descope deleted the
+    publication protocol and kept exactly one thing from it — the staged set the
+    gate audits — so this ordering is the whole of B-1's fix now.
     """
     import ast
     import inspect
@@ -560,133 +368,15 @@ def test_the_swap_is_unreachable_without_passing_the_gate(tmp_path):
         isinstance(s, ast.Return) and isinstance(s.value, ast.Call)
         and getattr(s.value.func, "id", "") == "_refuse_publication"
         for s in ast.walk(n)))
-    mark = index_of(lambda n: calls(n, "mark_ready"))
-    commit = index_of(lambda n: calls(n, "commit_staging"))
+    publish = index_of(lambda n: calls(n, "publish_staging"))
 
     assert gate >= 0, (
         "pipeline.run has no top-level gate that returns _refuse_publication — "
         "Stage 6 is computing checks and publishing regardless (Codex B-1)")
-    assert mark >= 0 and commit >= 0, "the swap left pipeline.run's top level"
-    assert gate < mark < commit, (
-        f"the swap is not downstream of the gate: gate at statement {gate}, "
-        f"mark_ready at {mark}, commit_staging at {commit}")
-
-
-# ---------------------------------------------------------------------------
-# The defect the repetition found
-# ---------------------------------------------------------------------------
-
-
-def test_a_transient_lock_on_the_marker_is_retried_not_refused(tmp_path):
-    """FOUND BY REPETITION, on run 6 of 30 of this very file.
-
-    An ordinary run went red with ``PermissionError`` reading the marker DocIQ
-    had written one statement earlier — a Windows on-access scanner holding a
-    transient deny-write, not corruption. The B-2 fix had turned that into a
-    blocked run.
-
-    The defect is older than the fix. Under the permissive read B-2 replaced,
-    that same ``PermissionError`` was swallowed into ``superseded = ()``, so an
-    antivirus scan at the wrong moment produced B-2's mixed evidence set on a
-    real matter folder with no crash involved at all. This is the finding
-    reached by the ordinary path.
-    """
-    out = tmp_path / "matter"
-    layout = OutputLayout.at(out).ensure()
-    (out / "document_index.csv").write_text("Doc ID\n", encoding="utf-8",
-                                            newline="")
-    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
-    (staging / "clean_text").mkdir(parents=True)
-    (staging / "sources.json").write_text("{}\n", encoding="utf-8", newline="")
-    emit_paths.mark_ready(layout, ("document_index.csv",))
-
-    real_read = emit_paths.Path.read_text
-    attempts = {"n": 0}
-
-    def locked_twice(self, *a, **kw):
-        if self.name == emit_paths.MARKER_NAME:
-            attempts["n"] += 1
-            if attempts["n"] <= 2:
-                raise PermissionError(13, "Permission denied", str(self))
-        return real_read(self, *a, **kw)
-
-    mp = pytest.MonkeyPatch()
-    mp.setattr(emit_paths.Path, "read_text", locked_twice)
-    try:
-        removed = emit_paths.commit_staging(layout)
-    finally:
-        mp.undo()
-
-    assert attempts["n"] == 3, "the transient lock was not retried"
-    assert removed == ("document_index.csv",)
-    assert (out / "sources.json").is_file(), "the swap did not complete"
-
-
-def test_a_lock_that_never_clears_still_fails_closed(tmp_path):
-    """The retry is a retry, not a way out. When the file genuinely cannot be
-    read, the refusal is the same one B-2 requires."""
-    out = tmp_path / "matter"
-    layout = OutputLayout.at(out).ensure()
-    (out / "document_index.csv").write_text("Doc ID\n", encoding="utf-8",
-                                            newline="")
-    staging = out / emit_paths.STATE_DIRNAME / emit_paths.STAGING_DIRNAME
-    staging.mkdir(parents=True)
-    (staging / "sources.json").write_text("{}\n", encoding="utf-8", newline="")
-    emit_paths.mark_ready(layout, ("document_index.csv",))
-    before = _deliverables(out)
-
-    real_read = emit_paths.Path.read_text
-
-    def always_locked(self, *a, **kw):
-        if self.name == emit_paths.MARKER_NAME:
-            raise PermissionError(13, "Permission denied", str(self))
-        return real_read(self, *a, **kw)
-
-    mp = pytest.MonkeyPatch()
-    mp.setattr(emit_paths.Path, "read_text", always_locked)
-    try:
-        with pytest.raises(emit_paths.PendingSwapUnreadable):
-            emit_paths.commit_staging(layout)
-    finally:
-        mp.undo()
-
-    assert _deliverables(out) == before
-    assert (out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME).is_file()
-
-
-def test_corrupt_json_is_not_retried(tmp_path):
-    """Transient I/O and corrupt state are different things.
-
-    Re-reading the same bytes cannot make invalid JSON valid, so a retry there
-    would be a delay dressed up as a check — and a 2.5-second one on every
-    hand-edited marker. Asserted by counting the reads, because the only visible
-    symptom of getting this wrong is that the suite is slower.
-    """
-    out = tmp_path / "matter"
-    layout = OutputLayout.at(out).ensure()
-    marker = out / emit_paths.STATE_DIRNAME / emit_paths.MARKER_NAME
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text('{"superseded": ["clean', encoding="utf-8", newline="")
-
-    real_read = emit_paths.Path.read_text
-    reads = {"n": 0}
-
-    def counted(self, *a, **kw):
-        if self.name == emit_paths.MARKER_NAME:
-            reads["n"] += 1
-        return real_read(self, *a, **kw)
-
-    mp = pytest.MonkeyPatch()
-    mp.setattr(emit_paths.Path, "read_text", counted)
-    try:
-        with pytest.raises(emit_paths.PendingSwapUnreadable):
-            emit_paths.commit_staging(layout)
-    finally:
-        mp.undo()
-
-    assert reads["n"] == 1, (
-        f"a corrupt marker was read {reads['n']} times — content corruption is "
-        f"not transient and must not be retried")
+    assert publish >= 0, "publication left pipeline.run's top level"
+    assert gate < publish, (
+        f"publication is not downstream of the gate: gate at statement {gate}, "
+        f"publish_staging at {publish}")
 
 
 # ---------------------------------------------------------------------------
@@ -1003,14 +693,14 @@ _NOT_DURABLE = {
     # other. There is no value here to record, rather than a value being
     # dropped.
     "stale_removed": "a refused run replaced nothing, so there is nothing to record",
-    # D-31. A refused run never reaches the swap, so it never sets anything
-    # aside and can leave no residue of its own. Residue left by an EARLIER run
-    # IS recorded, in `run.superseded_residue_before_swap` -- but only on a run
-    # that got as far as building a log, which a refused run does not do twice.
+    # A refused run never reaches publication, so it can leave no residue of
+    # its own. Residue left by an EARLIER run IS recorded, in
+    # `run.state_residue_before_run` -- but only on a run that got as far as
+    # building a log, which a refused run does not do twice.
     "superseded_residue": (
-        "a refused run never swaps, so it sets nothing aside and leaves no "
-        "residue; an earlier run's residue is recorded by the run that observes "
-        "it in `run.superseded_residue_before_swap`"
+        "a refused run never publishes, so it leaves no residue of its own; an "
+        "earlier run's residue is recorded by the run that observes it in "
+        "`run.state_residue_before_run`"
     ),
 }
 

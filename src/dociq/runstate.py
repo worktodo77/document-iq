@@ -13,8 +13,11 @@ run's deliverables and wrote an empty set over them, so a failed disk check
 destroyed the last good reduction of a matter. That is provenance loss.
 
 *(Both sentences are past tense on purpose. The purge itself is gone as well as
-the status defect: under D-31 Stage 5 renames the previous set aside and deletes
-it only after the new one is in place — see :func:`dociq.emit.paths.commit_staging`.)*
+the status defect: a run that does not complete never reaches Stage 5's
+publication at all, so the previous set is untouched. The set-aside protocol
+that once stood behind this sentence was removed by D-32 — what guarantees it
+now is the abort path, not a rename. See :func:`dociq.emit.paths.publish_staging`
+for the window that remains once publication does start.)*
 
 This module is the fix's vocabulary: one small record and the operator-facing
 prose that goes with it.

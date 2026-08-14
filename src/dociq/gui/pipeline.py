@@ -367,15 +367,20 @@ class RunOutcome:
     termination — see :attr:`termination`."""
 
     superseded_residue: tuple[str, ...] = ()
-    """Set-aside trees under ``.dociq/`` a completed swap could not delete
-    (amendment A-16, from ruling D-31).
+    """``.dociq/`` trees a completed run could not delete (amendment A-16).
+
+    **The name predates what it carries.** It was written for the set-aside
+    trees of the publication protocol D-32 removed, and it is kept unchanged
+    because renaming a wired seam field is a contract amendment, which this
+    descope has no business making. What it now carries is
+    :func:`dociq.emit.paths.state_residue`'s answer on the success path: a
+    drained ``.dociq/staging/`` that could not be removed after every file had
+    been moved out of it.
 
     **This is a success with a residue, not a failure**, and the screen must say
-    so in that order. Under D-31 the swap renames the previous set aside,
-    renames the staged set into place, and deletes the set-aside tree LAST — so
-    a failure of that last step leaves the matter folder holding one complete,
-    correct set, and ``.dociq/`` holding a clearly-named stale one. The run
-    published. The evidence is right.
+    so in that order. The matter folder holds one complete, correct set; what
+    remains under ``.dociq/`` is empty directories. The run published. The
+    evidence is right.
 
     It crosses the seam because **nobody opens ``.dociq/``**. Left unsurfaced it
     is disk that fills for reasons no operator can see, and — worse for this
@@ -472,9 +477,8 @@ class PackageResult:
     (amendment A-17, from Codex third-fix-round finding A-7).
 
     The package's exact analogue of :attr:`RunOutcome.superseded_residue`, and
-    it exists because A-16 did NOT cover it: ``emit.paths.superseded_residue()``
-    recognizes matter-swap directories named ``superseded*`` and not
-    ``package_superseded``. So the field that was supposed to make undeletable
+    it exists because A-16 did NOT cover it: ``emit.paths.state_residue()``
+    recognizes DocIQ's own state trees and not ``package_superseded``. So the field that was supposed to make undeletable
     residue visible had a blind spot the exact width of the package path, and
     the GUI said only "Upload package built" while a full stale copy of a
     previous package sat on the matter machine.

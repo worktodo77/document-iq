@@ -49,6 +49,18 @@ applied centrally rather than worked around.
    output folder.** Distinct from the aborted-walk case that B-1 closed; it
    needs write-to-staging-then-swap.
 
+   > **CLOSED IN PART, AND THE REMAINDER ACCEPTED — D-32, 2026-08-06.** The
+   > *emit* half is closed: deliverables are built in `.dociq/staging/` and a
+   > crash anywhere in Stage 5 leaves the previous run byte-for-byte intact. The
+   > *swap* half is **not** closed and will not be. Six review generations of
+   > defects in the publication protocol led Alex to descope it; publication now
+   > deletes the previous deliverables and then moves the staged set in, with no
+   > marker, no set-aside copy and no recovery, so **a crash between the first
+   > removal and the last move leaves a partly-replaced output folder
+   > permanently, and nothing detects it.** That is a narrower window than this
+   > item described (it is publication, not the whole of emit) and a permanent
+   > one. See `docs/verification/d32_descope_2026-08-06.md`.
+
 ## Review history
 
 Two Codex rounds, no A findings in either.

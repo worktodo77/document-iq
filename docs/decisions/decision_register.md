@@ -82,6 +82,40 @@ holes rather than closing them. The release note and the Codex relay must say
 this in those words — a simpler design with a larger known risk, chosen over a
 complex one with a smaller unknown one.
 
+### DONE, on `build/s2-descope` (2026-08-06)
+
+**The rule, in one sentence:** *publication deletes the previous run's
+deliverables from the matter folder and then moves each staged file onto its
+final name, in that order, once — with no marker, no set-aside copy, no
+inventory, and no recovery.*
+
+**The window, stated where the ruling asked for it:** a process that dies between
+the first removal and the last move leaves the matter folder holding part of two
+runs' evidence, **permanently** — nothing on disk records that a publication was
+in progress, and no later run detects or repairs it. On the measured corpus that
+window is thousands of file operations wide, so **seconds, not milliseconds**.
+The complete new set survives under `.dociq/staging/` and the next run discloses
+having found it (`run.state_residue_before_run`), which is the only trace.
+
+`emit/paths.py` went **1,827 → 568 lines**. Kept, each on its own terms: B-1's
+publication gate (and therefore the staging directory it audits), the package's
+own publish order (A-6/A-7), residue disclosure (A-16) in the narrower form
+residue now takes, and criterion 7.
+
+**Two things the scope note did not anticipate, decided at execution and open to
+correction.** First, **B-8's fix is withdrawn with the inventory that carried
+it** — the set-aside plan is again this build's own output patterns only, so a
+deliverable an older build wrote under a retired name stays in the folder
+permanently. It is disclosed in every run log and pinned by a test that asserts
+the file *survives*. Second, **A-16's seam field keeps a name that no longer
+describes its contents** (`RunOutcome.superseded_residue`); renaming a wired seam
+field is a contract amendment this descope had no authority to make, so the
+mismatch is explained at both ends and flagged rather than fixed. **No amendment
+was orphaned and no registry entry was deleted.**
+
+Full record, including everything nothing supports:
+`docs/verification/d32_descope_2026-08-06.md`.
+
 ## D-32 — the swap gets ONE more generation, then it is descoped (Alex, 2026-08-06)
 
 **The cap.** The output swap has now produced five consecutive generations of

@@ -1,5 +1,13 @@
 """A failed package build never leaves a CURRENT partial folder — A-4, then A-5.
 
+**D-32 (2026-08-06) did NOT touch this file, and that is a decision rather than
+an oversight.** The descope removed the MATTER folder's publication protocol.
+The package's own delete-last publish is a separate mechanism in
+``dociq/emit/handoff.py``; the sixth review generation checked it and found it
+sound, so the D-31 references below still describe live code. A reader arriving
+from ``tests/test_emit_atomicity.py`` — where the equivalent machinery was
+deleted — should not assume the same happened here.
+
 **D-31 (2026-08-05) rewrote the second half of this file.** The publish order it
 tested — move the earlier package aside, DELETE it, then rename the new one into
 place — was found to have one more window (A-5): ``shutil.rmtree`` deletes part
