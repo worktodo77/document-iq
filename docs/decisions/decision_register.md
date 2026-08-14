@@ -72,6 +72,49 @@ difference. This was contention, start to finish.
    unattributed** rather than closed. That is recorded honestly in §9.4 of
    `docs/verification/d32_descope_2026-08-06.md` and remains open.
 
+## MERGE GATE PASSED — Codex review #2, 2026-08-14 at `57c7cc0`
+
+**PASSED, no new findings.** D-10 designated this review the merge gate for the
+whole programme. It ran **four verdict rounds plus two internal adversarial
+reviews**, and every A/B finding is closed except one, which is open by ruling.
+
+| round | findings | outcome |
+|---|---|---|
+| 1 | 2A / 3B / 1D | all closed |
+| 2 | 2A / 2B / 1D | all closed |
+| 3 | 1A / 2B | B-7 closed; A-5, B-6 moot under D-31 |
+| 4 | 1A / 2B (A-8, B-9, D-3) | all closed |
+| internal | F-1..F-6, F-A..F-I | closed, or moot under D-32 |
+
+**Codex's own closing words on the last three:** A-8 closed — *"the planner now
+emits file paths only… I withdraw my stronger interpretation; that was not the
+original TOCTOU property."* B-9 closed — *"safe guidance is pinned three
+independent ways."* D-3 closed.
+
+**Independent verification at the passing tip:** full suite **1,392 passed, 1
+skipped in 4m53s**; focused A-8/B-9 tests passed; amendment registry green;
+`git diff --check` green; worktree clean.
+
+### What passes with the merge, stated as it is
+
+- **B-8 is OPEN and owner-accepted.** Not mitigated, not closed. A deliverable
+  an older build wrote under a retired name stays in the matter folder
+  permanently. Codex: *"I would not hold the merge solely to restore the removed
+  inventory."* It is a live risk carried by D-32's ruling, not a solved problem.
+- **Criterion 4 NOT MET** (D-29). 92.130% is a projection; the last measured
+  full-corpus figure is **91.512%**. Never quote the projection flat.
+- **The offline-probe failures remain unreproduced and unattributed.** Codex's
+  run passing them does not close them and neither side treats it as closing
+  them.
+- **The publication window is WIDER than the design it replaced**, permanently
+  so, and no claim is made that the new design is correct — only that it is
+  small enough to enumerate.
+- Never observed on a real matter: an interrupted publication. Never performed:
+  a mouse-driven GUI pass, and an upload actually accepted by a Claude Project.
+
+**Merging `build/sprint-2` to `main` requires Alex's explicit authorization.
+The gate passing does not confer it and it is never inferred.**
+
 ## D-32 EXECUTED — the swap is descoped (Alex, 2026-08-06)
 
 **The sixth generation arrived, and the rule fired.** A second adversarial
