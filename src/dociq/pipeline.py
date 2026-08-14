@@ -707,11 +707,32 @@ def _stale_deliverables(
             "refusing to list a previous run's deliverables for replacement for "
             f"a run that ended {termination.status.value}: {termination.reason}"
         )
+    # FILES ONLY, recursing into any directory a pattern matches. A plan entry
+    # that names a directory is decided here, at the top of Stage 5, and acted
+    # on after Stage 6 — minutes later on a real matter — and publication then
+    # removes whatever the directory holds AT THAT MOMENT, including a file the
+    # plan never named.
+    #
+    # This is the third generation of one defect. F-3 fixed it for `clean_text`
+    # by making that pattern a glob; A-8 found `upload_package` still bare;
+    # A-8's second round found that `upload_package/*` matches DIRECTORIES too,
+    # so a pre-existing `upload_package/analyst_notes/` was planned whole and
+    # recursively deleted. Each fix corrected the pattern list, which is the
+    # wrong layer — the patterns are a list someone must keep right, and this
+    # loop is the place the property can be made true for every pattern at once.
+    #
+    # So the invariant is established HERE and cannot be reintroduced by editing
+    # `_STALE_PATTERNS`: whatever a pattern matches, the plan names files.
     found: list[str] = []
     for pattern in _STALE_PATTERNS:
         for path in sorted(layout.root.glob(pattern)):
-            if path.is_file() or path.is_dir():
+            if path.is_file():
                 found.append(path.relative_to(layout.root).as_posix())
+            elif path.is_dir():
+                found.extend(
+                    child.relative_to(layout.root).as_posix()
+                    for child in sorted(path.rglob("*")) if child.is_file()
+                )
     return tuple(sorted(set(found)))
 
 

@@ -22,10 +22,15 @@ publication was in progress, no later run detects the mixture or repairs it, and
 the manifest describing the folder is itself one of the files that may or may not
 have landed. The window is the time to remove one file per superseded name and
 rename one file per staged file — on the measured corpus, thousands of clean-text
-files, so **seconds, not milliseconds**. The one thing that survives is the new
-set: publication removes the staging tree only after every file has left it, so
-an interrupted publication leaves the complete new set under
-``.dociq/staging/``, and the next run reports finding it before discarding it
+files, so **seconds, not milliseconds**. What survives is whatever has NOT YET
+BEEN MOVED: publication removes the staging tree only after every file has left
+it, so an interrupted publication leaves the new set **split between the matter
+root and** ``.dociq/staging/``, and the next run reports finding the remainder
+before discarding it
+
+(This said "the complete new set" until 2026-08-14 — Codex finding D-3, filed
+twice. It was corrected in three places and this, the fourth, was missed. A file
+already moved is not in staging, so staging alone cannot reconstruct the run.)
 (:func:`state_residue`).
 
 **Staging still exists, and it is not vestigial.** Deliverables are built in

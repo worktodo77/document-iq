@@ -328,6 +328,26 @@ def test_a_locked_previous_deliverable_stops_publication_before_any_move(
         "publication moved staged files even though the removal pass failed; "
         "the removal pass runs to completion first, on purpose")
 
+    # B-9 (Codex, 2026-08-14), pinned here because the fix was made in code and
+    # left unasserted. This message used to end "...or move the staged files
+    # into this folder by hand." Removal stops at the FIRST failure, so the
+    # previous run's LATER deliverables are still present, and an operator who
+    # followed that advice got `a.txt = NEW` beside `z.txt = OLD` with the stale
+    # file absent from the new set — the mixture the message is warning about.
+    #
+    # Asserted as a prohibition AND as the absence of the old advice, because
+    # the two can drift apart: someone could add the warning and leave the
+    # original sentence below it.
+    message = str(exc.value)
+    assert "Do NOT move the staged files into this folder by hand" in message, (
+        "the removal-failure message does not prohibit the manual move that "
+        "produces a mixed folder (B-9)")
+    assert "or move the staged files into this folder by hand" not in message, (
+        "the removal-failure message still offers the manual move as a remedy; "
+        "following it produces exactly the mixture the message warns about")
+    assert "RE-RUN THE MATTER" in message, (
+        "the message prohibits the unsafe route without naming the safe one")
+
 
 def test_a_failed_move_leaves_the_unmoved_staged_files_on_disk(tmp_path):
     """The second half of the same promise: what publication has not moved, it
@@ -407,6 +427,18 @@ def test_the_plan_names_the_files_and_never_the_directory(tmp_path):
     _run(out)
     layout = OutputLayout.at(out)
 
+    # A NESTED directory inside a planned tree, present BEFORE the plan is
+    # taken. Codex's second A-8 round: the first widening passed only because
+    # every planned tree in the fixture was flat, so `upload_package/*` never
+    # matched a directory and the `is_dir()` branch of the planner was never
+    # reached. A test whose fixture cannot contain the defect proves nothing,
+    # and that is the same failure as asserting a class by naming one member —
+    # one level further down.
+    nested = out / "upload_package" / "analyst_notes"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "seen_at_plan_time.md").write_text(
+        "# replaced, legitimately\n", encoding="utf-8", newline="")
+
     plan = pipeline._stale_deliverables(layout, COMPLETED)
 
     # The class: no plan entry may name a directory. Derived from the plan and
@@ -422,6 +454,10 @@ def test_the_plan_names_the_files_and_never_the_directory(tmp_path):
     assert {"clean_text", "upload_package"} <= set(trees), (
         f"the fixture's premise is gone: the plan reaches into {trees}, and "
         f"this test is only meaningful over the trees it actually plans")
+
+    # Written AFTER the plan, into the nested directory that already existed.
+    kept = nested / "queries.md"
+    kept.write_text("# mine, not DocIQ's\n", encoding="utf-8", newline="")
 
     # An analyst's file in EVERY planned tree, written after the plan was taken.
     notes = []
@@ -440,6 +476,17 @@ def test_the_plan_names_the_files_and_never_the_directory(tmp_path):
             f"a file the plan never named was removed from {tree}/, because "
             f"the plan decided a whole directory from a stale disk read")
         assert note.read_text(encoding="utf-8") == f"# not DocIQ's, in {tree}\n"
+
+    # The nested case, and the distinction that makes it meaningful. A file
+    # present INSIDE a DocIQ-owned tree when the plan is taken is legitimately
+    # replaced — `clean_text/*` has always done that. What must survive is a
+    # file that arrives AFTER the plan, which is the whole TOCTOU property, and
+    # it can only survive if the plan named files rather than the directory.
+    assert kept.is_file(), (
+        "a file written into a NESTED directory AFTER the plan was taken was "
+        "removed: the plan named the directory, so publication deleted "
+        "whatever it held at removal time")
+    assert kept.read_text(encoding="utf-8") == "# mine, not DocIQ's\n"
     assert (out / "sources.json").is_file(), "publication did not publish"
 
 
