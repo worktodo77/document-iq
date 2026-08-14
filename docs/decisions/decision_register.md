@@ -38,6 +38,40 @@ Consequence for the product's positioning, flagged: §7 and D-03 make the token 
 
 | D-19 | Tesseract / the D-01 bake-off | **Written off — rapidocr is the engine, full stop (Alex, 2026-07-31).** D-01's conditional swap and acceptance criterion 9's comparison are both **cancelled, not deferred**: there is no pending Tesseract evaluation, and no future sprint owes one. Tesseract was never installed (installing it needed authorization that was not given, and the build correctly refused to install it unilaterally), so the Sprint-1 bake-off is a **rapidocr characterization** rather than a comparison — and that is now its final form. Measured on 20 real scanned MPR pages from D-12's corpus: mean page confidence **0.8628**, 3 of 17 pages below the 85% review threshold, 37% of *lines* below it, **5.74 s/page**; 3 zero-character pages verified genuinely blank (uniform white, no embedded images) rather than misses. `docs/bakeoff/ocr_bakeoff_2026-07-30.md` stands as the methodology artifact D-01 asked for, retitled to what it is. **Consequence to state plainly rather than bury: §3 and §10's amended wording already name rapidocr, so nothing in the build changes — but the tool now ships an OCR engine chosen on in-house familiarity and ONNX bundling convenience, never benchmarked against an alternative on this corpus. If OCR quality is ever challenged, that is the honest answer, and "Tesseract is the industry-recognizable name for law-firm IT review" (the original argument for the bake-off) remains unaddressed.** | 2026-07-31 |
 
+## MEASURED: the "~20 minutes per suite" claim was wrong by 4x, and it was our own doing (2026-08-14)
+
+Timed on a verified-quiet machine, one full suite each:
+
+| tree | full suite |
+|---|---|
+| pre-descope `2728c96` | **4m40s** |
+| post-descope (merged) | **4m22s** |
+
+**Two relays told Codex a single full pass exceeds ten minutes and that its
+six-minute cap therefore could not see one finish. Both statements are false.**
+At 4m40s the cap was adequate. What actually happened is that our own parallel
+agents were saturating the machine underneath Codex's review — up to twelve
+concurrent pytest processes at times — so the runs Codex could not complete, and
+several we characterized as flaky, were starved by our fan-out rather than slow
+by nature.
+
+The test deletion explains **18 seconds of the gap**, not the four-fold
+difference. This was contention, start to finish.
+
+**Consequences worth carrying beyond this sprint:**
+
+1. **Timing claims made while agents are running are worthless**, and we made
+   several. Any figure quoted to a reviewer must come from a machine verified
+   quiet, and must say so.
+2. **We blamed the reviewer's tooling for our own load.** Codex was right not to
+   count its capped run as green, and right again not to accept our explanation
+   for why it capped.
+3. **The offline-probe "flake" chased across three rounds was of this family** —
+   an implementing agent proved it by building a six-way concurrent probe, which
+   then passed 6/6, leaving the original two failures **unreproduced and
+   unattributed** rather than closed. That is recorded honestly in §9.4 of
+   `docs/verification/d32_descope_2026-08-06.md` and remains open.
+
 ## D-32 EXECUTED — the swap is descoped (Alex, 2026-08-06)
 
 **The sixth generation arrived, and the rule fired.** A second adversarial
