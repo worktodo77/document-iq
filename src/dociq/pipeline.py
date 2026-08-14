@@ -624,7 +624,7 @@ _STALE_PATTERNS = (
     mf.MANIFEST_NAME,
     "profile/*.yaml",
     f"{INCOMPLETE_DIR}/*",
-    "upload_package",
+    "upload_package/*",
 )
 """Deliverables a re-run replaces.
 
@@ -633,8 +633,22 @@ renumbering check — deleting it would silence the one warning the re-run case
 exists to produce. (It is still replaced: the run stages a new one, and
 publication moves it over the old.)
 
-``upload_package`` IS listed, as a whole directory, and the reason it used to be
-absent no longer holds. :func:`~dociq.emit.handoff.build_upload_package` rebuilds
+``upload_package/*`` is listed **as its FILES, never as the directory** — and
+that distinction is the whole of Codex finding A-8. A plan entry naming a
+directory is decided at the top of Stage 5 and acted on after Stage 6, minutes
+later on a real corpus, and `publish_staging` then removes whatever the
+directory contains — including a file the plan never named. An analyst who saves
+`upload_package/cover_letter.docx` while the run is working loses it, and
+`stale_outputs_replaced` never says so.
+
+This is exactly the defect that was fixed for ``clean_text`` (finding F-3) and
+left standing for its sibling, which D-32's own register entry named and which
+the F-3 regression test did not cover because it asserted only on
+``clean_text``. Costs an empty ``upload_package/`` shell when a re-run produces
+no package — the same cosmetic residue ``clean_text`` already accepts, and the
+same trade: a directory nobody named is not the tool's to delete.
+
+The package IS still replaced. :func:`~dociq.emit.handoff.build_upload_package` rebuilds
 the package from scratch — but since deliverables are built in staging it
 rebuilds it *in staging*, so the destination's copy is no longer touched by the
 emit at all. Left unlisted, a re-run that produced fewer documents would leave the previous run's

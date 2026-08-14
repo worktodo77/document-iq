@@ -424,8 +424,13 @@ _FAILED_REMOVING = (
     "DocIQ will not repair this and no later run will detect it.\n\n"
     "The new run's complete set of deliverables is intact in {staging} and was "
     "NOT discarded. Free whatever is holding the file above — an antivirus scan, "
-    "a backup agent, or the file being open — and re-run the matter, or move the "
-    "staged files into this folder by hand."
+    "a backup agent, or the file being open — and RE-RUN THE MATTER.\n\n"
+    "Do NOT move the staged files into this folder by hand. Removal stopped at "
+    "the file above, so the previous run's LATER deliverables are still here; "
+    "moving the new set in beside them produces a folder holding some documents "
+    "from each run, with no record of which is which. A re-run removes them "
+    "first. (Codex finding B-9: this instruction used to say you could, and "
+    "following it produced exactly that mixture.)"
 )
 
 _FAILED_MOVING = (
@@ -475,11 +480,20 @@ def publish_staging(
     detects the mixture, repairs it, or warns about it; the manifest that
     describes the folder is one of the files that may or may not have landed. A
     later run publishing successfully will end the mixture, but only because it
-    replaces everything, and only if it succeeds. The one thing that survives is
-    the staged set: publication removes the staging tree only after every file
-    has been moved out of it, so a run interrupted mid-publication leaves the
-    complete new set under ``.dociq/staging/``, and the next run reports having
-    found it (:func:`state_residue`) before discarding it.
+    replaces everything, and only if it succeeds. What survives is **whatever
+    has not yet been moved**: publication removes the staging tree only after
+    every file has left it, so a run interrupted mid-publication leaves the new
+    set **SPLIT between the matter root and ``.dociq/staging/``**, and the next
+    run reports having found the remainder (:func:`state_residue`) before
+    discarding it.
+
+    **This used to say the COMPLETE new set survives under staging. It does
+    not** (Codex finding D-3), and the distinction is the difference between a
+    recoverable state and an unrecoverable one: a file already moved is no
+    longer in staging, so staging alone cannot reconstruct the run. Only on the
+    REMOVAL path — before any file has moved — is the staged set complete, and
+    that message says so for that reason. The crash tests assert staging
+    *exists*; they do not assert it is complete, because it is not.
 
     The window is not instantaneous and should not be described as if it were.
     It is the time to remove one previous deliverable per superseded name and

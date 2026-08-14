@@ -393,29 +393,53 @@ def test_the_plan_names_the_files_and_never_the_directory(tmp_path):
     was taken. The plan names files.
 
     The window is reproduced exactly: the plan is taken, an analyst's note is
-    written into ``clean_text/``, publication runs.
+    written into every planned tree, publication runs.
+
+    **Widened after Codex finding A-8.** This test asserted the property for
+    ``clean_text`` alone, and ``upload_package`` was still planned as a bare
+    directory — so F-3 shipped fixed for one deliverable tree and unfixed for
+    its sibling, which D-32's own register entry had named. A test that asserts
+    a class by naming one member of it is how the same defect returns under a
+    new number. It now asserts over EVERY directory the plan touches, so a
+    deliverable tree added later is covered the moment it exists.
     """
     out = tmp_path / "matter"
     _run(out)
     layout = OutputLayout.at(out)
 
     plan = pipeline._stale_deliverables(layout, COMPLETED)
-    assert any(rel.startswith("clean_text/") for rel in plan), (
-        "the fixture's premise is gone: the plan does not reach into clean_text")
-    assert "clean_text" not in plan, (
-        "the plan named the DIRECTORY, so everything below it is decided by a "
-        "disk read that is minutes stale by the time the removal happens")
 
-    note = out / "clean_text" / "analyst_note.md"
-    note.write_text("# not DocIQ's\n", encoding="utf-8", newline="")
+    # The class: no plan entry may name a directory. Derived from the plan and
+    # the disk, not from a list of tree names someone has to remember to extend.
+    bare_dirs = sorted(rel for rel in plan if (out / rel).is_dir())
+    assert not bare_dirs, (
+        f"the plan names {bare_dirs} as DIRECTORIES, so everything inside them "
+        f"is decided by a disk read that is minutes stale by the time the "
+        f"removal happens — an analyst's file saved meanwhile is destroyed and "
+        f"stale_outputs_replaced never names it")
+
+    trees = sorted({rel.split("/")[0] for rel in plan if "/" in rel})
+    assert {"clean_text", "upload_package"} <= set(trees), (
+        f"the fixture's premise is gone: the plan reaches into {trees}, and "
+        f"this test is only meaningful over the trees it actually plans")
+
+    # An analyst's file in EVERY planned tree, written after the plan was taken.
+    notes = []
+    for tree in trees:
+        note = out / tree / "analyst_note.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(f"# not DocIQ's, in {tree}\n", encoding="utf-8",
+                        newline="")
+        notes.append((tree, note))
 
     _, _, _ = _stage_a_second_set(tmp_path, out)
     emit_paths.publish_staging(layout, plan)
 
-    assert note.is_file(), (
-        "a file the plan never named was removed, because the plan decided a "
-        "whole directory from a disk read taken minutes earlier")
-    assert note.read_text(encoding="utf-8") == "# not DocIQ's\n"
+    for tree, note in notes:
+        assert note.is_file(), (
+            f"a file the plan never named was removed from {tree}/, because "
+            f"the plan decided a whole directory from a stale disk read")
+        assert note.read_text(encoding="utf-8") == f"# not DocIQ's, in {tree}\n"
     assert (out / "sources.json").is_file(), "publication did not publish"
 
 

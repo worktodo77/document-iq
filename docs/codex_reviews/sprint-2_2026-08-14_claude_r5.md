@@ -58,7 +58,9 @@ Deleted outright — not disabled, not deferred, not feature-flagged:
 
 A process that dies between the first removal and the last move leaves the matter folder holding **part of two runs' evidence, permanently**. Nothing records that a publication was in progress. No later run detects or repairs it. The manifest is itself one of the files that may or may not have landed. On the measured corpus that is thousands of file operations — **seconds, not milliseconds**.
 
-The complete new set survives under `.dociq/staging/`, and the next run discloses having found it. Handled I/O failures raise `PublicationFailed`, whose message opens *"THIS FOLDER IS NOW MIXED"* and is deliberately not caught.
+> **WITHDRAWN 2026-08-14 — Codex finding D-3.** This paragraph said *"the complete new set survives under `.dociq/staging/`"*. It does not. A file already moved is no longer in staging, so once publication has begun the new set survives **split between the matter root and staging**, and staging alone cannot reconstruct the run. The claim holds only on the REMOVAL path, before any file has moved. The named crash tests assert staging *exists* — they never asserted it was complete, so the tests were right and this sentence was not.
+
+Whatever has **not yet been moved** survives under `.dociq/staging/`, and the next run discloses having found it. Handled I/O failures raise `PublicationFailed`, whose message opens *"THIS FOLDER IS NOW MIXED"* and is deliberately not caught.
 
 **Both facts are asserted in tests**, so the hole cannot be closed in documentation only: `test_a_crash_inside_publication_leaves_a_MIXED_matter_folder` and `test_the_next_run_does_not_detect_or_repair_the_mixture` go red if anyone quietly narrows the window without correcting the prose.
 

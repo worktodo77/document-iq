@@ -128,7 +128,14 @@ the first removal and the last move leaves the matter folder holding part of two
 runs' evidence, **permanently** — nothing on disk records that a publication was
 in progress, and no later run detects or repairs it. On the measured corpus that
 window is thousands of file operations wide, so **seconds, not milliseconds**.
-The complete new set survives under `.dociq/staging/` and the next run discloses
+~~The complete new set survives under `.dociq/staging/`~~ **FALSE — withdrawn
+2026-08-14, Codex finding D-3.** A file already moved is no longer in staging,
+so once publication has begun the new set survives **split between the matter
+root and `.dociq/staging/`**, and staging alone cannot reconstruct the run. The
+claim is true only on the REMOVAL path, before any file has moved. The crash
+tests assert staging *exists*; they never asserted it was complete, so the
+tests were right and the sentence describing them was not. What is true: the
+remainder survives under `.dociq/staging/` and the next run discloses
 having found it (`run.state_residue_before_run`), which is the only trace.
 
 `emit/paths.py` went **1,827 → 568 lines**. Kept, each on its own terms: B-1's
