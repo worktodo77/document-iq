@@ -111,9 +111,11 @@ def test_a_run_may_not_eat_its_own_output(tmp_path, where):
     scratch.
 
     All three overlapping arrangements are refused, not just the one that was
-    measured — the reverse nesting matters too, because the swap removes the
+    measured — the reverse nesting matters too, because publication removes the
     previous run's deliverables BY NAME and a source folder underneath the
     output root could have an operator's own `document_index.csv` deleted.
+    Under D-32 that deletion is outright, with nothing set aside to recover it
+    from, so the refusal carries more weight than when it was written.
     """
     matter = tmp_path / "matter"
     (matter / "docs").mkdir(parents=True)
@@ -292,11 +294,19 @@ def test_the_purge_refuses_any_run_that_did_not_complete(tmp_path, status):
     takes a proof of completion as a required argument and checks it, so
     destroying a prior corpus cannot be reached by rearranging call order.
 
-    Sprint 2 moved the deletion itself into the staging swap
-    (:func:`dociq.emit.paths.commit_staging`), so the guarded function is now the
-    ENUMERATOR — and the swap adds a third defence of its own: it deletes
-    nothing without a readiness marker, and only a run that reached the end of
-    Stage 6 writes one.
+    Sprint 2 moved the deletion itself into publication
+    (:func:`dociq.emit.paths.publish_staging`), so the guarded function is now
+    the ENUMERATOR — and publication adds a third defence of its own: it
+    refuses an empty staging directory rather than emptying the matter folder
+    into nothing.
+
+    **The third defence used to be "no readiness marker, no deletion", and that
+    marker is gone (D-32).** The replacement is not weaker in the case that
+    matters here — an aborted run never calls publication at all — but it is
+    narrower, and the difference is stated rather than glossed: nothing on disk
+    now stands between a caller that reaches :func:`publish_staging` and the
+    deletion. The proof-of-completion argument on the enumerator, checked below,
+    is what remains.
     """
     layout = OutputLayout.at(tmp_path).ensure()
     victim = layout.index_csv
@@ -307,9 +317,13 @@ def test_the_purge_refuses_any_run_that_did_not_complete(tmp_path, status):
             layout, RunTermination(status, "stopped"))
     assert victim.exists(), "the refused enumeration deleted a file anyway"
 
-    # Third defence: no marker, no deletion — whatever else has happened.
-    assert emit_paths.commit_staging(layout) == ()
-    assert victim.exists(), "the swap deleted a file with no readiness marker"
+    # Third defence: an empty staging directory publishes nothing rather than
+    # emptying the folder. The plan is handed in deliberately — this is the
+    # shape of the accident the guard exists for.
+    with pytest.raises(emit_paths.PublicationFailed):
+        emit_paths.publish_staging(layout, ("document_index.csv",))
+    assert victim.exists(), (
+        "publication removed a deliverable with nothing staged to replace it")
 
     listed = pipeline._stale_deliverables(layout, COMPLETED)
     assert "document_index.csv" in listed

@@ -1175,10 +1175,12 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
     # arranged this way, silently, with no bad input anywhere. That is a ruling,
     # not a bug fix, so the run fails closed and names both remedies.
     #
-    # The reverse nesting is refused for the same reason and a second one: the
-    # staging swap removes the previous run's deliverables by name, so a source
+    # The reverse nesting is refused for the same reason and a second one:
+    # publication removes the previous run's deliverables by name, so a source
     # folder underneath the output root could have an operator's own
-    # `document_index.csv` deleted by a re-run.
+    # `document_index.csv` deleted by a re-run. That reason got STRONGER under
+    # D-32 — the names are now deleted outright rather than renamed aside, so
+    # there is nothing to recover such a file from.
     overlap = _root_overlap(root, output_root)
     if overlap:
         return blocked_result(overlap)

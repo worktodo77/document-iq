@@ -277,19 +277,24 @@ class PipelineOutcome:
     """Deliverables of a previous run that this one replaced. Recorded in the
     log's ``run`` section, never in its hashed content."""
     superseded_residue: tuple[str, ...] = ()
-    """Set-aside trees under ``.dociq/`` that could not be deleted (D-31).
+    """``.dociq/`` trees this run left behind (amendment A-16, after D-32).
 
-    A swap renames the previous set aside, renames the staged set into place,
-    and deletes the set-aside tree LAST. A failure of that last step leaves the
-    matter folder holding one complete, correct set and ``.dociq/`` holding a
-    clearly-named stale one — a success with a residue, not a failed run. It is
-    surfaced here rather than absorbed because nobody opens ``.dociq/``.
+    **The name is older than what it now carries** and is kept because it is a
+    seam field that amendment A-16 wired end to end; renaming it is a contract
+    change, and a misleading name explained in place is cheaper than a
+    contract amendment nobody asked for. It named the set-aside trees of the
+    swap protocol D-32 removed. It now names what
+    :func:`~dociq.emit.paths.state_residue` finds: on this field, populated on
+    the success path, that is a **drained staging tree the publication could not
+    remove** — the matter folder holds one complete, correct set and
+    ``.dociq/staging/`` holds empty directories. A residue, not a failed run,
+    surfaced because nobody opens ``.dociq/``.
 
-    Measured AFTER this run's swap, which is why it also has to be measured
-    before the log is built: the log is written into staging and sealed before
-    the swap happens, so this run's own residue reaches the durable record via
-    the NEXT run's ``run.superseded_residue_before_swap``. Stated rather than
-    left to be discovered."""
+    Measured AFTER publication, which is why the log cannot carry it: the log is
+    written into staging and sealed before publication happens. What the log
+    carries is ``run.state_residue_before_run`` — what an EARLIER run left,
+    measured at the top of this one. Stated rather than left to be
+    discovered."""
     bates_ranges: dict[tuple[str, str, int], BatesRange] = field(default_factory=dict)
     timings_s: tuple[tuple[str, float], ...] = ()
     """Per-stage wall clock, in stage order. Reporting only — it never reaches
@@ -625,14 +630,14 @@ _STALE_PATTERNS = (
 
 ``doc_ids_issued.json`` is absent because it is this run's *input* to the D-04
 renumbering check — deleting it would silence the one warning the re-run case
-exists to produce. (It is still replaced: the run stages a new one, and the swap
-moves it over the old.)
+exists to produce. (It is still replaced: the run stages a new one, and
+publication moves it over the old.)
 
 ``upload_package`` IS listed, as a whole directory, and the reason it used to be
 absent no longer holds. :func:`~dociq.emit.handoff.build_upload_package` rebuilds
-the package from scratch — but since the staging swap it rebuilds it *in
-staging*, so the destination's copy is no longer touched by the emit at all. Left
-unlisted, a re-run that produced fewer documents would leave the previous run's
+the package from scratch — but since deliverables are built in staging it
+rebuilds it *in staging*, so the destination's copy is no longer touched by the
+emit at all. Left unlisted, a re-run that produced fewer documents would leave the previous run's
 extra ``upload_package/LI-06999.txt`` sitting in a folder an operator uploads
 whole. The claim that the rebuild covers it was true of the old write path and is
 withdrawn with it.
@@ -641,72 +646,59 @@ withdrawn with it.
 record of an earlier aborted attempt describes a state the folder is no longer
 in, and leaving it would put a "RUN BLOCKED" artifact beside a good output set.
 
-**These names are RENAMED ASIDE, not deleted** (D-31). Every entry here is a
-name the swap moves into ``.dociq/<aside>/`` before the staged set takes it, and
-that tree is deleted only once the new set is in place. The word "stale" is
-about what the name holds, not about how it leaves."""
+**These names are DELETED, and this list is the only knowledge publication has**
+(D-32). Every entry is a name :func:`~dociq.emit.paths.publish_staging` removes
+from the matter folder before the staged set is moved in. The set-aside rename
+that used to stand between "stale" and "gone" is removed, and so is the durable
+inventory of what the last run actually published — so a deliverable an OLDER
+DocIQ wrote under a name this list does not match is **left in the matter
+folder**, permanently and undetected (Codex review #2, finding B-8, knowingly
+reopened). A name added to this list must therefore be treated as permanent:
+retiring an output means leaving its pattern here forever, not deleting the
+line."""
 
 
 def _stale_deliverables(
     layout: OutputLayout,
     termination: RunTermination,
-    previously_published: Sequence[str] | None = None,
 ) -> tuple[str, ...]:
     """ENUMERATE the previous run's deliverables this run supersedes.
 
-    Split from the removal (which is now :func:`~dociq.emit.paths.commit_staging`
-    acting on the marker) because the two happen at different times: the list has
-    to be in the processing log, and the log is written *before* the swap. It
-    carries the same required, validated ``termination`` argument as the removal
-    always has, so the guard sits on the function that decides what gets deleted
-    as well as on the one that deletes it.
+    Split from the removal (which is
+    :func:`~dociq.emit.paths.publish_staging`) because the two happen at
+    different times: the list has to be in the processing log, and the log is
+    written *before* publication. It carries the same required, validated
+    ``termination`` argument as the removal always has, so the guard sits on the
+    function that decides what gets deleted as well as on the one that deletes
+    it.
 
-    **Two sources, and the first is the one that matters** (Codex review #2,
-    third fix round, B-8). ``previously_published`` is the durable inventory the
-    last run wrote — *what is actually in this folder* — and
-    :data:`_STALE_PATTERNS` is what THIS BUILD knows how to write. Only the first
-    can name a deliverable an older DocIQ left under a name this build has
-    retired or renamed, and D-31's whole ordering claim is that the *complete*
-    previous set leaves the matter root before any new file enters it. The
-    pattern expansion is kept beside it rather than replaced, because a folder
-    last published by a build that predates the inventory has no inventory to
-    read and the patterns are then the only knowledge there is; the run says so
-    (``published_set_inventory`` in the log's ``run`` block).
+    **One source, and its limit is the point** (D-32). :data:`_STALE_PATTERNS`
+    is what THIS BUILD knows how to write. The durable inventory of what the
+    last run actually published — which could name a deliverable an older DocIQ
+    left under a retired name — was part of the publication protocol D-32
+    removed, and went with it. B-8's second case is therefore live again and is
+    recorded as a known limitation rather than left to be rediscovered: a file at
+    a name this build no longer writes stays in the folder.
 
-    Entries are filtered to what is ON DISK once, here, and normalised so that a
-    directory and its contents are not both listed — see
-    :func:`~dociq.emit.paths.covering_plan`, which does no further disk reading
-    for the reason F-3 gives: this function runs at the TOP of Stage 5 and the
-    renames it plans happen after Stage 6, so anything decided from the disk here
-    is minutes stale by the time it is acted on. Existence-filtering is safe
-    across that window in the direction that matters — a name that has since
-    disappeared is skipped by the swap, and a name that has since appeared is
-    handled by the swap's own pre-publish destination sweep. Passing ``None`` reads the inventory
-    from the folder; ``dociq.pipeline.run`` passes the value it read at the top
-    of the run, inside the block that turns an unreadable one into a disclosed
-    BLOCKED run rather than a traceback.
+    Entries are filtered to what is ON DISK once, here. This function runs at the
+    TOP of Stage 5 and the removals it plans happen after Stage 6, which on a
+    real matter is minutes — so a name that has since disappeared is skipped by
+    publication, and a name that has since appeared is not removed at all. The
+    second is the direction that matters: a file an analyst saves into the matter
+    folder mid-run at a name no pattern matched is not in this plan and is not
+    touched.
     """
     if not termination.publishable:
         raise ContractViolation(
             "refusing to list a previous run's deliverables for replacement for "
             f"a run that ended {termination.status.value}: {termination.reason}"
         )
-    if previously_published is None:
-        previously_published = emit_paths.published_inventory(layout)
     found: list[str] = []
     for pattern in _STALE_PATTERNS:
         for path in sorted(layout.root.glob(pattern)):
             if path.is_file() or path.is_dir():
                 found.append(path.relative_to(layout.root).as_posix())
-    for rel in previously_published:
-        # A name the last run published that this build no longer writes — the
-        # B-8 case — or one it does, in which case the glob already found it and
-        # the set absorbs the duplicate. Filtered by existence so the durable
-        # `stale_outputs_replaced` record does not claim to have replaced a file
-        # that was already gone.
-        if (layout.root / rel).exists():
-            found.append(rel)
-    return emit_paths.covering_plan(found)
+    return tuple(sorted(set(found)))
 
 
 def _log_reconciliation(
@@ -758,7 +750,7 @@ def _abort(
     """End a run that did not complete, WITHOUT publishing anything.
 
     Codex review #1, finding B-1. Everything Stage 5 would do is skipped: no
-    swap, no ``clean_text/``, no index, no ``sources.json``, no
+    publication, no ``clean_text/``, no index, no ``sources.json``, no
     ``processing_log.json``, no ``run_summary.pdf``, no ``output_manifest.json``
     and no issued-ID ledger. Whatever the last COMPLETE run left in this folder
     is exactly as it was, which is the point of the finding.
@@ -775,7 +767,7 @@ def _abort(
     They live in a sub-directory rather than beside the deliverables so that no
     name an incomplete run writes can collide with a name a complete run wrote.
     A subsequent complete run replaces the directory (``_STALE_PATTERNS`` — it
-    is renamed aside with the rest of the superseded set, D-31), and the
+    is removed with the rest of the superseded set), and the
     manifest classifies it as excluded so it can never make a later, good run
     report an unclassified output.
 
@@ -1064,10 +1056,13 @@ def _refuse_publication(
     the success side:
 
     1. **Staging is discarded.** It is a set that failed its own audit, and
-       leaving it under a matter folder is leaving something a later hand could
-       mark ready. Nothing in the destination is touched — no marker was
-       written, so :func:`~dociq.emit.paths.commit_staging` has nothing to act
-       on and the previous run's deliverables stay byte-for-byte as they were.
+       leaving it under a matter folder is leaving a set that failed its audit
+       where a later hand could find it. Nothing in the destination is touched:
+       :func:`~dociq.emit.paths.publish_staging` is a direct call that this path
+       never makes, so the previous run's deliverables stay byte-for-byte as
+       they were. **This is the constraint that kept staging alive through
+       D-32** — the gate audits the staged set, so a red gate costs the operator
+       a run and never an evidence set.
     2. **The refusal becomes the terminal status**, so every consumer that
        already knows how to read one — the log's ``run`` section, the GUI's
        failure state, ``run_status.json``, the summary banner — sees it without
@@ -1150,67 +1145,18 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         if opts.on_stage is not None:
             opts.on_stage(StageProgress(number, dict(STAGES)[number], detail))
 
-    # An interrupted swap from a PREVIOUS run is finished before this one reads
-    # or writes anything. It is the first statement of the run on purpose: the
-    # folder that swap was replacing is the folder this run is about to read its
-    # own previous ledger from, and rolling forward afterwards would compare
-    # against a set that is half of one run and half of another.
+    # What an EARLIER run left under `.dociq/`, measured before this run touches
+    # the folder — which is the only moment it can be measured, because the next
+    # two statements create this run's own staging tree.
     #
-    # `was_pending` is asked BEFORE the recovery and is what the disclosure keys
-    # on. The recovery's return value is the list of files it *removed*, which is
-    # empty for the commonest interrupted swap of all — a first run into an empty
-    # folder, where there was nothing to supersede. Keying the disclosure on it
-    # made a completed roll-forward silent whenever the folder had been empty,
-    # which is the case an operator is least likely to reconstruct unaided.
-    was_pending = emit_paths.pending_swap(layout)
-    recovery_notes: list[str] = []
-    try:
-        recovered = emit_paths.recover_pending(layout, recovery_notes)
-        # The DURABLE INVENTORY of the set this folder currently holds (B-8),
-        # read AFTER the roll-forward — before it, the folder is mid-swap and
-        # the inventory describes whichever side of the swap has the names.
-        # Read here, in this block, rather than at Stage 5 where it is used:
-        # a corrupt inventory must reach the operator as the same disclosed
-        # BLOCKED run an unreadable marker does, not as a traceback out of the
-        # middle of a run that has already done the work.
-        previously_published = emit_paths.published_inventory(layout)
-    except (
-        emit_paths.PendingSwapUnreadable,
-        emit_paths.PendingSwapUnrecoverable,
-        emit_paths.PublishedSetUnreadable,
-    ) as unreadable:
-        # Codex review #2, B-2. The marker exists and cannot be trusted to say
-        # which of this folder's files the staged set replaces, so nothing has
-        # moved and nothing has been deleted. The run STOPS here — before the
-        # `discard_staging` below, which would otherwise throw away the complete
-        # set the operator is being told to go and look at, and before the walk,
-        # so no work is done that a refused publication would discard anyway.
-        #
-        # It takes the ordinary abort path rather than raising: a windowed
-        # executable turns a traceback into nothing at all, and this is a state
-        # an operator can act on if — and only if — they are told what it is.
-        blocked = walker.RunNotes()
-        blocked.termination = RunTermination(
-            TerminalStatus.BLOCKED, str(unreadable))
-        blocked.invocation.append(
-            "BLOCKED before Stage 1: "
-            + (
-                "this folder's record of what the previous run published could "
-                "not be read, so this run could not tell which of its files it "
-                "would be replacing"
-                if isinstance(unreadable, emit_paths.PublishedSetUnreadable)
-                else "an interrupted swap could not be completed safely"
-            )
-            + " and this folder was left untouched.")
-        return _abort(
-            config=config,
-            walked=RunResult(config=config),
-            walk_notes=blocked,
-            layout=layout,
-            stamp=stamp,
-            opts=opts,
-            timings=timings,
-        )
+    # A surviving `.dociq/staging/` is the on-disk signature of D-32's accepted
+    # window: a run that died or was cancelled between building its set and
+    # publishing it. It is disclosed in the log rather than silently discarded,
+    # because the run that left it wrote no record of itself.
+    #
+    # There is no roll-forward, no marker to read, and no folder state that can
+    # block a run. D-32 removed all three; see `emit.paths` for what that costs.
+    residue_before = emit_paths.state_residue(layout)
     emit_paths.discard_staging(layout)
 
     index = opts.master_index
@@ -1300,36 +1246,14 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # ---- Stages 1-2 --------------------------------------------------------
     t = time.monotonic()
     walk_notes = walker.RunNotes()
-    if was_pending:
-        # An invocation fact, so it travels with the resume and cancellation
-        # notes — visible to the operator, outside the hashed content. A folder
-        # whose deliverables were completed by a LATER run's recovery rather
-        # than by the run that produced them is exactly the kind of thing an
-        # auditor should not have to infer.
-        #
-        # WHICH outcome, not just "recovered". The recovery can also ROLL BACK —
-        # if the interrupted run's staged set was gone, the previous run's set
-        # is restored and the interrupted run's deliverables are the ones that
-        # did not survive. This sentence used to assert that the swap "was
-        # completed", which is false in that case, and a durable record that
-        # says the wrong thing about which run's evidence is in the folder is
-        # the failure this whole subsystem exists to prevent.
-        walk_notes.invocation.append(
-            "RECOVERED: a previous run had finished writing its deliverables "
-            "but was interrupted before its swap was fully wound up. It was "
-            "resolved before this run started, and the folder held ONE complete "
-            f"set as a result ({len(recovered)} superseded file(s) replaced by "
-            "the recovery itself). "
-            + (recovery_notes[0] + "." if recovery_notes else
-               "The outcome was not recorded."))
     stage(1)
     walked = walker.run(walk_config, opts.walk, walk_notes)
     stage(2, f"{len(walked.documents)} document(s) read")
     mark("walk_extract", t)
 
     # Codex B-1. A blocked or cancelled walk stops HERE, before Stage 3 and
-    # therefore long before Stage 5's swap. Every later stage — assignment, the
-    # swap, emission, accounting, the manifest — is unreachable for a run
+    # therefore long before Stage 5. Every later stage — assignment,
+    # emission, accounting, the manifest, publication — is unreachable for a run
     # that did not complete, so none of them needs to know about the case, and
     # none of them can be the place a future edit reintroduces it.
     if not walk_notes.termination.publishable:
@@ -1586,8 +1510,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # destinations, which is the only check that would catch it.
     stage(5)
     t = time.monotonic()
-    stale = _stale_deliverables(
-        layout, walk_notes.termination, previously_published)
+    stale = _stale_deliverables(layout, walk_notes.termination)
     stage_out = emit_paths.staging_layout(layout)
     written: list[Path] = []
     # Clean text is for EXTRACTED documents only. An unsupported file has no
@@ -1654,33 +1577,32 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 "disk_headroom_x100": round(walker._DISK_HEADROOM * 100),
             },
             "stale_outputs_replaced": list(stale),
-            # WHERE the set-aside plan's knowledge came from (B-8). A folder
-            # last published by a build that predates the durable inventory has
-            # none to read, so the plan falls back to this build's own output
-            # names — which is exactly the incomplete-plan case B-8 is about, and
-            # is disclosed rather than assumed away. `run`, not `content`: it is
-            # a fact about this folder's history, not about the evidence, and
-            # hashing it would make a first run and a re-run differ.
-            "published_set_inventory": (
-                list(previously_published) if previously_published
-                else "absent — the set-aside plan used this build's output "
-                     "patterns only; a deliverable an older build wrote under a "
-                     "name this build does not write may remain in the folder"
+            # WHAT PUBLICATION KNEW, and what it could not know (D-32). The plan
+            # above is this build's own output patterns and nothing else — the
+            # durable inventory of what the last run actually published went out
+            # with the publication protocol. So a deliverable an older DocIQ
+            # wrote at a name this build no longer writes is still in this
+            # folder, and no field can name it. Recorded as a standing statement
+            # about the design rather than as a per-run finding, because it is
+            # true of every run of this build. `run`, not `content`: a fact
+            # about this folder's history, not about the evidence.
+            "stale_outputs_plan_source": (
+                "this build's output patterns only; a deliverable an older "
+                "build wrote under a name this build does not write remains in "
+                "this folder and is not detected (D-32, reopening B-8)"
             ),
-            "recovered_swap": list(recovered),
-            # Set-aside trees an EARLIER run could not delete (D-31). A swap
-            # that publishes and then cannot remove what it moved aside is a
-            # success with a residue: the matter folder holds one complete set
-            # and `.dociq/` holds a clearly-named stale one. Nobody opens
-            # `.dociq/`, so it is recorded.
+            # What an EARLIER run left under `.dociq/`, measured at the top of
+            # this run and discarded immediately afterwards. A `staging` tree
+            # here means a previous run died or was cancelled between building
+            # its set and publishing it — which under D-32 may also mean that
+            # run left this folder holding part of two runs' evidence. Nothing
+            # detects that; this is the only trace of it.
             #
-            # Stated precisely, because it is measured before this run's own
-            # swap and cannot be otherwise: the log is written INTO STAGING, so
-            # residue THIS run leaves is recorded by the NEXT run's log. The
-            # operator sees this run's residue on screen through
-            # `PipelineOutcome.superseded_residue`.
-            "superseded_residue_before_swap": list(
-                emit_paths.superseded_residue(layout)),
+            # This run's OWN residue cannot appear here: the log is written into
+            # staging and sealed before publication. The operator sees it on
+            # screen through `PipelineOutcome.superseded_residue`, and the next
+            # run records it here.
+            "state_residue_before_run": list(residue_before),
             "load_dependent_extraction": list(walk_notes.load_dependent),
             "invocation_notes": list(walk_notes.invocation),
         },
@@ -1740,7 +1662,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # Run against STAGING, before anything reaches the matter folder. The
     # manifest is a hash of the set this run produced, so building it over the
     # destination would have it hash whatever a previous run left behind that
-    # this one does not replace — and running the gates before the swap means a
+    # this one does not replace — and running the gates before publication means a
     # set that fails them never displaces a set that passed.
     stage(6)
     t = time.monotonic()
@@ -1757,12 +1679,17 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # Codex review #2, finding B-1. Everything above COMPUTED these checks; only
     # this decides anything with them. Until it existed, Stage 6 detected a
     # page-accounting discrepancy or an unclassified artifact and then marked
-    # the set ready and swapped it in regardless, so a red set replaced the last
-    # good deliverables and `PipelineOutcome.ok` reported the fact afterwards to
-    # an in-memory caller who need never look. Observation is not a gate. The
-    # heading said "the gates" and the relay said the set was "gated there,
-    # marked, then swapped"; that claim was false and is withdrawn with the
-    # behavior it described.
+    # published it regardless, so a red set replaced the last good deliverables
+    # and `PipelineOutcome.ok` reported the fact afterwards to an in-memory
+    # caller who need never look. Observation is not a gate. The heading said
+    # "the gates" and the relay said the set was "gated there, marked, then
+    # swapped"; that claim was false and is withdrawn with the behavior it
+    # described.
+    #
+    # **This gate is why staging survived D-32.** The descope removed the
+    # publication protocol and kept the staging directory, because B-1's fix
+    # lives here: the audit runs over the staged set, so a failure costs a run
+    # rather than an evidence set.
     #
     # `corpus_sort_check` joins them here rather than staying the module-level
     # function nothing called. It was written as a Stage-6 check, was reachable
@@ -1843,23 +1770,25 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             bates_ranges=ranges,
         )
 
-    # ---- The swap ----------------------------------------------------------
+    # ---- Publication -------------------------------------------------------
     #
-    # Reached only by a set that PASSED the gate above.
+    # ONE statement, reached only by a set that PASSED the gate above.
     #
-    # Two statements, in this order, and the order is the guarantee: the marker
-    # says "staging holds a COMPLETE set of deliverables and the folder they
-    # replace is listed here", and only then does anything move. A crash before
-    # the marker leaves the matter folder exactly as the last complete run left
-    # it; a crash after it leaves a swap that the next run rolls forward.
+    # `publish_staging` removes the deliverables named in `stale` and then moves
+    # the staged set into place. A crash before this line leaves the matter
+    # folder exactly as the last complete run left it. A crash INSIDE it leaves
+    # the folder holding part of the previous run's evidence and part of this
+    # one's, permanently and undetected — that is D-32's accepted window, and it
+    # is stated at full width on `emit.paths.publish_staging` rather than here,
+    # so that the one place it is described is the place a reader changing the
+    # code will be standing.
     #
-    # Under D-31 the swap RENAMES this folder's set into `.dociq/` before it
-    # renames the staged set in, and deletes only afterwards — so a crash here
-    # can leave the folder incomplete but never MIXED, and a failure of the
-    # final deletion is a residue rather than an error. See `commit_staging`.
-    emit_paths.mark_ready(layout, stale)
-    emit_paths.commit_staging(layout)
-    residue = emit_paths.superseded_residue(layout)
+    # `PublicationFailed` is NOT caught. Its message says what state the folder
+    # is in and where the complete staged set still is; converting it into a
+    # refused run would file a mixed matter folder under a status that means
+    # "nothing was touched".
+    publication = emit_paths.publish_staging(layout, stale)
+    residue = publication.residue
 
     return PipelineOutcome(
         result=result,

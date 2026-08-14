@@ -1143,9 +1143,32 @@ whose whole point is that it does not move under people.
 **Affects:** `dociq/gui/pipeline.py` — `RunOutcome.superseded_residue`; wired by
 `dociq/adapter.py`
 **Proposed severity:** MINOR — a new optional field on a non-contract seam record
-**Status:** **APPLIED 2026-08-05 at `f7358a7`**
+**Status:** **APPLIED 2026-08-05 at `f7358a7`** — still applied, still wired, and
+carrying something narrower than the case below describes. See the D-32 note.
 
-### The case
+### D-32 (2026-08-06) — the field survives, its subject matter shrank
+
+**The amendment is NOT withdrawn and the entry is NOT deleted.**
+`RunOutcome.superseded_residue` still exists, is still populated by
+`dociq/adapter.py`, and is still rendered success-first. What changed is what it
+can contain: D-32 deleted the set-aside protocol, so there are no
+`.dociq/superseded*` trees for this build to leave. The field now carries
+`dociq.emit.paths.state_residue()`'s answer — on the success path, a drained
+`.dociq/staging/` that could not be removed after every file had been moved out
+of it. **Empty directories, not a stale copy of a previous run's deliverables.**
+That is a smaller thing than the case below argues for, and it is stated rather
+than left for a reader to discover that the field is usually empty.
+
+The NAME is deliberately unchanged. Renaming a seam field that this amendment
+wired end to end is a contract change, and the descope has no business making
+one; the mismatch is explained at both ends (`gui/pipeline.py` and
+`pipeline.py`) instead. **This is a stop-the-line item disclosed, not a registry
+entry quietly edited** — if the name is to change, that is a new amendment.
+
+The reasoning about hashed content in the last paragraph below is unaffected and
+still binding.
+
+### The case (as raised under D-31, whose design no longer exists)
 
 D-31 made the matter swap delete-last: the previous deliverable set is renamed
 aside under `.dociq/`, the staged set is renamed into place, and the set-aside
@@ -1170,6 +1193,12 @@ that belonged in the run record instead.
 ## A-17 — A-16's residue disclosure has a blind spot exactly the width of the package path
 
 **Raised by:** Codex review #2, third fix round, finding A-7, 2026-08-06
+**Unaffected by D-32:** the package's own delete-last publish is a separate
+mechanism in `dociq/emit/handoff.py`, it was reviewed on its own terms and found
+sound, and the descope did not touch it. `package_superseded` trees are still
+created and still reported. The one sentence that changed is the cross-reference:
+A-16's blind spot is now described against `state_residue()` rather than the
+deleted `superseded_residue()`.
 **Affects:** `dociq/gui/pipeline.py` — `PackageResult.residue`; wired by
 `dociq/adapter.py`, `dociq/emit/handoff.py` (`UploadPackage.residue`),
 `dociq/gui/view_models.py` and `dociq/gui/screens.py`

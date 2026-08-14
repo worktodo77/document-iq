@@ -286,10 +286,15 @@ def test_a_rerun_into_the_same_folder_is_byte_identical_to_the_first(tmp_path):
 
 
 def test_the_replaced_set_is_recorded_outside_the_hashed_content(tmp_path):
-    """Renamed from ``..._purge_...`` and its key from ``stale_outputs_removed``
-    under D-31: nothing is purged any more. The previous run's deliverables are
-    RENAMED into ``.dociq/`` and deleted only after the new set holds their
-    names, so "removed" was about to become a false description of the field."""
+    """The durable record of what a re-run replaced, outside hashed content.
+
+    **The D-31 reasoning for the field's name is withdrawn (D-32).** It said the
+    previous run's deliverables were RENAMED into ``.dociq/`` rather than purged,
+    so "removed" would have been a false description. They are now deleted
+    outright, and "removed" would be accurate again — but the name stays
+    ``stale_outputs_replaced``, because *replaced* is what the field is about and
+    renaming a durable log key to chase a mechanism is how a consumer breaks. The
+    old key ``stale_outputs_removed`` must still be absent."""
     _run(tmp_path, "record")
     second = _run(tmp_path, "record")
     payload = json.loads(
