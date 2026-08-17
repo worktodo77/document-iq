@@ -197,6 +197,28 @@ cosmetic: only the first kind is the expert's to defend.
 """
 
 
+LEVER_RECOGNIZED = "recognized"
+"""A section the tool RECOGNIZED and will never offer to drop (amendment A-20).
+
+`section_taxonomy.md` §4 grades some categories HIGH risk and the shipped
+template marks them ``offer=False``: the executive summary, the critical path
+narrative, the weather log, the timesheets, the manpower histograms, the change
+log, the quality/NCR log, the action register. They are recognized so an expert
+can find and cite them, and they are **not levers**.
+
+A third kind rather than an ``offer`` flag on the row, because the distinction
+has to survive :meth:`ReductionPlan.with_toggled`. A boolean that a widget is
+trusted to respect is a boolean some future widget does not; a kind that is not
+``LEVER_EXPERT`` is locked by :attr:`ReductionLever.locked`, and the toggle
+ignores locked rows at the model layer where no screen can reach past it.
+
+It is drawn and never merged into a total: an unengaged row contributes nothing
+to :attr:`ReductionPlan.remaining_tokens` either way, and showing it is the
+point — a waterfall that silently omitted the sections it will not drop would
+let a reader believe the record contains less than it does.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class ReductionLever:
     """One row of the reduction waterfall."""
@@ -236,9 +258,52 @@ class ReductionLever:
     a widget — a GUI-authored rationale for an evidentiary omission would be the
     tool putting words in the expert's mouth."""
 
+    family_id: str = ""
+    """The template family this row belongs to (amendment A-20).
+
+    The identifier an :class:`OmissionApproval` is given against, so the row the
+    expert clicked and the approval the pipeline records name the same thing.
+    Empty for a recognized section the loaded template defines no family for —
+    which is a row that can be seen and cannot be engaged."""
+
+    risk: str = ""
+    """``low`` / ``medium`` / ``high`` — what dropping this section costs
+    (§4, A-20).
+
+    On the row rather than in a tooltip, and required for the same reason §5.3
+    gives: risk is **deliberately not correlated with size**. The most dangerous
+    categories in the taxonomy are among the smallest — a weather log is trivial
+    in tokens and decisive in a weather-delay claim. A waterfall sorted by
+    saving puts a HIGH-risk row next to a large number and an easy click, and
+    the only thing standing between those two facts is this field being
+    rendered."""
+
+    tier: str = ""
+    """How the section was recognized: ``t1_outline``, ``t3_page_class``
+    (A-18, A-20).
+
+    "The document's own outline placed these pages here" and "a page-class rule
+    matched them" are different claims with different strengths, and §5.4 puts
+    the difference in front of the person deciding — not only in the log after
+    they have decided."""
+
+    approved_by: str = ""
+    """Who approved this omission, once someone has (D-34).
+
+    Empty until a human engages the row. It is never defaulted and never
+    inferred from the template: a template approved nothing, and the approver
+    field holding a fiction is the exact failure D-34 was ruled to prevent."""
+
     @property
     def locked(self) -> bool:
-        return self.kind == LEVER_AUTOMATIC
+        """True for every row that is not the expert's to toggle.
+
+        **Widened from ``kind == LEVER_AUTOMATIC``** when A-20 added
+        :data:`LEVER_RECOGNIZED`. Written as "not expert" rather than as a list
+        of locked kinds on purpose: the next kind added is locked unless someone
+        deliberately unlocks it, which is the safe direction for a predicate
+        that decides whether a page can be dropped."""
+        return self.kind != LEVER_EXPERT
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,6 +566,32 @@ class PackageResult:
 
 
 @dataclass(frozen=True, slots=True)
+class OmissionApproval:
+    """One expert, engaging one lever, as it crosses the seam (D-34, A-20).
+
+    A seam record rather than :class:`dociq.sections.model.ApprovedOmission`
+    itself, because the freeze forbids the GUI reaching into the pipeline's
+    packages — the adapter converts. The fields are the same fields, and they
+    are all of them: an approval that reached a screen without its approver, or
+    without the matter it was given on, would be exactly the half-record D-34
+    says must not exist.
+
+    **The GUI never constructs one.** It asks the pipeline to record an approval
+    and is handed this back. That is what keeps ``approved_by`` and
+    ``approved_at`` facts about the machine and the moment rather than strings a
+    widget composed — a GUI-authored approver is a fiction, and the ruling is
+    that this field never holds one.
+    """
+
+    family_id: str
+    approved_by: str
+    approved_at: str
+    matter: str
+    template_id: str
+    template_version: str
+
+
+@dataclass(frozen=True, slots=True)
 class RunRequest:
     """What the setup screen collected. Turned into a :class:`RunConfig` by the
     adapter — building the config is pipeline work, not GUI work, because the
@@ -510,6 +601,17 @@ class RunRequest:
     output_root: str
     profile: ProfileInfo | None = None
     master_index_path: str | None = None
+
+    approvals: tuple[OmissionApproval, ...] = ()
+    """The omissions an expert engaged on the waterfall, carried into the run
+    that will act on them (D-34).
+
+    On the REQUEST rather than held inside the adapter, deliberately. Engaging a
+    lever changes no file — the deliverables were written by the run that has
+    already finished, which is why the summary screen marks itself stale — so
+    the approval has to survive as far as the next run's inputs, and an adapter
+    that remembered it privately would make two runs from one visible request
+    produce different corpora. It is an input; it travels with the inputs."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -557,6 +659,27 @@ class PipelineAPI(Protocol):
         as an operator confirmation, and a refusal must never be silently
         treated as "no Bates present" — an unstamped production and a stamped
         one whose format was declined are different facts about the record.
+        """
+        ...
+
+    def set_omission(
+        self, family_id: str, engaged: bool, matter: str
+    ) -> "OmissionApproval | None":
+        """Engage or withdraw one omission, and CAPTURE THE APPROVER (D-34).
+
+        This is the moment D-34 is about. A template ships unengaged and can
+        never drop a page; the instant a human ticks a row, DocIQ writes that
+        person's identity, the time and the matter into the approval and into
+        every drop-log line it will produce. Returns the record on engage and
+        ``None`` on withdrawal.
+
+        It is a pipeline call rather than a GUI construction because the
+        approver is the machine's answer to "who is running this", not a string
+        a screen can compose. The alternative — a widget filling in a name — is
+        the fiction the ruling forbids.
+
+        An adapter that does not offer it leaves the row un-engageable, which is
+        the safe direction: no approval, no drop.
         """
         ...
 
@@ -680,6 +803,8 @@ __all__ = [
     "DIRECT_CONTEXT_TOKENS",
     "LEVER_AUTOMATIC",
     "LEVER_EXPERT",
+    "LEVER_RECOGNIZED",
+    "OmissionApproval",
     "ProfileInfo",
     "TokenBasis",
     "ReductionLever",

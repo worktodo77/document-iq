@@ -586,6 +586,13 @@ class SummaryScreen(QWidget):
     open_output_requested = Signal()
     handoff_requested = Signal()
     plan_changed = Signal(object)  # ReductionPlan
+    lever_engaged = Signal(str, bool)
+    """``(family_id, engaged)`` — a row the MODEL actually moved (D-34).
+
+    Emitted only after :meth:`ReductionPlan.with_toggled` has accepted the
+    change, so a locked row never reaches the window and never reaches the
+    approver capture. The window turns it into an approval; this screen does
+    not, because it has neither the pipeline nor the matter."""
 
     def __init__(self, theme: Theme, parent=None) -> None:
         super().__init__(parent)
@@ -778,9 +785,28 @@ class SummaryScreen(QWidget):
         self._route.setText(view.route_line())
 
     def _toggle_lever(self, key: str) -> None:
+        """A row was clicked. The MODEL decides whether it may move.
+
+        ``with_toggled`` ignores a locked row, so a recognized-and-never-offered
+        section cannot be engaged even if a future widget wires a click to it.
+        The screen then reports what the model did rather than what the click
+        asked for — which is why the emitted plan is read back out instead of
+        assumed.
+
+        The approver is captured by the window, not here: this screen has no
+        pipeline and no matter name, and a screen that could compose an approver
+        is a screen that could compose a fiction (D-34).
+        """
         if self._plan is None:
             return
-        self._plan = self._plan.with_toggled(key)
+        before = {lever.key: lever.engaged for lever in self._plan.levers}
+        plan = self._plan.with_toggled(key)
+        moved = [lever for lever in plan.levers
+                 if before.get(lever.key) != lever.engaged]
+        if not moved:
+            return
+        self._plan = plan
+        self.lever_engaged.emit(moved[0].family_id, moved[0].engaged)
         self.plan_changed.emit(self._plan)
 
     def mark_stale(self) -> None:

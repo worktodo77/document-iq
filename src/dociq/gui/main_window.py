@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from dociq.gui.pipeline import (
     BatesProposal,
+    OmissionApproval,
     PipelineAPI,
     ProfileInfo,
     ProgressEvent,
@@ -178,6 +180,14 @@ class MainWindow(QMainWindow):
         self._scope = PackageScope()
         self._package: PackageOutcomeView | None = None
         self._request: RunRequest | None = None
+        self._approvals: tuple[OmissionApproval, ...] = ()
+        """Omissions the expert has engaged on the waterfall (D-34).
+
+        Held here because an approval outlives the run it was given after and
+        applies to the run that comes next: the waterfall is read on the summary
+        screen, and the corpus it describes has already been written. Carried
+        into :attr:`RunRequest.approvals` when a run starts, so the pipeline
+        receives it as an input rather than reading it out of a window."""
         """The last run's request, kept so a FAILED run can be retried (A-2).
         Without it the only recovery from a failure was closing the window."""
 
@@ -214,6 +224,12 @@ class MainWindow(QMainWindow):
         self.setup.run_requested.connect(self.start_run)
         self.setup.source_chosen.connect(self._preview_folder)
         self.summary.plan_changed.connect(self._replan)
+        # D-34: the row that moved becomes an approval carrying a real name.
+        # Connected next to the re-projection because they are two halves of one
+        # click — the picture changes and the ruling is recorded — and wiring
+        # only the first is how the waterfall would have gone on being a
+        # calculator that forgets who used it.
+        self.summary.lever_engaged.connect(self._capture_approval)
         self.progress.cancel_requested.connect(self.cancel_run)
         # A-2. Both are only offered once the run has settled, and both must
         # actually work from there — a dead-end screen was the finding.
@@ -266,6 +282,38 @@ class MainWindow(QMainWindow):
         self.summary.show_summary(self._view)
         self.summary.mark_stale()
 
+    def _capture_approval(self, family_id: str, engaged: bool) -> None:
+        """D-34's capture point, at the only layer that has both halves.
+
+        The screen knows which row moved; the pipeline knows who is running the
+        tool. Neither can write an approval alone, and that is deliberate — an
+        approver a screen composed would be the fiction the ruling forbids.
+
+        The approval is held on the window and travels into the NEXT run's
+        request. Engaging a lever changes no file: the corpus on disk was
+        written by the run that has already finished, which is why the summary
+        marks itself stale rather than pretending the choice took effect.
+
+        A refusal (an unknown family, or one the template never offers) is
+        reported and dropped rather than raised: the model already declined to
+        move such a row, so reaching here means the two layers disagree, and the
+        safe reading of a disagreement about whether a page may be dropped is
+        the one where it is not.
+        """
+        if not family_id:
+            return
+        capture = getattr(self._pipeline, "set_omission", None)
+        if capture is None:
+            return
+        matter = Path(self._request.source_root).name if self._request else ""
+        try:
+            approval = capture(family_id, engaged, matter)
+        except Exception as exc:
+            print(f"[dociq] omission {family_id!r} was not recorded: {exc}")
+            return
+        kept = tuple(a for a in self._approvals if a.family_id != family_id)
+        self._approvals = kept + ((approval,) if approval is not None else ())
+
     def start_run(self, request: RunRequest) -> None:
         if self.thread_running():
             # A second run started over a live one would leave the first
@@ -278,7 +326,8 @@ class MainWindow(QMainWindow):
             # Joining it here is what keeps ``self._thread`` from naming a
             # thread that is still finishing while a new one starts.
             self._thread.wait(2000)
-        self._request = request
+        self._request = replace(request, approvals=self._approvals)
+        request = self._request
         self.progress.reset()
         self.stack.setCurrentIndex(PROGRESS)
 
