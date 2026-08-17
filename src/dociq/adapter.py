@@ -581,7 +581,22 @@ class RealPipeline:
         Empty by default and supplied per matter. Never a list of real project
         names living in the source: measured, 30.5% of the corpus's section
         vocabulary carries project-identifying text, and a default here would
-        compile one client's vessel name into the product."""
+        compile one client's vessel name into the product.
+
+        **NO SCREEN SETS THIS, and saying so is the point.** The parameter
+        reaches the run identity and the family matching; the setup screen has
+        no field for it, so in the shipped GUI it is always empty. That is the
+        A-12 shape — a capability declared, wired to the pipeline, and
+        unreachable by the operator — and A-12 is the amendment this project
+        shipped a permanently disabled button behind, so the gap is written down
+        rather than left to be found.
+
+        What it costs is bounded and it is in the safe direction: an unstripped
+        `MV32 APPENDICES` matches no family, and a section with no family keeps.
+        Measured, that is 30.5% of the vocabulary declining to match rather than
+        matching wrongly. Nothing is dropped that should not be; some things that
+        could be offered are not. Closing it is a setup-screen field and a
+        `RunRequest` entry, and it is named in the Sprint-3 handoff."""
         self.library_issues: tuple[str, ...] = ()
         """Profile files in the library that could not be read, with the reason.
 

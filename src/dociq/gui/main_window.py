@@ -304,6 +304,14 @@ class MainWindow(QMainWindow):
             return
         capture = getattr(self._pipeline, "set_omission", None)
         if capture is None:
+            # A stand-in pipeline (the mock) cannot capture an approver, and it
+            # must not pretend to. Said out loud rather than returning silently:
+            # the row will look engaged and NO approval exists behind it, which
+            # is the one state D-34 says must never be mistaken for the other.
+            # The stand-in carries a standing disclosure that it is not a real
+            # pipeline; this is the same disclosure, at the moment it matters.
+            print("[dociq] this pipeline cannot record an approval: the lever "
+                  f"{family_id!r} moved on screen and NOTHING was approved")
             return
         matter = Path(self._request.source_root).name if self._request else ""
         try:
