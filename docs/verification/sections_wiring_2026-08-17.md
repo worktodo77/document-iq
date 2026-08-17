@@ -199,3 +199,82 @@ identity input, a matter copy and a log entry.
 * **Tiers 2 and 4 are not built**, and the corpus-wide ceiling stands where the
   measurement put it: about 70% of pages recognized, about 30% kept
   unconditionally.
+
+
+---
+
+## The tree, measured at the end
+
+**Machine verified quiet before starting and it stayed quiet**: CPU sampled at
+3/4/0%, zero python processes, no agents of ours running. This is the first
+figure in this sprint that may be quoted, and the reason it may be is the
+condition, not the number.
+
+| | |
+|---|---|
+| Tests collected | **1,494** |
+| Full-suite runs | **8** |
+| Exit code | **0**, all eight |
+| FAILED/ERROR markers | **0**, all eight |
+| Output size | **1,701 bytes**, identical all eight |
+| Wall clock | **259–265 s** (~4m20s) |
+| `python -m dociq.selftest` | **exit 0, 70 checks** |
+| Determinism, inside the selftest | 8 sequential runs, **1 distinct corpus hash** |
+
+The 4m20s agrees with the register's post-descope 4m22s, measured the same way.
+That agreement is the cross-check that the suite did not quietly stop running
+something.
+
+**Baseline for the comparison: 79 items** (74 FAILED, 5 ERROR) at `743446b`,
+watched to completion and counted with `grep -cE '^(FAILED|ERROR) '` — never
+from a `tail`, which puts the summary line above the list it summarises.
+
+### One count that was NOT a count, recorded because it nearly went in a commit
+
+After the spine landed, a full-suite run exited **2** with **2,877 bytes** and
+four `ERROR` lines. That is a **collection abort, not a suite result**: four
+modules could not import `dociq.profiles.apply`, so nothing ran. Reporting it as
+"4 failures" would have been the same error `743446b` withdrew, one order of
+magnitude smaller and therefore easier to believe. The commit for that state
+says in terms that no suite figure exists for it.
+
+## What the adversarial pass found that no test did
+
+Five reviewers re-derived each package against the real diff rather than the
+report. The findings that mattered were not in the tests.
+
+**The §6 approve button was disabled on every path.** `profile_rules` began
+describing the template (19 families, 11 offerable) while
+`ProfileChecklistView.counts_agree` went on comparing `profile.section_rules`
+(2, or 0 for no profile) against the rows shown. Permanently False, so
+`approvable` was permanently False, and the operator was shown *"a rule that is
+not on this screen can still leave pages out"* — an alarm about a hazard that did
+not exist, over a button that could not be pressed.
+
+**It was found by driving the real product, and it could not have been found any
+other way.** `MockPipeline.profile_rules` slices its levers to
+`profile.section_rules`, so the mock's checklist agrees with itself by
+construction and can never exhibit the disagreement. Every mock-driven assertion
+on that screen passed throughout.
+
+The completeness guarantee **moved rather than vanished**, and the move is a
+change in kind: the old check protected against an adapter losing rules while
+parsing a profile off disk, which a shipped template cannot do at runtime. It is
+now a test comparing the real adapter's rows against `PROGRESS_REPORT.families`,
+plus a regression guard that presses the button through `MainWindow`. Both
+fail-befores were watched red.
+
+### Two instrument corrections from this pass, both worth keeping
+
+**An empty result is not a red.** A fail-before was run with `pytest -k
+recognized`, which selected no test and printed nothing. Nothing is not a
+failure; it was re-run against the named test and produced the real message
+(`executive-summary: a recognized-never-offered row moved when toggled`).
+
+**A console is not a file.** A traceback appeared to show a mangled section sign
+and the encoding scan reporting zero damage looked broken. `repr()` prints
+printable non-ASCII as-is and the Windows console cannot render `§`, so the
+damage was in the terminal. The scan was re-run with a needle built by
+`chr(0xFFFD)` — because a needle typed into a heredoc could itself have been
+mangled, which would have made the green meaningless — and still reports zero.
+The real fault was an unterminated docstring, caught by the compiler.
