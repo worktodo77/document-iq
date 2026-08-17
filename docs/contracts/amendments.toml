@@ -190,3 +190,18 @@ title = "A-16's residue disclosure has a blind spot exactly the width of the pac
 raised_by = "Codex third fix round, finding A-7"
 wired_in = { "src/dociq/gui/pipeline.py" = ["PackageResult"], "src/dociq/adapter.py" = ["PackageResult"], "src/dociq/emit/handoff.py" = ["UploadPackage"], "src/dociq/gui/view_models.py" = ["PackageOutcomeView"] }
 tests = ["tests/test_package_swap.py", "tests/test_gui_screen_states.py"]
+
+# A-18 lands its wiring and this entry in the SAME commit, so its adopting
+# commit id cannot exist yet — a commit cannot name itself, and the checker
+# rejects both "PENDING" and "HEAD". Recorded as "raised" for exactly one
+# commit, per the A-16/A-17 two-step, and flipped to "applied" with the real id
+# once the tier reaches the processing log. It stays "raised" while
+# RecognitionTier exists and no pipeline path populates it: that gap IS the
+# A-12/A-14 defect, and calling it applied early is how A-14 shipped a
+# Bates-stamped production with zero locators.
+[amendment.A-18]
+status = "raised"
+title = "PageRecord cannot carry HOW a page's section was recognized"
+raised_by = "D-35 and the Sprint-3 taxonomy build, for section_taxonomy.md §5.4"
+wired_in = { "src/dociq/contracts.py" = ["RecognitionTier"] }
+tests = ["tests/test_sections.py"]

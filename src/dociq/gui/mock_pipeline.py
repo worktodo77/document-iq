@@ -43,6 +43,7 @@ from dociq.contracts import (
     PageKind,
     PageRecord,
     ProcessingStatus,
+    RecognitionTier,
     RunConfig,
     RunResult,
 )
@@ -360,6 +361,10 @@ def _build_document(index: int, rel_path: str, pages: int, scanned: int,
                 ocr_low_conf_lines=low_lines,
                 bates=None,
                 section=section,
+                # A-18. The mock's sections stand in for ones a document's own
+                # outline placed, which is the tier the real Tier-1 resolver
+                # produces for the same material.
+                section_tier=RecognitionTier.OUTLINE,
                 disposition=Disposition.DROP if drop else Disposition.KEEP,
                 drop_rule=f"modec-mpr:{section.lower().replace(' ', '-')}"
                 if drop else None,

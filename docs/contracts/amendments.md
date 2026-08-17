@@ -1231,3 +1231,67 @@ copy on a machine an operator uploads from is a retention problem and a
 confusion problem — a folder full of package-shaped files, ten minutes after
 they were told to drag one into a Project — and not a build failure. Calling it
 either of the other two would be wrong.
+
+## A-18 — `PageRecord` cannot carry HOW a page's section was recognized
+
+**Raised by:** D-35 and the Sprint-3 taxonomy build, 2026-08-17
+**Affects:** `dociq/contracts.py` — `RecognitionTier` (new), `PageRecord.section_tier`
+**Proposed severity:** MINOR as a type change (additive, safe default `None`);
+**MAJOR in one validation rule**, stated plainly below rather than buried.
+**Status:** **RAISED, NOT APPLIED** — the type exists and no pipeline path
+populates it yet. It is flipped to APPLIED, with the adopting commit id, in the
+commit that carries the tier into `processing_log.json`.
+
+### The gap
+
+`docs/design/section_taxonomy.md` §5.4 has required the recognition tier per page
+since the day it was written:
+
+> "Dropped because the document's own outline placed this page in PROGRESS
+> PHOTOS" and "dropped because the page matched a photo-page rule" are different
+> claims with different strengths.
+
+There was nowhere to put it. `PageRecord` carried `section` and `drop_rule`, so
+the log could say *which rule* fired and never *what kind of evidence it rested
+on* — and the four tiers are explicitly not equally strong. §3 calls presenting
+them as though they were "the quiet lie in this feature". An expert defending an
+omission in cross-examination is making one of those two claims and needs to know
+which.
+
+### What lands
+
+`RecognitionTier` — `t1_outline`, `t2_toc`, `t3_page_class`, `t4_explicit`,
+ordered strongest first. The values are the audit vocabulary written to disk and
+are as immutable as a `rule_id`; `test_the_tier_values_are_the_stable_audit_vocabulary`
+pins them. `t2_toc` and `t4_explicit` are declared although Sprint 3 builds
+neither, so the log vocabulary does not change when they arrive.
+
+`PageRecord.section_tier`, defaulted to `None`, and a hashed identity input —
+unlike `ocr_conf`, it is a deterministic property of the document and the tier
+that read it, carries no float, and a run that recognized a page by a different
+tier genuinely produced different evidence.
+
+### The rule that is not merely additive
+
+Three validation rules land with the field. Two are symmetry (`section` without a
+tier is refused; a tier without a `section` is refused). The third is a real
+tightening:
+
+> **a DROP page must carry a `section_tier`.**
+
+Principle 1 already makes an unattributable *drop* impossible. Without this, an
+unattributable *tier* stayed possible — §5.4 would have been a docstring that
+some future construction site could satisfy by omission, and a guarantee that is
+optional is one that regresses silently. This is the same reasoning that made
+`SectionRule.validate()` refuse a DROP without notes, applied one level deeper.
+
+It is recorded as a tightening rather than an addition because it can break a
+caller: any code path constructing a DROP page without a tier now raises. In this
+build there is exactly one such path and D-35 deletes it.
+
+### What it does NOT do
+
+It does not record *which* rule matched — `drop_rule` already does — and it does
+not record the approver, which lives on `ApprovedOmission` in the matter folder
+rather than on a page. And while this entry says RAISED it means it: the field is
+declared, the tiers produce it, and **no run writes it to disk yet**.

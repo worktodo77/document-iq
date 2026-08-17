@@ -23,7 +23,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-CONTRACT_VERSION = "1.6.0"
+CONTRACT_VERSION = "1.7.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -147,6 +147,27 @@ detail — and because the consequence is not cosmetic. When ``ratio_refuted`` i
 true the contract says the ruled band was NOT the method used, yet a consumer
 holding only :attr:`RunResult.tokens_before` received zeros and could fall back
 to the ruled ratio, displaying a number the pipeline expressly disclaims.
+
+1.7.0 — amendment A-18, from D-35 and the Sprint-3 taxonomy build.
+:class:`PageRecord` gains ``section_tier``, and :class:`RecognitionTier` is
+added to carry it. `docs/design/section_taxonomy.md` §5.4 required the
+recognition tier per page from the day it was written and there was nowhere to
+put it, so the strength of the evidence behind an omission was recorded
+nowhere: "the document's own outline placed this page in PROGRESS PHOTOS" and
+"a photo-page rule matched it" reached the operator as the same sentence.
+
+Additive with a safe default (``None``), so no existing construction site is
+obliged to change — but three validation rules land with it, and the third is
+not merely additive: **a DROP page must now carry a tier.** That is deliberate.
+Principle 1 already makes an unattributable drop impossible; without this an
+unattributable *tier* stayed possible, and a guarantee that is optional is one
+that regresses silently. The rule is what makes §5.4 correct-by-construction
+rather than a docstring.
+
+``section_tier`` is a hashed identity input, unlike ``ocr_conf``: it is a
+deterministic property of the document and the tier that read it, carries no
+float, and a run that recognized a page by a different tier genuinely produced
+different evidence.
 """
 
 
@@ -196,6 +217,41 @@ class Disposition(str, enum.Enum):
 
     KEEP = "keep"
     DROP = "drop"
+
+
+class RecognitionTier(str, enum.Enum):
+    """How a page's section was recognized (amendment A-18).
+
+    `docs/design/section_taxonomy.md` §5.4: *"Recognition tier belongs in the
+    log, per page."* The tiers are **not equally strong**, and presenting them
+    identically is what that section calls the quiet lie in this feature —
+    "dropped because the document's own outline placed this page in PROGRESS
+    PHOTOS" and "dropped because the page matched a photo-page rule" are
+    different claims, and an expert defending an omission needs to know which
+    one he is making.
+
+    Ordered strongest first. The values are stable strings written into
+    `processing_log.json` and must not be renamed: they are the audit trail
+    between runs, exactly as ``SectionRule.rule_id`` is.
+    """
+
+    OUTLINE = "t1_outline"
+    """The document's own PDF outline. A lookup, not an inference — evidence
+    the document makes about itself. Measured reach: 63.01% of corpus pages."""
+
+    TOC = "t2_toc"
+    """The document's own table of contents, parsed. Its own statement, but
+    recovered by parsing. **Not built in Sprint 3** — declared here so the log
+    vocabulary is stable when it is."""
+
+    PAGE_CLASS = "t3_page_class"
+    """A measurable property of the page (activity-grid headers, image area,
+    line recurrence). Deterministic and inspectable, but a *class* rule rather
+    than a section boundary. Measured reach: +7.38% of corpus pages."""
+
+    EXPLICIT = "t4_explicit"
+    """A page range entered by the expert. Strongest of all and least scalable.
+    **Not built in Sprint 3.**"""
 
 
 class TerminalStatus(str, enum.Enum):
@@ -332,8 +388,20 @@ class PageRecord:
     an un-Bates-stamped matter yields ``None`` on every page."""
 
     section: str | None = None
-    """Section header this page falls under, as matched by the active profile
-    (Stage 4). ``None`` when no profile matched — which means KEEP."""
+    """Section header this page falls under, as resolved by Stage 4. ``None``
+    when no tier resolved the page — which means KEEP. On the real corpus that
+    is 29.6% of pages, and it is a correct outcome rather than a coverage
+    failure (§1: a section the recognizer misses is a page that survives)."""
+
+    section_tier: "RecognitionTier | None" = None
+    """WHICH KIND OF EVIDENCE placed this page in :attr:`section` (amendment
+    A-18, for §5.4).
+
+    ``None`` exactly when :attr:`section` is ``None``, and required whenever
+    the page is DROP — both enforced by :meth:`validate`. The second rule is
+    the load-bearing one: it makes an unattributable *tier* as impossible as
+    Principle 1 already makes an unattributable *drop*, so the strength of the
+    evidence behind an omission cannot silently stop being recorded."""
 
     disposition: Disposition = Disposition.KEEP
     """KEEP unless an expert-approved profile rule dropped it. Defaulted so
@@ -383,6 +451,25 @@ class PageRecord:
         if self.disposition is Disposition.KEEP and self.drop_rule:
             raise ContractViolation(
                 f"page {self.page_no}: drop_rule set on a KEEP page"
+            )
+        if self.section_tier is not None and self.section is None:
+            raise ContractViolation(
+                f"page {self.page_no}: section_tier "
+                f"{self.section_tier.value!r} without a section — a tier "
+                "records HOW a section was recognized, and there is none here"
+            )
+        if self.section is not None and self.section_tier is None:
+            raise ContractViolation(
+                f"page {self.page_no}: section {self.section!r} without a "
+                "section_tier — §5.4 requires the kind of evidence to be "
+                "recorded per page, because the tiers are not equally strong"
+            )
+        if self.disposition is Disposition.DROP and self.section_tier is None:
+            raise ContractViolation(
+                f"page {self.page_no}: DROP without a section_tier — an "
+                "expert defending this omission must be able to say whether "
+                "the document's own outline placed the page or a page-class "
+                "rule matched it"
             )
 
 
@@ -986,6 +1073,7 @@ __all__ = [
     "CONTRACT_VERSION",
     "PageKind",
     "Disposition",
+    "RecognitionTier",
     "ProcessingStatus",
     "TerminalStatus",
     "IdRegime",

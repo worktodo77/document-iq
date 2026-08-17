@@ -43,6 +43,7 @@ from ..contracts import (
     PageKind,
     PageRecord,
     ProcessingStatus,
+    RecognitionTier,
     RunConfig,
     RunResult,
     canonical_json,
@@ -631,6 +632,14 @@ def _page_from_jsonable(d: dict) -> PageRecord:
         ocr_conf=d["ocr_conf"], ocr_line_count=d["ocr_line_count"],
         ocr_low_conf_lines=d["ocr_low_conf_lines"], bates=d["bates"],
         section=d["section"], disposition=Disposition(d["disposition"]),
+        # A-18. `.get` rather than `[...]`: a page cached by a build that
+        # predates the amendment has no such key, and a KeyError there would
+        # turn "this cache is older than the field" into a dead run. The
+        # contract then refuses the record if `section` is set and this is not,
+        # which is the loud failure the safe default must not swallow.
+        section_tier=(
+            RecognitionTier(d["section_tier"]) if d.get("section_tier") else None
+        ),
         drop_rule=d["drop_rule"], notes=tuple(d["notes"]))
 
 
