@@ -5,18 +5,25 @@ is `docs/verification/sections_2026-08-17.md` Q1 over all 298 PDFs. The corpus
 supplied three facts that the template design has to survive, and each one is a
 step here:
 
-**547 distinct section names.** Too many to enumerate in a shipped template, so a
-template matches a *family* rather than a literal. The count is 547 only after
-numbering is stripped; counted raw it is 750, and the difference is entirely
+**522 distinct section families.** Too many to enumerate in a shipped template, so
+a template matches a *family* rather than a literal. The count is 522 only after
+numbering is stripped; counted raw it is 716, and the difference is entirely
 ``4.5 ENGINEERING`` vs ``5.4 ENGINEERING`` — the same section under a different
 number in a different month's report.
 
-**116 of those 547 labels carry project-identifying text** — ``MV32 APPENDICES``,
-``STATUS OF PETROBRAS TQ``, ``BOMESC YARD``. That is 21% of the vocabulary, and
+**159 of those 522 labels carry project-identifying text** — ``MV32 APPENDICES``,
+``STATUS OF PETROBRAS TQ``, ``BOMESC YARD``. That is 30.5% of the vocabulary, and
 D-24 forbids a shipped template attributable to a corpus project. A template that
 matched these verbatim would have ``MV32`` compiled into a Long International
 deliverable. So project tokens are stripped before matching, and the token list
 is **supplied per matter, never shipped in this file**.
+
+*(These four figures read 547 / 750 / 116 / 21% until 2026-08-17. They came from
+runs 1 and 2 of the probe, which carried the exact-label pairing bug and the
+positional-label bug; the verification note states in terms that any figure
+quoted from those runs elsewhere is superseded, and this docstring was the
+elsewhere. Nothing in the module's behavior turned on them — which is exactly
+why they survived two readings.)*
 
 **The third most frequent label in the corpus is Portuguese** — ``PAGINA EM
 BRANCO`` (blank page), 61 occurrences. An English-only template does not see it.

@@ -78,6 +78,41 @@ than a foundation to extend.
 
 | D-35 | The shipped Stage-4 engine drops the wrong pages, as a class | **REPLACE IT WITH TIER-BASED SPANS (Alex, 2026-08-17).** `profiles/apply.py` matches a rule's regex against every line of every page and carries the matched section forward until another rule matches — so a rule fires on any line that merely *mentions* its section, and the carried state then governs every following page. Reproduced on **five trigger shapes** with a single DROP rule for `PROGRESS PHOTOGRAPHS`: the document's own table of contents, a body-text cross-reference, a transmittal listing enclosures, an appendix cover sheet, and — the worst, needing no confusing text at all — **a CORRECT first match where no later rule marks the section's end**, which runs the drop to the end of the document. The pages lost in the reproductions are the **executive summary, the critical path narrative, the weather log and the timesheets**, four of the categories §4 grades HIGH risk, and the drop log attributes every one of them to `PROGRESS PHOTOGRAPHS` — an audit trail that is complete and is a misdescription. This inverts §1's binding asymmetry: the recognizer does not miss a section, it **invents** one. Ruling: section resolution moves to Tier 1–3 page **spans** and Tier 4 explicit ranges; regex heading matching and carried section state are **deleted**. Rejected: bounding the rules instead (refusing to load a profile whose DROP sections have no end) — it keeps the mechanism §2 measured returning `FPSO ALMIRANTE BARROSO MV32` (1,017) and `PETROBRAS` (981) as its top matches, and does not touch the three shapes where the text merely mentions a section name; and suppressing matches on TOC pages, which is the repro fix for one of five shapes and is how the same defect returns under a new number. **Exposure stated precisely: `apply_profiles` is wired into the real pipeline (`pipeline.py:1435`) and no test covers the carry-forward path — but no built-in profile ships and there is no profile YAML on disk, so the code is reachable only by a hand-authored profile in the D-05 library, and nobody has authored one. Live and unexercised, which is exactly why it must be settled before templates make it exercised on every run.** | 2026-08-17 |
 
+### D-34 and D-35 wired, and what the wiring found (2026-08-17)
+
+Full record: `docs/verification/sections_wiring_2026-08-17.md`.
+
+`profiles/apply.py` is deleted. Recognition (Tiers 1 and 3) runs at extraction,
+where the file is open; `walker._record` stamps `section` and `section_tier`;
+Stage 4 rebuilds the spans from the stamped pages and drops only what an
+`ApprovedOmission` naming a person authorizes. Measured end to end: a template
+with no approvals recognizes three sections and drops nothing, and one approval
+drops pages 3-4 and **stops there** — the shape the old engine ran to the end of
+the document.
+
+**A-19 raised, and it is A-08 again.** A-08 put profiles in the run identity
+because they decided which pages dropped. D-34/D-35 move that decision to an
+approval, so approvals became the deciding input and sat outside the identity
+exactly as profiles once had. Not a hypothetical: a template ships unengaged, so
+"run, engage a lever, run again" is the ORDINARY path, and those two runs
+differed in their corpus and in nothing the identity could see. `RunConfig` gains
+`omissions`, `project_tokens` and the template id/version; CONTRACT_VERSION
+1.8.0. The claim narrows and correctly — two runs differing only in WHO approved
+are no longer byte-identical, because the drop log names the approver.
+
+**Two defects the wiring introduced and closed**, both recorded because each was
+a true statement turning false one layer away from where it was edited: the index
+would have printed a template id under a column headed "Omission approved by",
+and widening `ReductionLever.locked` routed every recognized-never-offered
+section — the weather logs, the timesheets, the manpower histograms — into the
+waterfall row whose hint reads "Removed mechanically by the tool", while those
+pages were kept.
+
+**One decision taken while wiring rather than ruled, flagged for Alex.** §6's
+checklist now describes the TEMPLATE rather than the profile. Rendering profile
+rules there would print "DROP" beside a rule that drops nothing, on the one
+screen whose purpose is approving omissions before a run commits to them.
+
 ### The three measured answers (2026-08-17)
 
 Full record: `docs/verification/sections_2026-08-17.md`. Probe:
