@@ -1303,9 +1303,11 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         # The ORDERED profile set, by content (amendment A-08, from Codex
         # review #1 round 2 finding B-R2-2). Recording only
         # ``opts.profiles[0].profile_id`` and its version was not recording the
-        # input the run used: Stage 4 applies the first profile whose header
-        # patterns claim a document, so every profile's rules AND the order
-        # they are tried in decide which pages drop.
+        # input the run used, when the profile engine still decided
+        # dispositions. It no longer does (D-35) — see RunConfig.profiles, where
+        # the claim is withdrawn in full. The snapshot stays: a profile is still
+        # loaded, hashed, matter-copied and logged, and hashing an input that
+        # can no longer change the output is the conservative direction.
         #
         # Measured on the fixture corpus, both without any attacker model:
         # editing a second profile's rule without bumping its version moved 2

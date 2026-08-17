@@ -221,6 +221,17 @@ class FormatProfile:
         )
 
     def applies_to(self, sample_text: str) -> bool:
+        """Whether this profile's header patterns claim a document.
+
+        **Nothing calls this any more (D-35).** Its only caller was
+        ``profiles/apply.py``, which is deleted; a profile no longer claims a
+        document and no longer decides a disposition. Kept rather than removed
+        because it is the executable statement of what ``header_patterns``
+        MEANS, and the field is still loaded, validated, round-tripped through
+        YAML and hashed into the run identity — a field whose meaning lives only
+        in prose is a field that drifts. Enumerated here rather than left for a
+        reader to discover it has no callers.
+        """
         """Whether this profile claims a document (§4 Stage 4).
 
         A profile with no header patterns claims everything — that is what

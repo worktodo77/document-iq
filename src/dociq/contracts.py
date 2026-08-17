@@ -95,9 +95,9 @@ snapshots, in precedence order, each carrying ``profile_id``, ``version`` and
 
 The configuration recorded only ``opts.profiles[0].profile_id`` and its
 version, and that is not the input the run actually used.
-:func:`~dociq.profiles.apply.apply_profiles` applies the FIRST profile whose
-header patterns claim a document, so both the content of every profile and
-their precedence order change which pages drop — and therefore ``clean_text``,
+``profiles/apply.py`` applied the FIRST profile whose header patterns claimed a
+document, so both the content of every profile and their precedence order
+changed which pages drop — and therefore ``clean_text``,
 the index, the sources map and the corpus hash. Measured, with no attacker
 model needed: editing a second profile's rule without bumping its version, and
 separately swapping two profiles' precedence with no content change at all,
@@ -814,21 +814,30 @@ class RunConfig:
     """Every profile the run was given, **in precedence order** (A-08).
 
     ``profile_id``/``profile_version`` above name only the first one, and that
-    is not the input the run used. Stage 4 applies the FIRST profile whose
-    header patterns claim a document, so *every* profile's content and the
-    order they are tried in decide which pages drop — and therefore decide
-    ``clean_text``, the index, the sources map and the corpus hash.
+    is not the input the run used.
 
-    Two measured counterexamples, neither needing an attacker model:
+    **A profile no longer decides a disposition, and this docstring said
+    otherwise (D-35, 2026-08-17).** It read: *"Stage 4 applies the FIRST profile
+    whose header patterns claim a document, so every profile's content and the
+    order they are tried in decide which pages drop."* Stage 4 does not claim
+    documents and does not read a profile's rules; the engine that did is
+    deleted, and section dispositions come from a template family and an
+    expert's approval. A-08's two measured counterexamples were true of the
+    mechanism they were measured on and are left standing in this module's
+    version history as the record of why the field exists.
 
-    * edit a *second* profile's rule and do not bump its version — the recorded
-      identity did not move, the corpus hash did (2 pages KEEP → DROP);
-    * swap two profiles' precedence with no content change anywhere — same
-      result.
+    **What the field is now.** Profiles remain a hashed run INPUT: they are
+    loaded, snapshotted by content, copied into the matter folder and recorded
+    in the log. Keeping them in the identity is the conservative direction — it
+    can only make two runs look more different than they are — and a supplied
+    profile whose DROP rules no longer drop anything is reported by
+    :func:`dociq.pipeline._inert_profile_warnings` rather than silently ignored.
 
-    A tuple, because order is part of the input. Empty for an unprofiled run,
-    which is the ordinary case (§4 Stage 4: a document no profile claims passes
-    through whole)."""
+    The input that decides dispositions is :attr:`omissions`, and A-19 is the
+    amendment that put it here for exactly the reason A-08 put profiles here.
+
+    A tuple, because order was part of the input. Empty for an unprofiled run,
+    which is the ordinary case."""
 
     @property
     def ocr_conf_threshold(self) -> float:
