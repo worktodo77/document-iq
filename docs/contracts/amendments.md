@@ -1365,3 +1365,90 @@ template is shipped Python that versions with the build, so its id and version
 are its content. If templates ever become loadable from disk, that stops being
 true and this needs a hash — recorded here so the next person does not have to
 rediscover why the asymmetry was deliberate.
+
+
+---
+
+## A-20 — the waterfall seam cannot say a section is recognized and must never be offered
+
+**Raised by:** D-34 and D-35, wiring the D-14 picker, 2026-08-17
+**Affects:** `dociq/gui/pipeline.py` - `LEVER_RECOGNIZED` (new), `OmissionApproval`
+(new), `ReductionLever.family_id` / `risk` / `tier` / `approved_by`,
+`ReductionLever.locked`, `PipelineAPI.set_omission`, `RunRequest.approvals`
+**Proposed severity:** MINOR as a type change (additive, safe defaults); **MAJOR
+in one predicate**, stated plainly below.
+**Status:** **RAISED, NOT APPLIED** - flipped with the adopting commit id in the
+commit that follows the one wiring it. The A-16/A-17 two-step.
+
+### The gap
+
+D-14 ruled that the waterfall rows ARE the section picker, so that the picture
+and the next action are the same object. D-34 then ruled that some sections are
+recognized and **never offered**: the shipped template marks eight of its
+nineteen families `offer=False` - the executive summary, the critical path
+narrative, the weather logs, the timesheets, the manpower histograms, the change
+log, the quality/NCR log, the action register. Section 4 grades every one of them
+HIGH risk.
+
+The seam had no way to say it. `ReductionLever` had two kinds, expert and
+automatic, and `locked` meant "automatic". A never-offered section is neither:
+it is not the tool's mechanical saving, and it is not the expert's to toggle.
+Without a third kind the picker would have offered a click that drops the
+weather log - on the screen D-16 made the single forward action.
+
+It also had nowhere to put the three facts an expert needs BEFORE clicking. Risk
+is the load-bearing one, and section 5.3 says why: risk is deliberately not
+correlated with size, so a waterfall sorted by saving puts a HIGH-risk row next
+to a large number and an easy click.
+
+### What lands
+
+`LEVER_RECOGNIZED`, and `ReductionLever` gains `family_id` (what an approval is
+given against), `risk`, `tier` (A-18's evidence strength, in front of the person
+deciding rather than only in the log afterwards) and `approved_by`.
+
+`OmissionApproval` crosses the seam, and `PipelineAPI.set_omission` is D-34's
+capture point. **The GUI never constructs an approval.** It asks the pipeline to
+record one and is handed the record back, so `approved_by` is the machine's
+answer to "who is running this" rather than a string a widget composed - a
+GUI-authored approver is precisely the fiction D-34 was ruled to prevent.
+
+`RunRequest.approvals` carries them into the next run, because engaging a lever
+changes no file: the corpus was written by the run that already finished, which
+is why the summary screen marks itself stale.
+
+### The change that is not merely additive
+
+> **`locked` widens from `kind == LEVER_AUTOMATIC` to `kind != LEVER_EXPERT`.**
+
+Written as "not expert" rather than as a list of locked kinds, because this
+predicate decides whether a page may be dropped and the safe direction is that
+the next kind added is locked until somebody deliberately unlocks it.
+
+**It broke something on the way in, and the break is worth recording because it
+is the shape of this whole amendment.** The waterfall widget split its rows on
+`locked`, so widening the predicate routed every recognized-never-offered
+section into the AUTOMATIC branch - whose row reads *"Removed mechanically by
+the tool, not by an expert decision"*. The eight families the template protects
+would have been drawn to the operator as REMOVED, in the place they go to check
+what happened to the corpus, while those pages were kept. A true statement
+turning false one layer away from where it was edited.
+
+Fixed with a fifth `WaterfallRow` kind rather than by re-narrowing `locked`.
+
+### Where the refusal lives
+
+At the model, twice, and not at the widget:
+
+* `ReductionPlan.with_toggled` ignores a locked row, so no screen can move one;
+* `RealPipeline.set_omission` refuses an unknown family AND a family with
+  `offer=False`, so a caller bypassing the screen is refused too.
+
+"The widget will not send it" is a hope about every future widget.
+
+### What it does NOT do
+
+It does not let the GUI reach `dociq.sections`. `OmissionApproval` is a seam
+record the adapter converts, and `tests/test_import_graph.py` now names
+`sections` in its FORBIDDEN list so the indirection is enforced rather than
+merely intended.
