@@ -30,6 +30,7 @@ from dociq.contracts import (
 from dociq.docid.reconcile import ReconciliationReport
 from dociq.emit.paths import OutputLayout, write_text_deterministic
 from dociq.identify.bates import BatesRange
+from dociq.sections.apply import SectionDropEntry
 
 __all__ = [
     "INDEX_COLUMNS",
@@ -63,11 +64,25 @@ INDEX_COLUMNS = (
     "SHA-256",
     "Parent doc",
     "Processing status",
+    "Sections recognized",
+    "Recognition tier",
     "Sections dropped",
+    "Omission approved by",
 )
 """§5's field list, in §5's order. "Relative path" is the one addition: without
 it the reconciliation tab's folder-side entries cannot be located on disk, and
-every consumer of the index otherwise has to re-derive it."""
+every consumer of the index otherwise has to re-derive it.
+
+**Three more were added when the taxonomy landed**, and each answers a question
+"Sections dropped" raises and cannot settle. A count of omissions is unreadable
+without the recognition it came out of — a document showing 0 dropped is either
+a document nothing was recognized in or a document an expert chose to keep whole,
+and those are different facts. "Recognition tier" carries §5.4/A-18 to the
+artifact a reviewer actually opens: the document's own outline and a page-class
+rule are not equally strong evidence, and an index that renders them identically
+is what §3 calls the quiet lie in this feature. "Omission approved by" carries
+D-34 the same way — the name is a person who acted, and an empty cell means
+nothing was omitted rather than that nobody is answerable."""
 
 RECONCILIATION_COLUMNS = (
     "Category",
@@ -115,9 +130,23 @@ def build_index_rows(
     documents: Sequence[DocumentRecord],
     *,
     bates_ranges: Mapping[tuple[str, str, int], BatesRange] | None = None,
+    drops: Sequence[SectionDropEntry] = (),
 ) -> tuple[IndexRow, ...]:
-    """Build the index rows in canonical document order."""
+    """Build the index rows in canonical document order.
+
+    ``drops`` supplies the "Omission approved by" column and has to be passed
+    in: the approver is deliberately NOT on :class:`PageRecord`. A page records
+    which rule dropped it (``drop_rule``, ``template_id:family_id``); the person
+    who approved the omission lives on the :class:`ApprovedOmission` in the
+    matter folder, because D-34 makes an approval a matter-scoped act by a named
+    human rather than a property of a page. Deriving a name from ``drop_rule``
+    would print a template id under a column headed "approved by", which is the
+    class of misdescription D-35 exists to remove.
+    """
     ranges = bates_ranges or {}
+    approvers_by_doc: dict[str, set[str]] = {}
+    for entry in drops:
+        approvers_by_doc.setdefault(entry.doc_id, set()).add(entry.approved_by)
     rows: list[IndexRow] = []
     for doc in sorted(documents, key=document_sort_key):
         rng = ranges.get(document_sort_key(doc))
@@ -126,6 +155,15 @@ def build_index_rows(
             for p in doc.pages
             if p.disposition is Disposition.DROP
         }
+        recognized = {p.section for p in doc.pages if p.section is not None}
+        # Tiers are rendered strongest-first and de-duplicated, not counted: a
+        # document is commonly placed by its outline in one part and by a
+        # page-class rule in another, and a reader needs to know BOTH were used
+        # rather than which was used more.
+        tiers = sorted(
+            {p.section_tier.value for p in doc.pages if p.section_tier is not None}
+        )
+        approvers = sorted(approvers_by_doc.get(doc.doc_id, ()))
         rows.append(
             IndexRow(
                 (
@@ -142,7 +180,10 @@ def build_index_rows(
                     doc.sha256,
                     doc.parent_doc_id or "",
                     _status_label(doc.status),
+                    str(len(recognized)),
+                    "; ".join(tiers),
                     str(len(dropped_sections)),
+                    "; ".join(approvers),
                 )
             )
         )

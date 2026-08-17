@@ -23,7 +23,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-CONTRACT_VERSION = "1.7.0"
+CONTRACT_VERSION = "1.8.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -168,6 +168,32 @@ rather than a docstring.
 deterministic property of the document and the tier that read it, carries no
 float, and a run that recognized a page by a different tier genuinely produced
 different evidence.
+
+1.8.0 — amendment A-19, from D-34 and D-35 as they were wired. :class:`RunConfig`
+gains ``omissions: tuple[OmissionSnapshot, ...]``, ``project_tokens``,
+``section_template_id`` and ``section_template_version``; :class:`OmissionSnapshot`
+is added to carry the first.
+
+**This is A-08's finding on the input that replaced the one A-08 was about.**
+A-08 put profiles in the run identity because they decided which pages dropped,
+and proved it with two measured counterexamples. D-35 deletes that engine and
+D-34 moves the decision to an approval a person gives against a template family,
+so approvals are now the deciding input — and until this amendment they sat
+outside the identity exactly as profiles once did. Two runs over one folder,
+identical in every recorded term, one of them missing a section: the same
+collision, one design generation later.
+
+``project_tokens`` is in for the same reason and is easier to miss. It changes
+which family a label normalizes to, so supplying `MV32` makes `MV32 APPENDICES`
+match an appendices rule and withholding it keeps the page. That is a different
+corpus from the same folder and the same approvals.
+
+The template id and version are recorded even when no approval was given,
+because "the expert engaged nothing" and "no template was offered" are different
+facts about a run and only one of them is a decision.
+
+Additive with safe defaults throughout: an empty approval set is the state of
+every freshly-installed DocIQ and of every run nobody has ruled on.
 """
 
 
@@ -608,6 +634,39 @@ class ProfileSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class OmissionSnapshot:
+    """One expert-approved omission, as the run identity records it
+    (amendment A-19).
+
+    The A-08 argument, one level along. A-08 put profiles in the identity
+    because they decided which pages dropped; D-34 and D-35 move that decision
+    to an approval a person gives against a template family, so the approvals
+    are now the input that decides, and an identity that omits them says two
+    corpora are the same run when one of them is missing a section.
+
+    A snapshot rather than :class:`dociq.sections.model.ApprovedOmission`
+    itself, for the reason every other snapshot here is one — the identity needs
+    a fixed fingerprint, not a live object — and for a second reason particular
+    to this module: :mod:`dociq.sections` imports the contract, so the contract
+    cannot import it back.
+
+    Every field is hashed, ``approved_by`` and ``approved_at`` included. That is
+    deliberate and it narrows the determinism claim: two runs over one folder
+    that differ only in WHO approved the omission are not byte-identical,
+    because the drop log names the approver and the approver differs. Recording
+    the person is the whole of D-34; a claim that had to pretend otherwise would
+    be the wrong claim to keep.
+    """
+
+    family_id: str
+    approved_by: str
+    approved_at: str
+    matter: str
+    template_id: str
+    template_version: str
+
+
+@dataclass(frozen=True, slots=True)
 class EffectiveLimits:
     """Every environment-controlled setting that can change output evidence
     (amendment A-04, from Codex review #1 finding B-2).
@@ -714,6 +773,42 @@ class RunConfig:
     ``None`` only for constructions that never reach a real run — the pipeline
     must always populate it, and the manifest names it as part of the identity
     the byte-identical claim covers."""
+
+    omissions: tuple[OmissionSnapshot, ...] = ()
+    """Every omission an expert approved for this run, in the order the log
+    records them (amendment A-19).
+
+    This is the input that decides which pages drop. Under D-34 a template ships
+    unengaged and can never drop a page on its own, so the disposition of a
+    corpus is a function of these records and of nothing else in the profile
+    system. Leaving them out of the identity would reproduce, exactly, the
+    defect A-08 was raised to close: two runs over one folder, one of them
+    missing a section, reporting the same identity.
+
+    Empty is the ordinary state of a freshly-installed DocIQ and of every run
+    nobody has ruled on — recognition happens, nothing drops."""
+
+    project_tokens: tuple[str, ...] = ()
+    """Matter-specific tokens stripped from a section label before a template
+    family matches it (A-19).
+
+    In the identity because it changes the answer: with `MV32` supplied,
+    `MV32 APPENDICES` normalizes to the family `APPENDICES` and a rule keyed to
+    appendices matches it; without, it does not, and the page keeps. Same folder,
+    same approvals, different corpus — which is the definition of an identity
+    input.
+
+    Supplied per matter and never shipped, because a token list is a list of a
+    client's own names (D-24)."""
+
+    section_template_id: str | None = None
+    """The template the approvals were given against, and its version. Recorded
+    beside :attr:`omissions` rather than derived from them so that a run with no
+    approvals still says which template was loaded — the difference between "the
+    expert engaged nothing" and "no template was offered" is a fact about the
+    run, and only one of them is a decision."""
+
+    section_template_version: str | None = None
 
     profiles: tuple[ProfileSnapshot, ...] = ()
     """Every profile the run was given, **in precedence order** (A-08).

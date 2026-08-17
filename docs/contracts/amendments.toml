@@ -205,3 +205,13 @@ title = "PageRecord cannot carry HOW a page's section was recognized"
 raised_by = "D-35 and the Sprint-3 taxonomy build, for section_taxonomy.md §5.4"
 wired_in = { "src/dociq/contracts.py" = ["RecognitionTier"] }
 tests = ["tests/test_sections.py"]
+
+# A-19 lands its wiring and this entry in the SAME commit, so like A-18 it is
+# recorded as "raised" for exactly one commit and flipped with the real adopting
+# id in the follow-up. The A-16/A-17 two-step, third time of asking.
+[amendment.A-19]
+status = "raised"
+title = "the run identity does not cover the input that now decides which pages drop"
+raised_by = "D-34 and D-35, wiring the section taxonomy into the pipeline"
+wired_in = { "src/dociq/contracts.py" = ["OmissionSnapshot"], "src/dociq/pipeline.py" = ["_inert_profile_warnings"] }
+tests = ["tests/test_run_identity.py", "tests/test_sections.py"]

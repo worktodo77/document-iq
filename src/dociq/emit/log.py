@@ -30,6 +30,7 @@ from typing import Any, Mapping, Sequence
 from dociq.contracts import (
     CONTRACT_VERSION,
     ContractViolation,
+    Disposition,
     DocumentRecord,
     PageKind,
     RunConfig,
@@ -43,8 +44,8 @@ from dociq.docid.assign import AssignmentResult
 from dociq.docid.reconcile import ReconciliationReport, RenumberWarning
 from dociq.emit.paths import OutputLayout, write_text_deterministic
 from dociq.identify.bates import BatesDecision, BatesRange
-from dociq.profiles.apply import DropLogEntry
 from dociq.profiles.model import FormatProfile, OperatorStamp, operator_stamp
+from dociq.sections.apply import SectionDropEntry
 from dociq.verify import tokens as tokens_mod
 from dociq.verify.accounting import AccountingReport
 from dociq.verify.manifest import Manifest
@@ -78,6 +79,49 @@ def _conf_pct(value: float | None) -> int | None:
     return None if value is None else round(value * 100)
 
 
+def _sections_of(doc: DocumentRecord) -> list[dict[str, Any]]:
+    """What was recognized in one document, and by which tier (§5.4, A-18).
+
+    **Recognition is logged whether or not anything was dropped**, and that is
+    the half it would have been easy to leave out. Under D-34 a shipped template
+    arrives unengaged, so the ordinary run — the one a freshly-installed DocIQ
+    performs — drops nothing at all; if the tier reached the log only through a
+    drop entry, then §5.4's "recognition tier belongs in the log, per page"
+    would be satisfied by exactly the runs that need it least, and A-18 would be
+    a field that no real run populates. That is the A-12 shape: declared, wired
+    to something, and absent from the product's actual behavior.
+
+    It is also what makes the index's "sections dropped" column readable: a
+    count of omissions means nothing without the sections that were recognized
+    and kept beside it.
+
+    One row per contiguous run of pages under one section and one tier, in page
+    order — the same grouping :func:`dociq.sections.resolve.spans_from_pages`
+    uses, so the log and the drop decision describe the same spans.
+    """
+    rows: list[dict[str, Any]] = []
+    for page in doc.pages:
+        if page.section is None or page.section_tier is None:
+            continue
+        dropped = 1 if page.disposition is Disposition.DROP else 0
+        if (rows and rows[-1]["section"] == page.section
+                and rows[-1]["tier"] == page.section_tier.value
+                and rows[-1]["last_page"] == page.page_no - 1):
+            rows[-1]["last_page"] = page.page_no
+            rows[-1]["pages"] += 1
+            rows[-1]["pages_dropped"] += dropped
+            continue
+        rows.append({
+            "section": page.section,
+            "tier": page.section_tier.value,
+            "first_page": page.page_no,
+            "last_page": page.page_no,
+            "pages": 1,
+            "pages_dropped": dropped,
+        })
+    return rows
+
+
 def _document_entry(doc: DocumentRecord) -> dict[str, Any]:
     ocr_pages = [p for p in doc.pages if p.kind is PageKind.OCR]
     confs = [p.ocr_conf for p in ocr_pages if p.ocr_conf is not None]
@@ -102,6 +146,7 @@ def _document_entry(doc: DocumentRecord) -> dict[str, Any]:
         "pages_in": doc.pages_in,
         "pages_kept": doc.pages_kept,
         "pages_dropped": doc.pages_dropped,
+        "sections": _sections_of(doc),
         "page_kinds": dict(sorted(kinds.items())),
         "ocr_pages": len(ocr_pages),
         "ocr_mean_conf_pct": _conf_pct(sum(confs) / len(confs)) if confs else None,
@@ -165,7 +210,7 @@ def build_log(
     assignment: AssignmentResult | None = None,
     reconciliation: ReconciliationReport | None = None,
     renumbering: Sequence[RenumberWarning] = (),
-    drops: Sequence[DropLogEntry] = (),
+    drops: Sequence[SectionDropEntry] = (),
     profiles: Sequence[FormatProfile] = (),
     bates_decision: BatesDecision | None = None,
     bates_ranges: Mapping[tuple[str, str, int], BatesRange] | None = None,
@@ -411,18 +456,29 @@ def build_log(
             }
             for d in sorted(unsupported, key=document_sort_key)
         ],
+        # §7's per-drop record, and §5.4's requirement inside it. Each entry
+        # now answers three questions an expert is asked in cross-examination
+        # and could previously answer only the first of: WHICH rule omitted this
+        # page, WHAT KIND OF EVIDENCE placed it in that section (`tier`, A-18 —
+        # the document's own outline is not the same claim as a page-class
+        # rule), and WHO approved the omission and when (D-34 — an approver
+        # that is a real person who acted, never a template's default).
         "drops": [
             {
                 "doc_id": e.doc_id,
                 "rel_path": e.rel_path,
                 "page_no": e.page_no,
                 "section": e.section,
-                "rule_id": e.rule_id,
-                "pattern": e.pattern,
-                "matched_text": e.matched_text,
-                "profile_id": e.profile_id,
-                "profile_version": e.profile_version,
-                "rule_notes": e.rule_notes,
+                "family": e.family,
+                "tier": e.tier.value,
+                "evidence": e.evidence,
+                "family_id": e.family_id,
+                "drop_rule": e.drop_rule,
+                "approved_by": e.approved_by,
+                "approved_at": e.approved_at,
+                "matter": e.matter,
+                "template_id": e.template_id,
+                "template_version": e.template_version,
             }
             for e in drops
         ],

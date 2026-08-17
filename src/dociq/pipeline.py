@@ -16,7 +16,7 @@ Stage order is §4's, and it is not negotiable:
 1-2  walk, extract, normalize            :mod:`dociq.ingest.walker`
 3    Bates detection                     :mod:`dociq.identify.bates`
 3b   Doc ID assignment + reconciliation  :mod:`dociq.docid`
-4    section KEEP/DROP                   :mod:`dociq.profiles.apply`
+4    section KEEP/DROP                   :mod:`dociq.sections.apply`
 5    emit                                :mod:`dociq.emit`
 6    verify: accounting, manifest, tokens :mod:`dociq.verify`
 
@@ -38,6 +38,7 @@ from dociq.contracts import (
     Disposition,
     DocumentRecord,
     IdRegime,
+    OmissionSnapshot,
     PageKind,
     ProcessingStatus,
     ProfileSnapshot,
@@ -85,8 +86,10 @@ from dociq.identify.bates import (
 )
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
-from dociq.profiles.apply import DropLogEntry, apply_profiles
 from dociq.profiles.model import FormatProfile, OperatorStamp, operator_stamp, write_matter_copy
+from dociq.sections.apply import SectionApplyResult, SectionDropEntry, apply_sections
+from dociq.sections.model import ApprovedOmission, SectionTemplate
+from dociq.sections.resolve import spans_from_pages
 from dociq.runstate import (
     COMPLETED,
     INCOMPLETE_DIR,
@@ -174,6 +177,32 @@ class PipelineOptions:
     master_index: MasterIndex | None = None
     master_index_path: str | None = None
     profiles: tuple[FormatProfile, ...] = ()
+    """The expert-authored profile library this run was given.
+
+    **A profile no longer decides a disposition (D-35).** The engine that
+    matched a rule's regex against every line of every page and carried the
+    matched section forward is deleted, so what a profile contributes to a run
+    today is its identity, its matter copy and its record in the log — not a
+    KEEP or a DROP. A profile whose rules would have dropped pages is reported
+    (:func:`_inert_profile_warnings`) rather than silently ignored."""
+
+    template: SectionTemplate | None = None
+    """The section template this run recognizes against
+    (:mod:`dociq.sections.templates`).
+
+    ``None`` is a real state and not a degraded one: pages are still placed in
+    sections by Tiers 1 and 3, and the template is only what maps a section to a
+    named family an expert can rule on. Without one, every page keeps."""
+
+    approvals: tuple[ApprovedOmission, ...] = ()
+    """The omissions an expert actually engaged (D-34).
+
+    The only thing in the product that can drop a page. Empty is the state of a
+    freshly-installed DocIQ and of every run nobody has ruled on, and it is the
+    state D-34 requires a shipped template to arrive in — recognition happens,
+    nothing is omitted, and the approver field holds no fiction because there is
+    no approval."""
+
     bates_decision: BatesDecision | None = None
     confirm_bates: Callable[[BatesProposal, tuple[str, ...]], bool] | None = None
     """ASK the operator to confirm a detected Bates format (§4 Stage 3, A-14).
@@ -591,6 +620,38 @@ def _bates_decision(
     )
 
 
+def _inert_profile_warnings(
+    profiles: Sequence[FormatProfile],
+) -> list[str]:
+    """Report a supplied profile whose DROP rules no longer drop anything.
+
+    D-35 deleted the engine those rules drove. The rules are still valid YAML,
+    still load, still hash into the run identity — and now do nothing. An
+    operator who authored one and watched a run keep every page would have no
+    way to learn why, and "the feature silently stopped working" is the shape of
+    failure this project has twice shipped and once caught in review.
+
+    Stated as what it is rather than as an error: the profile is not malformed,
+    the product changed underneath it, and the named replacement is the
+    template plus an approval.
+    """
+    out: list[str] = []
+    for profile in profiles:
+        dropping = [r.rule_id for r in profile.section_rules
+                    if r.disposition is Disposition.DROP]
+        if not dropping:
+            continue
+        out.append(
+            f"profile {profile.profile_id!r} v{profile.version} carries "
+            f"{len(dropping)} DROP rule(s) ({', '.join(sorted(dropping))}) and "
+            "they dropped nothing. Section dispositions are decided by a "
+            "section template and an expert's approval (D-34/D-35); the "
+            "heading-matching engine these rules were written for has been "
+            "removed. The profile is still recorded as an input to this run."
+        )
+    return out
+
+
 def _hashes_of(written: Sequence[Path], layout: OutputLayout) -> dict[str, str]:
     """Hashes of the artifacts THIS run wrote, before the log.
 
@@ -775,7 +836,7 @@ def _abort(
     manifest: mf.Manifest | None = None,
     accounting_report: accounting.AccountingReport | None = None,
     renumbering: Sequence[RenumberWarning] = (),
-    drops: Sequence[DropLogEntry] = (),
+    drops: Sequence[SectionDropEntry] = (),
     bates_decision: BatesDecision | None = None,
     bates_ranges: dict[tuple[str, str, int], BatesRange] | None = None,
     content_warnings: Sequence[str] | None = None,
@@ -1081,7 +1142,7 @@ def _refuse_publication(
     output_hashes: Mapping[str, str],
     staged_bundle: LogBundle,
     renumbering: Sequence[RenumberWarning] = (),
-    drops: Sequence[DropLogEntry] = (),
+    drops: Sequence[SectionDropEntry] = (),
     bates_decision: BatesDecision | None = None,
     bates_ranges: dict[tuple[str, str, int], BatesRange] | None = None,
 ) -> PipelineOutcome:
@@ -1261,22 +1322,23 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         ),
     )
     # ``profile_id`` / ``profile_version`` are DELIBERATELY not resolved from
-    # ``opts.profiles`` here, and the reason is worth recording because the
-    # obvious tidy-up is wrong.
+    # ``opts.profiles`` here.
     #
-    # :func:`walker._record` stamps whatever the walk config carries onto every
-    # DocumentRecord, and Stage 4 (:func:`~dociq.profiles.apply.apply_profiles`)
-    # overwrites that stamp only on documents a profile actually CLAIMED — an
-    # unclaimed document keeps what it arrived with. Resolving the library's
-    # first profile into the walk config would therefore label every unclaimed
-    # document with a profile that did not match it, which is a false statement
-    # in the index and in hashed content both.
+    # **The reason this note used to give is withdrawn.** It said Stage 4
+    # "overwrites that stamp only on documents a profile actually CLAIMED", so
+    # resolving the library's first profile here would mislabel unclaimed
+    # documents. Stage 4 no longer claims documents and no longer stamps a
+    # profile onto any of them: D-35 deleted the engine that did, and
+    # :func:`~dociq.sections.apply.apply_sections` touches ``section``,
+    # ``section_tier`` and the disposition only.
     #
-    # It costs nothing on the resume key. A replayed walk record is
-    # profile-independent in its text, the stamp it carries is
-    # ``config.profile_id`` — which the resume key does cover — and Stage 4
-    # re-runs over replayed records exactly as it does over fresh ones. The
-    # emitted profile is the same either way.
+    # The conclusion survives its reasoning, on a plainer ground. Whatever the
+    # walk config carries is stamped by :func:`walker._record` onto EVERY
+    # document, and nothing downstream corrects it, so resolving a library's
+    # first profile here would now label every document in the corpus with a
+    # profile — including the ones nobody wrote it for. That is a false
+    # statement in the index and in hashed content, and it is worse than the
+    # one the old note describes, not better.
 
     # ---- Stages 1-2 --------------------------------------------------------
     t = time.monotonic()
@@ -1430,11 +1492,45 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     mark("assign_reconcile", t)
 
     # ---- Stage 4 -----------------------------------------------------------
+    #
+    # Recognition already happened, at Stage 2, where the file was open: every
+    # page a tier placed arrived here carrying its section and its tier. What is
+    # left is the DISPOSITION, and it happens at this point in the order for one
+    # reason — a drop-log entry is written against a Doc ID, and Doc IDs are
+    # issued at 3b.
+    #
+    # The spans are rebuilt from the pages rather than carried in a side channel
+    # (:func:`~dociq.sections.resolve.spans_from_pages`), which is what makes a
+    # resumed run behave like a fresh one: replayed records come back stamped, so
+    # they rebuild the same spans and reach the same dispositions.
+    #
+    # **Nothing drops without an approval that names a person (D-34).** With no
+    # approvals this loop stamps nothing new and returns every document
+    # unchanged — the recognition-only state a freshly-installed DocIQ is in.
     stage(4)
     t = time.monotonic()
-    applied = apply_profiles(documents, opts.profiles)
-    documents = applied.documents
-    warnings.extend(applied.warnings)
+    warnings.extend(_inert_profile_warnings(opts.profiles))
+    classified: list[DocumentRecord] = []
+    section_drops: list[SectionDropEntry] = []
+    for doc in documents:
+        spans = spans_from_pages(
+            doc.pages, project_tokens=walk_config.project_tokens
+        )
+        # NOT named `applied`: that name is already bound, twenty lines up, to
+        # the Bates result, and two later call sites read it.
+        stage4 = apply_sections(
+            doc, spans, template=opts.template, approvals=opts.approvals
+        )
+        classified.extend(stage4.documents)
+        section_drops.extend(stage4.drops)
+        warnings.extend(stage4.warnings)
+    if len(classified) != len(documents):
+        raise ContractViolation(  # pragma: no cover — guards a refactor
+            f"Stage 4 changed the document count: {len(documents)} in, "
+            f"{len(classified)} out"
+        )
+    documents = tuple(classified)
+    drops = tuple(section_drops)
     mark("classify", t)
 
     # The config the deliverables record is the one the walk actually ran
@@ -1463,6 +1559,37 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         profile_id=opts.profiles[0].profile_id if opts.profiles else config.profile_id,
         profile_version=(
             opts.profiles[0].version if opts.profiles else config.profile_version
+        ),
+        # A-19. The approvals are the input that decides which pages dropped, so
+        # they are the input the identity has to cover — the same finding A-08
+        # made about profiles, on the mechanism that replaced them.
+        #
+        # Built HERE rather than into `walk_config`, and the split is the same
+        # one the Bates pattern makes: an approval cannot change what the walk
+        # produced. Recognition happens at Stage 2 and is a property of the
+        # document; approval happens at Stage 4 and is a property of the ruling.
+        # A journal replayed under a different approval set is still a correct
+        # journal, and keying the resume on approvals would throw away an
+        # extraction every time an expert changed his mind about a section.
+        omissions=tuple(
+            OmissionSnapshot(
+                family_id=a.family_id,
+                approved_by=a.approved_by,
+                approved_at=a.approved_at,
+                matter=a.matter,
+                template_id=a.template_id,
+                template_version=a.template_version,
+            )
+            for a in opts.approvals
+        ),
+        # Recorded even when nothing was approved: "the expert engaged nothing"
+        # and "no template was offered" are different facts about a run.
+        section_template_id=(
+            opts.template.template_id if opts.template else config.section_template_id
+        ),
+        section_template_version=(
+            opts.template.version if opts.template
+            else config.section_template_version
         ),
     )
 
@@ -1556,7 +1683,8 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     text_result = write_clean_text(documents, stage_out)
     written.extend(stage_out.root / rel for _, rel in text_result.sources)
     written.append(write_sources_json(text_result, stage_out))
-    rows = build_index_rows(documents + unsupported, bates_ranges=ranges)
+    rows = build_index_rows(documents + unsupported, bates_ranges=ranges,
+                            drops=drops)
     written.append(write_index_csv(rows, stage_out))
     if index is not None:
         written.append(write_reconciliation_csv(report, stage_out))
@@ -1581,7 +1709,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         assignment=assignment,
         reconciliation=_log_reconciliation(report, index_supplied=index is not None),
         renumbering=renumbering,
-        drops=applied.drops,
+        drops=drops,
         profiles=opts.profiles,
         bates_decision=decision,
         bates_ranges=ranges,
@@ -1800,7 +1928,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             # and the reconciliation B-5 found — established by the run, present
             # in memory, absent from the record that outlives it.
             renumbering=renumbering,
-            drops=applied.drops,
+            drops=drops,
             bates_decision=decision,
             bates_ranges=ranges,
         )

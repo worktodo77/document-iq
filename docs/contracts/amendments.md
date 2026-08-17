@@ -1295,3 +1295,73 @@ It does not record *which* rule matched — `drop_rule` already does — and it 
 not record the approver, which lives on `ApprovedOmission` in the matter folder
 rather than on a page. And while this entry says RAISED it means it: the field is
 declared, the tiers produce it, and **no run writes it to disk yet**.
+
+---
+
+## A-19 — the run identity does not cover the input that now decides which pages drop
+
+**Raised by:** D-34 and D-35, wiring the section taxonomy into the pipeline, 2026-08-17
+**Affects:** `dociq/contracts.py` — `OmissionSnapshot` (new), `RunConfig.omissions`,
+`RunConfig.project_tokens`, `RunConfig.section_template_id` / `_version`
+**Proposed severity:** MINOR (additive, safe defaults throughout)
+**Status:** **RAISED, NOT APPLIED** — flipped to APPLIED, with the adopting
+commit id, in the commit that follows the one wiring it. A commit cannot name
+itself; this is the A-16/A-17 two-step.
+
+### The gap
+
+**This is A-08's finding, on the input that replaced the one A-08 was about.**
+
+A-08 put profiles into the run identity because profiles decided which pages
+dropped, and it did not argue the point — it measured it twice. Editing a second
+profile's rule without bumping its version moved two pages KEEP → DROP and left
+the recorded identity byte-identical. Swapping two profiles' precedence with no
+content change anywhere did the same.
+
+D-35 deletes that engine. D-34 moves the decision to an approval a person gives
+against a template family. So the deciding input is now
+`ApprovedOmission` — and for exactly as long as it took to wire it, that input
+sat outside the identity in precisely the way profiles had. Two runs over one
+folder, identical in every recorded term, one of them missing a section.
+
+The collision is not hypothetical here either; it is the default. A template
+ships unengaged (D-34), so the ordinary sequence is: run, look at the waterfall,
+engage a lever, run again. Those two runs differ in their corpus and, before
+this, in nothing the identity could see.
+
+### What lands
+
+`OmissionSnapshot` — `family_id`, `approved_by`, `approved_at`, `matter`,
+`template_id`, `template_version` — and `RunConfig.omissions` carrying an
+ordered tuple of them. A snapshot rather than `ApprovedOmission` itself for the
+reason `MasterIndexSnapshot` and `ProfileSnapshot` are snapshots, and for one
+particular to the module: `dociq.sections` imports the contract, so the contract
+cannot import it back.
+
+`RunConfig.project_tokens`, which is the easier one to miss. It changes which
+family a label normalizes to: supply `MV32` and `MV32 APPENDICES` matches an
+appendices rule; withhold it and the page keeps. Same folder, same approvals,
+different corpus.
+
+`RunConfig.section_template_id` and `section_template_version`, recorded even
+when nothing was approved — "the expert engaged nothing" and "no template was
+offered" are different facts about a run, and only one of them is a decision.
+
+### The consequence worth stating rather than burying
+
+**It narrows the determinism claim, and the narrowing is correct.** Two runs
+over one folder that differ only in *who* approved the omission are no longer
+byte-identical, because `approved_by` and `approved_at` are hashed. That is not
+a defect in the identity; it is D-34 being true. The drop log names the approver,
+so the bytes genuinely differ, and an identity that pretended otherwise would be
+claiming sameness about two records that say different things about who is
+answerable.
+
+### What it does NOT do
+
+It does not record the template's *content*. `ProfileSnapshot` carries a
+`profile_hash` because a profile is a file an expert edits between runs; a
+template is shipped Python that versions with the build, so its id and version
+are its content. If templates ever become loadable from disk, that stops being
+true and this needs a hash — recorded here so the next person does not have to
+rediscover why the asymmetry was deliberate.
