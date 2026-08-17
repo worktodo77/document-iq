@@ -38,6 +38,66 @@ Consequence for the product's positioning, flagged: §7 and D-03 make the token 
 
 | D-19 | Tesseract / the D-01 bake-off | **Written off — rapidocr is the engine, full stop (Alex, 2026-07-31).** D-01's conditional swap and acceptance criterion 9's comparison are both **cancelled, not deferred**: there is no pending Tesseract evaluation, and no future sprint owes one. Tesseract was never installed (installing it needed authorization that was not given, and the build correctly refused to install it unilaterally), so the Sprint-1 bake-off is a **rapidocr characterization** rather than a comparison — and that is now its final form. Measured on 20 real scanned MPR pages from D-12's corpus: mean page confidence **0.8628**, 3 of 17 pages below the 85% review threshold, 37% of *lines* below it, **5.74 s/page**; 3 zero-character pages verified genuinely blank (uniform white, no embedded images) rather than misses. `docs/bakeoff/ocr_bakeoff_2026-07-30.md` stands as the methodology artifact D-01 asked for, retitled to what it is. **Consequence to state plainly rather than bury: §3 and §10's amended wording already name rapidocr, so nothing in the build changes — but the tool now ships an OCR engine chosen on in-house familiarity and ONNX bundling convenience, never benchmarked against an alternative on this corpus. If OCR quality is ever challenged, that is the honest answer, and "Tesseract is the industry-recognizable name for law-firm IT review" (the original argument for the bake-off) remains unaddressed.** | 2026-07-31 |
 
+## Sprint-3 kickoff rulings (Alex, 2026-08-17)
+
+| D-33 | Sprint 3's scope | **BUILD THE OMISSION TAXONOMY (D-24).** Chosen over: driving the GUI with a human first; reopening D-19's Tesseract benchmark for criterion 4; and closing the carried risks (B-8, the offline probe). The reasoning that carried it: the reduction feature is fully designed, measured against the real corpus, and **not built** — DocIQ ships one profile, "keep every page" — so the taxonomy is the difference between a tool that reduces a corpus and one that only measures it. The measured evidence is already in hand (schedule tables 33.9%, furniture 8.0%, TOC 5.4%, photographs 0.2%). **The other four candidates are deferred, not declined**, and B-8 in particular stays where D-32 put it: open, owner-accepted, and NOT to be reopened as a side effect of this sprint. | 2026-08-17 |
+
+| D-34 | The approver problem (`section_taxonomy.md` §6, first bullet) — how a shipped template satisfies `SectionRule.validate()`'s "who approved" check without naming an expert who never saw the matter | **TEMPLATES SHIP UNENGAGED; APPROVAL IS CAPTURED AT THE MOMENT THE EXPERT ENGAGES THE LEVER.** A built-in template carries **no approver and no live DROP**: every lever arrives OFF, and the template's contribution until somebody ticks something is *recognition only*. When the expert engages a lever, DocIQ writes his identity, the time and the matter into the rule and into every drop-log line it produces. Two properties follow and both are the ruling: **a template alone can never drop a page**, and **the approver field never holds a fiction** — it is either a real name that a real person put there by acting, or the rule is not a DROP. Rejected: shipping §4's Default column live with LI recorded as *author* and the expert as *approver* (faster, and it makes "the software's default" the sentence an expert has to defend under cross-examination, having approved LI's judgment by not looking); and recognition-only templates carrying no dispositions at all (safest reading of §1, but it leaves the reduction feature needing hand-authored YAML per matter, which is the gap D-24 was raised to close). **Consequence for the build:** `SectionRule.validate()` today accepts any non-empty free-text `notes` as the approver record. Under this ruling the approver becomes a *structured* field with a real capture point, and an unengaged template rule must be representable without one — which means the KEEP/DROP disposition can no longer be baked into the shipped template file. | 2026-08-17 |
+
+### What the taxonomy sprint found before writing any of it (2026-08-17)
+
+Recorded here because it changes D-24's size and was not visible when D-24 was
+written.
+
+**The shipped Stage-4 engine implements the one recognition mechanism the
+taxonomy excludes.** `profiles/apply.py` matches a regex against every line of
+every page and carries the matched section forward until the next match, while
+`section_taxonomy.md` §2 measured that heading-shaped matching returns
+`FPSO ALMIRANTE BARROSO MV32` (1,017) and `PETROBRAS` (981) at the top of its
+frequency list and struck the tier out on that evidence. Of the four tiers the
+design proposes:
+
+- **Tier 1 (the document's own PDF outline)** — the strongest tier, and the one
+  §2 calls "a lookup, not an inference" — **has no implementation anywhere in
+  the tree.**
+- **Tier 2 (TOC parsing)** — proposed, unbuilt, and §6 records it as unmeasured.
+- **Tier 3 (measurable page classes)** — unbuilt. `profiles/detect.py` is a
+  different thing: a shallow line-shape/recurrence detector that *proposes*
+  candidates for a human checklist, and it is the same family of heuristic §2
+  measured returning letterhead.
+- **Tier 4 (explicit page ranges)** — `SectionRule` is regex-only and cannot
+  express a page range.
+
+**Zero built-in profiles ship** (there is no profile YAML on disk), and
+`PageRecord` carries no `section_tier` field, which §5.4 requires and which is a
+frozen-contract amendment.
+
+So D-24 is not "author the templates". It is **build the recognizer the
+templates key to**, and the shipped engine is the tier that was excluded rather
+than a foundation to extend.
+
+| D-35 | The shipped Stage-4 engine drops the wrong pages, as a class | **REPLACE IT WITH TIER-BASED SPANS (Alex, 2026-08-17).** `profiles/apply.py` matches a rule's regex against every line of every page and carries the matched section forward until another rule matches — so a rule fires on any line that merely *mentions* its section, and the carried state then governs every following page. Reproduced on **five trigger shapes** with a single DROP rule for `PROGRESS PHOTOGRAPHS`: the document's own table of contents, a body-text cross-reference, a transmittal listing enclosures, an appendix cover sheet, and — the worst, needing no confusing text at all — **a CORRECT first match where no later rule marks the section's end**, which runs the drop to the end of the document. The pages lost in the reproductions are the **executive summary, the critical path narrative, the weather log and the timesheets**, four of the categories §4 grades HIGH risk, and the drop log attributes every one of them to `PROGRESS PHOTOGRAPHS` — an audit trail that is complete and is a misdescription. This inverts §1's binding asymmetry: the recognizer does not miss a section, it **invents** one. Ruling: section resolution moves to Tier 1–3 page **spans** and Tier 4 explicit ranges; regex heading matching and carried section state are **deleted**. Rejected: bounding the rules instead (refusing to load a profile whose DROP sections have no end) — it keeps the mechanism §2 measured returning `FPSO ALMIRANTE BARROSO MV32` (1,017) and `PETROBRAS` (981) as its top matches, and does not touch the three shapes where the text merely mentions a section name; and suppressing matches on TOC pages, which is the repro fix for one of five shapes and is how the same defect returns under a new number. **Exposure stated precisely: `apply_profiles` is wired into the real pipeline (`pipeline.py:1435`) and no test covers the carry-forward path — but no built-in profile ships and there is no profile YAML on disk, so the code is reachable only by a hand-authored profile in the D-05 library, and nobody has authored one. Live and unexercised, which is exactly why it must be settled before templates make it exercised on every run.** | 2026-08-17 |
+
+### The three measured answers (2026-08-17)
+
+Full record: `docs/verification/sections_2026-08-17.md`. Probe:
+`tools/measure_sections.py`. Corpus: all 298 PDFs / 17,732 pages, read-only —
+the page count reproduces D-12's independently-established figure exactly.
+
+| §6 question | Answer |
+|---|---|
+| **Tier 1 reach** | **29.866% of documents — but 63.01% of PAGES** (11,173). The taxonomy's "40% of PDFs" was a 36-doc sample and is withdrawn everywhere it was asserted. Vocabulary: **522 distinct section families** (716 raw), too many to enumerate — templates key to a normalized family, not a list. **159 of the 522 (30.5%) carry project-identifying text** (`BOMESC YARD`, `MV32 APPENDICES`), so project tokens are stripped before matching and their list is supplied **per matter, never shipped** — D-24 forbids a template attributable to a corpus project. And the corpus's third most frequent label is **Portuguese** (`PAGINA EM BRANCO`, 61): matching is accent-folded and no template may assume English. |
+| **Tier 2 feasibility** | §6's doubt **not reproduced**: offset 0 in all 106 paired lines across 25 documents, within-document spread 0. **But the check reaches only documents that do not need Tier 2** — it requires an outline as ground truth, so the ~193 documents with a TOC and no outline are structurally unreachable. Risk lowered, question open. |
+| **Coverage of the rest** | **No.** Tier 3 resolves 20.66% of the 6,331 pages in unoutlined documents and leaves **79.34% resolved by nothing**. Corpus-wide the tiers recognize **~70%** of pages and keep the other **~30%** unconditionally. That is the honest ceiling on the reduction feature and should be the claim the product makes. |
+
+**One instrument correction worth carrying.** The first run of the Tier 2 probe
+paired **3 lines out of 3,484** and read as decisive evidence against building
+the tier. It was a comparison bug — a TOC prints `3.1 EXECUTIVE SUMMARY` where
+the outline says `EXECUTIVE SUMMARY` — and stripping leading section numbering
+pairs 103. **A red result from a broken instrument is not evidence**, and this
+one would have descoped a tier. The discipline that catches a green result
+proving nothing has to run in both directions.
+
 ## MEASURED: the "~20 minutes per suite" claim was wrong by 4x, and it was our own doing (2026-08-14)
 
 Timed on a verified-quiet machine, one full suite each:
@@ -376,7 +436,11 @@ revision numbers. The obvious recognition mechanism is **excluded on measurement
 — it would have looked reasonable, passed review, and silently dropped the wrong
 pages.
 
-**What works instead: the document's own outline.** 40% of the PDFs carry PDF
+**What works instead: the document's own outline.** ~~40% of the PDFs~~
+**CORRECTED 2026-08-17 — 29.866% (89 of 298) on the full corpus; the 40% came
+from this pass's 36-document sample. The figure to carry is pages, not
+documents: outlined documents are the large ones, so the tier places 11,174
+pages, 63.016% of the corpus.** The PDFs that carry them carry PDF
 bookmarks with a real section vocabulary — `EXECUTIVE SUMMARY`, `PROGRESS
 PHOTOS`, `HSE`, `CRITICAL PATH NARRATIVE`, `APPENDICES`, `OVERALL PROGRESS
 S-CURVE`. Where an outline exists the section→page map is a **lookup, not an

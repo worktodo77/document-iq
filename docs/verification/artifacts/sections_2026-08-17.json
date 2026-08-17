@@ -1,0 +1,272 @@
+{
+  "corpus_root": "C:\\Users\\Alex\\Desktop\\Petrobras\\Petrobras\\Project FIles",
+  "documents_readable": 298,
+  "documents_unreadable": 0,
+  "pages_total": 17732,
+  "Q1_tier1_outline": {
+    "documents_with_any_outline": 89,
+    "documents_with_any_outline_pct": 29.866,
+    "documents_with_SUBSTANTIVE_outline": 89,
+    "documents_with_SUBSTANTIVE_outline_pct": 29.866,
+    "outline_entries_total": 3538,
+    "outline_entries_positional": 226,
+    "pages_in_any_outlined_document": 11401,
+    "pages_in_substantive_outlined_document": 11401,
+    "pages_placed_by_a_substantive_outline": 11173,
+    "pages_placed_pct_of_corpus": 63.01,
+    "documents_with_nonmonotonic_outline": 4,
+    "vocabulary_distinct_raw": 716,
+    "vocabulary_distinct_numbering_stripped": 522,
+    "vocabulary_top_40_numbering_stripped": [
+      [
+        "PROCUREMENT",
+        110
+      ],
+      [
+        "ENGINEERING",
+        109
+      ],
+      [
+        "PAGINA EM BRANCO",
+        61
+      ],
+      [
+        "EICT ENGINEERING",
+        57
+      ],
+      [
+        "HSE",
+        48
+      ],
+      [
+        "MARINE ENGINEERING",
+        48
+      ],
+      [
+        "TOPSIDES ENGINEERING",
+        48
+      ],
+      [
+        "MOORING",
+        48
+      ],
+      [
+        "TOPSIDES PROCUREMENT",
+        48
+      ],
+      [
+        "VESSEL CONVERSION REPAIR",
+        48
+      ],
+      [
+        "BOMESC YARD",
+        48
+      ],
+      [
+        "COSCO TOPSIDE YARD",
+        48
+      ],
+      [
+        "BRASFELS TOPSIDE YARD",
+        48
+      ],
+      [
+        "EBR TOPSIDE YARD",
+        48
+      ],
+      [
+        "MECHANICAL COMPLETION AND COMMISSIONING",
+        48
+      ],
+      [
+        "EBR",
+        34
+      ],
+      [
+        "MARINE PROCUREMENT",
+        33
+      ],
+      [
+        "TOPSIDE MODULE FABRICATION",
+        33
+      ],
+      [
+        "BOMESC",
+        33
+      ],
+      [
+        "MV32 APPENDICES",
+        33
+      ],
+      [
+        "APPENDICES",
+        30
+      ],
+      [
+        "EXECUTIVE SUMMARY",
+        28
+      ],
+      [
+        "PROGRESS PHOTOS",
+        27
+      ],
+      [
+        "LOCAL CONTENT",
+        25
+      ],
+      [
+        "PRE OPERATIONS",
+        25
+      ],
+      [
+        "PROJECT HIGHLIGHTS THIS MONTH",
+        24
+      ],
+      [
+        "PROJECT PROGRESS UPDATE",
+        24
+      ],
+      [
+        "PROJECT DETAILED OVERVIEW",
+        24
+      ],
+      [
+        "QA QC REGULATORY COMPLIANCE",
+        24
+      ],
+      [
+        "CONTRACT ADMINISTRATION",
+        24
+      ],
+      [
+        "FABRICATION CONSTRUCTION",
+        24
+      ],
+      [
+        "MARINE CONVERSION MANPOWER HISTOGRAM",
+        24
+      ],
+      [
+        "TOPSIDE MODULE CONSTRUCTION",
+        24
+      ],
+      [
+        "BOMESC MANPOWER HISTOGRAM",
+        24
+      ],
+      [
+        "INSTALLATION",
+        24
+      ],
+      [
+        "QA QC REGULATION COMPLIANCE",
+        24
+      ],
+      [
+        "CONTRACTS ADMINISTRATION",
+        24
+      ],
+      [
+        "MARINE AND HULL PROCUREMENT",
+        24
+      ],
+      [
+        "FABRICATION AND CONSTRUCTION",
+        24
+      ],
+      [
+        "PRE OPERATIONS AND ASSET READINESS",
+        24
+      ]
+    ],
+    "vocabulary_labels_carrying_a_project_token": 159,
+    "vocabulary_project_token_examples": [
+      [
+        "BOMESC YARD",
+        48
+      ],
+      [
+        "COSCO TOPSIDE YARD",
+        48
+      ],
+      [
+        "BRASFELS TOPSIDE YARD",
+        48
+      ],
+      [
+        "EBR TOPSIDE YARD",
+        48
+      ],
+      [
+        "EBR",
+        34
+      ],
+      [
+        "BOMESC",
+        33
+      ],
+      [
+        "MV32 APPENDICES",
+        33
+      ],
+      [
+        "BOMESC MANPOWER HISTOGRAM",
+        24
+      ],
+      [
+        "STATUS OF PETROBRAS TQ",
+        24
+      ],
+      [
+        "BOMESC PROGRESS CURVES",
+        23
+      ]
+    ],
+    "project_tokens_supplied": [
+      "MV32",
+      "PETROBRAS",
+      "FPSO",
+      "BOMESC",
+      "COSCO",
+      "BRASFELS",
+      "EBR",
+      "MODEC",
+      "ALMIRANTE",
+      "BARROSO"
+    ]
+  },
+  "Q2_tier2_toc": {
+    "documents_with_a_toc_page": 275,
+    "documents_with_toc_and_outline": 82,
+    "toc_lines_parsed": 10041,
+    "toc_lines_paired_to_outline": 106,
+    "documents_offset_constant": 25,
+    "documents_offset_scattered": 0,
+    "constant_offset_values": [
+      [
+        0,
+        25
+      ]
+    ],
+    "offset_spread_histogram": [
+      [
+        0,
+        25
+      ]
+    ]
+  },
+  "Q3_tier3_the_other_60pct": {
+    "documents_without_a_substantive_outline": 209,
+    "pages_without_a_substantive_outline": 6331,
+    "classified": {
+      "photo_figure": 585,
+      "table_of_contents": 373,
+      "schedule_table": 303,
+      "distribution_list": 32,
+      "image_only": 15
+    },
+    "classified_total": 1308,
+    "unresolved": 5023,
+    "unresolved_pct_of_those_pages": 79.34
+  }
+}
