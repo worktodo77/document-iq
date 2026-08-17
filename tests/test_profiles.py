@@ -10,9 +10,14 @@ and the schema and detection groups below test exactly what they always did.
 The KEEP/DROP guarantees were not withdrawn with the engine; they moved to
 :func:`dociq.sections.apply.apply_sections`, so the third group is re-pointed
 there rather than deleted. KEEP is still the default, every drop is still
-attributed, the page accounting still holds, and repeated application is still
-stable — the same four properties, now asserted against spans, a template and an
-expert's approval instead of against header patterns and heading regexes.
+attributed, the page accounting still holds, a document nothing covers still
+passes through unchanged, and repeated application is still stable — the same
+FIVE properties, now asserted against spans, a template and an expert's approval
+instead of against header patterns and heading regexes.
+
+*(This said "four" and listed four, omitting the pass-through. Counted, because
+the sprint's own headline defect was a table of five reproductions under a
+sentence that said four.)*
 
 Two guarantees in that group **were** genuinely withdrawn, both of them about a
 profile *claiming a document by its header patterns*. Neither is deleted
@@ -477,23 +482,58 @@ def test_nothing_in_the_pipeline_consults_a_profile_to_decide_a_disposition():
 
     So the guarantee is asserted where it can actually be violated — over the
     source tree — rather than over one call. Scanned with :mod:`ast` rather than
-    by substring so a mention in a docstring or a comment does not fire it, and
-    a call reached through an alias still does.
+    by substring, so a mention in a docstring or a comment does not fire it.
+
+    **Two corrections from the adversarial review, and the first is the reason
+    this docstring is longer than the test.** The check matched only an
+    ``ast.Call`` on an ``ast.Attribute``, while claiming a call reached through
+    an alias still fired it. It did not: ``claims = profile.applies_to`` on one
+    line and ``claims(sample)`` on the next was measured GREEN, and so was
+    ``getattr(profile, "applies_to")(sample)`` — which is the exact re-wiring
+    this exists to forbid, written across two lines instead of one. It now
+    matches any ATTRIBUTE ACCESS of the name plus the ``getattr`` spelling,
+    which cannot be split that way.
+
+    **And it passed over an empty scan.** Nothing asserted the walk visited any
+    file, so moving ``src/dociq`` — or renaming the tests directory — reported
+    success while guarding nothing. Measured at ``files_scanned=0, offenders=[],
+    assert passes: True``. A probe that cannot tell "nothing is wrong" from "I
+    looked nowhere" is the vacuous-probe failure this project keeps finding in
+    its own tests.
     """
     import ast
     from pathlib import Path
 
     src = Path(__file__).resolve().parents[1] / "src" / "dociq"
     offenders = []
+    scanned = 0
     for path in sorted(src.rglob("*.py")):
+        scanned += 1
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "applies_to"
-            ):
+            hit = (
+                # `profile.applies_to`, whether called here or bound and called
+                # later. Attribute ACCESS, not Call: binding then calling is the
+                # split this check used to be blind to.
+                (isinstance(node, ast.Attribute) and node.attr == "applies_to")
+                # getattr(profile, "applies_to") — reaches the same method
+                # without ever writing it as an attribute.
+                or (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "getattr"
+                    and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value == "applies_to"
+                )
+            )
+            if hit:
                 offenders.append(f"{path.relative_to(src).as_posix()}:{node.lineno}")
+    assert scanned > 20, (
+        f"the scan visited {scanned} file(s) under {src} — it is reporting "
+        "success without having looked, which is the one result this probe "
+        "must never be able to give"
+    )
     assert offenders == [], (
         "a profile's header patterns are being consulted at "
         + ", ".join(offenders)

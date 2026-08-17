@@ -12,7 +12,7 @@ of them to `PROGRESS PHOTOGRAPHS`.
 4092f76 deleted it.** Said here because the sentence above is the justification
 for every test below it and a reader must be able to check it: the five shapes,
 the pages each one lost and the pages the expert meant to lose are tabulated in
-`docs/verification/sections_2026-08-17.md`, and the four Stage-4 guarantees that
+`docs/verification/sections_2026-08-17.md`, and the five Stage-4 guarantees that
 outlived the deletion are re-pointed in `tests/test_profiles.py`.
 
 These are written as properties of the *class*, not as five named repros: what

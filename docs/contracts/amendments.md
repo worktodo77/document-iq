@@ -1238,9 +1238,18 @@ either of the other two would be wrong.
 **Affects:** `dociq/contracts.py` — `RecognitionTier` (new), `PageRecord.section_tier`
 **Proposed severity:** MINOR as a type change (additive, safe default `None`);
 **MAJOR in one validation rule**, stated plainly below rather than buried.
-**Status:** **RAISED, NOT APPLIED** — the type exists and no pipeline path
-populates it yet. It is flipped to APPLIED, with the adopting commit id, in the
-commit that carries the tier into `processing_log.json`.
+**Status:** **APPLIED** in `4092f76`, and the condition this entry set for
+itself is the one that was checked. It said the flip happens "in the commit that
+carries the tier into `processing_log.json`" — so the tier was put in front of a
+real log before the word changed. On an 8-page PDF whose outline names three
+sections, a run with the template loaded and NOTHING approved writes three
+`sections` entries, each carrying `t1_outline`, and drops zero pages.
+
+**That the unengaged run is the one that was checked is the point**, not an
+incidental choice of fixture. If the tier reached the log only through a drop
+entry, §5.4 would have been satisfied by exactly the runs that need it least and
+this field would be populated by no ordinary run — which is the A-12 shape, and
+is what "RAISED, NOT APPLIED" was guarding against for the one commit it stood.
 
 ### The gap
 
@@ -1304,9 +1313,9 @@ declared, the tiers produce it, and **no run writes it to disk yet**.
 **Affects:** `dociq/contracts.py` — `OmissionSnapshot` (new), `RunConfig.omissions`,
 `RunConfig.project_tokens`, `RunConfig.section_template_id` / `_version`
 **Proposed severity:** MINOR (additive, safe defaults throughout)
-**Status:** **RAISED, NOT APPLIED** — flipped to APPLIED, with the adopting
-commit id, in the commit that follows the one wiring it. A commit cannot name
-itself; this is the A-16/A-17 two-step.
+**Status:** **APPLIED** in `4092f76`. Measured before the word changed: adding
+one approval moves the run identity, and changing only the APPROVER moves it
+again.
 
 ### The gap
 
@@ -1377,8 +1386,11 @@ rediscover why the asymmetry was deliberate.
 `ReductionLever.locked`, `PipelineAPI.set_omission`, `RunRequest.approvals`
 **Proposed severity:** MINOR as a type change (additive, safe defaults); **MAJOR
 in one predicate**, stated plainly below.
-**Status:** **RAISED, NOT APPLIED** - flipped with the adopting commit id in the
-commit that follows the one wiring it. The A-16/A-17 two-step.
+**Status:** **APPLIED** in `d3cee24`. Measured before the word changed: the
+shipped template's 19 families all reach the checklist, the 8 marked
+`offer=False` are refused by `with_toggled` at the model and by `set_omission`
+at the pipeline, and engaging an offered one returns a record stamped with a
+real account, time and matter.
 
 ### The gap
 

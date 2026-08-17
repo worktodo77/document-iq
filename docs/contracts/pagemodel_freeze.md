@@ -155,9 +155,12 @@ inside the field that exists to prevent one.
 "Profile" means the **ordered tuple of profile snapshots** since v1.6.0 (A-08,
 from round-2 finding B-R2-2), each carrying `profile_id`, `version` and
 `profile_hash`. Naming only the first profile's id and version was not naming
-the input: Stage 4 claims a document with the first profile whose header
-patterns match, so every profile's content and their precedence order decide
-which pages drop. Measured before the fix — editing a second profile's rule
+the input: Stage 4 claimed a document with the first profile whose header
+patterns matched, so every profile's content and their precedence order decided
+which pages dropped. *(Past tense since 2026-08-17: D-35 deleted that engine and
+A-19 put the input that decides today — the omissions an expert approved — into
+the same projection. The snapshots stay hashed; what changed is which input the
+identity has to cover, not whether it covers it.)* Measured before the fix — editing a second profile's rule
 without bumping its version, and separately swapping two profiles' order —
 each moved the corpus hash and left the recorded identity byte-identical.
 

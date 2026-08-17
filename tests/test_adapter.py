@@ -26,6 +26,7 @@ from dociq.gui.pipeline import (
     LEVER_EXPERT,
     LEVER_RECOGNIZED,
     ProfileInfo,
+    ReductionPlan,
     RunRequest,
     get_pipeline,
     set_pipeline,
@@ -145,8 +146,15 @@ def test_a_missing_library_is_not_an_error(library, tmp_path):
 
 
 def test_the_rule_count_is_the_real_one(library):
-    """``section_rules`` is what the profile carries, not a placeholder: the
-    operator reads it to see whether a profile will remove anything."""
+    """``section_rules`` is what the profile carries, not a placeholder.
+
+    **Its stated purpose is withdrawn.** This read "the operator reads it to see
+    whether a profile will remove anything" — false since D-35: a profile
+    removes nothing, and that number was precisely what disabled the §6 approve
+    button while it was still being compared against the template's families.
+    The count is still worth asserting as a faithful reading of the file, which
+    is all it now claims to be.
+    """
     _write(library, MPR)
     offered = adapter.RealPipeline().profiles()
     real = [p for p in offered if p.profile_id == "mpr-test"]
@@ -244,7 +252,16 @@ def test_the_checklist_lists_every_family_the_template_carries(library):
     assert {le.key for le in levers if le.kind == LEVER_RECOGNIZED} == (
         {f.family_id for f in PROGRESS_REPORT.families} - offered
     ), "a family the template refuses to offer is drawn as engageable"
-    assert all(le.locked for le in levers if le.kind == LEVER_RECOGNIZED)
+    # NOT `all(le.locked for ... if kind == LEVER_RECOGNIZED)`, which was here
+    # and is a tautology: `locked` is DEFINED as `kind != LEVER_EXPERT`, so it
+    # restates the filter. What is worth asserting is that the model refuses to
+    # move such a row — the property a screen depends on and a definition cannot
+    # give.
+    plan = ReductionPlan(full_tokens=1000, levers=tuple(levers))
+    for row in (le for le in levers if le.kind == LEVER_RECOGNIZED):
+        assert plan.with_toggled(row.key) == plan, (
+            f"{row.key}: a recognized-never-offered row moved when toggled"
+        )
 
     # §5.3 / A-11b: every row says what it costs and what it catches.
     assert all(le.risk for le in levers), "a row was drawn without its risk grade"
