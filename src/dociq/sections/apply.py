@@ -70,6 +70,25 @@ class SectionApplyResult:
         return len(self.drops)
 
 
+def _kept(page: PageRecord, *, section: str | None,
+          tier: RecognitionTier | None) -> PageRecord:
+    """A page carrying its recognition and NO omission.
+
+    Every field a drop sets is cleared here, rather than only the ones a
+    particular caller happened to have set. A KEEP that clears the disposition
+    and forgets the ``drop_rule`` would leave the contract's own check to catch
+    it (``PageRecord.validate()`` refuses a ``drop_rule`` on a KEEP page) — which
+    is a loud failure and still a failure. Clearing both together is what makes
+    the pair impossible to separate.
+    """
+    return page.evolve(
+        section=section,
+        section_tier=tier,
+        disposition=Disposition.KEEP,
+        drop_rule=None,
+    )
+
+
 def apply_sections(
     doc: DocumentRecord,
     spans: tuple[SectionSpan, ...],
@@ -111,7 +130,10 @@ def apply_sections(
     for page in doc.pages:
         span = section_for_page(spans, page.page_no)
         if span is None:
-            pages.append(page)
+            # No span, so no section, so no approval can reach this page: KEEP,
+            # and stated rather than inherited. See the note below — this branch
+            # and the recognized-not-approved branch are the same rule.
+            pages.append(_kept(page, section=None, tier=None))
             continue
 
         family = template.classify(span.family) if template is not None else None
@@ -123,7 +145,24 @@ def apply_sections(
             # Recognized, not dropped. The section and its tier are still
             # recorded: the index's "sections dropped" column is only
             # meaningful if the sections NOT dropped are known too.
-            new_page = page.evolve(section=span.section, section_tier=span.tier)
+            #
+            # THE DISPOSITION IS SET, NOT LEFT ALONE, and that is a fix rather
+            # than a flourish. Leaving it inherited made this function wrong
+            # under the one sequence the product invites: engage a lever, run,
+            # change your mind, run again. The second run finds no approval,
+            # took this branch, and left the page DROP carrying the drop_rule of
+            # an approval that no longer exists — while `drops` is empty, so the
+            # page is dropped and NOTHING in the log accounts for it. That is
+            # the unattributable drop Principle 1 forbids, arrived at by
+            # withdrawal rather than by omission.
+            #
+            # Reproduced before it was fixed: approve, apply, withdraw, apply —
+            # both pages stayed dropped. It is not reachable through today's
+            # pipeline, because Stage 4 only ever sees fresh or
+            # resumed-before-Stage-4 records, and it is reachable through this
+            # function, which is public and is the only thing that may drop a
+            # page.
+            new_page = _kept(page, section=span.section, tier=span.tier)
         else:
             new_page = page.evolve(
                 section=span.section,
