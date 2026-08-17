@@ -196,14 +196,61 @@ def test_toggling_a_lever_reflows_the_whole_projection() -> None:
 
 def test_automatic_savings_are_locked_and_never_merged() -> None:
     """The profile system's whole point: "the expert approved this omission" and
-    "the tool did this mechanically" are different claims."""
+    "the tool did this mechanically" are different claims.
+
+    Selects on ``kind``, not on ``locked``: since A-20 ``locked`` spans two
+    kinds and "the locked lever" is no longer a way of saying "the automatic
+    lever". The mock fixture happens to emit no recognized rows, so this passed
+    either way — which is precisely the reason to stop relying on it.
+    """
+    from dociq.gui.pipeline import LEVER_AUTOMATIC
+
     plan = _outcome().plan
-    automatic = [le for le in plan.levers if le.locked]
+    automatic = [le for le in plan.levers if le.kind == LEVER_AUTOMATIC]
     assert len(automatic) == 1
-    assert automatic[0].kind == "automatic"
+    assert automatic[0].locked
     assert plan.with_toggled(automatic[0].key) == plan  # a click changes nothing
     assert plan.expert_tokens and plan.automatic_tokens
     assert plan.expert_tokens != plan.remaining_tokens
+
+
+def test_a_recognized_lever_is_locked_and_the_toggle_refuses_to_move_it():
+    """A-20's third kind, at the MODEL layer where no screen can reach past it.
+
+    ``LEVER_RECOGNIZED`` is the template's structural refusal to offer a
+    section: the executive summary, the critical path narrative, the weather
+    log, the timesheets. D-34 makes an :class:`ApprovedOmission` the only thing
+    that can drop a page, and a row that cannot be engaged is how that refusal
+    is expressed on screen. If ``with_toggled`` moved it, a click would engage
+    an omission the template exists to forbid.
+
+    Asserted directly rather than through the mock, which emits no recognized
+    lever — so before this test the entire kind was unexercised at the seam.
+
+    FAIL-BEFORE: watched red by widening ``ReductionLever.locked`` to
+    ``kind == LEVER_AUTOMATIC``, the definition it carried before A-20.
+    """
+    from dociq.gui.pipeline import LEVER_RECOGNIZED, ReductionLever
+
+    lever = ReductionLever(
+        key="weather-logs", label="Weather logs", tokens=9_000, pages=140,
+        kind=LEVER_RECOGNIZED, engaged=False, estimated=False,
+        family_id="weather-logs", risk="high", tier="t1_outline",
+        note="A weather log is trivial in tokens and decisive in a "
+             "weather-delay claim.",
+    )
+    plan = ReductionPlan(full_tokens=900_000, levers=(lever,))
+
+    assert lever.locked, "a kind that is not LEVER_EXPERT is not the expert's"
+    assert plan.with_toggled("weather-logs") == plan, (
+        "a click engaged a section the template refuses to offer")
+    assert plan.with_toggled("weather-logs").levers[0].engaged is False
+
+    # And it is counted into neither ledger — recognized pages are kept, so
+    # they are not the expert's saving and not the tool's either.
+    assert plan.expert_tokens == 0
+    assert plan.automatic_tokens == 0
+    assert plan.remaining_tokens == plan.full_tokens
 
 
 def test_run_accounting_does_not_follow_a_toggle() -> None:
@@ -350,18 +397,69 @@ def _lever_fields() -> tuple[str, ...]:
     return tuple(f.name for f in dataclasses.fields(ReductionLever))
 
 
-def test_toggling_preserves_every_lever_field_except_engaged():
+#: Fields the fixture below cannot give a non-default value, with the reason.
+#: Not a convenience list — every name here is a field this probe cannot prove
+#: anything about, so it is kept short and each entry has to be argued.
+_UNDISTINGUISHABLE = {
+    # The operation under test flips it; "different from its default" is not a
+    # property it can hold on both sides of the call.
+    "engaged",
+    # ``with_toggled`` moves EXPERT levers only, so a fixture whose kind
+    # differed from ``LEVER_EXPERT`` would be a fixture the method ignores —
+    # the toggle would no-op and the whole assertion would pass vacuously.
+    "kind",
+}
+
+
+def test_the_toggle_fixture_can_actually_detect_a_dropped_field():
+    """The guard on the guard.
+
+    ``test_toggling_preserves_every_lever_field_except_engaged`` is only
+    evidence if every field it compares holds a value the DEFAULT would not
+    also produce. Measured against d3cee24 it did not: A-20 added ``family_id``,
+    ``risk``, ``tier`` and ``approved_by``, the fixture left all four unset, and
+    a ``with_toggled`` mutated to drop all four stayed GREEN. ``approved_by``
+    silently reverting to ``""`` on a click is D-34's own failure — the named
+    person who approved an omission, gone at the next toggle, with the omission
+    still engaged.
+
+    So the fixture's adequacy is asserted here rather than claimed in a comment.
+    A field added to ``ReductionLever`` next year and not given a value in the
+    fixture fails THIS test, loudly, instead of quietly emptying the other one.
+    """
     import dataclasses
 
+    from dociq.gui.pipeline import ReductionLever
+
+    lever = _toggle_fixture()
+    for field in dataclasses.fields(ReductionLever):
+        if field.name in _UNDISTINGUISHABLE:
+            continue
+        if field.default is dataclasses.MISSING:
+            continue  # required: every call site must supply it, loudly
+        assert getattr(lever, field.name) != field.default, (
+            f"the fixture leaves ReductionLever.{field.name!r} at its default "
+            f"{field.default!r}, so with_toggled could drop that field and the "
+            f"preservation test would still pass"
+        )
+
+
+def _toggle_fixture():
+    """One lever with every optional field set away from its default."""
     from dociq.gui.pipeline import LEVER_EXPERT, ReductionLever
 
-    # Every field given a value distinguishable from its default, so a dropped
-    # field shows up as a difference rather than coinciding with the default.
-    lever = ReductionLever(
+    return ReductionLever(
         key="photo_logs", label="Photo logs", tokens=41_000, pages=612,
         kind=LEVER_EXPERT, engaged=True, estimated=True,
         rule="section:^PHOTO LOG", note="Dropped per J. Long, 2026-08-01.",
+        # A-20's four. Present so the probe below is not vacuous over them.
+        family_id="progress-photographs", risk="high", tier="t1_outline",
+        approved_by="abachowski",
     )
+
+
+def test_toggling_preserves_every_lever_field_except_engaged():
+    lever = _toggle_fixture()
     plan = ReductionPlan(full_tokens=900_000, levers=(lever,))
 
     toggled = plan.with_toggled("photo_logs").levers[0]
@@ -598,6 +696,40 @@ def test_a_counted_checklist_carries_no_projection_marker() -> None:
         ProfileInfo(profile_id="p", version="1", label="P", section_rules=1),
         levers)
     assert "projected" not in view.drop_summary()
+
+
+def test_the_locked_disposition_map_covers_every_locked_lever_kind() -> None:
+    """The tripwire for the next kind, asserted rather than trusted.
+
+    ``ChecklistRow.disposition_word`` subscripts
+    ``view_models._LOCKED_DISPOSITION`` so an unhandled kind raises instead of
+    printing a word chosen for a different one — but a ``KeyError`` raised at
+    render time is raised in front of an expert, on the §6 approval screen. This
+    is the same condition, checked where it is cheap.
+
+    The kinds are DERIVED from the seam's ``LEVER_*`` constants, not listed
+    here: a list would be one kind behind the module the day someone adds the
+    fifth, which is exactly how ``LEVER_RECOGNIZED`` ended up rendering as
+    "AUTOMATIC" for a whole sprint.
+    """
+    from dociq.gui import pipeline as seam
+    from dociq.gui.view_models import _LOCKED_DISPOSITION
+
+    kinds = {
+        getattr(seam, name) for name in dir(seam)
+        if name.startswith("LEVER_") and isinstance(getattr(seam, name), str)
+    }
+    assert len(kinds) >= 3, kinds  # expert, automatic, recognized
+    locked_kinds = kinds - {seam.LEVER_EXPERT}
+    assert set(_LOCKED_DISPOSITION) == locked_kinds, (
+        f"lever kind(s) with no word on the §6 checklist: "
+        f"{sorted(locked_kinds - set(_LOCKED_DISPOSITION))}; "
+        f"word(s) for a kind that no longer exists: "
+        f"{sorted(set(_LOCKED_DISPOSITION) - locked_kinds)}"
+    )
+    # And no two kinds render the same word — two kinds sharing one word is the
+    # merge D-14 forbids, wearing the map's clothes.
+    assert len(set(_LOCKED_DISPOSITION.values())) == len(_LOCKED_DISPOSITION)
 
 
 def test_every_aggregate_over_levers_marks_a_projection() -> None:

@@ -115,7 +115,13 @@ CLAIM = (
 IDENTITY_NOTE = (
     "The run identity is dociq.contracts.run_identity(RunConfig) — the single "
     "authoritative projection — and its value for this run is recorded below "
-    "as run_identity_sha256. It covers: the SOURCE folder; the ORDERED tuple "
+    "as run_identity_sha256. It covers: the SOURCE folder; every APPROVED "
+    "OMISSION (family id, approver, approval timestamp, matter, and the "
+    "template id and version it was given against), which is the input that "
+    "decides which pages drop; the SECTION TEMPLATE loaded for the run (id and "
+    "version), recorded even when nothing was approved; the PROJECT TOKENS "
+    "stripped from a section label before a template family matches it; the "
+    "ORDERED tuple "
     "of profile snapshots (profile id, version and profile_hash for every "
     "profile, in precedence order); the master-index snapshot (filename, "
     "sha256, row count); the OCR confidence threshold, the OCR engine and "
@@ -145,13 +151,31 @@ its own identity is not checkable, which is the one thing this manifest exists
 to be.
 
 Round 2, finding B-R2-2, found the repaired claim still wrong in two ways, and
-both are corrected above. It named "profile id and version", which is not the
-input Stage 4 uses — every profile's content and their precedence order decide
-which pages drop. And it named the output folder as part of the identity while
-the log and the acceptance harness both treated the destination as irrelevant;
-three parts of one system cannot describe the identity differently. The note now
-describes exactly what :func:`~dociq.contracts.run_identity` hashes, and the
-value itself is persisted beside it so there is nothing left to infer."""
+both are corrected above. It named "profile id and version", which was not the
+input Stage 4 then used — every profile's content and their precedence order
+decided which pages dropped. And it named the output folder as part of the
+identity while the log and the acceptance harness both treated the destination
+as irrelevant; three parts of one system cannot describe the identity
+differently.
+
+**A-19 made the same finding a third time, on the mechanism that replaced the
+one B-R2-2 was about, and this note had it wrong until 2026-08-17.** D-35
+deleted the profile-application engine and D-34 moved the decision to an
+approval a person gives against a template family, so profiles no longer decide
+anything and APPROVALS do. :class:`~dociq.contracts.RunConfig` gained
+``omissions``, ``project_tokens``, ``section_template_id`` and
+``section_template_version``, and :func:`~dociq.contracts.run_identity` has
+hashed all four since 4092f76 — while this sentence still described an identity
+covering neither the approvals nor the template. A claim that omits the input
+deciding which pages drop is precisely the uncheckable claim B-2 was raised to
+end. The profile snapshots stay named because they are still hashed inputs; they
+are simply no longer the deciding ones.
+
+The note now describes exactly what :func:`~dociq.contracts.run_identity`
+hashes, and ``tests/test_run_identity.py`` asserts that field-by-field rather
+than by reading it, so the next field added to the identity fails there instead
+of quietly leaving this paragraph behind. The value itself is persisted beside
+it so there is nothing left to infer."""
 
 
 @dataclass

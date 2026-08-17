@@ -44,6 +44,7 @@ from dociq.gui.mock_pipeline import MockPipeline, at_measured_scale  # noqa: E40
 from dociq.gui.pipeline import (  # noqa: E402
     LEVER_AUTOMATIC,
     LEVER_EXPERT,
+    LEVER_RECOGNIZED,
     ProfileInfo,
     ReductionLever,
     ReductionPlan,
@@ -230,8 +231,40 @@ def _drive_detail(window, state: str) -> int:
     return DETAIL
 
 
+def _template_checklist_rows():
+    """The §6 rows the SHIPPED adapter actually builds, from the real template.
+
+    Taken from :meth:`dociq.adapter.RealPipeline.profile_rules` rather than
+    hand-assembled here, because the whole reason the defect below survived is
+    that every checklist cell in this grid was driven from
+    :class:`MockPipeline`, whose fixture emits only ``LEVER_EXPERT`` and
+    ``LEVER_AUTOMATIC`` rows. ``LEVER_RECOGNIZED`` — the third kind A-20 added,
+    and the one 8 of the 19 shipped families produce — reached no cell of a grid
+    whose docstring claims to walk every screen through every state it can
+    reach. A fixture that cannot produce a state is not evidence the state is
+    handled; it is the reason nobody looked.
+
+    Constructing the real adapter costs nothing: ``__init__`` loads the template
+    and touches no disk beyond it, and ``profile_rules`` ignores the profile it
+    is handed (D-35 — the rows are the template's, not the profile's).
+    """
+    from dociq.adapter import NO_PROFILE, RealPipeline
+
+    levers, basis, source = RealPipeline().profile_rules(NO_PROFILE)
+    offered = sum(1 for le in levers if le.kind == LEVER_EXPERT)
+    return levers, basis, source, offered
+
+
 def _drive_checklist(window, state: str) -> int:
     profiles = MockPipeline().profiles()
+    if state == "recognized":
+        levers, basis, source, offered = _template_checklist_rows()
+        window.checklist.show_checklist(build_profile_checklist(
+            ProfileInfo("progress-report", "1", "Progress report template",
+                        section_rules=offered),
+            levers, basis, source))
+        window.stack.setCurrentIndex(CHECKLIST)
+        return CHECKLIST
     if state == "complete":
         window.show_profile_checklist(profiles[0])
     elif state == "two-rules":
@@ -304,7 +337,8 @@ GRID: tuple[tuple[str, str, object], ...] = tuple(
                      "huge", "fits"), _drive_summary),
         ("detail", ("ocr", "reconciliation"), _drive_detail),
         ("checklist", ("complete", "two-rules", "keeps-everything",
-                       "unavailable", "mismatch"), _drive_checklist),
+                       "unavailable", "mismatch", "recognized"),
+         _drive_checklist),
         ("handoff", ("all", "dates", "types", "empty-scope", "unpublished",
                      "built", "built-short", "built-with-residue",
                      "build-failed"),
@@ -398,7 +432,10 @@ def test_the_grid_covers_every_screen() -> None:
     # the grid by an edit that only meant to reorder it.
     # 33 → 34: the third fix round added the fourth package outcome,
     # built-with-residue (A-17, from finding A-7).
-    assert len(GRID) == 34
+    # 34 → 35: the checklist gained "recognized" — A-20's third lever kind,
+    # which the MockPipeline fixture cannot produce and which therefore reached
+    # no cell of this grid until the real template was driven through it.
+    assert len(GRID) == 35
 
 
 @pytest.mark.parametrize("screen,state,driver", GRID,
@@ -473,7 +510,18 @@ def test_no_state_promises_a_token_floor(
 
 def test_every_drop_on_the_checklist_is_attributable(window) -> None:
     """Principle 3: an omission an expert cannot attribute is, downstream,
-    indistinguishable from a document that went missing."""
+    indistinguishable from a document that went missing.
+
+    **Re-pointed at ``kind`` rather than at ``locked``.** The locked branch used
+    to assert a single guarantee — "a locked row says AUTOMATIC and says no
+    expert approved it" — because ``locked`` had exactly one cause. A-20 gave it
+    a second (``LEVER_RECOGNIZED``) and the two causes make OPPOSITE claims: an
+    automatic row was removed by the tool, a recognized row is KEPT and will
+    never be offered. Asserting the old sentence over both is what let the
+    product tell an expert the executive summary had been "removed mechanically"
+    (see :func:`test_a_recognized_never_offered_row_is_kept_and_never_automatic`).
+    The guarantee is not withdrawn — it is now stated per kind.
+    """
     profile = MockPipeline().profiles()[0]
     window.show_profile_checklist(profile)
     view = window.checklist._view
@@ -483,12 +531,15 @@ def test_every_drop_on_the_checklist_is_attributable(window) -> None:
         assert row.lever.label in text
         attribution = row.attribution()
         assert attribution in text
-        if row.locked:
+        if row.lever.kind == LEVER_AUTOMATIC:
             assert "No expert approved this" in attribution
             # Never drawn as an expert DROP: D-14 forbids merging the tool's
             # mechanical savings with the omissions the expert signs for, and
             # an identically-styled "DROP" merges them at a glance.
             assert row.disposition_word() == "AUTOMATIC"
+            assert not row.expert_drop
+        elif row.lever.kind == LEVER_RECOGNIZED:
+            assert row.disposition_word() == "KEPT"
             assert not row.expert_drop
         else:
             assert f"{profile.profile_id} v{profile.version}" in attribution
@@ -498,13 +549,103 @@ def test_every_drop_on_the_checklist_is_attributable(window) -> None:
     assert marks == {"DROP", "KEEP", "AUTOMATIC"}
 
 
-def test_the_checklist_shows_every_rule_the_profile_declares(window) -> None:
-    for profile in MockPipeline().profiles():
-        window.show_profile_checklist(profile)
-        view = window.checklist._view
-        assert len(view.expert_rows) == profile.section_rules, profile.profile_id
-        assert view.approvable
-        assert view.counts_agree
+def test_a_recognized_never_offered_row_is_kept_and_never_automatic(
+        window) -> None:
+    """The §6 approval screen told the expert his executive summary was gone.
+
+    ``ReductionLever.locked`` is ``kind != LEVER_EXPERT``: a three-valued
+    discriminator flattened to a bool inside a property, and then rendered as a
+    WORD. Every ``locked`` branch in ``ChecklistRow`` was written when the only
+    locked kind was ``LEVER_AUTOMATIC``, so after A-20 a section the template
+    RECOGNIZES and refuses to offer — ``offer=False``, 8 of the 19 shipped
+    families, graded HIGH risk by ``section_taxonomy.md`` §4 — rendered on the
+    real adapter's checklist as::
+
+        AUTOMATIC   Executive summary
+        "Executive summary" was removed mechanically by the tool. No expert
+        approved this; it is recorded separately from the profile's drops in
+        the processing log.
+
+    Every clause of that is false. The pages are KEPT, nothing was removed, and
+    the sentence appears on the one screen whose entire purpose is an expert
+    approving omissions before a run commits to them. This is finding A-3's
+    class — a member's word printed in another member's place — reached through
+    a bool instead of through an enum, which is why every AST tripwire in
+    ``tests/test_terminal_status_rendering.py`` stayed green over it.
+
+    FAIL-BEFORE, stated as what was actually watched rather than as a blanket
+    claim over the whole test. Three reds were observed, each isolating one
+    assertion because an earlier failing assert hides the ones after it:
+
+    * ``disposition_word() == "KEPT"`` — red on unmodified d3cee24
+      (``assert 'AUTOMATIC' == 'KEPT'``).
+    * ``"removed mechanically" not in attribution`` — red with the
+      ``LEVER_RECOGNIZED`` branch of ``ChecklistRow.attribution`` disabled, so
+      the row fell through to the automatic sentence again.
+    * ``not view.automatic_rows`` — red with ``automatic_rows`` reverted to
+      ``if r.locked``.
+
+    Not individually watched, because the asserts above them fired first:
+    ``"No expert approved this" not in attribution``, ``"never offered" in
+    attribution`` and ``automatic_summary() == ""``. They read the same two
+    values the three watched asserts read, so they are covered in substance —
+    but they were not seen red and this note does not imply they were.
+    """
+    _drive_checklist(window, "recognized")
+    view = window.checklist._view
+    recognized = [r for r in view.rows if r.lever.kind == LEVER_RECOGNIZED]
+    assert recognized, (
+        "the shipped template must still produce never-offered families, or "
+        "this test is guarding a state the product can no longer reach")
+
+    text = _all_text(window.checklist)
+    for row in recognized:
+        assert not row.dropped, "a recognized row is never engaged"
+        assert row.disposition_word() == "KEPT"
+        attribution = row.attribution()
+        assert attribution in text, "the sentence must actually be on screen"
+        # The two false claims, named rather than paraphrased.
+        assert "removed mechanically" not in attribution, attribution
+        assert "No expert approved this" not in attribution, attribution
+        # And the true one, stated.
+        assert "never offered" in attribution, attribution
+
+    # The tool's mechanical ledger must not count pages it never touched.
+    assert not view.automatic_rows, (
+        "recognized sections are being added up as pages DocIQ removed "
+        "mechanically")
+    assert view.automatic_summary() == ""
+
+
+def test_the_checklist_shows_every_family_the_template_carries() -> None:
+    """The completeness guarantee, re-pointed at what the checklist is now about.
+
+    It read ``len(view.expert_rows) == profile.section_rules`` over the MOCK.
+    D-35 made those two numbers unrelated — the rows are the template's families
+    and the profile declares its own rule count — and the mock could never show
+    it, because ``MockPipeline.profile_rules`` slices its levers to
+    ``profile.section_rules`` and so agrees with itself by construction.
+
+    What the old check protected against was the ADAPTER losing rows between the
+    thing being described and the screen. That risk is real and it moved, so the
+    check moves with it: against the REAL adapter, every family in the shipped
+    template must reach the screen, offerable and never-offered alike.
+    """
+    from dociq.adapter import NO_PROFILE, RealPipeline
+    from dociq.sections.templates import PROGRESS_REPORT
+
+    levers, _basis, source = RealPipeline().profile_rules(NO_PROFILE)
+    assert len(levers) == len(PROGRESS_REPORT.families), (
+        "the checklist dropped a family between the template and the seam: "
+        f"{len(PROGRESS_REPORT.families)} carried, {len(levers)} shown"
+    )
+    assert {le.family_id for le in levers} == {
+        f.family_id for f in PROGRESS_REPORT.families
+    }
+    # Offered vs never-offered is the template's call, not the screen's.
+    offered = {le.family_id for le in levers if not le.locked}
+    assert offered == {f.family_id for f in PROGRESS_REPORT.families if f.offer}
+    assert PROGRESS_REPORT.template_id in source and PROGRESS_REPORT.version in source
 
 
 def test_a_profile_whose_rules_did_not_load_cannot_be_approved(window) -> None:
@@ -527,15 +668,48 @@ def test_a_profile_whose_rules_did_not_load_cannot_be_approved(window) -> None:
     assert summary in _all_text(window.checklist)
 
 
-def test_a_rule_count_that_disagrees_blocks_approval(window) -> None:
-    _drive_checklist(window, "mismatch")
-    view = window.checklist._view
-    assert not view.counts_agree and not view.approvable
-    text = _all_text(window.checklist)
-    assert "declares 9 section rules" in text
-    accept = [b for b in window.checklist.findChildren(QPushButton)
-              if b.objectName() == "primary"]
-    assert not accept[0].isEnabled()
+def test_the_approve_button_is_enabled_on_the_real_product_path(app) -> None:
+    """REGRESSION. "Use this profile" was disabled on every path, for a day.
+
+    Replaces ``test_a_rule_count_that_disagrees_blocks_approval``, whose
+    guarantee — a profile declaring N rules while M are shown must block — D-35
+    withdrew: the rows stopped being the profile's, so the two numbers stopped
+    being comparable and the "disagreement" branch fired on every ordinary run.
+
+    The defect that guarantee then caused is what this asserts instead.
+    ``counts_agree`` went on comparing ``profile.section_rules`` (2, or 0 for no
+    profile) against the template's offerable families (11), so it was
+    permanently False, ``approvable`` was permanently False, and the operator was
+    shown *"a rule that is not on this screen can still leave pages out"* — an
+    alarm about a hazard that did not exist, over a button that could not be
+    pressed. That is A-12's shape, and A-12 is the amendment behind which this
+    product already shipped one permanently disabled button.
+
+    It is driven through the REAL pipeline and the REAL window, because the mock
+    cannot reproduce it: its ``profile_rules`` slices to the profile's own count,
+    so its checklist always agrees with itself. No mock-driven assertion could
+    have caught this, and none did.
+    """
+    from dociq.adapter import NO_PROFILE, RealPipeline
+    from dociq.gui.main_window import MainWindow
+
+    win = MainWindow(RealPipeline())
+    try:
+        for profile in (NO_PROFILE, *RealPipeline().profiles()):
+            win.show_profile_checklist(profile)
+            view = win.checklist._view
+            assert view.approvable, (
+                f"{profile.profile_id}: the checklist refuses approval over a "
+                "template that rendered completely"
+            )
+            accept = [b for b in win.checklist.findChildren(QPushButton)
+                      if b.objectName() == "primary"]
+            assert len(accept) == 1 and accept[0].isEnabled(), (
+                f"{profile.profile_id}: 'Use this profile' is disabled"
+            )
+            assert "can still leave pages out" not in _all_text(win.checklist)
+    finally:
+        win.deleteLater()
 
 
 def test_a_profile_with_no_rules_is_benign_not_alarming(window) -> None:
@@ -582,10 +756,15 @@ def test_no_disposition_word_is_silently_clipped(window) -> None:
     from dociq.gui.theme import build_theme
 
     seen = set()
-    for state in ("complete", "keeps-everything", "two-rules"):
+    # "recognized" added with A-20's third lever kind: the enumeration is only
+    # exhaustive over states the loop actually drives, and the word this column
+    # gained ("KEPT") came from a state no cell of this grid used to reach.
+    for state in ("complete", "keeps-everything", "two-rules", "recognized"):
         _drive_checklist(window, state)
         seen |= {r.disposition_word() for r in window.checklist._view.rows}
     assert seen and seen <= set(DISPOSITION_WORDS)
+    assert "KEPT" in seen, (
+        "the recognized state must actually exercise the word it was added for")
 
     theme = build_theme()
     metrics = QFontMetrics(theme.label(9))

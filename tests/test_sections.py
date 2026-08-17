@@ -2,11 +2,18 @@
 
 **The first class of test in this file is the reason the file exists.** D-35's
 five trigger shapes are reproduced here against the NEW engine. Each of them was
-watched failing against the old one — `profiles/apply.py` matched a regex against
-every line of every page and carried the section forward until another rule
-matched, so a single DROP rule for `PROGRESS PHOTOGRAPHS` dropped the executive
-summary, the critical path narrative, the weather log and the timesheets, and
-attributed all of them to `PROGRESS PHOTOGRAPHS`.
+watched failing against the old one, which matched a regex against every line of
+every page and carried the section forward until another rule matched, so a
+single DROP rule for `PROGRESS PHOTOGRAPHS` dropped the executive summary, the
+critical path narrative, the weather log and the timesheets, and attributed all
+of them to `PROGRESS PHOTOGRAPHS`.
+
+**That engine is `dociq/profiles/apply.py`, and it is not in the tree — commit
+4092f76 deleted it.** Said here because the sentence above is the justification
+for every test below it and a reader must be able to check it: the five shapes,
+the pages each one lost and the pages the expert meant to lose are tabulated in
+`docs/verification/sections_2026-08-17.md`, and the four Stage-4 guarantees that
+outlived the deletion are re-pointed in `tests/test_profiles.py`.
 
 These are written as properties of the *class*, not as five named repros: what
 must hold is that **no page outside the span that caused a drop is ever

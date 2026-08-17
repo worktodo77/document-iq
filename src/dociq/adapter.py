@@ -351,6 +351,19 @@ def _template_lever(
             family_id=family.family_id if family is not None else "",
             risk=family.risk.value if family is not None else "",
             tier=tier,
+            # Passed on this branch too. A family that is never OFFERED still
+            # has patterns, and they are what an expert reads to check that the
+            # right pages were recognized as the weather log; a blank here would
+            # be the A-11b defect on the eight rows where getting recognition
+            # wrong is most expensive. Empty only where there is genuinely no
+            # family, and that emptiness is a fact rather than a dropped field.
+            rule=" | ".join(family.patterns) if family is not None else "",
+            # Empty, and it is a FACT rather than a dropped field: this row can
+            # never be engaged, so no approval can exist for it and no name may
+            # appear against it. D-34 — the approver field never holds a
+            # fiction, and a recognized-never-offered section is the one row
+            # where a name would be the plainest fiction available.
+            approved_by="",
             note=(family.rationale if family is not None else
                   "Recognized, and no template family names this section — so "
                   "there is nothing to approve and the pages are kept."),

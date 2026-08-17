@@ -434,16 +434,26 @@ def test_the_walk_does_not_stamp_a_profile_onto_documents_it_did_not_claim(tmp_p
     """Why ``profile_id`` stays OUT of the pre-walk configuration.
 
     ``walker._record`` stamps the walk config's profile onto every
-    ``DocumentRecord``, and Stage 4 overwrites that stamp only on documents a
-    profile actually CLAIMED — an unclaimed document keeps what it arrived
-    with. Resolving ``PipelineOptions.profiles[0]`` into the pre-walk config
-    (the obvious tidy-up while fixing F-4a, and one this package started to
-    make) would therefore label every unclaimed document with a profile that
-    did not match it: a false statement in the document index and in hashed
-    content both.
+    ``DocumentRecord``. Resolving ``PipelineOptions.profiles[0]`` into the
+    pre-walk config (the obvious tidy-up while fixing F-4a, and one this package
+    started to make) would therefore label documents with a profile that did not
+    match them: a false statement in the document index and in hashed content
+    both.
 
-    "What the run was configured with" and "what matched this document" are two
-    different facts, and only Stage 4 knows the second.
+    **The reason this test used to give is withdrawn, and the guarantee is
+    STRONGER without it.** It said Stage 4 "overwrites that stamp only on
+    documents a profile actually CLAIMED — an unclaimed document keeps what it
+    arrived with", so the damage was confined to unclaimed documents. D-35
+    (commit 4092f76) deleted the engine that claimed documents:
+    ``dociq.sections.apply.apply_sections`` touches ``section``,
+    ``section_tier`` and the disposition only, and NOTHING downstream of the
+    walk writes ``DocumentRecord.profile_id`` at all. So a profile resolved into
+    the pre-walk config would now label EVERY document in the corpus, with no
+    later pass to correct any of them.
+
+    The assertion below is unchanged because it never depended on the mechanism:
+    no document may carry a profile that did not match it. ``src/dociq/pipeline.py``
+    carries the same withdrawal at the site itself.
     """
     from dociq.profiles.model import FormatProfile
 
@@ -510,7 +520,29 @@ def test_every_deadline_limit_is_an_exactly_represented_integer():
 
 
 # ---------------------------------------------------------------------------
-# B-R2-2 — the ordered profile set IS the input, and the identity must say so
+# B-R2-2 / A-19 — the input that DECIDES WHICH PAGES DROP must move the identity
+#
+# A-08 put the ordered profile set in the run identity because profiles decided
+# which pages dropped, and proved it with two measured counterexamples: edit a
+# second profile's rule without bumping its version, or swap two profiles'
+# precedence, and the recorded identity stayed byte-identical while the corpus
+# hash moved and pages went KEEP → DROP.
+#
+# **D-35 deleted that mechanism** (commit 4092f76). ``dociq.profiles.apply`` is
+# gone; a profile's DROP rule now drops nothing, and the pipeline reports it as
+# an inert input rather than applying it. Both of A-08's counterexamples are
+# therefore no longer counterexamples — measured on this branch, two runs that
+# differ only in profile content or profile order emit a BYTE-IDENTICAL
+# deterministic file set.
+#
+# A-08's PRINCIPLE is untouched and is carried by A-19: the input that decides
+# which pages drop must move the identity. That input is now the set of
+# APPROVED OMISSIONS (D-34), plus the template they were given against and the
+# project tokens that decide which family a label normalizes to. So the two
+# counterexamples below are rebuilt on approvals — approve an omission, and
+# change WHO approved it — and the profile tests are kept, repointed at the
+# guarantee that survived: profile snapshots are still hashed run inputs, and
+# they are still recorded in full and by content.
 # ---------------------------------------------------------------------------
 
 
@@ -541,18 +573,178 @@ def _profiled_run(tmp_path, name, profiles):
         write_workbook=False, write_summary_pdf=False, write_package=False))
 
 
+# The one template family the fixture corpus exercises: three pages of it, all
+# placed by Tier 3, all offered. Approving it turns 0 dropped pages into 3.
+FIXTURE_FAMILY = "progress-photographs"
+
+
+def _omission(approved_by: str = "j.long", family: str = FIXTURE_FAMILY):
+    from dociq.sections.model import ApprovedOmission
+    from dociq.sections.templates import PROGRESS_REPORT
+
+    return ApprovedOmission(
+        family_id=family,
+        approved_by=approved_by,
+        approved_at="2026-08-17T00:00:00Z",
+        matter="the test matter",
+        template_id=PROGRESS_REPORT.template_id,
+        template_version=PROGRESS_REPORT.version,
+    )
+
+
+def _approved_run(tmp_path, name, approvals=()):
+    from dociq.sections.templates import PROGRESS_REPORT
+
+    cfg = RunConfig(
+        source_root=str(FIXTURES),
+        output_root=str(tmp_path / name),
+        ocr_engine_version=ex.ocr_engine_version(),
+    )
+    return pipeline.run(cfg, pipeline.PipelineOptions(
+        walk=walker.WalkOptions(ocr_enabled=False, resume=False),
+        template=PROGRESS_REPORT, approvals=tuple(approvals), stamp=STAMP,
+        write_workbook=False, write_summary_pdf=False, write_package=False))
+
+
+def test_approving_an_omission_moves_the_identity(tmp_path):
+    """A-19's counterexample, measured end to end — A-08's finding on the input
+    that replaced the one A-08 was about.
+
+    Two runs over one folder, identical in every other recorded term. One of
+    them is missing a section. Without ``RunConfig.omissions`` in the identity
+    they would report the same ``run_identity_sha256`` over different evidence,
+    which is the uncheckable claim B-2 was raised to end — the same collision,
+    one design generation later.
+
+    No attacker model, and no unusual configuration: this is one expert clicking
+    one lever between two runs of the same matter.
+    """
+    none = _approved_run(tmp_path, "none")
+    approved = _approved_run(tmp_path, "approved", (_omission(),))
+
+    assert none.result.pages_dropped == 0
+    assert approved.result.pages_dropped > 0, (
+        "the approval dropped nothing, so this measures nothing — the fixture "
+        "corpus must still recognize the family being approved")
+    assert none.manifest.deterministic != approved.manifest.deterministic, (
+        "the approval did not actually change the emitted evidence")
+
+    assert run_identity(none.result.config) != run_identity(approved.result.config), (
+        "an approved omission that removed pages from the deliverable left the "
+        "run identity unchanged — the determinism claim would assert sameness "
+        "the bytes do not support")
+    assert none.manifest.run_identity_sha256 != approved.manifest.run_identity_sha256
+
+    # And the identity records the approval itself, not merely that one existed.
+    snaps = approved.result.config.omissions
+    assert [s.family_id for s in snaps] == [FIXTURE_FAMILY]
+    assert snaps[0].approved_by == "j.long"
+    assert snaps[0].matter == "the test matter"
+
+
+def test_changing_who_approved_the_omission_moves_the_identity(tmp_path):
+    """The second half of A-19, and the one that narrows the claim on purpose.
+
+    Same folder, same family, same number of pages dropped — a different person
+    approved it. ``OmissionSnapshot`` hashes ``approved_by`` and ``approved_at``
+    deliberately: the drop log NAMES the approver, so the two runs are not
+    byte-identical, and a claim that had to pretend otherwise would be the wrong
+    claim to keep. Recording the person is the whole of D-34.
+
+    Measured rather than argued — the assertion below is that the emitted files
+    really do differ, not just the hash of the configuration.
+    """
+    a = _approved_run(tmp_path, "by-long", (_omission("j.long"),))
+    b = _approved_run(tmp_path, "by-other", (_omission("a.other"),))
+
+    assert a.result.pages_dropped == b.result.pages_dropped > 0, (
+        "the two runs dropped different amounts, so this is not the "
+        "approver-only counterexample it claims to be")
+    assert a.manifest.deterministic != b.manifest.deterministic, (
+        "the approver reaches no emitted file, so the determinism claim would "
+        "not need to cover it — check the drop log before relaxing this")
+
+    assert run_identity(a.result.config) != run_identity(b.result.config), (
+        "two runs whose deliverables name different approvers reported one "
+        "identity")
+    assert a.manifest.run_identity_sha256 != b.manifest.run_identity_sha256
+
+
+def test_the_identity_covers_every_input_that_decides_a_disposition(tmp_path):
+    """The CLASS, enumerated, so the next A-19 fails here rather than in review.
+
+    A-08 found one such input outside the identity and A-19 found four more, and
+    both times the pattern was the same: a field is added to
+    :class:`RunConfig`, the projection picks it up, and something else that
+    describes the identity is left behind. So this names all four of A-19's
+    fields, asserts each is hashed, and asserts the manifest's own prose claim
+    names them too — which is where the omission actually was on 2026-08-17.
+    """
+    from dociq.contracts import _IDENTITY_EXCLUDED
+
+    a19 = ("omissions", "project_tokens",
+           "section_template_id", "section_template_version")
+    declared = {f.name for f in dataclasses.fields(RunConfig)}
+    assert set(a19) <= declared, (
+        f"amendment A-19's fields are not on RunConfig: {set(a19) - declared}")
+    for name in a19:
+        assert name not in _IDENTITY_EXCLUDED, (
+            f"RunConfig.{name} decides which pages drop and is excluded from "
+            f"the identity")
+
+    from dociq.contracts import OmissionSnapshot
+
+    base = RunConfig(source_root="s", output_root="o")
+    changes = {
+        "omissions": (OmissionSnapshot(
+            family_id=FIXTURE_FAMILY, approved_by="j.long",
+            approved_at="2026-08-17T00:00:00Z", matter="m",
+            template_id="progress-report", template_version="1"),),
+        "project_tokens": ("MV32",),
+        "section_template_id": "progress-report",
+        "section_template_version": "1",
+    }
+    for name, value in changes.items():
+        other = dataclasses.replace(base, **{name: value})
+        assert run_identity(base) != run_identity(other), (
+            f"RunConfig.{name} does not move the run identity, so two runs "
+            f"that disposed of pages differently would report the same one")
+
+    # The prose claim has to name them too. This is the half that was wrong:
+    # `run_identity` hashed all four from 4092f76 and IDENTITY_NOTE described an
+    # identity covering neither the approvals nor the template.
+    for named in ("APPROVED OMISSION", "approver", "SECTION TEMPLATE",
+                  "PROJECT TOKENS"):
+        assert named in mf.IDENTITY_NOTE, (
+            f"the manifest's claim does not name {named!r}, so it describes an "
+            f"identity narrower than the one it publishes — B-2's defect, on "
+            f"A-19's fields")
+
+
 def test_editing_a_later_profile_without_a_version_bump_moves_the_identity(
     tmp_path,
 ):
-    """Codex round-2 B-R2-2's counterexample, verbatim and end to end.
+    """Codex round-2 B-R2-2's counterexample — **REPOINTED at D-35 (4092f76).**
 
-    Keep profile 1's id and version unchanged, alter profile 2's rule, run the
-    same corpus. Before A-08 the recorded identity was byte-identical while the
-    corpus hash moved and pages went KEEP to DROP: the manifest asserted "same
-    run identity" over evidence that was not the same.
+    **What this asserted and why half of it is withdrawn.** Keep profile 1's id
+    and version, alter profile 2's rule, run the same corpus. Before A-08 the
+    recorded identity was byte-identical while the corpus hash moved and TWO
+    PAGES WENT KEEP → DROP; the manifest asserted "same run identity" over
+    evidence that was not the same. D-35 deleted the engine that applied the
+    rule, so the page movement is gone: measured on this branch, ``a`` and ``b``
+    below drop zero pages each and emit a byte-identical deterministic file set.
+    The old ``pages_dropped != pages_dropped`` assertion is withdrawn because
+    the behaviour behind it is, not because it became inconvenient.
 
-    No attacker model is needed, and that matters — nothing enforces that an
-    edited profile gets a new version, so this is the ordinary way a profile
+    **What still holds, and is asserted instead.** A profile is still a recorded
+    input, still snapshotted by content, and still hashed — so an edit that
+    bumps no version still moves the identity. That is the honest remaining
+    claim: not "the evidence changed", but "the recorded inputs did, and the
+    identity noticed". The evidence-changing case now lives in
+    ``test_approving_an_omission_moves_the_identity``.
+
+    No attacker model is needed, and that still matters — nothing enforces that
+    an edited profile gets a new version, so this is the ordinary way a profile
     library drifts between runs.
     """
     p1 = _profile("p1", "1.0", header="NO SUCH HEADER ANYWHERE")
@@ -564,24 +756,47 @@ def test_editing_a_later_profile_without_a_version_bump_moves_the_identity(
 
     assert a.result.config.profile_id == b.result.config.profile_id == "p1"
     assert a.result.config.profile_version == b.result.config.profile_version
-    assert a.manifest.corpus_sha256 != b.manifest.corpus_sha256, (
-        "the fixture did not actually change the evidence")
-    assert a.result.pages_dropped != b.result.pages_dropped
+
+    # MEASURED, and stated rather than assumed: the profile edit changes NO
+    # deliverable. If this ever fails, a profile has started deciding
+    # dispositions again and D-35 has been reopened without saying so.
+    assert a.manifest.deterministic == b.manifest.deterministic, (
+        "a profile edit changed the emitted evidence — D-35 deleted the engine "
+        "that could do that, so either it is back or something else now reads "
+        "profile rules")
+    assert a.result.pages_dropped == b.result.pages_dropped == 0
 
     assert run_identity(a.result.config) != run_identity(b.result.config), (
-        "a profile edit that changed the emitted evidence left the run "
-        "identity unchanged — the determinism claim would assert sameness the "
-        "bytes do not support")
+        "a profile edit that bumped no version left the run identity unchanged "
+        "— the profiles are recorded inputs and a recorded input that cannot "
+        "be told apart between runs is not recorded")
     assert a.manifest.run_identity_sha256 != b.manifest.run_identity_sha256
+    # By CONTENT, which is what makes the un-bumped version detectable at all.
+    assert ([s.profile_hash for s in a.result.config.profiles]
+            != [s.profile_hash for s in b.result.config.profiles])
 
 
 def test_swapping_profile_precedence_moves_the_identity(tmp_path):
-    """The order half of B-R2-2, with every profile's CONTENT untouched.
+    """The order half of B-R2-2 — **REPOINTED at D-35 (4092f76).**
 
-    ``apply_profiles`` claims a document with the FIRST profile whose header
-    patterns match, so precedence alone decides which rules a document is
-    subject to. The first profile is held fixed here, because the old config
-    recorded only ``profiles[0]`` and would otherwise appear to notice.
+    **The withdrawn prose.** "``apply_profiles`` claims a document with the
+    FIRST profile whose header patterns match, so precedence alone decides which
+    rules a document is subject to." ``apply_profiles`` no longer exists;
+    precedence decides nothing about dispositions.
+
+    **The withdrawn assertion, and why it was worse than merely stale.** This
+    required ``c.manifest.corpus_sha256 != d.manifest.corpus_sha256`` under the
+    message "the fixture did not actually change the evidence". It still passes
+    on this branch — and for the wrong reason: ``corpus_sha256`` folds in
+    ``log_content_sha256``, and the processing log records the ordered profile
+    set, so the hash moves because the CONFIGURATION was written down, not
+    because any evidence differs. Measured: ``c`` and ``d`` emit an identical
+    deterministic file set. A green assertion proving the opposite of what its
+    message claims is worse than a red one, so it is replaced by the two
+    statements that are true.
+
+    What survives is the guarantee A-08 actually bought: profiles are recorded
+    as an ORDERED tuple, and the order is part of the hashed input.
     """
     fixed = _profile("p0", "1.0", header="NO SUCH HEADER ANYWHERE")
     x = _profile("px", "1.0", drop=r"Daily")
@@ -591,10 +806,12 @@ def test_swapping_profile_precedence_moves_the_identity(tmp_path):
     d = _profiled_run(tmp_path, "d", [fixed, y, x])
 
     assert c.result.config.profile_id == d.result.config.profile_id == "p0"
-    assert c.manifest.corpus_sha256 != d.manifest.corpus_sha256, (
-        "the fixture did not actually change the evidence")
+    assert c.manifest.deterministic == d.manifest.deterministic, (
+        "profile precedence changed the emitted evidence — D-35 says it cannot")
+
     assert run_identity(c.result.config) != run_identity(d.result.config), (
-        "precedence order changed which pages dropped but not the identity")
+        "precedence order is part of the recorded input and the identity did "
+        "not notice it move")
 
     # And the recorded snapshots are the ordered set, not a set.
     assert [s.profile_id for s in c.result.config.profiles] == ["p0", "px", "py"]
@@ -606,6 +823,12 @@ def test_every_profile_in_the_library_is_snapshotted_by_content(tmp_path):
 
     Enumerated over the whole library so a future change that records only some
     of them fails here.
+
+    REPOINTED in one word. The old message read "the snapshot records a name,
+    not the content that decides drops"; profiles decide no drops since D-35.
+    The guarantee is unchanged — a hashed input recorded by name only cannot be
+    told apart between runs — and the message now says that instead of naming a
+    mechanism that no longer exists.
     """
     profiles = [
         _profile("p0", "1.0", header="NO SUCH HEADER ANYWHERE"),
@@ -620,7 +843,8 @@ def test_every_profile_in_the_library_is_snapshotted_by_content(tmp_path):
         assert snap.profile_id == prof.profile_id
         assert snap.version == prof.version
         assert snap.profile_hash == prof.profile_hash, (
-            "the snapshot records a name, not the content that decides drops")
+            "the snapshot records a name, not the content of a hashed input — "
+            "two runs under an edited profile would be indistinguishable")
         assert len(snap.profile_hash) == 64
 
 
@@ -628,6 +852,19 @@ def test_an_unprofiled_run_records_an_empty_profile_set(outcome):
     """The ordinary case (section 4 Stage 4) stays honest: no profiles, not a
     fabricated one."""
     assert outcome.result.config.profiles == ()
+
+
+def test_a_run_nobody_ruled_on_records_an_empty_omission_set(outcome):
+    """The A-19 sibling of the test above, and the state every freshly-installed
+    DocIQ is in.
+
+    D-34: a template ships unengaged. "Nobody approved anything" must be
+    recorded as an empty set, not as an approval attributed to the operator who
+    happened to run the tool — the approver field holding a fiction is the exact
+    failure the ruling was made to prevent, and the identity would carry it.
+    """
+    assert outcome.result.config.omissions == ()
+    assert outcome.result.pages_dropped == 0
 
 
 # ---------------------------------------------------------------------------

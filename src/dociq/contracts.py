@@ -238,7 +238,8 @@ class Disposition(str, enum.Enum):
     """Stage-4 section classification outcome for a page.
 
     Default is KEEP everywhere, unconditionally. Principle 1: unclassified
-    content is kept; only an expert-approved profile rule may set DROP.
+    content is kept; only an omission an expert approved by name may set DROP
+    (D-34). The engine that let a PROFILE RULE set it is deleted (D-35).
     """
 
     KEEP = "keep"
@@ -430,12 +431,14 @@ class PageRecord:
     evidence behind an omission cannot silently stop being recorded."""
 
     disposition: Disposition = Disposition.KEEP
-    """KEEP unless an expert-approved profile rule dropped it. Defaulted so
+    """KEEP unless an omission an expert approved by name dropped it. Defaulted so
     that any code path that forgets to classify still keeps the page."""
 
     drop_rule: str | None = None
-    """Identifier of the profile rule that set DROP, for the per-drop log
-    entry. MUST be non-None whenever :attr:`disposition` is DROP — enforced by
+    """Identifier of the approved omission that set DROP, for the per-drop log
+    entry — ``template_id:family_id``
+    (:attr:`dociq.sections.model.ApprovedOmission.drop_rule`). It named a
+    profile rule until D-35 deleted the engine that applied one. MUST be non-None whenever :attr:`disposition` is DROP — enforced by
     :meth:`validate`. Principle 1 forbids an unattributable drop."""
 
     notes: tuple[str, ...] = ()

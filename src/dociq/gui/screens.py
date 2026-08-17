@@ -889,12 +889,18 @@ class DetailScreen(QWidget):
                                          Rule(self._theme))
 
 
-DISPOSITION_WORDS = ("DROP", "KEEP", "AUTOMATIC")
+DISPOSITION_WORDS = ("DROP", "KEEP", "AUTOMATIC", "KEPT")
 """Every value :meth:`ChecklistRow.disposition_word` can return.
 
 Enumerated so the column that holds them can be sized from the widest one. A
 test asserts this tuple is exhaustive — otherwise adding a fourth word would
 reintroduce the clipping this exists to prevent, silently.
+
+"KEPT" is A-20's ``LEVER_RECOGNIZED`` row: a section the template names and
+never offers. It arrived here late — the word existed in
+:data:`dociq.gui.view_models._LOCKED_DISPOSITION` only after that kind stopped
+being rendered as "AUTOMATIC" — and it is narrower than "AUTOMATIC", so the
+column width does not move.
 """
 
 
@@ -941,7 +947,10 @@ class ProfileChecklistScreen(QWidget):
         lay.addWidget(self._source)
         lay.addSpacing(UNIT)
 
-        lay.addWidget(SectionLabel("Sections this profile decides", theme))
+        # NOT "Sections this profile decides" (D-35). A profile decides nothing:
+        # these rows are the section template's families, identical for
+        # every profile including "no profile".
+        lay.addWidget(SectionLabel("Section types DocIQ recognizes", theme))
         lay.addWidget(Rule(theme, strong=True))
         self._rows = QWidget()
         self._rows_lay = QVBoxLayout(self._rows)

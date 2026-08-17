@@ -21,10 +21,12 @@ from dociq.contracts import (
     EffectiveLimits,
     IdRegime,
     MasterIndexSnapshot,
+    OmissionSnapshot,
     PageKind,
     PageRecord,
     ProcessingStatus,
     ProfileSnapshot,
+    RecognitionTier,
     TerminalStatus,
     ReconciliationReport,
     ReconciliationRow,
@@ -51,6 +53,26 @@ def ocr_page(page_no: int = 1, conf: float = 0.91) -> PageRecord:
         ocr_conf=conf,
         ocr_line_count=10,
         ocr_low_conf_lines=1,
+    )
+
+
+def dropped_page(page_no: int = 1, text: str = "hello") -> PageRecord:
+    """A DROP page as the contract requires one to be built since 1.7.0.
+
+    Every DROP fixture in this file goes through here rather than spelling the
+    four fields out, so a future rule about what a DROP page must carry lands in
+    one place instead of being satisfied at three call sites and missed at a
+    fourth. Amendment A-18 added the third of them — the tier — and the fixture
+    that pre-dated it was still constructible and no longer valid.
+    """
+    return PageRecord(
+        page_no=page_no,
+        text=text,
+        kind=PageKind.NATIVE,
+        section="HSE STATISTICS",
+        section_tier=RecognitionTier.OUTLINE,
+        disposition=Disposition.DROP,
+        drop_rule="progress-report:hse-statistics",
     )
 
 
@@ -108,10 +130,24 @@ def test_drop_without_a_rule_is_a_contract_violation():
         p.validate()
 
 
-def test_drop_with_a_rule_validates():
-    native_page().evolve(
+def test_drop_with_a_rule_and_a_tier_validates():
+    """RE-POINTED at the guarantee that replaced this one.
+
+    Until 1.7.0 a rule alone was the whole requirement, and this test asserted
+    exactly that. Amendment A-18 raised the bar: a DROP must also record WHICH
+    KIND OF EVIDENCE placed the page in its section, because "the document's own
+    outline said so" and "a page-class rule matched" are different claims and an
+    expert defending the omission has to say which one he is making. The old
+    single-field construction is now refused — pinned just below, and pinned
+    again from the recognition side in ``tests/test_sections.py``.
+    """
+    dropped_page().validate()
+
+    rule_but_no_tier = native_page().evolve(
         disposition=Disposition.DROP, drop_rule="modec-mpr/v3#photo-log"
-    ).validate()
+    )
+    with pytest.raises(ContractViolation, match="DROP without a section_tier"):
+        rule_but_no_tier.validate()
 
 
 def test_drop_rule_on_a_kept_page_is_a_contract_violation():
@@ -186,28 +222,21 @@ def test_empty_pages_still_count_as_pages():
 
 
 def test_accounting_balances_across_keep_and_drop():
-    d = doc(
-        (
-            native_page(1),
-            native_page(2).evolve(
-                disposition=Disposition.DROP, drop_rule="p/v1#hse"
-            ),
-            native_page(3),
-        )
-    )
+    d = doc((native_page(1), dropped_page(2), native_page(3)))
     d.validate()
     assert (d.pages_in, d.pages_kept, d.pages_dropped) == (3, 2, 1)
     assert d.pages_kept + d.pages_dropped == d.pages_in
 
 
 def test_run_level_accounting_sums_documents():
+    # The DROP page here goes through ``dropped_page`` too. It was the one site
+    # A-18 did not break — nothing validates it — so it would have gone on
+    # constructing a page the contract refuses, and the next test to reach for
+    # a two-document fixture would have inherited it.
     cfg = RunConfig(source_root="s", output_root="o")
     d1 = doc((native_page(1), native_page(2)))
-    d2 = doc(
-        (native_page(1).evolve(disposition=Disposition.DROP, drop_rule="r"),),
-        rel_path="a/c.pdf",
-        sha256="1" * 64,
-    )
+    d2 = doc((dropped_page(1),), rel_path="a/c.pdf", sha256="1" * 64)
+    d2.validate()
     r = RunResult(config=cfg, documents=(d1, d2))
     assert (r.pages_in, r.pages_kept, r.pages_dropped) == (3, 2, 1)
 
@@ -303,8 +332,13 @@ def test_id_regime_follows_the_presence_of_a_master_index():
 
 
 def test_master_index_participates_in_the_run_identity():
-    # D-04 mitigation (a): the index is a hashed run input, so the determinism
-    # contract is "same folder + same profile + same index".
+    # D-04 mitigation (a): the index is a hashed run input, so it is a term of
+    # the determinism contract. The contract used to be stated here as "same
+    # folder + same profile + same index"; that clause is withdrawn, because
+    # D-35 deleted the engine in which a profile decided which pages dropped
+    # and A-19 put the input that replaced it — the approvals, and the project
+    # tokens that decide which family a label reaches — into the identity. The
+    # index's own membership is what this test is about and is unaffected.
     base = RunConfig(source_root="s", output_root="o")
     with_index = dataclasses.replace(
         base,
@@ -346,9 +380,186 @@ def test_changing_the_ocr_threshold_changes_the_run_identity():
     assert content_hash(a) != content_hash(b)
 
 
-def test_contract_version_is_the_frozen_one():
-    # Bumping this is the amendment procedure's final step, not its first.
-    assert CONTRACT_VERSION == "1.6.0"
+def test_contract_version_is_the_frozen_one_and_every_bump_is_written_up():
+    """Bumping this is the amendment procedure's final step, not its first.
+
+    The literal moved 1.6.0 -> 1.8.0 when A-18 (``PageRecord.section_tier``) and
+    A-19 (approvals, project tokens and the template in :class:`RunConfig`)
+    landed. The literal on its own is a weak guard — it fails on the bump and
+    passes on the write-up, which is the wrong way round — so this also asserts
+    that **every** MINOR up to the current one carries its own entry in the
+    contract's amendment history. A bump with no entry now fails here, whatever
+    the number is, rather than only the two numbers someone thought to list.
+    """
+    import pathlib
+
+    assert CONTRACT_VERSION == "1.8.0"
+
+    src = pathlib.Path(__file__).parent.parent / "src" / "dociq" / "contracts.py"
+    history = src.read_text(encoding="utf-8")
+    major, minor, _patch = (int(part) for part in CONTRACT_VERSION.split("."))
+    undocumented = [
+        f"{major}.{m}.0"
+        for m in range(1, minor + 1)
+        if f"\n{major}.{m}.0 — amendment" not in history
+    ]
+    assert not undocumented, (
+        f"contract versions bumped with no amendment entry: {undocumented} — "
+        "the version literal is the last step of the procedure, and a bump "
+        "nobody wrote up is a freeze that was relaxed in private"
+    )
+    # And the two this sprint added, named, so a renumbered entry is caught.
+    assert "1.7.0 — amendment A-18" in history
+    assert "1.8.0 — amendment A-19" in history
+
+
+# ---------------------------------------------------------------------------
+# Amendment A-19 (contract 1.8.0) — the input that decides which pages drop
+# ---------------------------------------------------------------------------
+
+
+def omission(**kw: object) -> OmissionSnapshot:
+    base = dict(
+        family_id="progress-photographs",
+        approved_by="abachowski",
+        approved_at="2026-08-17T12:00:00Z",
+        matter="Project 495",
+        template_id="progress-report",
+        template_version="1",
+    )
+    base.update(kw)
+    return OmissionSnapshot(**base)  # type: ignore[arg-type]
+
+
+def test_an_approved_omission_moves_the_run_identity():
+    """A-19, and it is A-08's finding one design generation later.
+
+    A-08 put profiles in the identity because they decided which pages dropped,
+    and proved it with two measured counterexamples. D-35 deleted that engine and
+    D-34 moved the decision to an approval a named person gives against a
+    template family — so approvals are now the deciding input. Two runs over one
+    folder, identical in every other recorded term, one of them missing a
+    section: the same collision A-08 closed, on the field that replaced the one
+    A-08 was about.
+    """
+    base = RunConfig(source_root="s", output_root="o")
+    engaged = dataclasses.replace(base, omissions=(omission(),))
+    assert content_hash(base) != content_hash(engaged)
+    assert run_identity(base) != run_identity(engaged)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["family_id", "approved_by", "approved_at", "matter", "template_id",
+     "template_version"],
+)
+def test_every_field_of_an_approval_is_hashed(field: str):
+    """Enumerated rather than sampled: each field, one at a time.
+
+    ``approved_by`` and ``approved_at`` are in here deliberately and they narrow
+    the determinism claim — two runs differing only in WHO approved the omission
+    are not byte-identical, because the drop log names the approver. Recording
+    the person is the whole of D-34; a claim that had to pretend otherwise would
+    be the wrong claim to keep.
+    """
+    def cfg(**kw: object) -> RunConfig:
+        return RunConfig(
+            source_root="s", output_root="o", omissions=(omission(**kw),)
+        )
+
+    assert content_hash(cfg()) != content_hash(cfg(**{field: "other"}))
+
+
+def test_the_order_approvals_were_given_in_is_part_of_the_identity():
+    # A tuple, like `profiles`, because the log records them in order and two
+    # logs that differ are two different artifacts.
+    a = omission(family_id="progress-photographs")
+    b = omission(family_id="hse-statistics")
+    first = RunConfig(source_root="s", output_root="o", omissions=(a, b))
+    second = dataclasses.replace(first, omissions=(b, a))
+    assert content_hash(first) != content_hash(second)
+
+
+def test_project_tokens_move_the_run_identity():
+    """The half of A-19 that is easiest to miss.
+
+    Tokens are not a display setting: they change which family a label
+    normalizes to. With ``MV32`` supplied, ``MV32 APPENDICES`` keys to
+    ``APPENDICES`` and an appendices approval reaches it; without, it does not
+    and the page keeps. Same folder, same approvals, different corpus.
+    """
+    base = RunConfig(source_root="s", output_root="o")
+    tokenized = dataclasses.replace(base, project_tokens=("MV32",))
+    assert content_hash(base) != content_hash(tokenized)
+    assert content_hash(tokenized) != content_hash(
+        dataclasses.replace(base, project_tokens=("MV32", "BOMESC"))
+    )
+
+
+def test_the_template_is_recorded_even_when_nothing_was_engaged():
+    """"The expert engaged nothing" and "no template was offered" are different
+    facts about a run, and only one of them is a decision. Recording the
+    template beside the (empty) approval set is what keeps them distinguishable
+    — a run whose omissions are empty because the template shipped unengaged is
+    the ORDINARY state of a freshly-installed DocIQ (D-34)."""
+    none_offered = RunConfig(source_root="s", output_root="o")
+    offered = dataclasses.replace(
+        none_offered, section_template_id="progress-report",
+        section_template_version="1",
+    )
+    assert none_offered.omissions == offered.omissions == ()
+    assert content_hash(none_offered) != content_hash(offered)
+    assert content_hash(offered) != content_hash(
+        dataclasses.replace(offered, section_template_version="2")
+    )
+
+
+def test_the_contract_no_longer_claims_a_profile_rule_can_drop_a_page():
+    """The CLAIM withdrawn, not only the code — modelled on
+    ``test_the_withdrawn_token_floor_is_reserved_and_says_so``, which pins A-05's
+    withdrawal the same way.
+
+    D-35 deleted ``profiles/apply.py``, the only engine in which a profile rule
+    could set a disposition. Three sentences in this contract went on asserting
+    it afterwards — on :class:`Disposition`, on ``PageRecord.disposition`` and on
+    ``PageRecord.drop_rule`` — and the contract is what a future implementer
+    reads before writing a DROP. Under D-34 the only thing that can turn a KEEP
+    into a DROP is an approval naming a person.
+
+    Prose, deliberately. There is no identifier to grep for: the engine's name is
+    gone and what survived it was the description.
+    """
+    import pathlib
+
+    src = pathlib.Path(__file__).parent.parent / "src" / "dociq" / "contracts.py"
+    text = src.read_text(encoding="utf-8")
+    # From the first class declaration onward: the live description of the page
+    # model. This deliberately excludes ``CONTRACT_VERSION``'s amendment history
+    # above it, which SHOULD go on saying that profiles once decided which pages
+    # dropped — A-08 is a record of what was true when it was raised, and
+    # rewriting history to match the present is the opposite of an audit trail.
+    live = text.split("\nclass ", 1)[-1]
+    assert len(live) < len(text) and "ContractViolation" not in live.split("\n")[0]
+    for claim in ("expert-approved profile rule",
+                  "Identifier of the profile rule"):
+        assert claim not in live, (
+            f"the contract still says {claim!r} — D-35 removed the engine that "
+            "made it true and D-34 replaced it with an approval that names a "
+            "person"
+        )
+    assert "ApprovedOmission" in live, (
+        "and the replacement must be named where the withdrawn claim stood, or "
+        "the next implementer has a prohibition and no route"
+    )
+
+
+def test_a_19_is_additive_so_existing_construction_still_works():
+    # The grading check, the same one A-01/A-02 got: MINOR, because every
+    # pre-existing call site still constructs.
+    cfg = RunConfig(source_root="s", output_root="o")
+    assert (cfg.omissions, cfg.project_tokens) == ((), ())
+    assert cfg.section_template_id is None
+    assert cfg.section_template_version is None
 
 
 def test_a_run_result_describes_a_completed_run_by_default():
@@ -504,9 +715,11 @@ def limits(**kw: object) -> EffectiveLimits:
      "recurse", "ocr_model_id"],
 )
 def test_every_output_affecting_limit_changes_the_run_identity(field: str):
-    # A-04 / Codex B-2. When any of these bites, the same folder+profile+index
-    # yields different evidence — so an identical hash across the two would be
-    # agreement the bytes do not support.
+    # A-04 / Codex B-2. When any of these bites, one identical set of hashed
+    # inputs yields different evidence — so an identical hash across the two
+    # would be agreement the bytes do not support. (Stated as "the same
+    # folder+profile+index" until D-35 removed the profile's power to decide a
+    # disposition; the argument never depended on which inputs those were.)
     base = RunConfig(source_root="s", output_root="o", limits=limits())
     other = dataclasses.replace(base.limits, **{field: _perturb(getattr(base.limits, field))})
     assert content_hash(base) != content_hash(

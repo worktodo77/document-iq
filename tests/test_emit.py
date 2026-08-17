@@ -55,15 +55,99 @@ from dociq.identify.bates import (
     document_ranges,
     propose_format,
 )
-from dociq.profiles.apply import apply_profiles
 from dociq.profiles.model import OperatorStamp
+from dociq.sections.apply import apply_sections
+from dociq.sections.model import ApprovedOmission
+from dociq.sections.resolve import resolve_sections
+from dociq.sections.templates import PROGRESS_REPORT
 from dociq.verify.tokens import estimate_for_texts, estimate_tokens
 from tests.fixtures import corpus, document, ocr_page, page
-from tests.test_profiles import mpr_profile
 
 
 def assigned(count=3):
     return assign_doc_ids(corpus(count), None).documents
+
+
+# --- the dropped-page fixture ----------------------------------------------
+#
+# Every dropped page in this file used to come from ``profiles.apply``, which
+# D-35 deleted: it matched a rule's regex against every line of every page and
+# carried the matched section forward until the next match, so one rule for
+# PROGRESS PHOTOGRAPHS could drop an executive summary and attribute it to
+# photographs. Nothing here is a translation of that engine. Drops now come from
+# the two things that replaced it, and both are visible in the fixture:
+#
+#   * a SPAN, resolved from the document's own outline, which names its LAST
+#     page and therefore cannot reach past it; and
+#   * an :class:`ApprovedOmission`, which names a person — under D-34 it is the
+#     only thing in the system that can turn a KEEP into a DROP. A template on
+#     its own drops nothing, which is what ``sectioned(approved=())`` builds.
+
+MPR_OUTLINE = [
+    ("COVER", 0),
+    ("EXECUTIVE SUMMARY", 1),
+    ("SCHEDULE STATUS", 2),
+    ("4. HSE STATISTICS", 3),
+    ("PHOTO LOG", 4),
+    ("ORGANISATION CHART", 5),
+]
+"""The outline of ``fixtures.MPR_PAGES``, one entry per page, 0-based as
+PyMuPDF's ``get_toc`` gives them. Entries the shipped template classifies into
+six different families — including ``EXECUTIVE SUMMARY``, which is recognized
+and can never be offered.
+
+**One entry carries its section number on purpose.** A real outline numbers its
+sections and the number changes between months, so the family a template matches
+is the STRIPPED key while the label the log and the index show is the
+document's own words. With every entry pre-normalized the two would be equal on
+every row here and an assertion on either would pass for the wrong reason."""
+
+OMITTED = ("hse-statistics", "progress-photographs", "organization-chart")
+"""The three families engaged in most of this file's fixtures — the same three
+sections the retired profile fixture dropped, so the page arithmetic every
+downstream assertion depends on is unchanged."""
+
+APPROVER = "abachowski"
+APPROVED_AT = "2026-08-17T12:00:00Z"
+MATTER = "Project 495 — QDCPC v Domopan"
+
+
+def approvals(*family_ids: str) -> tuple[ApprovedOmission, ...]:
+    return tuple(
+        ApprovedOmission(
+            family_id=family_id,
+            approved_by=APPROVER,
+            approved_at=APPROVED_AT,
+            matter=MATTER,
+            template_id=PROGRESS_REPORT.template_id,
+            template_version=PROGRESS_REPORT.version,
+        )
+        for family_id in family_ids
+    )
+
+
+def sectioned(count=3, *, approved=OMITTED):
+    """Doc IDs first, then recognition, then the approved omissions.
+
+    That order is the pipeline's and it is load-bearing rather than tidy: a
+    :class:`~dociq.sections.apply.SectionDropEntry` is written against a Doc ID,
+    so Stage 4 cannot run before Stage 3b has issued one. Applying sections to
+    an unassigned corpus produces drop entries keyed on the empty string, and
+    the index's "Omission approved by" column — which joins on ``doc_id`` —
+    silently empties.
+
+    Returns ``(documents, drops)``; ``drops`` is empty when ``approved`` is.
+    """
+    documents, drops = [], []
+    for doc in assign_doc_ids(corpus(count), None).documents:
+        spans = resolve_sections(outline=list(MPR_OUTLINE), page_count=len(doc.pages))
+        result = apply_sections(
+            doc, spans, template=PROGRESS_REPORT, approvals=approvals(*approved)
+        )
+        assert result.warnings == (), result.warnings
+        documents.extend(result.documents)
+        drops.extend(result.drops)
+    return tuple(documents), tuple(drops)
 
 
 # --- markers ---------------------------------------------------------------
@@ -81,11 +165,14 @@ def test_marker_rejects_a_zero_page():
 
 
 def test_dropped_pages_vanish_but_original_numbers_survive():
-    doc = apply_profiles(corpus(1), (mpr_profile(),)).documents[0]
-    doc = assign_doc_ids((doc,), None).documents[0]
+    """RE-POINTED at the engine that replaced the one D-35 deleted. The
+    guarantee is unchanged and is the reason the assertion is on the NUMBERS:
+    an omitted page leaves a hole in the sequence, so page 3 is still page 3
+    and the reader of the clean text can see that pages were removed."""
+    doc = sectioned(1)[0][0]
     body = render_document(doc)
     assert "===== PAGE 3 =====" in body
-    assert "===== PAGE 4 =====" not in body  # HSE STATISTICS dropped
+    assert "===== PAGE 4 =====" not in body  # HSE STATISTICS omitted
     numbers = [int(l.split()[2]) for l in body.split("\n") if l.startswith("===== PAGE")]
     assert numbers == [1, 2, 3]
 
@@ -160,6 +247,46 @@ def test_index_columns_match_section_5():
     text = render_index_csv(rows)
     assert text.split("\n")[0].startswith("Doc ID,LI File No,Filename")
     assert "\r" not in text
+
+
+def test_the_index_carries_the_recognition_tier_and_the_approver(tmp_path):
+    """The three columns the taxonomy added, asserted on content.
+
+    ``test_index_columns_match_section_5`` counts columns and would go on
+    passing if all three rendered empty on every row for ever. Each of them
+    answers a question "Sections dropped" raises and cannot settle: what was
+    recognized (a 0 in the dropped column means two different things without
+    it), how strongly (§5.4 — the outline and a page-class rule are not equal
+    evidence), and who is answerable (D-34 — a person who acted, never a
+    template).
+    """
+    docs, drops = sectioned(1)
+    cells = dict(zip(INDEX_COLUMNS, build_index_rows(docs, drops=drops)[0].values))
+    assert cells["Sections recognized"] == "6"
+    assert cells["Recognition tier"] == "t1_outline"
+    assert cells["Sections dropped"] == "3"
+    assert cells["Omission approved by"] == APPROVER
+
+
+def test_the_index_distinguishes_nothing_omitted_from_nothing_recognized(tmp_path):
+    """The pair the "Sections recognized" column exists to separate, both built
+    and compared rather than described. A document an expert kept whole and a
+    document the recognizer never placed both show 0 omissions; only one of them
+    is a decision, and the approver cell is empty on both — an empty cell means
+    nothing was omitted, never that nobody is answerable."""
+    docs, drops = sectioned(1, approved=())
+    kept_whole = dict(zip(
+        INDEX_COLUMNS, build_index_rows(docs, drops=drops)[0].values))
+    unrecognized = dict(zip(
+        INDEX_COLUMNS, build_index_rows(assigned(1))[0].values))
+
+    assert kept_whole["Sections dropped"] == unrecognized["Sections dropped"] == "0"
+    assert kept_whole["Omission approved by"] == ""
+    assert unrecognized["Omission approved by"] == ""
+    assert kept_whole["Sections recognized"] == "6"
+    assert kept_whole["Recognition tier"] == "t1_outline"
+    assert unrecognized["Sections recognized"] == "0"
+    assert unrecognized["Recognition tier"] == ""
 
 
 def test_index_csv_quotes_embedded_commas(tmp_path):
@@ -313,15 +440,121 @@ def test_log_states_bates_absence_is_not_an_error(tmp_path):
 
 
 def test_every_drop_reaches_the_log(tmp_path):
-    applied = apply_profiles(corpus(2), (mpr_profile(),))
-    docs = assign_doc_ids(applied.documents, None).documents
-    drops = tuple(
-        d for d in applied.drops
-    )
-    bundle = build_log(config(tmp_path), docs, drops=drops, profiles=(mpr_profile(),),
+    docs, drops = sectioned(2)
+    bundle = build_log(config(tmp_path), docs, drops=drops,
                        stamp=OperatorStamp("a", "t"))
     assert len(bundle.content["drops"]) == sum(d.pages_dropped for d in docs)
-    assert all(e["rule_id"] for e in bundle.content["drops"])
+    assert all(e["drop_rule"] for e in bundle.content["drops"])
+
+
+def test_a_drop_entry_answers_which_rule_what_evidence_and_who_approved(tmp_path):
+    """RE-POINTED, and the re-pointing is the substance rather than a rename.
+
+    The old assertion was ``all(e["rule_id"] ...)`` — one field, the profile
+    rule. Under the engine D-35 deleted that field could be, and on the five
+    reproduced shapes was, a lie: the rule named was the rule whose regex last
+    matched a line, not the rule that governed the page. Two amendments landed
+    with the replacement and each adds a question the log must now answer:
+
+    * **A-18** — WHAT KIND OF EVIDENCE placed this page in that section.
+      "The document's own outline said so" and "a page-class rule matched it"
+      are not equally strong claims and must not render identically.
+    * **D-34 / A-19** — WHO approved the omission, when, and on which matter,
+      against which template and version. A template can never supply this,
+      because a template approved nothing.
+
+    Asserted field by field rather than by a length check, because a missing
+    key here is silent: ``canonical_json`` writes whatever dict it is given.
+    """
+    docs, drops = sectioned(2)
+    bundle = build_log(config(tmp_path), docs, drops=drops,
+                       stamp=OperatorStamp("a", "t"))
+    entries = bundle.content["drops"]
+    assert entries, "the fixture engaged three levers and dropped nothing"
+
+    for entry in entries:
+        assert entry["tier"] == "t1_outline"
+        assert entry["evidence"] == (
+            "the document's own outline entry {!r}".format(entry["section"])
+        )
+        assert entry["approved_by"] == APPROVER
+        assert entry["approved_at"] == APPROVED_AT
+        assert entry["matter"] == MATTER
+        assert entry["template_id"] == PROGRESS_REPORT.template_id
+        assert entry["template_version"] == PROGRESS_REPORT.version
+        assert entry["drop_rule"] == f"progress-report:{entry['family_id']}"
+        assert entry["doc_id"] and entry["rel_path"] and entry["page_no"]
+
+    # The section an expert reads is the label the DOCUMENT used, verbatim —
+    # section number and all. The normalized key it was matched on is beside it
+    # under `family`, and the two are deliberately not the same string: an
+    # expert checking an omission against the PDF looks for the words the PDF
+    # used, and next month the same section is numbered differently.
+    assert {e["section"] for e in entries} == {
+        "4. HSE STATISTICS", "PHOTO LOG", "ORGANISATION CHART"}
+    numbered = next(e for e in entries if e["family_id"] == "hse-statistics")
+    assert numbered["section"] == "4. HSE STATISTICS"
+    assert numbered["family"] == "HSE STATISTICS"
+    assert {e["family_id"] for e in entries} == set(OMITTED)
+    # And nothing outside the engaged families reached the log, which is the
+    # D-35 class itself: the executive summary and the schedule status were
+    # recognized on every one of these documents and neither was omitted.
+    assert "EXECUTIVE SUMMARY" not in {e["section"] for e in entries}
+
+
+def test_the_log_records_what_was_recognized_not_only_what_was_dropped(tmp_path):
+    """§5.4 / A-18's per-document ``sections`` block.
+
+    A count of omissions is unreadable without the recognition it came out of:
+    a document showing 0 dropped is either a document nothing was recognized in
+    or a document an expert chose to keep whole, and those are different facts.
+    """
+    docs, drops = sectioned(1)
+    bundle = build_log(config(tmp_path), docs, drops=drops,
+                       stamp=OperatorStamp("a", "t"))
+    sections = bundle.content["documents"][0]["sections"]
+
+    assert [row["section"] for row in sections] == [
+        "COVER", "EXECUTIVE SUMMARY", "SCHEDULE STATUS",
+        "4. HSE STATISTICS", "PHOTO LOG", "ORGANISATION CHART",
+    ]
+    assert all(row["tier"] == "t1_outline" for row in sections)
+    assert [(row["first_page"], row["last_page"]) for row in sections] == [
+        (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)]
+    assert {row["section"]: row["pages_dropped"] for row in sections} == {
+        "COVER": 0,
+        "EXECUTIVE SUMMARY": 0,
+        "SCHEDULE STATUS": 0,
+        "4. HSE STATISTICS": 1,
+        "PHOTO LOG": 1,
+        "ORGANISATION CHART": 1,
+    }
+    assert sum(row["pages"] for row in sections) == docs[0].pages_in
+
+
+def test_a_template_with_no_approvals_still_writes_the_tier_into_the_log(tmp_path):
+    """The shipped state, and the one that would have regressed in silence.
+
+    Under D-34 a template arrives UNENGAGED, so the ordinary run — the one a
+    freshly-installed DocIQ performs — drops nothing at all. If the tier reached
+    the log only through a drop entry, §5.4's "recognition tier belongs in the
+    log, per page" would be satisfied by exactly the runs that need it least and
+    A-18 would be a field no real run populates. Every assertion below is on a
+    run with a template, no approvals and zero drops.
+    """
+    docs, drops = sectioned(1, approved=())
+    assert drops == (), "an unengaged template dropped a page"
+    assert docs[0].pages_dropped == 0
+
+    bundle = build_log(config(tmp_path), docs, drops=drops,
+                       stamp=OperatorStamp("a", "t"))
+    assert bundle.content["drops"] == []
+    assert bundle.content["accounting"]["pages_dropped"] == 0
+
+    sections = bundle.content["documents"][0]["sections"]
+    assert len(sections) == 6, "recognition vanished when nothing was omitted"
+    assert {row["tier"] for row in sections} == {"t1_outline"}
+    assert all(row["pages_dropped"] == 0 for row in sections)
 
 
 # --- summary ---------------------------------------------------------------
@@ -352,7 +585,7 @@ def summary_data(docs, unsupported=()):
 def test_summary_pdf_is_one_page(tmp_path):
     pypdf = pytest.importorskip("pypdf")
     layout = OutputLayout.at(tmp_path)
-    docs = assign_doc_ids(apply_profiles(corpus(4), (mpr_profile(),)).documents, None).documents
+    docs = sectioned(4)[0]
     path = write_run_summary(summary_data(docs), layout)
     assert len(pypdf.PdfReader(str(path)).pages) == 1
 
@@ -379,12 +612,18 @@ def test_summary_truncates_long_lists_with_a_stated_remainder(tmp_path):
 
 def full_matter(tmp_path):
     layout = OutputLayout.at(tmp_path)
-    docs = assign_doc_ids(apply_profiles(corpus(3), (mpr_profile(),)).documents, None).documents
+    docs, drops = sectioned(3)
     result = write_clean_text(docs, layout)
     write_sources_json(result, layout)
-    write_index_csv(build_index_rows(docs), layout)
+    # ``drops`` is passed on, not dropped on the floor: it is what fills the
+    # index's "Omission approved by" column, and a matter folder whose index
+    # says three sections were omitted and names nobody is the D-34 failure
+    # rendered into the one file a reviewer opens first.
+    write_index_csv(build_index_rows(docs, drops=drops), layout)
     write_processing_log(
-        build_log(config(tmp_path), docs, stamp=OperatorStamp("a", "t")), layout
+        build_log(config(tmp_path), docs, drops=drops,
+                  stamp=OperatorStamp("a", "t")),
+        layout,
     )
     return layout, docs
 
@@ -519,6 +758,15 @@ def test_a_subset_package_filters_sources_json_and_the_index(tmp_path):
         encoding="utf-8").splitlines()))
     assert rows[0] == list(INDEX_COLUMNS)
     assert [r[0] for r in rows[1:]] == list(chosen)
+
+    # D-34 survives the filtering. The package's index is the matter's index
+    # with rows removed, so the omission and the name of the person answerable
+    # for it travel together into the folder the recipient actually opens —
+    # a subset that kept "3 sections dropped" and lost the approver would be
+    # the D-34 failure reintroduced by a copy step.
+    cells = dict(zip(INDEX_COLUMNS, rows[1]))
+    assert cells["Sections dropped"] == "3"
+    assert cells["Omission approved by"] == APPROVER
 
     # The MATTER folder's copies are untouched — the filtering happens on the
     # way into the package, never to the deliverable itself.

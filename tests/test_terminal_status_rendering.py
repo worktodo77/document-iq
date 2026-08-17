@@ -254,6 +254,37 @@ def test_run_status_json_headline_agrees_with_its_own_machine_field(
 ENUM_NAMES = frozenset({
     "TerminalStatus", "ProcessingStatus", "IdRegime", "Disposition",
     "PageKind", "IdNamespace", "DecisionStatus",
+    # A-18/A-20, added when 4092f76 and d3cee24 landed the section engine.
+    # Adding a name here is the CHEAP half; the half that matters is walking
+    # every renderer of the member, which was done and is recorded below.
+    #
+    # ``RecognitionTier`` — five renderers, none of which chooses a word:
+    #   sections/resolve.py::_REBUILT_EVIDENCE  member -> sentence dict,
+    #       subscripted (not ``.get``), total over all four members including
+    #       the two Sprint 3 does not build. Asserted below by
+    #       ``test_each_member_to_text_map_is_total``.
+    #   sections/apply.py                       carries the MEMBER onto
+    #       ``SectionDropEntry.tier``; nothing is chosen.
+    #   emit/log.py, emit/indexbook.py          write ``.value`` — the enum's
+    #       own stable audit string, which every member has and no member
+    #       borrows from another.
+    #   adapter.py                              collects ``.value`` into
+    #       ``ReductionLever.tier``; the sort that picks the strongest tier
+    #       sorts those same stable ``t1_``…``t4_`` strings, so a new member
+    #       takes its declared position rather than a guessed one.
+    #   contracts.py::PageRecord.validate       interpolates ``.value`` into a
+    #       refusal message.
+    #
+    # ``Risk`` — one renderer: ``adapter.py`` writes ``family.risk.value`` onto
+    # ``ReductionLever.risk``. ``""`` appears there only where there is no
+    # family at all, which is an absent value and not a member's word put in
+    # another member's mouth.
+    #
+    # Neither enum is flattened to a bool and neither is selected by a string
+    # ternary — the two probes below now scan for both and find nothing. See
+    # the report for the one gap this walk DID find: ``ReductionLever.risk``
+    # reaches no widget, so §4's risk grade is on the seam and not on screen.
+    "RecognitionTier", "Risk",
 })
 """Every enumeration in the product whose members could reach an operator as a
 word. Kept as names rather than classes because the probe reads SOURCE, not
@@ -297,13 +328,54 @@ def _yields_text(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and isinstance(node.value, str)
 
 
-ALLOWED_TERNARIES: frozenset[tuple[str, int]] = frozenset()
-"""Sanctioned enum-tested string ternaries, as ``(relative path, line)``.
+def _sites(kind: str) -> list[tuple[str, str, int, str]]:
+    """Every offending site of one shape, as ``(path, expression, line, enum)``.
+
+    ``kind`` is ``"ternary"`` (an enum-tested string ternary) or ``"flatten"``
+    (an enum comparison stored into a value). Collected once, here, so the two
+    probes below and the sanction-hygiene probe all read the SAME enumeration —
+    a sanction list checked against a different walk from the one that enforces
+    it is a sanction list that can drift out of agreement with its own probe.
+    """
+    out: list[tuple[str, str, int, str]] = []
+    for path in sorted(SRC.rglob("*.py")):
+        rel = path.relative_to(SRC).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        for node in ast.walk(tree):
+            if kind == "ternary":
+                if not isinstance(node, ast.IfExp):
+                    continue
+                enum_name = _is_enum_test(node.test)
+                if not enum_name:
+                    continue
+                if not (_yields_text(node.body) and _yields_text(node.orelse)):
+                    continue
+                out.append((rel, ast.unparse(node), node.lineno, enum_name))
+                continue
+            candidates: list[ast.AST] = []
+            if isinstance(node, ast.Call):
+                candidates += [kw.value for kw in node.keywords]
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value:
+                candidates.append(node.value)
+            for value in candidates:
+                enum_name = _is_enum_test(value)
+                if enum_name:
+                    out.append(
+                        (rel, ast.unparse(value), value.lineno, enum_name))
+    return out
+
+
+ALLOWED_TERNARIES: frozenset[tuple[str, str]] = frozenset()
+"""Sanctioned enum-tested string ternaries, as ``(relative path, expression)``.
 
 **Empty, and that is the point.** Every entry added here is a place where a new
 enum member prints a word chosen for a different member. If one is ever
 genuinely needed the justification belongs beside it, in this docstring, in
 words a reviewer can refuse.
+
+**Keyed on the EXPRESSION, not on the line number** — see
+:data:`ALLOWED_FLATTENINGS` for why the line-number form was a defect of the
+same class the probes exist to catch.
 """
 
 
@@ -321,21 +393,12 @@ def test_no_operator_facing_string_is_chosen_by_an_enum_ternary() -> None:
     member nobody thought of instead of printing a word about a different one.
     """
     offenders: list[str] = []
-    for path in sorted(SRC.rglob("*.py")):
-        rel = path.relative_to(SRC).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.IfExp):
-                continue
-            if not _is_enum_test(node.test):
-                continue
-            if not (_yields_text(node.body) and _yields_text(node.orelse)):
-                continue
-            if (rel, node.lineno) in ALLOWED_TERNARIES:
-                continue
-            offenders.append(
-                f"{rel}:{node.lineno} — a string chosen by an "
-                f"{_is_enum_test(node.test)} comparison with an `else` branch")
+    for rel, expr, lineno, enum_name in _sites("ternary"):
+        if (rel, expr) in ALLOWED_TERNARIES:
+            continue
+        offenders.append(
+            f"{rel}:{lineno} — a string chosen by an "
+            f"{enum_name} comparison with an `else` branch")
     assert not offenders, (
         "operator-facing text selected by an enum ternary with a silent "
         "fallback:\n  " + "\n  ".join(offenders)
@@ -343,10 +406,10 @@ def test_no_operator_facing_string_is_chosen_by_an_enum_ternary() -> None:
     )
 
 
-ALLOWED_FLATTENINGS: frozenset[tuple[str, int]] = frozenset({
-    ("gui/mock_pipeline.py", 699),
+ALLOWED_FLATTENINGS: frozenset[tuple[str, str]] = frozenset({
+    ("gui/mock_pipeline.py", "status is not ProcessingStatus.FULL"),
 })
-"""Sanctioned enum→bool flattenings, as ``(relative path, line)``.
+"""Sanctioned enum→bool flattenings, as ``(relative path, expression)``.
 
 One entry, and its justification: ``flagged=status is not
 ProcessingStatus.FULL`` on a :class:`~dociq.gui.pipeline.ProgressEvent` renders
@@ -357,6 +420,16 @@ is not ``FULL``, and no member's name is printed in another member's place.
 Every other flattening is a wrong word waiting to happen — the §6 checklist's
 ``engaged`` bool was one, and it is now
 :data:`dociq.adapter._LEVER_ENGAGED`.
+
+**Keyed on the EXPRESSION, not on the line number, since 4092f76.** The entry
+read ``("gui/mock_pipeline.py", 699)`` and the sanctioned call moved to line 704
+when the section engine landed, which is how the rot was noticed. Going red
+when a sanctioned site MOVES is the harmless direction; the direction that
+matters is the other one — a line-number pin also sanctions whatever unrelated
+flattening drifts onto line 699 next, silently, which is finding A-3's own shape
+one level up: an ``else`` that is not a default but an assertion about
+everything the author did not think of. An expression is what was actually
+reviewed, so an expression is what is sanctioned.
 """
 
 
@@ -370,27 +443,34 @@ def test_no_enum_is_flattened_to_a_bool_that_is_later_rendered_as_a_word():
 
     **What it does not catch, stated rather than implied:** a flattening
     performed inside a helper function and returned, rather than written at a
-    call site or an assignment. That shape is not present in ``src/dociq``
-    today; this probe would not see it if it appeared.
+    call site or an assignment.
+
+    **That shape WAS present, and the claim that it was not is withdrawn.** The
+    sentence here used to end "That shape is not present in ``src/dociq``
+    today", and it was false as written — ``ReductionLever.locked`` is a
+    ``@property`` returning ``self.kind != LEVER_EXPERT``, which is a three-
+    valued discriminator flattened to a bool inside a helper and returned, and
+    ``ChecklistRow.disposition_word`` then rendered that bool as the WORD
+    "AUTOMATIC". A section the template merely RECOGNIZES and will never offer
+    — the executive summary, the critical path narrative, the weather log, the
+    timesheets — was labelled AUTOMATIC on the §6 approval screen and attributed
+    with "was removed mechanically by the tool. No expert approved this", about
+    pages that are KEPT. Fixed at the renderer in
+    ``dociq/gui/view_models.py``; see
+    ``tests/test_gui_screen_states.py::test_a_recognized_never_offered_row_is_
+    kept_and_never_called_automatic``.
+
+    **And this probe still would not see it**, for a second reason worth stating
+    beside the first: lever ``kind`` is a module-level ``str`` constant, not an
+    ``Enum``, so it is outside :data:`ENUM_NAMES` and outside every scan in this
+    module. The AST tripwires cover enum members; a hand-rolled string
+    vocabulary has to be covered by rendering tests, and now is.
     """
     offenders: list[str] = []
-    for path in sorted(SRC.rglob("*.py")):
-        rel = path.relative_to(SRC).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
-        for node in ast.walk(tree):
-            candidates: list[ast.AST] = []
-            if isinstance(node, ast.Call):
-                candidates += [kw.value for kw in node.keywords]
-            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value:
-                candidates.append(node.value)
-            for value in candidates:
-                enum_name = _is_enum_test(value)
-                if not enum_name:
-                    continue
-                if (rel, value.lineno) in ALLOWED_FLATTENINGS:
-                    continue
-                offenders.append(
-                    f"{rel}:{value.lineno} — a {enum_name} flattened to a bool")
+    for rel, expr, lineno, enum_name in _sites("flatten"):
+        if (rel, expr) in ALLOWED_FLATTENINGS:
+            continue
+        offenders.append(f"{rel}:{lineno} — a {enum_name} flattened to a bool")
     assert not offenders, (
         "enum(s) reduced to a boolean at a value site:\n  "
         + "\n  ".join(offenders)
@@ -400,10 +480,45 @@ def test_no_enum_is_flattened_to_a_bool_that_is_later_rendered_as_a_word():
     )
 
 
+@pytest.mark.parametrize("sanctions,kind,name", [
+    (ALLOWED_TERNARIES, "ternary", "ALLOWED_TERNARIES"),
+    (ALLOWED_FLATTENINGS, "flatten", "ALLOWED_FLATTENINGS"),
+])
+def test_every_sanction_names_exactly_one_live_site(sanctions, kind, name) -> None:
+    """A sanction that covers nothing, or covers more than it was written for.
+
+    Both directions are the same defect and both are silent. A STALE entry
+    outlives the code it excused and sits waiting to excuse whatever is written
+    next in its place — which is exactly how the line-number form failed. A
+    DUPLICATED entry excuses a second, unreviewed site because it happens to be
+    spelled the same way; the reviewer approved one expression in one file, not
+    every future copy of it.
+
+    So each entry must match exactly one site: not zero, not two.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for rel, expr, _lineno, _enum in _sites(kind):
+        counts[(rel, expr)] = counts.get((rel, expr), 0) + 1
+    for entry in sorted(sanctions):
+        found = counts.get(entry, 0)
+        assert found == 1, (
+            f"{entry} is sanctioned in {name} but matches "
+            f"{found} site(s). Zero means the sanction is stale and is now a "
+            f"blank cheque for the next thing written there; more than one "
+            f"means it is excusing a site nobody reviewed."
+        )
+
+
 @pytest.mark.parametrize("mapping_path", [
     ("dociq.runstate", "STATUS_PROSE", "TerminalStatus"),
     ("dociq.adapter", "_LEVER_ENGAGED", "Disposition"),
     ("dociq.gui.view_models", "_ID_REGIME_NOTE", "IdRegime"),
+    # A-18. The one member -> text map ``RecognitionTier`` has. Bound here
+    # rather than only trusted to its own module docstring: the map says it
+    # covers the two tiers Sprint 3 does not build precisely so the first run
+    # after Tier 2 lands does not raise inside a drop log an expert is reading,
+    # and a claim like that is worth an assertion.
+    ("dociq.sections.resolve", "_REBUILT_EVIDENCE", "RecognitionTier"),
 ])
 def test_each_member_to_text_map_is_total(mapping_path) -> None:
     """The maps that replaced the ternaries carry their own import-time
