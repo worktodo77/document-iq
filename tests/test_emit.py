@@ -142,7 +142,8 @@ def sectioned(count=3, *, approved=OMITTED):
     for doc in assign_doc_ids(corpus(count), None).documents:
         spans = resolve_sections(outline=list(MPR_OUTLINE), page_count=len(doc.pages))
         result = apply_sections(
-            doc, spans, template=PROGRESS_REPORT, approvals=approvals(*approved)
+            doc, spans, template=PROGRESS_REPORT, approvals=approvals(*approved),
+            matter=MATTER
         )
         assert result.warnings == (), result.warnings
         documents.extend(result.documents)

@@ -586,10 +586,17 @@ def _omission(approved_by: str = "j.long", family: str = FIXTURE_FAMILY):
         family_id=family,
         approved_by=approved_by,
         approved_at="2026-08-17T00:00:00Z",
-        matter="the test matter",
+        matter=APPROVAL_MATTER,
         template_id=PROGRESS_REPORT.template_id,
         template_version=PROGRESS_REPORT.version,
     )
+
+
+APPROVAL_MATTER = "fixture corpus"
+"""The matter these runs are for, and the matter their approvals are stamped
+with. One constant rather than two strings, because Stage 4 now compares them
+and a typo would read as "the approval did not apply here" rather than as a
+typo."""
 
 
 def _approved_run(tmp_path, name, approvals=()):
@@ -602,6 +609,11 @@ def _approved_run(tmp_path, name, approvals=()):
     )
     return pipeline.run(cfg, pipeline.PipelineOptions(
         walk=walker.WalkOptions(ocr_enabled=False, resume=False),
+        # Named, and named to match the approvals. Stage 4 refuses an approval
+        # given on a different matter (Codex B-2), and an unnamed matter is
+        # refused outright rather than compared against "" — a defaulted matter
+        # would be a silent bypass of the check.
+        matter_name=APPROVAL_MATTER,
         template=PROGRESS_REPORT, approvals=tuple(approvals), stamp=STAMP,
         write_workbook=False, write_summary_pdf=False, write_package=False))
 
@@ -639,7 +651,7 @@ def test_approving_an_omission_moves_the_identity(tmp_path):
     snaps = approved.result.config.omissions
     assert [s.family_id for s in snaps] == [FIXTURE_FAMILY]
     assert snaps[0].approved_by == "j.long"
-    assert snaps[0].matter == "the test matter"
+    assert snaps[0].matter == APPROVAL_MATTER
 
 
 def test_changing_who_approved_the_omission_moves_the_identity(tmp_path):
@@ -698,7 +710,7 @@ def test_the_identity_covers_every_input_that_decides_a_disposition(tmp_path):
     changes = {
         "omissions": (OmissionSnapshot(
             family_id=FIXTURE_FAMILY, approved_by="j.long",
-            approved_at="2026-08-17T00:00:00Z", matter="m",
+            approved_at="2026-08-17T00:00:00Z", matter=APPROVAL_MATTER,
             template_id="progress-report", template_version="1"),),
         "project_tokens": ("MV32",),
         "section_template_id": "progress-report",

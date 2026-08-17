@@ -25,7 +25,12 @@ from dociq.contracts import (
     PageRecord,
     RecognitionTier,
 )
-from dociq.sections.model import ApprovedOmission, SectionSpan, SectionTemplate
+from dociq.sections.model import (
+    ApprovedOmission,
+    SectionSpan,
+    SectionTemplate,
+    TemplateError,
+)
 from dociq.sections.resolve import section_for_page
 
 __all__ = ["SectionDropEntry", "SectionApplyResult", "apply_sections"]
@@ -95,6 +100,7 @@ def apply_sections(
     *,
     template: SectionTemplate | None = None,
     approvals: tuple[ApprovedOmission, ...] = (),
+    matter: str = "",
 ) -> SectionApplyResult:
     """Stamp sections onto a document's pages, and drop only what is approved.
 
@@ -105,13 +111,57 @@ def apply_sections(
     **With no approvals the result is recognition only** — every covered page
     gains a ``section`` and a ``section_tier``, and nothing drops. That is D-34's
     unengaged template, and it is the state a freshly-installed DocIQ is in.
+
+    ``matter`` is REQUIRED whenever ``approvals`` is non-empty, and the
+    requirement is the fix for a defect Codex reproduced. ``ApprovedOmission``
+    records ``matter``, ``template_id`` and ``template_version``, and its own
+    contract says an approval is not transferable between matters — but nothing
+    compared them, so an approval stamped `Matter-A / old-template v0` dropped a
+    page from a different matter under a different template, and the drop log
+    recorded `Matter-A` on its face. The record was complete and it proved the
+    opposite of authorization.
+
+    A defaulted matter would have been a silent bypass of exactly that check, so
+    supplying approvals without one raises instead.
     """
     if template is not None:
         template.validate()
+    if approvals and not matter.strip():
+        raise TemplateError(
+            "approvals were supplied without the matter they were given on. "
+            "An approval names the matter it authorizes and is not transferable "
+            "(D-34); accepting one here with nothing to compare it against is "
+            "how a previous matter's ruling drops a later matter's pages."
+        )
     approved_by_family: dict[str, ApprovedOmission] = {}
     warnings: list[str] = []
     for approval in approvals:
         approval.validate()
+        # SCOPE IS ENFORCED, NOT MERELY RECORDED. Each mismatch is reported and
+        # the approval is discarded, so the failure is fail-closed: the pages
+        # keep, and an operator is told which ruling did not apply and why.
+        if approval.matter != matter:
+            warnings.append(
+                f"omission of {approval.family_id!r} was approved on matter "
+                f"{approval.matter!r} and this run is {matter!r} — it was NOT "
+                "applied and no page was dropped for it. An approval is a "
+                "ruling about one matter's record and does not carry to another."
+            )
+            continue
+        if template is not None and (
+            approval.template_id != template.template_id
+            or approval.template_version != template.version
+        ):
+            warnings.append(
+                f"omission of {approval.family_id!r} was approved against "
+                f"template {approval.template_id!r} "
+                f"v{approval.template_version} and this run loaded "
+                f"{template.template_id!r} v{template.version} — it was NOT "
+                "applied and no page was dropped for it. A template version "
+                "can change what a family matches, so an approval given "
+                "against one is not an approval of the other."
+            )
+            continue
         if template is not None and template.family(approval.family_id) is None:
             warnings.append(
                 f"omission approved for family {approval.family_id!r}, which "

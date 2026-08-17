@@ -160,6 +160,7 @@ def applied(doc=None):
         mpr_spans(),
         template=MPR_TEMPLATE,
         approvals=MPR_APPROVALS,
+        matter="MODEC-4412",
     )
 
 
@@ -386,7 +387,8 @@ def test_a_document_no_section_covers_passes_through_whole():
     is a fact about the run rather than about which profile won a document.
     """
     doc = document("misc/letter.pdf", (page(1, "Dear Sir"), page(2, "PHOTO LOG")))
-    result = apply_sections(doc, (), template=MPR_TEMPLATE, approvals=MPR_APPROVALS)
+    result = apply_sections(doc, (), template=MPR_TEMPLATE, approvals=MPR_APPROVALS,
+                            matter="MODEC-4412")
     assert result.documents[0] is doc
     assert result.drops == ()
 
@@ -425,7 +427,8 @@ def test_a_profile_can_no_longer_claim_a_document_at_any_page():
         )
         doc = document(f"misc/letter-{header_page}.pdf", pages)
         result = apply_sections(
-            doc, (), template=MPR_TEMPLATE, approvals=MPR_APPROVALS
+            doc, (), template=MPR_TEMPLATE, approvals=MPR_APPROVALS,
+            matter="MODEC-4412",
         )
         assert result.drops == (), f"header on page {header_page} dropped pages"
 

@@ -45,6 +45,7 @@ from dociq.sections.model import (
 )
 from dociq.sections.normalize import family_key, strip_numbering, strip_project_tokens
 from dociq.sections.resolve import overlaps, section_for_page
+from dociq.sections.templates import PROGRESS_REPORT
 from dociq.sections.tier1_outline import spans_from_outline
 from dociq.sections.tier3_pageclass import PageSignals, spans_from_page_classes
 
@@ -124,7 +125,8 @@ def test_a_toc_line_naming_the_section_does_not_drop_the_report():
          ("3 PROGRESS PHOTOGRAPHS", 5)],
         page_count=7,
     )
-    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,))
+    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
+                            matter="MODEC-495")
     dropped = [p.page_no for p in result.documents[0].pages
                if p.disposition is Disposition.DROP]
     assert dropped == [6, 7], (
@@ -141,7 +143,8 @@ def test_a_body_text_mention_does_not_drop_anything():
         "CRITICAL PATH NARRATIVE\nDelay driven by late vendor data.",
     )
     spans = outline_spans_for([("1 EXECUTIVE SUMMARY", 0)], page_count=3)
-    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,))
+    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
+                            matter="MODEC-495")
     assert not [p for p in result.documents[0].pages
                 if p.disposition is Disposition.DROP]
 
@@ -152,7 +155,8 @@ def test_a_transmittal_listing_enclosures_does_not_drop_anything():
         "TRANSMITTAL\nEnclosed: MPR Rev 3; PROGRESS PHOTOGRAPHS; NCR log.",
         "EXECUTIVE SUMMARY\nThe project is 14 weeks behind.",
     )
-    result = apply_sections(doc, (), template=TEMPLATE, approvals=(APPROVAL,))
+    result = apply_sections(doc, (), template=TEMPLATE, approvals=(APPROVAL,),
+                            matter="MODEC-495")
     assert not [p for p in result.documents[0].pages
                 if p.disposition is Disposition.DROP]
 
@@ -168,7 +172,8 @@ def test_an_appendix_cover_sheet_does_not_drop_what_follows():
         [("1 QUALITY NCR LOG", 0), ("2 APPENDIX C", 1), ("3 TIMESHEETS", 2)],
         page_count=3,
     )
-    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,))
+    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
+                            matter="MODEC-495")
     assert not [p for p in result.documents[0].pages
                 if p.disposition is Disposition.DROP]
 
@@ -189,7 +194,8 @@ def test_a_correct_match_stops_at_the_end_of_its_own_section():
         [("1 PROGRESS PHOTOGRAPHS", 0), ("2 WEATHER LOG", 2), ("3 TIMESHEETS", 3)],
         page_count=4,
     )
-    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,))
+    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
+                            matter="MODEC-495")
     dropped = [p.page_no for p in result.documents[0].pages
                if p.disposition is Disposition.DROP]
     assert dropped == [1, 2]
@@ -210,7 +216,8 @@ def test_no_page_outside_the_causing_span_is_ever_dropped(mention_page):
         [("1 NARRATIVE", 0), ("2 PROGRESS PHOTOGRAPHS", 4), ("3 TIMESHEETS", 6)],
         page_count=8,
     )
-    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,))
+    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
+                            matter="MODEC-495")
     dropped = [p.page_no for p in result.documents[0].pages
                if p.disposition is Disposition.DROP]
     assert dropped == [5, 6], f"mention on page {mention_page + 1} moved the drop"
@@ -276,7 +283,8 @@ def test_an_approval_for_an_unknown_family_warns_and_drops_nothing():
         template_id="progress-report",
         template_version="1",
     )
-    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(stray,))
+    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(stray,),
+                            matter="MODEC-495")
     assert result.pages_dropped == 0
     assert any("does not define" in w for w in result.warnings)
 
@@ -284,7 +292,8 @@ def test_an_approval_for_an_unknown_family_warns_and_drops_nothing():
 def test_a_drop_carries_its_approver_and_its_tier():
     doc = document("PROGRESS PHOTOGRAPHS", "[image]")
     spans = outline_spans_for([("1 PROGRESS PHOTOGRAPHS", 0)], page_count=2)
-    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,))
+    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
+                            matter="MODEC-495")
     entry = result.drops[0]
     assert entry.approved_by == "ABachowski"
     assert entry.matter == "MODEC-495"
@@ -315,7 +324,8 @@ def test_a_family_marked_not_offered_never_drops():
     )
     doc = document("EXECUTIVE SUMMARY")
     spans = outline_spans_for([("1 EXECUTIVE SUMMARY", 0)], page_count=1)
-    result = apply_sections(doc, spans, template=template, approvals=(approval,))
+    result = apply_sections(doc, spans, template=template, approvals=(approval,),
+                            matter="M")
     assert result.pages_dropped == 0
 
 
@@ -449,7 +459,8 @@ def test_an_unresolved_page_has_no_section_and_therefore_keeps():
         signals=[PageSignals(page_no=1, text="ordinary narrative prose")],
     )
     assert spans == ()
-    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,))
+    result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
+                            matter="MODEC-495")
     assert result.documents[0].pages[0].disposition is Disposition.KEEP
     assert result.documents[0].pages[0].section is None
 
@@ -631,3 +642,138 @@ def test_an_unrecognized_section_matches_no_family_and_therefore_keeps():
         "a section the template does not know must fall through to KEEP, not "
         "to the nearest-looking family"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex Sprint-3 review, findings B-1 and B-2
+# ---------------------------------------------------------------------------
+
+
+def test_a_backward_outline_entry_stops_the_previous_section():
+    """B-1. A skipped non-monotonic entry let the previous section overrun it.
+
+    `spans_from_outline` discarded an out-of-order destination and said its pages
+    were "left unresolved, which keeps them". It removed the entry from the
+    boundary set, so the preceding span's end was computed from the NEXT
+    surviving boundary and ran straight through it.
+
+    Codex's outline, reproduced verbatim. Pages 5-10 belong to the executive
+    summary and were returned under `PROGRESS PHOTOGRAPHS` — an OFFERED family,
+    so an expert who engaged photographs dropped the executive summary. The
+    D-35 failure class in span form: no span ran past its stated end, the end was
+    computed from a boundary set that had thrown the contrary boundary away.
+    """
+    spans = spans_from_outline(
+        [("PROGRESS PHOTOGRAPHS", 0), ("PROCUREMENT", 10), ("EXECUTIVE SUMMARY", 4)],
+        12,
+    )
+    photos = [s for s in spans if s.family == "PROGRESS PHOTOGRAPHS"]
+    assert len(photos) == 1
+    assert photos[0].end_page == 4, (
+        "the photographs section runs past the backward destination at page 5 — "
+        f"it ends at {photos[0].end_page}"
+    )
+    covered = {n for s in spans for n in range(s.start_page, s.end_page + 1)}
+    assert not (set(range(5, 11)) & covered), (
+        "pages the document placed elsewhere were absorbed by a neighbouring "
+        "section instead of being left unresolved"
+    )
+    # The backward LABEL is still not trusted as a section.
+    assert not any(s.family == "EXECUTIVE SUMMARY" for s in spans)
+
+
+def test_pages_after_a_backward_entry_survive_an_approved_omission():
+    """B-1, at the layer that matters: the pages must still be KEPT.
+
+    Codex asked for exactly this — an approved, offerable preceding family, and
+    an assertion that every page from the backward destination onward stays KEEP.
+    Span geometry is the mechanism; a page surviving is the guarantee, and only
+    the second is what an expert is cross-examined about.
+    """
+    spans = spans_from_outline(
+        [("PROGRESS PHOTOGRAPHS", 0), ("PROCUREMENT", 10), ("EXECUTIVE SUMMARY", 4)],
+        12,
+    )
+    doc = document(*[f"page {n}" for n in range(1, 13)])
+    approval = ApprovedOmission(
+        family_id="progress-photographs",
+        approved_by="abachowski",
+        approved_at="2026-08-17T12:00:00Z",
+        matter="Matter-B",
+        template_id=PROGRESS_REPORT.template_id,
+        template_version=PROGRESS_REPORT.version,
+    )
+    out = apply_sections(
+        doc, spans, template=PROGRESS_REPORT, approvals=(approval,),
+        matter="Matter-B",
+    )
+    dropped = {p.page_no for p in out.documents[0].pages
+               if p.disposition is Disposition.DROP}
+    assert dropped == {1, 2, 3, 4}, (
+        "an approved photographs omission removed pages the document placed "
+        f"under a later section: dropped {sorted(dropped)}"
+    )
+
+
+def test_an_approval_does_not_carry_to_another_matter():
+    """B-2. `ApprovedOmission` recorded its matter and nothing compared it.
+
+    An approval stamped `Matter-A` dropped a page from `Matter-B`, and the drop
+    log recorded `Matter-A` — a record that is complete and proves the opposite
+    of authorization. Fail-closed: the approval is discarded, the page keeps, and
+    the run says which ruling did not apply.
+    """
+    spans = (SectionSpan("PROGRESS PHOTOGRAPHS", "PROGRESS PHOTOGRAPHS",
+                         RecognitionTier.OUTLINE, 1, 1, "the outline"),)
+    doc = document("x")
+    stale = ApprovedOmission(
+        family_id="progress-photographs", approved_by="abachowski",
+        approved_at="2026-01-01T00:00:00Z", matter="Matter-A",
+        template_id=PROGRESS_REPORT.template_id,
+        template_version=PROGRESS_REPORT.version,
+    )
+    out = apply_sections(doc, spans, template=PROGRESS_REPORT,
+                         approvals=(stale,), matter="Matter-B")
+    assert out.drops == ()
+    assert all(p.disposition is Disposition.KEEP for p in out.documents[0].pages)
+    assert any("Matter-A" in w and "Matter-B" in w for w in out.warnings), (
+        "the mismatch was not reported to the operator"
+    )
+
+
+def test_an_approval_does_not_carry_across_template_versions():
+    """B-2, the sibling. A template version can change what a family matches, so
+    an approval given against one is not an approval of the other."""
+    spans = (SectionSpan("PROGRESS PHOTOGRAPHS", "PROGRESS PHOTOGRAPHS",
+                         RecognitionTier.OUTLINE, 1, 1, "the outline"),)
+    doc = document("x")
+    for field, value in (("template_id", "some-other-template"),
+                         ("template_version", "0")):
+        kw = dict(
+            family_id="progress-photographs", approved_by="abachowski",
+            approved_at="2026-08-17T00:00:00Z", matter="Matter-B",
+            template_id=PROGRESS_REPORT.template_id,
+            template_version=PROGRESS_REPORT.version,
+        )
+        kw[field] = value
+        out = apply_sections(doc, spans, template=PROGRESS_REPORT,
+                             approvals=(ApprovedOmission(**kw),), matter="Matter-B")
+        assert out.drops == (), f"a mismatched {field} still dropped a page"
+        assert out.warnings, f"a mismatched {field} was not reported"
+
+
+def test_approvals_without_a_matter_are_refused_rather_than_defaulted():
+    """B-2's bypass. A defaulted matter would silently skip the scope check, so
+    supplying approvals without one raises instead of comparing against ""."""
+    spans = (SectionSpan("PROGRESS PHOTOGRAPHS", "PROGRESS PHOTOGRAPHS",
+                         RecognitionTier.OUTLINE, 1, 1, "the outline"),)
+    doc = document("x")
+    approval = ApprovedOmission(
+        family_id="progress-photographs", approved_by="abachowski",
+        approved_at="2026-08-17T00:00:00Z", matter="Matter-B",
+        template_id=PROGRESS_REPORT.template_id,
+        template_version=PROGRESS_REPORT.version,
+    )
+    with pytest.raises(TemplateError) as exc:
+        apply_sections(doc, spans, template=PROGRESS_REPORT, approvals=(approval,))
+    assert "matter" in str(exc.value)

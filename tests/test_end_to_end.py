@@ -213,6 +213,11 @@ def section_stage(
         applied = apply_sections(
             doc, spans_from_pages(doc.pages),
             template=template, approvals=approvals,
+            # The pipeline passes opts.matter_name here (Codex B-2). This helper
+            # exists to BE that loop rather than to resemble it, so it carries
+            # the matter too — otherwise it would be a Stage 4 that authorizes
+            # what the real one refuses.
+            matter=MATTER,
         )
         out.extend(applied.documents)
         drops.extend(applied.drops)
@@ -556,7 +561,18 @@ A sixth shape found later has a row to go in, which is the other half of what an
 enumeration is for.
 """
 
-APPROVAL = approvals_for("progress-photographs", approved_by="jlong")
+PIPELINE_MATTER = "Project 495"
+"""The matter name the real-pipeline runs below use.
+
+Distinct from :data:`MATTER`, which the composed Track-B walkthrough uses, and
+that is why both are named: an approval is valid only on the matter it was given
+on, so a fixture that borrowed the other one's name would be refused by Stage 4
+and would silently stop dropping pages."""
+
+APPROVAL = tuple(
+    replace(a, matter=PIPELINE_MATTER)
+    for a in approvals_for("progress-photographs", approved_by="jlong")
+)
 
 
 def write_report_pdf(path: Path) -> None:
@@ -604,7 +620,10 @@ def run_pipeline(matter: Path, out: Path, approvals=(), **kw):
         config,
         pipeline.PipelineOptions(
             walk=walker.WalkOptions(ocr_enabled=False, resume=False),
-            matter_name="Project 495",
+            # Stage 4 refuses an approval given on another matter (Codex B-2),
+            # so this name and the approvals handed in below must agree. They do
+            # because `run_pipeline`'s callers stamp them from PIPELINE_MATTER.
+            matter_name=PIPELINE_MATTER,
             stamp=STAMP,
             template=PROGRESS_REPORT,
             approvals=approvals,
@@ -745,7 +764,7 @@ def test_the_drop_log_names_the_section_the_tier_and_the_approver(engaged):
         assert entry["family_id"] == "progress-photographs"
         assert entry["tier"] == RecognitionTier.OUTLINE.value
         assert entry["approved_by"] == "jlong"
-        assert entry["matter"] == MATTER
+        assert entry["matter"] == PIPELINE_MATTER
         assert entry["template_id"] == PROGRESS_REPORT.template_id
         assert entry["template_version"] == PROGRESS_REPORT.version
         assert "PROGRESS PHOTOGRAPHS" in entry["evidence"]
@@ -821,7 +840,7 @@ def test_one_approval_changes_the_approved_pages_and_the_run_identity(
             family_id="progress-photographs",
             approved_by="jlong",
             approved_at="2026-07-30T11:00:00Z",
-            matter=MATTER,
+            matter=PIPELINE_MATTER,
             template_id=PROGRESS_REPORT.template_id,
             template_version=PROGRESS_REPORT.version,
         ),

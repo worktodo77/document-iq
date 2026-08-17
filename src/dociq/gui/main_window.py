@@ -334,6 +334,27 @@ class MainWindow(QMainWindow):
             # Joining it here is what keeps ``self._thread`` from naming a
             # thread that is still finishing while a new one starts.
             self._thread.wait(2000)
+        # APPROVALS DO NOT FOLLOW THE OPERATOR TO A NEW MATTER (B-2).
+        #
+        # They deliberately DO survive "Start another run" on the same matter,
+        # because that is the flow the feature needs: engaging a lever changes
+        # no file, the summary marks itself stale, and re-running is how the
+        # choice takes effect. Clearing on every new run would make an approval
+        # impossible to apply.
+        #
+        # So the filter is by matter rather than by navigation. Point the setup
+        # screen at a different folder and the previous matter's rulings are
+        # dropped here — before they can reach a run — instead of being carried
+        # into a corpus nobody approved. Stage 4 refuses them a second time
+        # (`apply_sections(matter=...)`); this is the layer that stops them
+        # travelling, that one is the layer that stops them acting.
+        matter = Path(request.source_root).name
+        kept = tuple(a for a in self._approvals if a.matter == matter)
+        if len(kept) != len(self._approvals):
+            dropped = sorted({a.matter for a in self._approvals} - {matter})
+            print(f"[dociq] {len(self._approvals) - len(kept)} approval(s) from "
+                  f"{dropped} were not carried into matter {matter!r}")
+        self._approvals = kept
         self._request = replace(request, approvals=self._approvals)
         request = self._request
         self.progress.reset()

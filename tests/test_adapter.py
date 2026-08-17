@@ -839,7 +839,14 @@ def approved(tmp_path, library):
     _write(library, MPR)
     pipe = adapter.RealPipeline(ocr_enabled=False)
     chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
-    approval = pipe.set_omission(FIXTURE_FAMILY, True, "the test matter")
+    # The matter is derived the SAME WAY the run derives it — from the source
+    # folder — because that is now enforced. Codex's B-2 fix made an approval
+    # valid only on the matter it names, and this fixture had been stamping a
+    # hand-written string while the run computed its own: the approval was
+    # refused, three pages stopped dropping, and the disagreement surfaced here.
+    # A capture point and a run that derive the matter differently is the defect
+    # itself, not a test detail.
+    approval = pipe.set_omission(FIXTURE_FAMILY, True, FIXTURES.name)
     assert approval is not None
     outcome, _ = _run(pipe, _request(tmp_path, "approved", chosen,
                                      approvals=(approval,)))
@@ -1396,7 +1403,7 @@ def test_the_only_drop_site_drops_a_whole_span():
 
     spans = spans_from_pages(doc.pages)
     result = apply_sections(doc, spans, template=PROGRESS_REPORT,
-                            approvals=(_approval(),))
+                            approvals=(_approval(),), matter="the test matter")
     out = result.documents[0]
     by_no = {p.page_no: p for p in out.pages}
 

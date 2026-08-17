@@ -47,10 +47,26 @@ def spans_from_outline(
     a template keyed to `5 1` would match a different section every month. The
     pages they govern fall through to Tier 3 exactly as unoutlined pages do.
 
-    **Out-of-order destinations are dropped, not sorted.** Four documents in the
-    corpus have a non-monotonic outline. Sorting would invent a section boundary
-    the document does not assert; ignoring the offending entry leaves its pages
-    unresolved, which keeps them.
+    **An out-of-order destination is kept as a STOP and never as a section.**
+    Four documents in the corpus have a non-monotonic outline. Sorting would
+    invent a boundary the document does not assert, so the entry's label is not
+    trusted — but the entry is still the document saying "something else begins
+    here", and that much is safe to believe.
+
+    **This paragraph used to say the offending entry was ignored and "leaves its
+    pages unresolved, which keeps them". That was false, and Codex reproduced
+    it.** Discarding the entry removed it from the boundary set, so the span
+    before it was ended by the NEXT surviving boundary and ran straight through
+    it. On the outline `PROGRESS PHOTOGRAPHS -> 1`, `PROCUREMENT -> 11`,
+    `EXECUTIVE SUMMARY -> 5`, the resolver returned `PROGRESS PHOTOGRAPHS` for
+    pages 1-10: the executive summary's pages inherited the photograph family,
+    and an expert who approved the photographs omission would have dropped them.
+
+    That is the D-35 failure class in span form. A span did not run past its
+    stated `end_page` — the end was simply computed from a boundary set that had
+    already thrown away the contrary boundary. Kept as a stop, the preceding
+    span ends at page 4 and pages 5-10 are resolved by nothing, which is what
+    this paragraph always claimed and now does.
 
     **Where entries share a start page, the DEEPEST one governs.** Outlines are
     depth-first, so the last entry at a given page is the most specific thing the
@@ -73,8 +89,16 @@ def spans_from_outline(
         if not (0 <= page0 < page_count):
             continue
         if page0 < highest:
-            # Non-monotonic: the document contradicts itself about order. Skip
-            # rather than reorder — see the docstring.
+            # Non-monotonic: the document contradicts itself about order. The
+            # LABEL is not trusted — `None` makes it a boundary that no rule can
+            # key to and that becomes no span — but the DESTINATION is kept, so
+            # the preceding section stops here instead of running through it.
+            #
+            # `highest` is deliberately NOT advanced. A second backward entry is
+            # judged against the furthest point the outline has genuinely
+            # reached, so it is also a stop rather than being silently promoted
+            # to a trusted section by the first one's presence.
+            boundaries.append((title, None, page0))
             continue
         highest = page0
         boundaries.append((title, family_key(title, project_tokens), page0))

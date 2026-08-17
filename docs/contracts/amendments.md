@@ -1302,8 +1302,14 @@ build there is exactly one such path and D-35 deletes it.
 
 It does not record *which* rule matched — `drop_rule` already does — and it does
 not record the approver, which lives on `ApprovedOmission` in the matter folder
-rather than on a page. And while this entry says RAISED it means it: the field is
-declared, the tiers produce it, and **no run writes it to disk yet**.
+rather than on a page.
+
+*(This paragraph ended "while this entry says RAISED it means it: the field is
+declared, the tiers produce it, and no run writes it to disk yet." It was true
+for one commit and false from `4092f76`, where the header above was flipped to
+APPLIED and this sentence was not — so the entry said both things at once.
+Codex, D-1. The tier now reaches `processing_log.json` on every run that
+recognizes anything, including a run that drops nothing.)*
 
 ---
 
