@@ -23,7 +23,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-CONTRACT_VERSION = "1.8.0"
+CONTRACT_VERSION = "1.9.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -194,6 +194,17 @@ facts about a run and only one of them is a decision.
 
 Additive with safe defaults throughout: an empty approval set is the state of
 every freshly-installed DocIQ and of every run nobody has ruled on.
+
+1.9.0 — amendment A-19, extended, from Codex review r2's finding B-2. :class:`OmissionSnapshot`
+gains ``matter_root`` and :func:`matter_key` is added.
+
+The first version scoped an approval by the matter's NAME, and a name is not an
+identity: `C:/Client-A/Production` and `D:/Client-B/Production` are one string,
+so the first client's ruling survived into the second client's run and dropped
+its pages. **The error was deriving a scope key from a display string** — one
+answers "what should an expert read", the other "are these the same matter" —
+and the fix separates them and gives the second exactly one derivation, shared
+by the capture point and by Stage 4.
 """
 
 
@@ -636,6 +647,32 @@ class ProfileSnapshot:
     different expert is a different ruling."""
 
 
+def matter_key(source_root: str) -> str:
+    """The one derivation of "which matter is this" (Codex r2, B-2).
+
+    An approval authorizes an omission on ONE matter. Deciding whether a later
+    run is that matter was done with ``Path(source_root).name`` — the folder's
+    display name — and two matters called `Production` under different clients
+    are the same string. Codex reproduced `C:/Client-A/Production` and
+    `D:/Client-B/Production` colliding, so the first client's ruling survived
+    into the second client's run and dropped its pages.
+
+    **The defect was deriving a SCOPE KEY from a DISPLAY STRING.** They answer
+    different questions: one is what an expert should read in a drop log, the
+    other is whether two runs are the same matter. This function is the second,
+    it lives here so both the capture point and Stage 4 use the same one, and it
+    is deliberately not pretty — nothing renders it.
+
+    ``normcase`` because Windows paths differ in case and not in meaning;
+    ``abspath`` because a relative root and the absolute root it resolves to are
+    the same folder. Not ``resolve()``: that touches the filesystem and would
+    make the key depend on whether a network share happened to be mounted.
+    """
+    import os
+
+    return os.path.normcase(os.path.abspath(source_root))
+
+
 @dataclass(frozen=True, slots=True)
 class OmissionSnapshot:
     """One expert-approved omission, as the run identity records it
@@ -665,6 +702,17 @@ class OmissionSnapshot:
     approved_by: str
     approved_at: str
     matter: str
+    """The matter's NAME, for a human reading the log. Not what decides scope —
+    see :attr:`matter_root`."""
+
+    matter_root: str
+    """:func:`matter_key` of the source folder the approval was given on.
+
+    What actually decides whether a later run is the same matter. Separate from
+    :attr:`matter` because a display name is not an identity: two clients each
+    having a folder called `Production` is ordinary, and it made one client's
+    ruling apply to the other's record."""
+
     template_id: str
     template_version: str
 

@@ -12,6 +12,8 @@ proven by only one implementation is not proven.
 
 from __future__ import annotations
 
+from dociq.contracts import matter_key
+
 import ast
 import json
 from pathlib import Path
@@ -112,6 +114,7 @@ def _approval(family_id: str = FIXTURE_FAMILY,
         approved_by=approved_by,
         approved_at="2026-08-17T00:00:00Z",
         matter="the test matter",
+        matter_root=matter_key(str(FIXTURES)),
         template_id=PROGRESS_REPORT.template_id,
         template_version=PROGRESS_REPORT.version,
     )
@@ -414,7 +417,7 @@ def test_the_checklist_and_the_run_offer_one_template(library):
     # Every row the screen says can be engaged, can be. Enumerated rather than
     # sampled: one family silently unapprovable is a lever that does nothing.
     for key in sorted(engageable):
-        approval = pipe.set_omission(key, True, "the test matter")
+        approval = pipe.set_omission(key, True, "the test matter", str(FIXTURES))
         assert approval is not None and approval.family_id == key
         assert approval.template_id == PROGRESS_REPORT.template_id
         assert approval.template_version == PROGRESS_REPORT.version
@@ -423,9 +426,9 @@ def test_the_checklist_and_the_run_offer_one_template(library):
     # And every row it locks is refused at the layer a widget cannot reach past.
     for locked in sorted({le.key for le in levers} - engageable):
         with pytest.raises(ProfileError):
-            pipe.set_omission(locked, True, "the test matter")
+            pipe.set_omission(locked, True, "the test matter", str(FIXTURES))
     with pytest.raises(ProfileError):
-        pipe.set_omission("no-such-family", True, "the test matter")
+        pipe.set_omission("no-such-family", True, "the test matter", str(FIXTURES))
 
 
 # ---------------------------------------------------------------------------
@@ -846,7 +849,7 @@ def approved(tmp_path, library):
     # refused, three pages stopped dropping, and the disagreement surfaced here.
     # A capture point and a run that derive the matter differently is the defect
     # itself, not a test detail.
-    approval = pipe.set_omission(FIXTURE_FAMILY, True, FIXTURES.name)
+    approval = pipe.set_omission(FIXTURE_FAMILY, True, FIXTURES.name, str(FIXTURES))
     assert approval is not None
     outcome, _ = _run(pipe, _request(tmp_path, "approved", chosen,
                                      approvals=(approval,)))
@@ -1403,7 +1406,8 @@ def test_the_only_drop_site_drops_a_whole_span():
 
     spans = spans_from_pages(doc.pages)
     result = apply_sections(doc, spans, template=PROGRESS_REPORT,
-                            approvals=(_approval(),), matter="the test matter")
+                            approvals=(_approval(),),
+                            matter_root=str(FIXTURES))
     out = result.documents[0]
     by_no = {p.page_no: p for p in out.pages}
 

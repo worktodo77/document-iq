@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 
 from dociq.contracts import (
     Disposition,
+    matter_key,
     DocumentRecord,
     PageRecord,
     RecognitionTier,
@@ -100,7 +101,7 @@ def apply_sections(
     *,
     template: SectionTemplate | None = None,
     approvals: tuple[ApprovedOmission, ...] = (),
-    matter: str = "",
+    matter_root: str = "",
 ) -> SectionApplyResult:
     """Stamp sections onto a document's pages, and drop only what is approved.
 
@@ -126,13 +127,15 @@ def apply_sections(
     """
     if template is not None:
         template.validate()
-    if approvals and not matter.strip():
+    if approvals and not matter_root.strip():
         raise TemplateError(
-            "approvals were supplied without the matter they were given on. "
-            "An approval names the matter it authorizes and is not transferable "
-            "(D-34); accepting one here with nothing to compare it against is "
-            "how a previous matter's ruling drops a later matter's pages."
+            "approvals were supplied without the matter root they were given "
+            "on. An approval authorizes an omission on one matter and is not "
+            "transferable (D-34); accepting one here with nothing to compare it "
+            "against is how a previous matter's ruling drops a later matter's "
+            "pages."
         )
+    here = matter_key(matter_root) if matter_root.strip() else ""
     approved_by_family: dict[str, ApprovedOmission] = {}
     warnings: list[str] = []
     for approval in approvals:
@@ -140,12 +143,16 @@ def apply_sections(
         # SCOPE IS ENFORCED, NOT MERELY RECORDED. Each mismatch is reported and
         # the approval is discarded, so the failure is fail-closed: the pages
         # keep, and an operator is told which ruling did not apply and why.
-        if approval.matter != matter:
+        # The ROOT decides, not the name. Two clients each with a folder
+        # called `Production` are two matters and one name, and comparing the
+        # name let the first one's ruling drop the second one's pages.
+        if approval.matter_root != here:
             warnings.append(
                 f"omission of {approval.family_id!r} was approved on matter "
-                f"{approval.matter!r} and this run is {matter!r} — it was NOT "
-                "applied and no page was dropped for it. An approval is a "
-                "ruling about one matter's record and does not carry to another."
+                f"{approval.matter!r} ({approval.matter_root}) and this run is "
+                f"over {here} — it was NOT applied and no page was dropped for "
+                "it. An approval is a ruling about one matter's record and does "
+                "not carry to another, even one of the same name."
             )
             continue
         if template is not None and (

@@ -1525,7 +1525,10 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             # The matter this run is FOR, so Stage 4 can refuse an approval
             # given on a different one. opts.matter_name is what the adapter
             # derives from the source folder and what the drop log records.
-            matter=opts.matter_name,
+            # The SOURCE ROOT, not the matter's display name. `matter_name`
+            # is a label and two clients' `Production` folders share one
+            # (Codex r2, B-2).
+            matter_root=walk_config.source_root,
         )
         classified.extend(stage4.documents)
         section_drops.extend(stage4.drops)
@@ -1583,6 +1586,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 approved_by=a.approved_by,
                 approved_at=a.approved_at,
                 matter=a.matter,
+                matter_root=a.matter_root,
                 template_id=a.template_id,
                 template_version=a.template_version,
             )

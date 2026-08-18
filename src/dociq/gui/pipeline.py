@@ -587,6 +587,14 @@ class OmissionApproval:
     approved_by: str
     approved_at: str
     matter: str
+    """The matter's NAME, for display."""
+
+    matter_root: str
+    """The folder the approval was given on, keyed by
+    ``dociq.contracts.matter_key``. What decides whether a later run is the same
+    matter — the name does not, because two clients each having a `Production`
+    folder is ordinary."""
+
     template_id: str
     template_version: str
 
@@ -663,7 +671,7 @@ class PipelineAPI(Protocol):
         ...
 
     def set_omission(
-        self, family_id: str, engaged: bool, matter: str
+        self, family_id: str, engaged: bool, matter: str, source_root: str
     ) -> "OmissionApproval | None":
         """Engage or withdraw one omission, and CAPTURE THE APPROVER (D-34).
 
@@ -677,6 +685,12 @@ class PipelineAPI(Protocol):
         approver is the machine's answer to "who is running this", not a string
         a screen can compose. The alternative — a widget filling in a name — is
         the fiction the ruling forbids.
+
+        ``source_root`` is the folder the run is over, and it is a separate
+        argument from ``matter`` on purpose: the first decides scope, the second
+        is what an expert reads. Deriving one from the other is what let a
+        `Production` folder under one client authorize an omission in a
+        `Production` folder under another.
 
         An adapter that does not offer it leaves the row un-engageable, which is
         the safe direction: no approval, no drop.

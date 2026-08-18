@@ -49,6 +49,7 @@ import pytest
 
 from dociq import pipeline
 from dociq.contracts import (
+    matter_key,
     Disposition,
     DocumentRecord,
     OmissionSnapshot,
@@ -136,8 +137,8 @@ proves nothing about the swap.
 """
 
 
-def approvals_for(*family_ids: str, approved_by: str = "abachowski") -> tuple[
-        ApprovedOmission, ...]:
+def approvals_for(*family_ids: str, approved_by: str = "abachowski",
+                  root: str) -> tuple[ApprovedOmission, ...]:
     """Approvals as the GUI's picker would record them (D-34).
 
     ``approved_by`` is a parameter because A-19 makes it a hashed identity input:
@@ -149,6 +150,7 @@ def approvals_for(*family_ids: str, approved_by: str = "abachowski") -> tuple[
             approved_by=approved_by,
             approved_at="2026-07-30T11:00:00Z",
             matter=MATTER,
+            matter_root=matter_key(root),
             template_id=PROGRESS_REPORT.template_id,
             template_version=PROGRESS_REPORT.version,
         )
@@ -199,6 +201,7 @@ def section_stage(
     approvals: tuple[ApprovedOmission, ...] = (),
     *,
     template=PROGRESS_REPORT,
+    root: str = "",
 ) -> tuple[tuple[DocumentRecord, ...], tuple[SectionDropEntry, ...], tuple[str, ...]]:
     """Stage 4 over a corpus: rebuild each document's spans, then dispose.
 
@@ -217,7 +220,7 @@ def section_stage(
             # exists to BE that loop rather than to resemble it, so it carries
             # the matter too — otherwise it would be a Stage 4 that authorizes
             # what the real one refuses.
-            matter=MATTER,
+            matter_root=root,
         )
         out.extend(applied.documents)
         drops.extend(applied.drops)
@@ -227,7 +230,8 @@ def section_stage(
 
 def run_track_b(tmp_path, out_name="out", index=None, approvals=None):
     layout = OutputLayout.at(tmp_path / out_name)
-    approvals = approvals_for(*APPROVED) if approvals is None else approvals
+    approvals = (approvals_for(*APPROVED, root=str(tmp_path / "native"))
+                 if approvals is None else approvals)
     docs = stamped_corpus(3) + (
         document("loose/note.txt", (page(1, "A loose note."),)),
     )
@@ -250,7 +254,8 @@ def run_track_b(tmp_path, out_name="out", index=None, approvals=None):
     # Stage 4 — KEEP/DROP. Sections and an approval, never a profile (D-35).
     # `note.txt` carries no section at all and is here to be the page no tier
     # resolved: under §1 it keeps, and it must survive a stage that drops.
-    docs, drops, section_warnings = section_stage(docs, approvals)
+    docs, drops, section_warnings = section_stage(
+        docs, approvals, root=str(tmp_path / "native"))
 
     # Stage 5 — emit
     text_result = write_clean_text(docs, layout)
@@ -273,6 +278,7 @@ def run_track_b(tmp_path, out_name="out", index=None, approvals=None):
                 approved_by=a.approved_by,
                 approved_at=a.approved_at,
                 matter=a.matter,
+                matter_root=matter_key(a.matter),
                 template_id=a.template_id,
                 template_version=a.template_version,
             )
@@ -569,10 +575,20 @@ that is why both are named: an approval is valid only on the matter it was given
 on, so a fixture that borrowed the other one's name would be refused by Stage 4
 and would silently stop dropping pages."""
 
-APPROVAL = tuple(
-    replace(a, matter=PIPELINE_MATTER)
-    for a in approvals_for("progress-photographs", approved_by="jlong")
-)
+def approval_for_corpus(matter_dir) -> tuple[ApprovedOmission, ...]:
+    """The approval the real-pipeline runs use, rooted at the corpus they read.
+
+    Built per run rather than at import: an approval is scoped to the FOLDER it
+    was given on (Codex r2), and these runs read a tmp corpus whose path is not
+    known until the fixture makes one. A module-level constant would have to
+    guess, and guessing is what the matter NAME was doing when two clients'
+    `Production` folders turned out to be one string.
+    """
+    return tuple(
+        replace(a, matter=PIPELINE_MATTER)
+        for a in approvals_for("progress-photographs", approved_by="jlong",
+                               root=str(matter_dir))
+    )
 
 
 def write_report_pdf(path: Path) -> None:
@@ -641,7 +657,8 @@ def unengaged(matter, tmp_path_factory):
 @pytest.fixture(scope="module")
 def engaged(matter, tmp_path_factory):
     """The same corpus with ONE omission approved by a named person."""
-    return run_pipeline(matter, tmp_path_factory.mktemp("one") / "out", APPROVAL)
+    return run_pipeline(matter, tmp_path_factory.mktemp("one") / "out",
+                        approval_for_corpus(matter))
 
 
 def _report(outcome):
@@ -737,7 +754,7 @@ def test_no_drop_anywhere_in_the_run_reaches_past_its_span(unengaged, engaged):
     unengaged run asserts it page by page — so the unengaged pages are the only
     honest source for what the spans were before a disposition touched them.
     """
-    approved = {a.family_id for a in APPROVAL}
+    approved = {"progress-photographs"}
     recognized = {d.doc_id: d for d in unengaged.result.documents}
     assert recognized, "no documents to probe"
     for doc in engaged.result.documents:
@@ -841,6 +858,7 @@ def test_one_approval_changes_the_approved_pages_and_the_run_identity(
             approved_by="jlong",
             approved_at="2026-07-30T11:00:00Z",
             matter=PIPELINE_MATTER,
+            matter_root=engaged.result.config.omissions[0].matter_root,
             template_id=PROGRESS_REPORT.template_id,
             template_version=PROGRESS_REPORT.version,
         ),

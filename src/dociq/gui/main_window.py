@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from dociq.contracts import matter_key
 from dociq.gui.pipeline import (
     BatesProposal,
     OmissionApproval,
@@ -313,9 +314,10 @@ class MainWindow(QMainWindow):
             print("[dociq] this pipeline cannot record an approval: the lever "
                   f"{family_id!r} moved on screen and NOTHING was approved")
             return
-        matter = Path(self._request.source_root).name if self._request else ""
+        source_root = self._request.source_root if self._request else ""
+        matter = Path(source_root).name if source_root else ""
         try:
-            approval = capture(family_id, engaged, matter)
+            approval = capture(family_id, engaged, matter, source_root)
         except Exception as exc:
             print(f"[dociq] omission {family_id!r} was not recorded: {exc}")
             return
@@ -348,12 +350,17 @@ class MainWindow(QMainWindow):
         # into a corpus nobody approved. Stage 4 refuses them a second time
         # (`apply_sections(matter=...)`); this is the layer that stops them
         # travelling, that one is the layer that stops them acting.
-        matter = Path(request.source_root).name
-        kept = tuple(a for a in self._approvals if a.matter == matter)
+        # Keyed on the FOLDER, not on its name (Codex r2, B-2). This read
+        # `a.matter == Path(request.source_root).name`, so `C:/Client-A/
+        # Production` and `D:/Client-B/Production` were the same matter and the
+        # first client's rulings survived into the second client's run.
+        root = matter_key(request.source_root)
+        kept = tuple(a for a in self._approvals if a.matter_root == root)
         if len(kept) != len(self._approvals):
-            dropped = sorted({a.matter for a in self._approvals} - {matter})
+            dropped = sorted({a.matter for a in self._approvals}
+                             - {a.matter for a in kept})
             print(f"[dociq] {len(self._approvals) - len(kept)} approval(s) from "
-                  f"{dropped} were not carried into matter {matter!r}")
+                  f"{dropped} were not carried into {request.source_root}")
         self._approvals = kept
         self._request = replace(request, approvals=self._approvals)
         request = self._request

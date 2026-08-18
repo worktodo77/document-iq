@@ -26,6 +26,7 @@ from __future__ import annotations
 import pytest
 
 from dociq.contracts import (
+    matter_key,
     ContractViolation,
     Disposition,
     DocumentRecord,
@@ -94,6 +95,7 @@ APPROVAL = ApprovedOmission(
     approved_by="ABachowski",
     approved_at="2026-08-17T12:00:00Z",
     matter="MODEC-495",
+    matter_root=matter_key("MODEC-495"),
     template_id="progress-report",
     template_version="1",
 )
@@ -126,7 +128,7 @@ def test_a_toc_line_naming_the_section_does_not_drop_the_report():
         page_count=7,
     )
     result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
-                            matter="MODEC-495")
+                            matter_root="MODEC-495")
     dropped = [p.page_no for p in result.documents[0].pages
                if p.disposition is Disposition.DROP]
     assert dropped == [6, 7], (
@@ -144,7 +146,7 @@ def test_a_body_text_mention_does_not_drop_anything():
     )
     spans = outline_spans_for([("1 EXECUTIVE SUMMARY", 0)], page_count=3)
     result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
-                            matter="MODEC-495")
+                            matter_root="MODEC-495")
     assert not [p for p in result.documents[0].pages
                 if p.disposition is Disposition.DROP]
 
@@ -156,7 +158,7 @@ def test_a_transmittal_listing_enclosures_does_not_drop_anything():
         "EXECUTIVE SUMMARY\nThe project is 14 weeks behind.",
     )
     result = apply_sections(doc, (), template=TEMPLATE, approvals=(APPROVAL,),
-                            matter="MODEC-495")
+                            matter_root="MODEC-495")
     assert not [p for p in result.documents[0].pages
                 if p.disposition is Disposition.DROP]
 
@@ -173,7 +175,7 @@ def test_an_appendix_cover_sheet_does_not_drop_what_follows():
         page_count=3,
     )
     result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
-                            matter="MODEC-495")
+                            matter_root="MODEC-495")
     assert not [p for p in result.documents[0].pages
                 if p.disposition is Disposition.DROP]
 
@@ -195,7 +197,7 @@ def test_a_correct_match_stops_at_the_end_of_its_own_section():
         page_count=4,
     )
     result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
-                            matter="MODEC-495")
+                            matter_root="MODEC-495")
     dropped = [p.page_no for p in result.documents[0].pages
                if p.disposition is Disposition.DROP]
     assert dropped == [1, 2]
@@ -217,7 +219,7 @@ def test_no_page_outside_the_causing_span_is_ever_dropped(mention_page):
         page_count=8,
     )
     result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
-                            matter="MODEC-495")
+                            matter_root="MODEC-495")
     dropped = [p.page_no for p in result.documents[0].pages
                if p.disposition is Disposition.DROP]
     assert dropped == [5, 6], f"mention on page {mention_page + 1} moved the drop"
@@ -255,6 +257,7 @@ def test_an_omission_naming_nobody_is_refused():
             approved_by="   ",
             approved_at="2026-08-17T12:00:00Z",
             matter="MODEC-495",
+            matter_root=matter_key("MODEC-495"),
             template_id="progress-report",
             template_version="1",
         ).validate()
@@ -267,6 +270,7 @@ def test_an_omission_naming_no_matter_is_refused():
             approved_by="ABachowski",
             approved_at="2026-08-17T12:00:00Z",
             matter="",
+            matter_root=matter_key(""),
             template_id="progress-report",
             template_version="1",
         ).validate()
@@ -280,11 +284,12 @@ def test_an_approval_for_an_unknown_family_warns_and_drops_nothing():
         approved_by="ABachowski",
         approved_at="2026-08-17T12:00:00Z",
         matter="MODEC-495",
+        matter_root=matter_key("MODEC-495"),
         template_id="progress-report",
         template_version="1",
     )
     result = apply_sections(doc, spans, template=TEMPLATE, approvals=(stray,),
-                            matter="MODEC-495")
+                            matter_root="MODEC-495")
     assert result.pages_dropped == 0
     assert any("does not define" in w for w in result.warnings)
 
@@ -293,7 +298,7 @@ def test_a_drop_carries_its_approver_and_its_tier():
     doc = document("PROGRESS PHOTOGRAPHS", "[image]")
     spans = outline_spans_for([("1 PROGRESS PHOTOGRAPHS", 0)], page_count=2)
     result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
-                            matter="MODEC-495")
+                            matter_root="MODEC-495")
     entry = result.drops[0]
     assert entry.approved_by == "ABachowski"
     assert entry.matter == "MODEC-495"
@@ -319,13 +324,14 @@ def test_a_family_marked_not_offered_never_drops():
         approved_by="ABachowski",
         approved_at="2026-08-17T12:00:00Z",
         matter="M",
+        matter_root=matter_key("M"),
         template_id="t",
         template_version="1",
     )
     doc = document("EXECUTIVE SUMMARY")
     spans = outline_spans_for([("1 EXECUTIVE SUMMARY", 0)], page_count=1)
     result = apply_sections(doc, spans, template=template, approvals=(approval,),
-                            matter="M")
+                            matter_root="M")
     assert result.pages_dropped == 0
 
 
@@ -460,7 +466,7 @@ def test_an_unresolved_page_has_no_section_and_therefore_keeps():
     )
     assert spans == ()
     result = apply_sections(doc, spans, template=TEMPLATE, approvals=(APPROVAL,),
-                            matter="MODEC-495")
+                            matter_root="MODEC-495")
     assert result.documents[0].pages[0].disposition is Disposition.KEEP
     assert result.documents[0].pages[0].section is None
 
@@ -700,12 +706,13 @@ def test_pages_after_a_backward_entry_survive_an_approved_omission():
         approved_by="abachowski",
         approved_at="2026-08-17T12:00:00Z",
         matter="Matter-B",
+        matter_root=matter_key("Matter-B"),
         template_id=PROGRESS_REPORT.template_id,
         template_version=PROGRESS_REPORT.version,
     )
     out = apply_sections(
         doc, spans, template=PROGRESS_REPORT, approvals=(approval,),
-        matter="Matter-B",
+        matter_root="Matter-B",
     )
     dropped = {p.page_no for p in out.documents[0].pages
                if p.disposition is Disposition.DROP}
@@ -729,14 +736,19 @@ def test_an_approval_does_not_carry_to_another_matter():
     stale = ApprovedOmission(
         family_id="progress-photographs", approved_by="abachowski",
         approved_at="2026-01-01T00:00:00Z", matter="Matter-A",
+        matter_root=matter_key("C:/Client-A/Production"),
         template_id=PROGRESS_REPORT.template_id,
         template_version=PROGRESS_REPORT.version,
     )
     out = apply_sections(doc, spans, template=PROGRESS_REPORT,
-                         approvals=(stale,), matter="Matter-B")
+                         approvals=(stale,),
+                         matter_root="D:/Client-B/Production")
     assert out.drops == ()
     assert all(p.disposition is Disposition.KEEP for p in out.documents[0].pages)
-    assert any("Matter-A" in w and "Matter-B" in w for w in out.warnings), (
+    # Lower-cased: `matter_key` normcases, because a Windows path differs in
+    # case and not in meaning.
+    lowered = [w.lower() for w in out.warnings]
+    assert any("client-a" in w and "client-b" in w for w in lowered), (
         "the mismatch was not reported to the operator"
     )
 
@@ -747,17 +759,20 @@ def test_an_approval_does_not_carry_across_template_versions():
     spans = (SectionSpan("PROGRESS PHOTOGRAPHS", "PROGRESS PHOTOGRAPHS",
                          RecognitionTier.OUTLINE, 1, 1, "the outline"),)
     doc = document("x")
+    root = "D:/Client-B/Production"
     for field, value in (("template_id", "some-other-template"),
                          ("template_version", "0")):
         kw = dict(
             family_id="progress-photographs", approved_by="abachowski",
             approved_at="2026-08-17T00:00:00Z", matter="Matter-B",
+            matter_root=matter_key("D:/Client-B/Production"),
             template_id=PROGRESS_REPORT.template_id,
             template_version=PROGRESS_REPORT.version,
         )
         kw[field] = value
         out = apply_sections(doc, spans, template=PROGRESS_REPORT,
-                             approvals=(ApprovedOmission(**kw),), matter="Matter-B")
+                             approvals=(ApprovedOmission(**kw),),
+                             matter_root=root)
         assert out.drops == (), f"a mismatched {field} still dropped a page"
         assert out.warnings, f"a mismatched {field} was not reported"
 
@@ -771,9 +786,54 @@ def test_approvals_without_a_matter_are_refused_rather_than_defaulted():
     approval = ApprovedOmission(
         family_id="progress-photographs", approved_by="abachowski",
         approved_at="2026-08-17T00:00:00Z", matter="Matter-B",
+        matter_root=matter_key("D:/Client-B/Production"),
         template_id=PROGRESS_REPORT.template_id,
         template_version=PROGRESS_REPORT.version,
     )
     with pytest.raises(TemplateError) as exc:
         apply_sections(doc, spans, template=PROGRESS_REPORT, approvals=(approval,))
     assert "matter" in str(exc.value)
+
+
+def test_two_matters_of_the_same_name_are_not_the_same_matter():
+    """Codex r2, B-2. Scope was keyed on the folder's NAME.
+
+    `C:/Client-A/Production` and `D:/Client-B/Production` are one string, so the
+    first client's approval survived the matter change and dropped the second
+    client's pages. **The error was deriving a SCOPE KEY from a DISPLAY
+    STRING** — one answers "what should an expert read", the other "are these
+    the same matter", and only the second is an identity.
+
+    Both directions are asserted. A scope check that refuses everything would
+    pass the first half and be useless, so the same approval is then applied on
+    the folder it was actually given on and must still drop.
+    """
+    spans = (SectionSpan("PROGRESS PHOTOGRAPHS", "PROGRESS PHOTOGRAPHS",
+                         RecognitionTier.OUTLINE, 1, 1, "the outline"),)
+    doc = document("x")
+    a_root, b_root = "C:/Client-A/Production", "D:/Client-B/Production"
+    from pathlib import Path as _P
+    assert _P(a_root).name == _P(b_root).name, "the fixture must actually collide"
+
+    approval = ApprovedOmission(
+        family_id="progress-photographs", approved_by="abachowski",
+        approved_at="2026-08-17T00:00:00Z", matter=_P(a_root).name,
+        matter_root=matter_key(a_root),
+        template_id=PROGRESS_REPORT.template_id,
+        template_version=PROGRESS_REPORT.version,
+    )
+    out = apply_sections(doc, spans, template=PROGRESS_REPORT,
+                         approvals=(approval,), matter_root=b_root)
+    assert out.drops == (), (
+        "an approval given on one client's Production folder dropped a page "
+        "from another client's Production folder"
+    )
+    assert all(p.disposition is Disposition.KEEP for p in out.documents[0].pages)
+    assert out.warnings
+
+    same = apply_sections(doc, spans, template=PROGRESS_REPORT,
+                          approvals=(approval,), matter_root=a_root)
+    assert len(same.drops) == 1, (
+        "the approval stopped applying on the folder it was given on — a scope "
+        "check that refuses everything is not a scope check"
+    )

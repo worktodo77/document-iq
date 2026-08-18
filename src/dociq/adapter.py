@@ -32,7 +32,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from dociq import pipeline as core
-from dociq.contracts import Disposition, RunResult
+from dociq.contracts import Disposition, RunResult, matter_key
 from dociq.gui.pipeline import (
     LEVER_RECOGNIZED,
     OmissionApproval,
@@ -638,7 +638,7 @@ class RealPipeline:
         return ""
 
     def set_omission(
-        self, family_id: str, engaged: bool, matter: str
+        self, family_id: str, engaged: bool, matter: str, source_root: str = ""
     ) -> OmissionApproval | None:
         """Record or withdraw one expert-approved omission (D-34).
 
@@ -680,11 +680,20 @@ class RealPipeline:
                 f"({family.display_name}). {family.rationale}"
             )
         stamp = operator_stamp()
+        if not source_root.strip():
+            raise ProfileError(
+                "an omission cannot be approved without the folder it is being "
+                "approved on. The matter's NAME does not scope an approval — "
+                "two clients with a 'Production' folder are two matters and one "
+                "name — so a capture point with no root is one whose record "
+                "nothing can check."
+            )
         return OmissionApproval(
             family_id=family_id,
             approved_by=stamp.username,
             approved_at=stamp.saved_at,
             matter=matter,
+            matter_root=matter_key(source_root),
             template_id=self._template.template_id,
             template_version=self._template.version,
         )
@@ -859,6 +868,7 @@ class RealPipeline:
                 approved_by=a.approved_by,
                 approved_at=a.approved_at,
                 matter=a.matter,
+                matter_root=a.matter_root,
                 template_id=a.template_id,
                 template_version=a.template_version,
             )

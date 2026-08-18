@@ -14,6 +14,7 @@ import json
 import pytest
 
 from dociq.contracts import (
+    matter_key,
     CONTRACT_VERSION,
     ContractViolation,
     Disposition,
@@ -385,7 +386,9 @@ def test_contract_version_is_the_frozen_one_and_every_bump_is_written_up():
 
     The literal moved 1.6.0 -> 1.8.0 when A-18 (``PageRecord.section_tier``) and
     A-19 (approvals, project tokens and the template in :class:`RunConfig`)
-    landed. The literal on its own is a weak guard — it fails on the bump and
+    landed, then -> 1.9.0 when A-19 was extended with ``OmissionSnapshot
+    .matter_root``: scope had been keyed on the matter's NAME, and two clients
+    each with a `Production` folder are one string. The literal on its own is a weak guard — it fails on the bump and
     passes on the write-up, which is the wrong way round — so this also asserts
     that **every** MINOR up to the current one carries its own entry in the
     contract's amendment history. A bump with no entry now fails here, whatever
@@ -393,7 +396,7 @@ def test_contract_version_is_the_frozen_one_and_every_bump_is_written_up():
     """
     import pathlib
 
-    assert CONTRACT_VERSION == "1.8.0"
+    assert CONTRACT_VERSION == "1.9.0"
 
     src = pathlib.Path(__file__).parent.parent / "src" / "dociq" / "contracts.py"
     history = src.read_text(encoding="utf-8")
@@ -411,6 +414,7 @@ def test_contract_version_is_the_frozen_one_and_every_bump_is_written_up():
     # And the two this sprint added, named, so a renumbered entry is caught.
     assert "1.7.0 — amendment A-18" in history
     assert "1.8.0 — amendment A-19" in history
+    assert "1.9.0 — amendment A-19, extended" in history
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +428,7 @@ def omission(**kw: object) -> OmissionSnapshot:
         approved_by="abachowski",
         approved_at="2026-08-17T12:00:00Z",
         matter="Project 495",
+        matter_root=matter_key("Project 495"),
         template_id="progress-report",
         template_version="1",
     )

@@ -22,6 +22,7 @@ import pytest
 
 from dociq import pipeline
 from dociq.contracts import (
+    matter_key,
     EffectiveLimits,
     RunConfig,
     content_hash,
@@ -587,6 +588,7 @@ def _omission(approved_by: str = "j.long", family: str = FIXTURE_FAMILY):
         approved_by=approved_by,
         approved_at="2026-08-17T00:00:00Z",
         matter=APPROVAL_MATTER,
+        matter_root=matter_key(str(FIXTURES)),
         template_id=PROGRESS_REPORT.template_id,
         template_version=PROGRESS_REPORT.version,
     )
@@ -711,6 +713,7 @@ def test_the_identity_covers_every_input_that_decides_a_disposition(tmp_path):
         "omissions": (OmissionSnapshot(
             family_id=FIXTURE_FAMILY, approved_by="j.long",
             approved_at="2026-08-17T00:00:00Z", matter=APPROVAL_MATTER,
+            matter_root=matter_key(str(FIXTURES)),
             template_id="progress-report", template_version="1"),),
         "project_tokens": ("MV32",),
         "section_template_id": "progress-report",

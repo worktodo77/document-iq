@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from dociq.contracts import (
+    matter_key,
     ContractViolation,
     Disposition,
     MasterIndexSnapshot,
@@ -119,6 +120,7 @@ def approvals(*family_ids: str) -> tuple[ApprovedOmission, ...]:
             approved_by=APPROVER,
             approved_at=APPROVED_AT,
             matter=MATTER,
+            matter_root=matter_key(MATTER),
             template_id=PROGRESS_REPORT.template_id,
             template_version=PROGRESS_REPORT.version,
         )
@@ -143,7 +145,7 @@ def sectioned(count=3, *, approved=OMITTED):
         spans = resolve_sections(outline=list(MPR_OUTLINE), page_count=len(doc.pages))
         result = apply_sections(
             doc, spans, template=PROGRESS_REPORT, approvals=approvals(*approved),
-            matter=MATTER
+            matter_root=MATTER
         )
         assert result.warnings == (), result.warnings
         documents.extend(result.documents)

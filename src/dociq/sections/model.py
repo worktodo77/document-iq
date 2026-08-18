@@ -277,8 +277,20 @@ class ApprovedOmission:
     read by humans and compared between runs."""
 
     matter: str
-    """The matter the approval was given on. An approval is not transferable
-    between matters, and recording the matter is what makes that checkable."""
+    """The matter's NAME, as an expert reads it in the drop log.
+
+    **This docstring used to end "recording the matter is what makes that
+    checkable", and for one round nothing checked it.** Enforcement now lives in
+    :func:`dociq.sections.apply.apply_sections`, and it compares
+    :attr:`matter_root` rather than this — a name is what to READ, not what to
+    decide by."""
+
+    matter_root: str
+    """:func:`dociq.contracts.matter_key` of the folder this was approved on.
+
+    What decides transferability. Two clients each with a folder named
+    `Production` are two matters and one string, which is how a first client's
+    ruling came to drop a second client's pages (Codex r2)."""
 
     template_id: str
     template_version: str
@@ -303,6 +315,14 @@ class ApprovedOmission:
             raise TemplateError(
                 f"omission of {self.family_id!r}: matter is empty — an "
                 "approval is not transferable between matters"
+            )
+        if not self.matter_root.strip():
+            raise TemplateError(
+                f"omission of {self.family_id!r}: matter_root is empty. The "
+                "matter's NAME does not decide transferability — two clients "
+                "with a folder called 'Production' are two matters and one "
+                "name — so an approval that cannot say which folder it was "
+                "given on is one nothing can scope."
             )
         if not self.template_id.strip() or not self.template_version.strip():
             raise TemplateError(

@@ -27,6 +27,8 @@ says in its own docstring what was withdrawn, by which commit, and why.
 
 from __future__ import annotations
 
+from dociq.contracts import matter_key
+
 import inspect
 
 import pytest
@@ -142,6 +144,7 @@ MPR_APPROVALS = tuple(
         approved_by="abachowski",
         approved_at="2026-08-17T12:00:00Z",
         matter="MODEC-4412",
+        matter_root=matter_key("MODEC-4412"),
         template_id="mpr-under-test",
         template_version="1",
     )
@@ -160,7 +163,7 @@ def applied(doc=None):
         mpr_spans(),
         template=MPR_TEMPLATE,
         approvals=MPR_APPROVALS,
-        matter="MODEC-4412",
+        matter_root="MODEC-4412",
     )
 
 
@@ -388,7 +391,7 @@ def test_a_document_no_section_covers_passes_through_whole():
     """
     doc = document("misc/letter.pdf", (page(1, "Dear Sir"), page(2, "PHOTO LOG")))
     result = apply_sections(doc, (), template=MPR_TEMPLATE, approvals=MPR_APPROVALS,
-                            matter="MODEC-4412")
+                            matter_root="MODEC-4412")
     assert result.documents[0] is doc
     assert result.drops == ()
 
@@ -428,7 +431,7 @@ def test_a_profile_can_no_longer_claim_a_document_at_any_page():
         doc = document(f"misc/letter-{header_page}.pdf", pages)
         result = apply_sections(
             doc, (), template=MPR_TEMPLATE, approvals=MPR_APPROVALS,
-            matter="MODEC-4412",
+            matter_root="MODEC-4412",
         )
         assert result.drops == (), f"header on page {header_page} dropped pages"
 
