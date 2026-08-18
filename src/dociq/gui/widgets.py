@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from dociq.branding.palette import BRAND_DIR
+from dociq.gui.pipeline import LEVER_AUTOMATIC, LEVER_RECOGNIZED
 from dociq.gui.theme import HAIRLINE, UNIT, Theme
 from dociq.gui.view_models import CAPACITY_LABEL, CAPACITY_SOURCE
 
@@ -257,8 +258,18 @@ class WaterfallRow(QWidget):
 
     toggled = Signal(str)
 
-    TOTAL, EXPERT, AUTOMATIC, RESULT, CAPACITY = (
-        "total", "expert", "automatic", "result", "capacity")
+    TOTAL, EXPERT, AUTOMATIC, RESULT, CAPACITY, RECOGNIZED = (
+        "total", "expert", "automatic", "result", "capacity", "recognized")
+    """RECOGNIZED is the row for a section the tool found and will never offer
+    to drop (A-20).
+
+    It is a fifth kind rather than a re-use of AUTOMATIC, and the reason is what
+    AUTOMATIC's row SAYS: "Removed mechanically by the tool, not by an expert
+    decision". A weather log or a set of timesheets is recognized and KEPT, so
+    rendering it on the automatic row would tell the operator that the tool
+    removed the one category §4 grades most dangerous to lose — a false
+    statement about the corpus, made in the place the operator goes to check
+    what happened to it."""
 
     LABEL_W = UNIT * 30
     DELTA_W = UNIT * 26
@@ -354,6 +365,7 @@ class WaterfallRow(QWidget):
             self.TOTAL: p.ink,
             self.EXPERT: p.ink if self._engaged else p.ink_muted,
             self.AUTOMATIC: p.ink_muted,
+            self.RECOGNIZED: p.ink_muted,
             self.RESULT: p.navy,
             self.CAPACITY: p.ink_muted,
         }[self._kind]
@@ -411,6 +423,7 @@ class WaterfallRow(QWidget):
                 self.TOTAL: QColor(p.hairline_strong),
                 self.EXPERT: QColor(p.accent),
                 self.AUTOMATIC: QColor(p.ink_muted),
+                self.RECOGNIZED: QColor(p.hairline_strong),
                 self.RESULT: QColor(p.navy),
             }[self._kind]
             painter.setPen(Qt.PenStyle.NoPen)
@@ -511,8 +524,25 @@ class ReductionWaterfall(QWidget):
                 delta, self._theme, ghost=ghost, engaged=lever.engaged, hint=hint,
             ))
 
+        # Recognized-and-never-offered, BEFORE the automatic rows and visually
+        # distinct from them (A-20). These pages are KEPT: the row exists so an
+        # expert can see that DocIQ found the weather log and the timesheets and
+        # is not touching them. `running` is deliberately not moved — nothing
+        # here is subtracted from anything.
         for lever in plan.levers:
-            if not lever.locked:
+            if lever.kind != LEVER_RECOGNIZED:
+                continue
+            rows.append(WaterfallRow(
+                WaterfallRow.RECOGNIZED, lever.key, lever.label, running / full,
+                f"{compact_tokens(lever.tokens)}  kept — not offered",
+                self._theme,
+                hint=(f"{lever.pages:,} pages. Recognized and kept: this "
+                      "section is never offered as an omission."
+                      + (f" {lever.note}" if lever.note else "")),
+            ))
+
+        for lever in plan.levers:
+            if lever.kind != LEVER_AUTOMATIC:
                 continue
             running -= lever.tokens if lever.engaged else 0
             note = "automatic, estimated" if lever.estimated else "automatic"

@@ -491,6 +491,23 @@ def test_no_pipeline_option_silently_decides_for_the_operator():
         "master_index_path": "chosen by the operator on the setup screen",
         "profiles": "chosen by the operator on the setup screen, and §6's "
                     "checklist gates it",
+        # D-34/D-35's two fields, and this probe is exactly the right place to
+        # be asked about them, because one of them IS a ruling.
+        "template": "NOT a ruling. A template ships unengaged and is "
+                    "structurally incapable of dropping a page (D-34) — "
+                    "SectionFamily has no disposition field — so defaulting it "
+                    "decides nothing about the corpus. What it changes is "
+                    "whether recognized sections are NAMED on the checklist, "
+                    "and withholding that by default would hide the levers "
+                    "rather than protect anybody.",
+        "approvals": "THE operator ruling of this sprint, and it is defaulted "
+                     "to EMPTY, which is the safe end: no approval, no drop. "
+                     "The GUI does not leave it at the default when the expert "
+                     "acts — engaging a waterfall row calls "
+                     "PipelineAPI.set_omission, which captures the approver "
+                     "from the OS, and MainWindow carries the result into "
+                     "RunRequest.approvals for the next run. A silent default "
+                     "here can only ever omit an omission.",
         "bates_decision": "the pre-made decision used by harnesses; the GUI "
                           "supplies confirm_bates instead",
         "auto_confirm_bates": "headless only; the GUI supplies confirm_bates, "

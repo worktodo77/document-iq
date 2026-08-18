@@ -68,7 +68,24 @@ fit". They are P6 activity listings pasted into progress reports.
 ### The recognition result that matters most
 
 **40% of the PDFs carry a PDF outline** (bookmarks) with a genuine section
-vocabulary authored by the document's own creator: `EXECUTIVE SUMMARY`,
+vocabulary authored by the document's own creator ~~40%~~ — **CORRECTED
+2026-08-17: 29.866% (89 of 298) over the full corpus.** The 40% figure came
+from this section's 36-document sample and is ten points high. The number that
+should be carried forward instead is **pages**: outlined documents are the large
+ones, so a tier present in under a third of documents places **11,173 pages,
+63.01% of the corpus**. See `docs/verification/sections_2026-08-17.md` Q1.
+
+The vocabulary claim below survives and was re-measured, with two additions that
+bind the template design: **522 distinct section families** (716 raw, before
+numbering is stripped) — far too many to enumerate, so a template must key to a
+normalized family rather than a list of literals; and **159 of those 522, 30.5%,
+carry project-identifying text** (`BOMESC YARD`, `MV32 APPENDICES`,
+`STATUS OF PETROBRAS TQ`), which D-24 forbids a shipped template from matching,
+so project tokens must be stripped and their list supplied per matter. A third
+fact belongs here too: **the corpus's third most frequent label is Portuguese**
+(`PAGINA EM BRANCO`, 61), so matching is accent-folded and no template may
+assume the record is in English. Section vocabulary:
+`EXECUTIVE SUMMARY`,
 `PROGRESS PHOTOS`, `HSE`, `CRITICAL PATH NARRATIVE`, `APPENDICES`,
 `OVERALL PROGRESS S-CURVE`, `PROCUREMENT`, `MECHANICAL COMPLETION AND
 COMMISSIONING`. Where an outline exists, the section→page map is a **lookup, not an
@@ -93,7 +110,7 @@ though they were would be the quiet lie in this feature.
 
 | Tier | Mechanism | Coverage on the real corpus | Strength |
 |---|---|---|---|
-| **1** | The document's own **PDF outline / bookmarks** | 40% of PDFs | Authored by the document's creator. Not inference. |
+| **1** | The document's own **PDF outline / bookmarks** | **29.9% of PDFs — but 63.0% of PAGES** (11,173; measured 2026-08-17 over all 298 PDFs. The earlier "40% of PDFs" was a 36-doc sample and is withdrawn) | Authored by the document's creator. Not inference. |
 | **2** | The document's own **table of contents** page, parsed to section→page ranges | TOC present on 65 of 1,535 pages | The document's own statement, but recovered by parsing. |
 | **3** | **Measurable page-class rules** — properties of the page, not its meaning | universal | Deterministic and inspectable, but a *class* rule, not a section boundary. |
 | **4** | **Explicit page ranges** entered by the expert | universal | The expert's own instruction. Strongest of all, and least scalable. |
@@ -217,20 +234,54 @@ column as what an approved profile would do, never as what a run does today.
 
 ---
 
-## 6. Open — not yet ruled
+## 6. Open — three of four now settled (2026-08-17)
 
-- **The approver problem.** `SectionRule.validate()` refuses a DROP without a "who
-  approved" field, which is why Track D shipped no built-in profiles at all. A
-  template is by definition not approved by the expert on the matter. Options:
-  templates arrive **unengaged** and approval is recorded when the expert engages
-  each lever in the checklist; or a template records LI as the *author* and the
-  expert as the *approver*, with both stated in the log. **Not ruled.**
-- **Tier 2 feasibility.** TOC parsing is proposed but not built or measured — TOC
-  page numbers may not match PDF page indices where front matter is unnumbered.
-- **Coverage of the other 60%.** Documents without an outline fall to Tier 3 page
-  classes, which recognize *page kinds*, not *report sections*. Whether that is
-  sufficient is untested.
+- **The approver problem.** ✅ **RULED — D-34.** Templates ship **unengaged**:
+  a built-in template carries no approver and no live DROP, every lever arrives
+  OFF, and its contribution until somebody ticks something is *recognition
+  only*. The expert's identity, the time and the matter are written into the
+  rule and into every drop-log line **at the moment he engages a lever**. Two
+  properties carry the ruling: a template alone can never drop a page, and the
+  approver field never holds a fiction. Consequence for the build: the KEEP/DROP
+  disposition can no longer be baked into a shipped template file, and the
+  approver becomes a structured field with a real capture point rather than
+  free-text `notes`.
+- **Tier 2 feasibility.** ✅ **MEASURED — the doubt is not reproduced, and the
+  question is not closed.** Where it could be checked, the printed TOC page
+  number *is* the physical page: offset **0 in all 106 paired lines across 25
+  documents**, within-document spread **0** everywhere. But the check requires a
+  document to carry an outline as ground truth, so it reaches only documents
+  that **do not need Tier 2** — the ~193 documents with a TOC and no outline,
+  which is Tier 2's whole purpose, are structurally unreachable by this method.
+  Risk lowered, question open. `docs/verification/sections_2026-08-17.md` Q2.
+- **Coverage of the other 60%.** ✅ **MEASURED, and the answer is "no".** Over
+  the 209 documents without a substantive outline (6,331 pages), Tier 3 resolves
+  **1,308 pages — 20.66%** and leaves **5,023 — 79.34% — resolved by nothing.**
+  Four pages in five, in exactly the documents that need Tier 3 most. Under
+  KEEP-by-default that is safe and correct, and it settles what Tier 3 is: a
+  supplement, not a fallback. **Corpus-wide the tiers recognize ~70% of pages
+  and keep the other ~30% unconditionally** — the honest ceiling on this
+  feature, and the claim the product should make.
 - **Cross-document repetition** (boilerplate identical across many documents) is
   listed above but is a different mechanism from within-document furniture, and is
   closer to the excluded near-duplicate detection than the other tiers. Needs its
-  own ruling before it is built.
+  own ruling before it is built. ⏳ **Still not ruled.**
+
+## 7. The engine this design replaces (2026-08-17)
+
+The shipped Stage-4 engine (`profiles/apply.py`) implements **the tier §3
+excludes**: it matches a rule's regex against every line of every page and
+carries the matched section forward until another rule matches.
+
+Measured consequence, reproduced on five trigger shapes: one DROP rule for
+`PROGRESS PHOTOGRAPHS` drops the executive summary, the critical path narrative,
+the weather log and the timesheets — four HIGH-risk categories from §4 — and the
+drop log attributes each of them to `PROGRESS PHOTOGRAPHS`. The worst shape needs
+no confusing text at all: a **correct** first match with no rule marking the
+section's end runs to the end of the document.
+
+That inverts §1's binding asymmetry — the recognizer does not miss a section, it
+invents one. **D-35 rules it replaced rather than repaired**: section resolution
+moves to Tier 1–3 page *spans* and Tier 4 explicit ranges, and regex heading
+matching and carried section state are deleted. Full reproduction and exposure
+analysis in `docs/verification/sections_2026-08-17.md`.

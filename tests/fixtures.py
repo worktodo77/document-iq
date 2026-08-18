@@ -19,6 +19,7 @@ from dociq.contracts import (
     PageKind,
     PageRecord,
     ProcessingStatus,
+    RecognitionTier,
 )
 
 __all__ = ["page", "ocr_page", "document", "corpus", "MPR_PAGES"]
@@ -26,6 +27,13 @@ __all__ = ["page", "ocr_page", "document", "corpus", "MPR_PAGES"]
 
 def page(page_no: int, text: str = "", **kw) -> PageRecord:
     kind = kw.pop("kind", PageKind.NATIVE if text else PageKind.EMPTY)
+    # A-18: the contract refuses a `section` without a `section_tier`. Fixtures
+    # that care which tier placed a page pass it; the rest are testing something
+    # else entirely and would only be made noisier by spelling it out. The RULE
+    # itself is pinned directly in tests/test_sections.py, so defaulting here
+    # cannot hide a regression in it.
+    if kw.get("section") is not None and "section_tier" not in kw:
+        kw["section_tier"] = RecognitionTier.OUTLINE
     return PageRecord(page_no=page_no, text=text, kind=kind, **kw)
 
 

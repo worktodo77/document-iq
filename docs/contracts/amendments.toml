@@ -133,7 +133,15 @@ status = "applied"
 title = "the checklist attributes a DROP by rule identity and never shows what it matches or who approved it"
 raised_by = "Track E, which proposed both fields and declined to apply them"
 adopted_in = "91fed8d"
-wired_in = { "src/dociq/adapter.py" = ["_section_rules", "_rule_text"], "src/dociq/gui/view_models.py" = ["matched_by", "expert_note"], "src/dociq/gui/screens.py" = ["ProfileChecklistScreen"] }
+# D-35 moved A-11b's two fields to a new source WITHOUT weakening the
+# amendment, and the checker is what forced the entry to say so: `_section_rules`
+# and `_rule_text` read a PROFILE's pattern and the expert's note, and both are
+# deleted with the engine. `_template_lever` now populates the same two seam
+# fields from the template family -- `rule` from its patterns, `note` from its
+# rationale, which SectionFamily.validate() refuses to leave empty. So the
+# guarantee is stronger than it was: the old source could be blank (a profile
+# with no note), the new one cannot.
+wired_in = { "src/dociq/adapter.py" = ["_template_lever"], "src/dociq/gui/view_models.py" = ["matched_by", "expert_note"], "src/dociq/gui/screens.py" = ["ProfileChecklistScreen"] }
 tests = ["tests/test_seam_population.py", "tests/test_view_models.py"]
 
 [amendment.A-12]
@@ -190,3 +198,45 @@ title = "A-16's residue disclosure has a blind spot exactly the width of the pac
 raised_by = "Codex third fix round, finding A-7"
 wired_in = { "src/dociq/gui/pipeline.py" = ["PackageResult"], "src/dociq/adapter.py" = ["PackageResult"], "src/dociq/emit/handoff.py" = ["UploadPackage"], "src/dociq/gui/view_models.py" = ["PackageOutcomeView"] }
 tests = ["tests/test_package_swap.py", "tests/test_gui_screen_states.py"]
+
+# A-18 lands its wiring and this entry in the SAME commit, so its adopting
+# commit id cannot exist yet — a commit cannot name itself, and the checker
+# rejects both "PENDING" and "HEAD". Recorded as "raised" for exactly one
+# commit, per the A-16/A-17 two-step, and flipped to "applied" with the real id
+# once the tier reaches the processing log. It stays "raised" while
+# RecognitionTier exists and no pipeline path populates it: that gap IS the
+# A-12/A-14 defect, and calling it applied early is how A-14 shipped a
+# Bates-stamped production with zero locators.
+[amendment.A-18]
+status = "applied"
+title = "PageRecord cannot carry HOW a page's section was recognized"
+raised_by = "D-35 and the Sprint-3 taxonomy build, for section_taxonomy.md §5.4"
+adopted_in = "4092f76"
+wired_in = { "src/dociq/contracts.py" = ["RecognitionTier"], "src/dociq/ingest/walker.py" = ["_stamped"], "src/dociq/emit/log.py" = ["_sections_of"] }
+tests = ["tests/test_sections.py", "tests/test_emit.py", "tests/test_end_to_end.py"]
+
+# A-19 lands its wiring and this entry in the SAME commit, so like A-18 it is
+# recorded as "raised" for exactly one commit and flipped with the real adopting
+# id in the follow-up. The A-16/A-17 two-step, third time of asking.
+[amendment.A-19]
+status = "applied"
+adopted_in = "4092f76"
+title = "the run identity does not cover the input that now decides which pages drop"
+raised_by = "D-34 and D-35, wiring the section taxonomy into the pipeline"
+# `matter_key` is named here because A-19's EXTENSION is the half a reviewer
+# would otherwise have to find in the code: the first version scoped an approval
+# by the matter's NAME, and `matter_key` is the single derivation that replaced
+# it. Codex r3, D-2 -- the registry named the fields the amendment landed and
+# not the ones that corrected it.
+wired_in = { "src/dociq/contracts.py" = ["OmissionSnapshot", "matter_key"], "src/dociq/pipeline.py" = ["_inert_profile_warnings"], "src/dociq/sections/apply.py" = ["apply_sections"] }
+tests = ["tests/test_run_identity.py", "tests/test_sections.py", "tests/test_contracts.py"]
+
+# A-20 lands its wiring and this entry in the same commit -- the A-16/A-17
+# two-step again -- so it is "raised" for exactly one commit.
+[amendment.A-20]
+status = "applied"
+adopted_in = "d3cee24"
+title = "the waterfall seam cannot say a section is recognized and must never be offered"
+raised_by = "D-34 and D-35, wiring the D-14 picker"
+wired_in = { "src/dociq/gui/pipeline.py" = ["LEVER_RECOGNIZED", "OmissionApproval"], "src/dociq/adapter.py" = ["set_omission"], "src/dociq/gui/widgets.py" = ["WaterfallRow"] }
+tests = ["tests/test_seam_population.py", "tests/test_view_models.py", "tests/test_gui_screen_states.py"]

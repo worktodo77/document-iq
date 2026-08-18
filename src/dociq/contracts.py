@@ -23,7 +23,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-CONTRACT_VERSION = "1.6.0"
+CONTRACT_VERSION = "1.9.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -95,9 +95,9 @@ snapshots, in precedence order, each carrying ``profile_id``, ``version`` and
 
 The configuration recorded only ``opts.profiles[0].profile_id`` and its
 version, and that is not the input the run actually used.
-:func:`~dociq.profiles.apply.apply_profiles` applies the FIRST profile whose
-header patterns claim a document, so both the content of every profile and
-their precedence order change which pages drop — and therefore ``clean_text``,
+``profiles/apply.py`` applied the FIRST profile whose header patterns claimed a
+document, so both the content of every profile and their precedence order
+changed which pages drop — and therefore ``clean_text``,
 the index, the sources map and the corpus hash. Measured, with no attacker
 model needed: editing a second profile's rule without bumping its version, and
 separately swapping two profiles' precedence with no content change at all,
@@ -147,6 +147,64 @@ detail — and because the consequence is not cosmetic. When ``ratio_refuted`` i
 true the contract says the ruled band was NOT the method used, yet a consumer
 holding only :attr:`RunResult.tokens_before` received zeros and could fall back
 to the ruled ratio, displaying a number the pipeline expressly disclaims.
+
+1.7.0 — amendment A-18, from D-35 and the Sprint-3 taxonomy build.
+:class:`PageRecord` gains ``section_tier``, and :class:`RecognitionTier` is
+added to carry it. `docs/design/section_taxonomy.md` §5.4 required the
+recognition tier per page from the day it was written and there was nowhere to
+put it, so the strength of the evidence behind an omission was recorded
+nowhere: "the document's own outline placed this page in PROGRESS PHOTOS" and
+"a photo-page rule matched it" reached the operator as the same sentence.
+
+Additive with a safe default (``None``), so no existing construction site is
+obliged to change — but three validation rules land with it, and the third is
+not merely additive: **a DROP page must now carry a tier.** That is deliberate.
+Principle 1 already makes an unattributable drop impossible; without this an
+unattributable *tier* stayed possible, and a guarantee that is optional is one
+that regresses silently. The rule is what makes §5.4 correct-by-construction
+rather than a docstring.
+
+``section_tier`` is a hashed identity input, unlike ``ocr_conf``: it is a
+deterministic property of the document and the tier that read it, carries no
+float, and a run that recognized a page by a different tier genuinely produced
+different evidence.
+
+1.8.0 — amendment A-19, from D-34 and D-35 as they were wired. :class:`RunConfig`
+gains ``omissions: tuple[OmissionSnapshot, ...]``, ``project_tokens``,
+``section_template_id`` and ``section_template_version``; :class:`OmissionSnapshot`
+is added to carry the first.
+
+**This is A-08's finding on the input that replaced the one A-08 was about.**
+A-08 put profiles in the run identity because they decided which pages dropped,
+and proved it with two measured counterexamples. D-35 deletes that engine and
+D-34 moves the decision to an approval a person gives against a template family,
+so approvals are now the deciding input — and until this amendment they sat
+outside the identity exactly as profiles once did. Two runs over one folder,
+identical in every recorded term, one of them missing a section: the same
+collision, one design generation later.
+
+``project_tokens`` is in for the same reason and is easier to miss. It changes
+which family a label normalizes to, so supplying `MV32` makes `MV32 APPENDICES`
+match an appendices rule and withholding it keeps the page. That is a different
+corpus from the same folder and the same approvals.
+
+The template id and version are recorded even when no approval was given,
+because "the expert engaged nothing" and "no template was offered" are different
+facts about a run and only one of them is a decision.
+
+Additive with safe defaults throughout: an empty approval set is the state of
+every freshly-installed DocIQ and of every run nobody has ruled on.
+
+1.9.0 — amendment A-19, extended, from Codex review r2's finding B-2. :class:`OmissionSnapshot`
+gains ``matter_root`` and :func:`matter_key` is added.
+
+The first version scoped an approval by the matter's NAME, and a name is not an
+identity: `C:/Client-A/Production` and `D:/Client-B/Production` are one string,
+so the first client's ruling survived into the second client's run and dropped
+its pages. **The error was deriving a scope key from a display string** — one
+answers "what should an expert read", the other "are these the same matter" —
+and the fix separates them and gives the second exactly one derivation, shared
+by the capture point and by Stage 4.
 """
 
 
@@ -191,11 +249,47 @@ class Disposition(str, enum.Enum):
     """Stage-4 section classification outcome for a page.
 
     Default is KEEP everywhere, unconditionally. Principle 1: unclassified
-    content is kept; only an expert-approved profile rule may set DROP.
+    content is kept; only an omission an expert approved by name may set DROP
+    (D-34). The engine that let a PROFILE RULE set it is deleted (D-35).
     """
 
     KEEP = "keep"
     DROP = "drop"
+
+
+class RecognitionTier(str, enum.Enum):
+    """How a page's section was recognized (amendment A-18).
+
+    `docs/design/section_taxonomy.md` §5.4: *"Recognition tier belongs in the
+    log, per page."* The tiers are **not equally strong**, and presenting them
+    identically is what that section calls the quiet lie in this feature —
+    "dropped because the document's own outline placed this page in PROGRESS
+    PHOTOS" and "dropped because the page matched a photo-page rule" are
+    different claims, and an expert defending an omission needs to know which
+    one he is making.
+
+    Ordered strongest first. The values are stable strings written into
+    `processing_log.json` and must not be renamed: they are the audit trail
+    between runs, exactly as ``SectionRule.rule_id`` is.
+    """
+
+    OUTLINE = "t1_outline"
+    """The document's own PDF outline. A lookup, not an inference — evidence
+    the document makes about itself. Measured reach: 63.01% of corpus pages."""
+
+    TOC = "t2_toc"
+    """The document's own table of contents, parsed. Its own statement, but
+    recovered by parsing. **Not built in Sprint 3** — declared here so the log
+    vocabulary is stable when it is."""
+
+    PAGE_CLASS = "t3_page_class"
+    """A measurable property of the page (activity-grid headers, image area,
+    line recurrence). Deterministic and inspectable, but a *class* rule rather
+    than a section boundary. Measured reach: +7.38% of corpus pages."""
+
+    EXPLICIT = "t4_explicit"
+    """A page range entered by the expert. Strongest of all and least scalable.
+    **Not built in Sprint 3.**"""
 
 
 class TerminalStatus(str, enum.Enum):
@@ -332,16 +426,30 @@ class PageRecord:
     an un-Bates-stamped matter yields ``None`` on every page."""
 
     section: str | None = None
-    """Section header this page falls under, as matched by the active profile
-    (Stage 4). ``None`` when no profile matched — which means KEEP."""
+    """Section header this page falls under, as resolved by Stage 4. ``None``
+    when no tier resolved the page — which means KEEP. On the real corpus that
+    is 29.6% of pages, and it is a correct outcome rather than a coverage
+    failure (§1: a section the recognizer misses is a page that survives)."""
+
+    section_tier: "RecognitionTier | None" = None
+    """WHICH KIND OF EVIDENCE placed this page in :attr:`section` (amendment
+    A-18, for §5.4).
+
+    ``None`` exactly when :attr:`section` is ``None``, and required whenever
+    the page is DROP — both enforced by :meth:`validate`. The second rule is
+    the load-bearing one: it makes an unattributable *tier* as impossible as
+    Principle 1 already makes an unattributable *drop*, so the strength of the
+    evidence behind an omission cannot silently stop being recorded."""
 
     disposition: Disposition = Disposition.KEEP
-    """KEEP unless an expert-approved profile rule dropped it. Defaulted so
+    """KEEP unless an omission an expert approved by name dropped it. Defaulted so
     that any code path that forgets to classify still keeps the page."""
 
     drop_rule: str | None = None
-    """Identifier of the profile rule that set DROP, for the per-drop log
-    entry. MUST be non-None whenever :attr:`disposition` is DROP — enforced by
+    """Identifier of the approved omission that set DROP, for the per-drop log
+    entry — ``template_id:family_id``
+    (:attr:`dociq.sections.model.ApprovedOmission.drop_rule`). It named a
+    profile rule until D-35 deleted the engine that applied one. MUST be non-None whenever :attr:`disposition` is DROP — enforced by
     :meth:`validate`. Principle 1 forbids an unattributable drop."""
 
     notes: tuple[str, ...] = ()
@@ -383,6 +491,25 @@ class PageRecord:
         if self.disposition is Disposition.KEEP and self.drop_rule:
             raise ContractViolation(
                 f"page {self.page_no}: drop_rule set on a KEEP page"
+            )
+        if self.section_tier is not None and self.section is None:
+            raise ContractViolation(
+                f"page {self.page_no}: section_tier "
+                f"{self.section_tier.value!r} without a section — a tier "
+                "records HOW a section was recognized, and there is none here"
+            )
+        if self.section is not None and self.section_tier is None:
+            raise ContractViolation(
+                f"page {self.page_no}: section {self.section!r} without a "
+                "section_tier — §5.4 requires the kind of evidence to be "
+                "recorded per page, because the tiers are not equally strong"
+            )
+        if self.disposition is Disposition.DROP and self.section_tier is None:
+            raise ContractViolation(
+                f"page {self.page_no}: DROP without a section_tier — an "
+                "expert defending this omission must be able to say whether "
+                "the document's own outline placed the page or a page-class "
+                "rule matched it"
             )
 
 
@@ -520,6 +647,76 @@ class ProfileSnapshot:
     different expert is a different ruling."""
 
 
+def matter_key(source_root: str) -> str:
+    """The one derivation of "which matter is this" (Codex r2, B-2).
+
+    An approval authorizes an omission on ONE matter. Deciding whether a later
+    run is that matter was done with ``Path(source_root).name`` — the folder's
+    display name — and two matters called `Production` under different clients
+    are the same string. Codex reproduced `C:/Client-A/Production` and
+    `D:/Client-B/Production` colliding, so the first client's ruling survived
+    into the second client's run and dropped its pages.
+
+    **The defect was deriving a SCOPE KEY from a DISPLAY STRING.** They answer
+    different questions: one is what an expert should read in a drop log, the
+    other is whether two runs are the same matter. This function is the second,
+    it lives here so both the capture point and Stage 4 use the same one, and it
+    is deliberately not pretty — nothing renders it.
+
+    ``normcase`` because Windows paths differ in case and not in meaning;
+    ``abspath`` because a relative root and the absolute root it resolves to are
+    the same folder. Not ``resolve()``: that touches the filesystem and would
+    make the key depend on whether a network share happened to be mounted.
+    """
+    import os
+
+    return os.path.normcase(os.path.abspath(source_root))
+
+
+@dataclass(frozen=True, slots=True)
+class OmissionSnapshot:
+    """One expert-approved omission, as the run identity records it
+    (amendment A-19).
+
+    The A-08 argument, one level along. A-08 put profiles in the identity
+    because they decided which pages dropped; D-34 and D-35 move that decision
+    to an approval a person gives against a template family, so the approvals
+    are now the input that decides, and an identity that omits them says two
+    corpora are the same run when one of them is missing a section.
+
+    A snapshot rather than :class:`dociq.sections.model.ApprovedOmission`
+    itself, for the reason every other snapshot here is one — the identity needs
+    a fixed fingerprint, not a live object — and for a second reason particular
+    to this module: :mod:`dociq.sections` imports the contract, so the contract
+    cannot import it back.
+
+    Every field is hashed, ``approved_by`` and ``approved_at`` included. That is
+    deliberate and it narrows the determinism claim: two runs over one folder
+    that differ only in WHO approved the omission are not byte-identical,
+    because the drop log names the approver and the approver differs. Recording
+    the person is the whole of D-34; a claim that had to pretend otherwise would
+    be the wrong claim to keep.
+    """
+
+    family_id: str
+    approved_by: str
+    approved_at: str
+    matter: str
+    """The matter's NAME, for a human reading the log. Not what decides scope —
+    see :attr:`matter_root`."""
+
+    matter_root: str
+    """:func:`matter_key` of the source folder the approval was given on.
+
+    What actually decides whether a later run is the same matter. Separate from
+    :attr:`matter` because a display name is not an identity: two clients each
+    having a folder called `Production` is ordinary, and it made one client's
+    ruling apply to the other's record."""
+
+    template_id: str
+    template_version: str
+
+
 @dataclass(frozen=True, slots=True)
 class EffectiveLimits:
     """Every environment-controlled setting that can change output evidence
@@ -628,25 +825,70 @@ class RunConfig:
     must always populate it, and the manifest names it as part of the identity
     the byte-identical claim covers."""
 
+    omissions: tuple[OmissionSnapshot, ...] = ()
+    """Every omission an expert approved for this run, in the order the log
+    records them (amendment A-19).
+
+    This is the input that decides which pages drop. Under D-34 a template ships
+    unengaged and can never drop a page on its own, so the disposition of a
+    corpus is a function of these records and of nothing else in the profile
+    system. Leaving them out of the identity would reproduce, exactly, the
+    defect A-08 was raised to close: two runs over one folder, one of them
+    missing a section, reporting the same identity.
+
+    Empty is the ordinary state of a freshly-installed DocIQ and of every run
+    nobody has ruled on — recognition happens, nothing drops."""
+
+    project_tokens: tuple[str, ...] = ()
+    """Matter-specific tokens stripped from a section label before a template
+    family matches it (A-19).
+
+    In the identity because it changes the answer: with `MV32` supplied,
+    `MV32 APPENDICES` normalizes to the family `APPENDICES` and a rule keyed to
+    appendices matches it; without, it does not, and the page keeps. Same folder,
+    same approvals, different corpus — which is the definition of an identity
+    input.
+
+    Supplied per matter and never shipped, because a token list is a list of a
+    client's own names (D-24)."""
+
+    section_template_id: str | None = None
+    """The template the approvals were given against, and its version. Recorded
+    beside :attr:`omissions` rather than derived from them so that a run with no
+    approvals still says which template was loaded — the difference between "the
+    expert engaged nothing" and "no template was offered" is a fact about the
+    run, and only one of them is a decision."""
+
+    section_template_version: str | None = None
+
     profiles: tuple[ProfileSnapshot, ...] = ()
     """Every profile the run was given, **in precedence order** (A-08).
 
     ``profile_id``/``profile_version`` above name only the first one, and that
-    is not the input the run used. Stage 4 applies the FIRST profile whose
-    header patterns claim a document, so *every* profile's content and the
-    order they are tried in decide which pages drop — and therefore decide
-    ``clean_text``, the index, the sources map and the corpus hash.
+    is not the input the run used.
 
-    Two measured counterexamples, neither needing an attacker model:
+    **A profile no longer decides a disposition, and this docstring said
+    otherwise (D-35, 2026-08-17).** It read: *"Stage 4 applies the FIRST profile
+    whose header patterns claim a document, so every profile's content and the
+    order they are tried in decide which pages drop."* Stage 4 does not claim
+    documents and does not read a profile's rules; the engine that did is
+    deleted, and section dispositions come from a template family and an
+    expert's approval. A-08's two measured counterexamples were true of the
+    mechanism they were measured on and are left standing in this module's
+    version history as the record of why the field exists.
 
-    * edit a *second* profile's rule and do not bump its version — the recorded
-      identity did not move, the corpus hash did (2 pages KEEP → DROP);
-    * swap two profiles' precedence with no content change anywhere — same
-      result.
+    **What the field is now.** Profiles remain a hashed run INPUT: they are
+    loaded, snapshotted by content, copied into the matter folder and recorded
+    in the log. Keeping them in the identity is the conservative direction — it
+    can only make two runs look more different than they are — and a supplied
+    profile whose DROP rules no longer drop anything is reported by
+    :func:`dociq.pipeline._inert_profile_warnings` rather than silently ignored.
 
-    A tuple, because order is part of the input. Empty for an unprofiled run,
-    which is the ordinary case (§4 Stage 4: a document no profile claims passes
-    through whole)."""
+    The input that decides dispositions is :attr:`omissions`, and A-19 is the
+    amendment that put it here for exactly the reason A-08 put profiles here.
+
+    A tuple, because order was part of the input. Empty for an unprofiled run,
+    which is the ordinary case."""
 
     @property
     def ocr_conf_threshold(self) -> float:
@@ -986,6 +1228,7 @@ __all__ = [
     "CONTRACT_VERSION",
     "PageKind",
     "Disposition",
+    "RecognitionTier",
     "ProcessingStatus",
     "TerminalStatus",
     "IdRegime",

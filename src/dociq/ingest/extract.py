@@ -50,11 +50,16 @@ import os
 import re
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Sequence
 
 from ..contracts import ExtractionError, PageKind, PageRecord, ProcessingStatus
 from ..identify.bates import FOOTER_BLOCK_MAX_LINES
+from ..sections.model import SectionSpan
+from ..sections.resolve import resolve_sections
+from ..sections.tier1_outline import spans_from_outline
+from ..sections.tier3_pageclass import PageSignals
 from .pagemodel import M_OCR_BLANK, make_page, synthetic_pages
 
 # Tier 1 (§3) — extracted page by page.
@@ -155,12 +160,20 @@ TRANSIENT_MARKERS: tuple[str, ...] = (
 # cannot improve" and "disclose in prose that nothing downstream can find
 # mechanically", and the second is how these paths went unnoticed.
 
+M_SECTIONS = "section recognition failed for this document"
 M_EML_PARSE = "email envelope would not parse"
 M_ATTACH_SKIPPED = "attachment content was not brought in"
 
 FINAL_MARKERS: tuple[str, ...] = (
     M_EML_PARSE,
     M_ATTACH_SKIPPED,
+    # Section recognition is arithmetic over the document's own outline and the
+    # geometry of its pages. The same bytes yield the same answer, so a failure
+    # here is FINAL: a re-read cannot find an outline the file does not have.
+    # It is disclosed rather than swallowed because its silent form is the one
+    # that matters — a document whose recognition failed keeps every page,
+    # which looks exactly like a document with nothing to recognize.
+    M_SECTIONS,
     # Routed to OCR, engine ran, nothing came back. Defined in
     # :mod:`dociq.ingest.pagemodel` and imported here so it is classified with
     # the rest of the vocabulary rather than living outside it — the class
@@ -244,6 +257,20 @@ class ExtractedDoc:
     status: ProcessingStatus = ProcessingStatus.FULL
     error: str | None = None
 
+    spans: tuple[SectionSpan, ...] = ()
+    """Sections the document asserted about itself (Tiers 1 and 3).
+
+    Empty is the ordinary answer, not a failure: a format with no outline and no
+    recognizable page class places nothing, and every one of its pages keeps.
+    On the real corpus 29.61% of pages end up here.
+
+    Consumed by :func:`dociq.ingest.walker._record`, which stamps ``section``
+    and ``section_tier`` onto the pages each span covers. It is deliberately not
+    carried any further as a span: the frozen contract's records are what cross
+    the stage boundaries, and Stage 4 rebuilds the spans from the stamped pages
+    (:func:`dociq.sections.resolve.spans_from_pages`) so that a resumed run and
+    a fresh run see the same sections."""
+
 
 @dataclass
 class ExtractOptions:
@@ -262,6 +289,18 @@ class ExtractOptions:
 
     ocr_enabled: bool = True
     """Off only for tests that must exercise the native path in isolation."""
+
+    project_tokens: tuple[str, ...] = ()
+    """Matter-specific tokens stripped from a section label before a template
+    matches it — a vessel, a client, a yard.
+
+    Supplied per matter and NEVER defaulted to real project names: 30.5% of the
+    measured corpus's section vocabulary carries project-identifying text
+    (`MV32 APPENDICES`, `STATUS OF PETROBRAS TQ`), and D-24 forbids a Long
+    International template attributable to a corpus project. Empty is the safe
+    value in both directions — an unstripped label simply matches no family, and
+    a page whose family is unknown keeps.
+    """
 
     footer_reocr: bool = True
     """The D-25 targeted footer re-OCR.
@@ -1095,6 +1134,119 @@ def _photo_block(raw: bytes, n_pages: int,
 # ---------------------------------------------------------------------------
 # Per-format extractors — each returns a list of PageRecords
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Section recognition — Tiers 1 and 3, where the file is still in hand (D-35)
+# ---------------------------------------------------------------------------
+#
+# This runs here, at extraction, and nowhere later, for a reason that is about
+# availability rather than tidiness: Tier 1 reads the PDF's own outline and
+# Tier 3 measures the geometry of its pages, and by Stage 4 the bytes are gone —
+# the pipeline holds `DocumentRecord`s, not files. Recognition therefore has to
+# happen while the document is open, and its ANSWER travels forward stamped onto
+# the pages (`walker._record`), which is also what makes it survive a resumed
+# run.
+#
+# Nothing here decides a disposition. Every page this places gains a section and
+# a tier and stays KEEP; only an expert-approved omission can drop one (D-34).
+
+
+def _page_image_share(page) -> tuple[float, bool]:
+    """Share of one page covered by embedded raster images, and whether any
+    exist.
+
+    Transcribed from `tools/measure_sections.py`, deliberately including its
+    limitation: overlapping images are not de-overlapped, so the share is an
+    UPPER bound. That is the direction the probe measured Q3's figures with, and
+    the shipped engine has to agree with the measurement that justified it — a
+    tidier implementation here would silently invalidate 1,308 pages of
+    published number.
+    """
+    try:
+        rects = [page.get_image_bbox(info) for info in page.get_images(full=True)]
+    except Exception:
+        return 0.0, False
+    if not rects:
+        return 0.0, False
+    page_area = abs(page.rect.get_area())
+    if page_area <= 0:
+        return 0.0, True
+    covered = sum(abs(r.get_area()) for r in rects if r is not None)
+    return min(covered / page_area, 1.0), True
+
+
+def pdf_spans(
+    raw: bytes,
+    pages: Sequence[PageRecord],
+    *,
+    project_tokens: tuple[str, ...] = (),
+) -> tuple[SectionSpan, ...]:
+    """Every section span one PDF asserts about itself.
+
+    ``pages`` supplies the TEXT, and it is the pipeline's own extracted text —
+    native layer, OCR where there was none, footer band merged — not a second
+    reading taken from PyMuPDF. One reading of a document, for the same reason
+    the contract has one serializer: two readings drift, and the one that drifts
+    is invisible because both look right in isolation.
+
+    **Two honest differences from the probe that measured Q3, neither hidden.**
+    The probe classified Tier 3 only in documents whose outline is not
+    substantive; this classifies every page no Tier-1 span covers, including
+    pages inside an outlined document, so shipped Tier-3 reach is at or above
+    the measured 1,308 pages rather than equal to it. And the probe read
+    PyMuPDF's text where this reads the pipeline's, so a scanned page that the
+    probe saw as empty is classified here on its OCR text. Both differences make
+    this recognize MORE than the measurement did; neither can drop a page,
+    because dropping needs an approval.
+
+    Image geometry is measured only for pages Tier 1 did not place — 63.01% of
+    the corpus is placed by outline, and the geometry of those pages is work no
+    tier would read.
+    """
+    import fitz  # pymupdf
+
+    texts = {p.page_no: p.text for p in pages}
+    page_count = len(pages)
+    with fitz.open(stream=raw, filetype="pdf") as doc:
+        outline: list[tuple[str, int]] = []
+        for item in doc.get_toc(simple=True):
+            if len(item) < 3:
+                continue
+            _level, title, page1 = item[0], item[1], item[2]
+            # PyMuPDF reports an unresolved destination as -1. Dropped rather
+            # than coerced: a destination that does not resolve is exactly the
+            # case where a lookup would place a section on the wrong page, and
+            # a wrongly placed section is the failure D-35 exists to prevent.
+            if not isinstance(page1, int) or page1 < 1:
+                continue
+            outline.append((str(title), page1 - 1))
+
+        placed = spans_from_outline(
+            outline, page_count, project_tokens=project_tokens
+        )
+        covered = frozenset(
+            n for span in placed for n in range(span.start_page, span.end_page + 1)
+        )
+        signals: list[PageSignals] = []
+        for index in range(min(page_count, doc.page_count)):
+            page_no = index + 1
+            if page_no in covered:
+                continue
+            share, has_image = _page_image_share(doc[index])
+            signals.append(PageSignals(
+                page_no=page_no,
+                text=texts.get(page_no, ""),
+                has_image=has_image,
+                image_area_share=share,
+            ))
+
+    return resolve_sections(
+        outline=outline,
+        page_count=page_count,
+        signals=signals,
+        project_tokens=project_tokens,
+    )
 
 
 def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], list[str]]:
@@ -2037,4 +2189,25 @@ def extract(filename: str, raw: bytes,
     )
     status = (ProcessingStatus.PARTIAL_OCR_FLAGGED if flagged
               else ProcessingStatus.FULL)
-    return ExtractedDoc(pages=tuple(pages), notes=tuple(notes), status=status)
+
+    # Section recognition, for the one format that carries an outline (D-35,
+    # Tiers 1 and 3). It runs on the pages just built, so a scanned page is
+    # classified on the text OCR actually recovered rather than on the empty
+    # text layer it started with.
+    #
+    # FAIL-OPEN AND DISCLOSED. A document whose recognition raises keeps every
+    # page, which is the direction §1 requires — but it is indistinguishable
+    # from a document with nothing to recognize, so it must not be silent. The
+    # note is a FINAL marker: the same bytes cannot yield a different outline,
+    # so the serial retry would spend its budget re-proving the failure.
+    spans: tuple[SectionSpan, ...] = ()
+    if _ext(filename) == ".pdf" and pages:
+        try:
+            spans = pdf_spans(raw, pages, project_tokens=opt.project_tokens)
+        except Exception as exc:
+            notes.append(sanitize_message(
+                f"{M_SECTIONS}: {clip_message(str(exc), 200)}; no page in this "
+                "document was placed in a section, and every page is kept"))
+
+    return ExtractedDoc(pages=tuple(pages), notes=tuple(notes), status=status,
+                        spans=spans)

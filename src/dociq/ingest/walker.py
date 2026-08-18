@@ -43,6 +43,7 @@ from ..contracts import (
     PageKind,
     PageRecord,
     ProcessingStatus,
+    RecognitionTier,
     RunConfig,
     RunResult,
     canonical_json,
@@ -50,6 +51,8 @@ from ..contracts import (
     to_jsonable,
 )
 from ..runstate import COMPLETED, RunTermination, TerminalStatus
+from ..sections.model import SectionSpan
+from ..sections.resolve import section_for_page
 from . import extract as ex
 from .dating import detect_dates
 
@@ -631,6 +634,14 @@ def _page_from_jsonable(d: dict) -> PageRecord:
         ocr_conf=d["ocr_conf"], ocr_line_count=d["ocr_line_count"],
         ocr_low_conf_lines=d["ocr_low_conf_lines"], bates=d["bates"],
         section=d["section"], disposition=Disposition(d["disposition"]),
+        # A-18. `.get` rather than `[...]`: a page cached by a build that
+        # predates the amendment has no such key, and a KeyError there would
+        # turn "this cache is older than the field" into a dead run. The
+        # contract then refuses the record if `section` is set and this is not,
+        # which is the loud failure the safe default must not swallow.
+        section_tier=(
+            RecognitionTier(d["section_tier"]) if d.get("section_tier") else None
+        ),
         drop_rule=d["drop_rule"], notes=tuple(d["notes"]))
 
 
@@ -780,6 +791,32 @@ def _dated(pages: tuple[PageRecord, ...]) -> tuple[tuple[str, ...], tuple[str, .
     return tuple(seen), note
 
 
+def _stamped(pages: tuple[PageRecord, ...],
+             spans: tuple[SectionSpan, ...]) -> tuple[PageRecord, ...]:
+    """Write each span's section and tier onto the pages it covers (A-18).
+
+    This is where section recognition enters the contract, and it happens at
+    Stage 2 rather than at Stage 4 because it is a fact about the DOCUMENT, not
+    about the profile a run was driven by. Two consequences follow and both are
+    wanted: a run with no template and no approval still records what every page
+    is — which is exactly D-34's unengaged state, recognition only — and a
+    document replayed from the resume cache arrives already stamped, so a
+    resumed run and a fresh run put the same pages in the same sections.
+
+    Nothing here changes a disposition. Every page leaves KEEP; only
+    :func:`dociq.sections.apply.apply_sections`, holding an approval that names
+    a person, can turn one into a DROP.
+    """
+    if not spans:
+        return pages
+    out = []
+    for page in pages:
+        span = section_for_page(spans, page.page_no)
+        out.append(page if span is None
+                   else page.evolve(section=span.section, section_tier=span.tier))
+    return tuple(out)
+
+
 def _record(entry: FileEntry, filename: str, ext: str, size: int, sha: str,
             got: ex.ExtractedDoc, *, parent: str | None = None,
             order: int | None = None, rel_path: str | None = None,
@@ -792,7 +829,8 @@ def _record(entry: FileEntry, filename: str, ext: str, size: int, sha: str,
         doc_id="",  # Stage 3b (Track B) assigns it
         rel_path=rel_path if rel_path is not None else entry.rel_path,
         filename=filename, sha256=sha, size_bytes=size, ext=ext,
-        pages=got.pages, status=got.status, parent_doc_id=parent,
+        pages=_stamped(got.pages, got.spans), status=got.status,
+        parent_doc_id=parent,
         container_order=order, detected_dates=dates,
         profile_id=config.profile_id if config else None,
         profile_version=config.profile_version if config else None,
@@ -1238,7 +1276,8 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
         d.validate()
 
     opt = ex.ExtractOptions(conf_threshold=config.ocr_conf_threshold,
-                            scratch_dir=scratch, ocr_enabled=opts.ocr_enabled)
+                            scratch_dir=scratch, ocr_enabled=opts.ocr_enabled,
+                            project_tokens=config.project_tokens)
 
     replay = _load_resume(config) if opts.resume else {}
     journal = _ResumeWriter(config, opts.resume, append=bool(replay))

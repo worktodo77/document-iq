@@ -23,7 +23,22 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 GUI = SRC / "dociq" / "gui"
 BRANDING = SRC / "dociq" / "branding"
 
-FORBIDDEN = ("ingest", "identify", "docid", "profiles", "emit", "verify")
+FORBIDDEN = ("ingest", "identify", "docid", "profiles", "sections", "emit",
+             "verify")
+"""The freeze names five packages; ``sections`` is the sixth and it did not
+exist when the rule was written.
+
+Added by enumerating what the rule is FOR rather than what it lists. Every name
+here is a pipeline package the GUI must not reach into, and ``dociq.sections``
+is one — it holds the tier resolvers and ``apply_sections``, the function that
+decides whether a page is dropped. A rule that enumerates the packages present
+on the day it was written has its blind spot exactly where the codebase grew,
+which is the same shape as the ``A-11b`` reference pattern that could not match
+the one amendment nobody had checked.
+
+The GUI reaches an approval through :class:`dociq.gui.pipeline.OmissionApproval`,
+a seam record the adapter converts. That indirection is the rule being obeyed,
+not worked around."""
 
 
 def _package_of(path: Path) -> str:

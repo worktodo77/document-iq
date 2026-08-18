@@ -586,6 +586,13 @@ class SummaryScreen(QWidget):
     open_output_requested = Signal()
     handoff_requested = Signal()
     plan_changed = Signal(object)  # ReductionPlan
+    lever_engaged = Signal(str, bool)
+    """``(family_id, engaged)`` — a row the MODEL actually moved (D-34).
+
+    Emitted only after :meth:`ReductionPlan.with_toggled` has accepted the
+    change, so a locked row never reaches the window and never reaches the
+    approver capture. The window turns it into an approval; this screen does
+    not, because it has neither the pipeline nor the matter."""
 
     def __init__(self, theme: Theme, parent=None) -> None:
         super().__init__(parent)
@@ -778,9 +785,28 @@ class SummaryScreen(QWidget):
         self._route.setText(view.route_line())
 
     def _toggle_lever(self, key: str) -> None:
+        """A row was clicked. The MODEL decides whether it may move.
+
+        ``with_toggled`` ignores a locked row, so a recognized-and-never-offered
+        section cannot be engaged even if a future widget wires a click to it.
+        The screen then reports what the model did rather than what the click
+        asked for — which is why the emitted plan is read back out instead of
+        assumed.
+
+        The approver is captured by the window, not here: this screen has no
+        pipeline and no matter name, and a screen that could compose an approver
+        is a screen that could compose a fiction (D-34).
+        """
         if self._plan is None:
             return
-        self._plan = self._plan.with_toggled(key)
+        before = {lever.key: lever.engaged for lever in self._plan.levers}
+        plan = self._plan.with_toggled(key)
+        moved = [lever for lever in plan.levers
+                 if before.get(lever.key) != lever.engaged]
+        if not moved:
+            return
+        self._plan = plan
+        self.lever_engaged.emit(moved[0].family_id, moved[0].engaged)
         self.plan_changed.emit(self._plan)
 
     def mark_stale(self) -> None:
@@ -863,12 +889,18 @@ class DetailScreen(QWidget):
                                          Rule(self._theme))
 
 
-DISPOSITION_WORDS = ("DROP", "KEEP", "AUTOMATIC")
+DISPOSITION_WORDS = ("DROP", "KEEP", "AUTOMATIC", "KEPT")
 """Every value :meth:`ChecklistRow.disposition_word` can return.
 
 Enumerated so the column that holds them can be sized from the widest one. A
 test asserts this tuple is exhaustive — otherwise adding a fourth word would
 reintroduce the clipping this exists to prevent, silently.
+
+"KEPT" is A-20's ``LEVER_RECOGNIZED`` row: a section the template names and
+never offers. It arrived here late — the word existed in
+:data:`dociq.gui.view_models._LOCKED_DISPOSITION` only after that kind stopped
+being rendered as "AUTOMATIC" — and it is narrower than "AUTOMATIC", so the
+column width does not move.
 """
 
 
@@ -915,7 +947,10 @@ class ProfileChecklistScreen(QWidget):
         lay.addWidget(self._source)
         lay.addSpacing(UNIT)
 
-        lay.addWidget(SectionLabel("Sections this profile decides", theme))
+        # NOT "Sections this profile decides" (D-35). A profile decides nothing:
+        # these rows are the section template's families, identical for
+        # every profile including "no profile".
+        lay.addWidget(SectionLabel("Section types DocIQ recognizes", theme))
         lay.addWidget(Rule(theme, strong=True))
         self._rows = QWidget()
         self._rows_lay = QVBoxLayout(self._rows)

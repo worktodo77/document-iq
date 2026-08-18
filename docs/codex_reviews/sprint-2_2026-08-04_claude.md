@@ -102,7 +102,7 @@ Both `None` runs warned that a format **was detected and not applied**. Closed b
 ### 4. The reduction feature is smaller than the mockups implied, and the taxonomy says so
 Measured over 36 documents / 1,535 pages / 3.34M characters: schedule and activity tables are **33.9%** of corpus text; page furniture **8.0%**; TOC **5.4%**; **photographs 0.2%**. Our own Sprint-1 mockups advertised photo logs as the largest lever at −2.49M tokens; that was wrong by about two orders of magnitude, because a photo page carries almost no text. The honest reduction story is furniture + TOC (13.4%, largely automatic) plus schedule tables (33.9%, the expert's call under D-27) — and D-20 had already concluded by a different route that nothing makes a matter of this class fit direct context.
 
-On recognition: 40% of PDFs carry a **PDF outline** with a real section vocabulary, which is a lookup rather than an inference. Heading-text matching was **excluded on measurement** — it returns `FPSO ALMIRANTE BARROSO MV32` 1,017 times and `PETROBRAS` 981 times. It finds letterhead, not sections, and would have passed review.
+On recognition: ~~40% of PDFs~~ **[CORRECTED 2026-08-17: 29.866% of PDFs — but 63.016% of PAGES. The 40% was a 36-document sample; see `docs/verification/sections_2026-08-17.md` Q1.]** carry a **PDF outline** with a real section vocabulary, which is a lookup rather than an inference. Heading-text matching was **excluded on measurement** — it returns `FPSO ALMIRANTE BARROSO MV32` 1,017 times and `PETROBRAS` 981 times. It finds letterhead, not sections, and would have passed review.
 
 ---
 

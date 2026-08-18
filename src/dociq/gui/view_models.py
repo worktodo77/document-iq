@@ -27,6 +27,7 @@ from dociq.gui.pipeline import (
     DIRECT_CONTEXT_TOKENS,
     LEVER_AUTOMATIC,
     LEVER_EXPERT,
+    LEVER_RECOGNIZED,
     PackageResult,
     ProfileInfo,
     ReductionLever,
@@ -579,6 +580,30 @@ loud, in the one place a missing rule could hide.
 """
 
 
+_LOCKED_DISPOSITION = {
+    LEVER_AUTOMATIC: "AUTOMATIC",
+    LEVER_RECOGNIZED: "KEPT",
+}
+"""The word each LOCKED lever kind puts in the §6 checklist's first column.
+
+Total over every kind for which :attr:`ReductionLever.locked` is true, and
+subscripted rather than ``.get``, so a fifth kind raises here instead of being
+handed a word chosen for a different one. That is the A-3 remedy applied to a
+discriminator that is a ``str`` constant rather than an ``Enum`` — the AST
+tripwires in ``tests/test_terminal_status_rendering.py`` scan enums only, so
+this vocabulary has to be policed by the rendering tests in
+``tests/test_gui_screen_states.py``.
+
+**"KEPT", one letter from the expert's "KEEP", and deliberately.** They are
+near neighbours because they are near claims — both mean these pages stay — and
+they must not be the SAME word because the claims differ in the thing an expert
+needs: a "KEEP" row is his, and one click turns it into a DROP; a "KEPT" row is
+the template's refusal and no click can move it. The attribution sentence
+directly beneath each row carries the distinction in full; this column only has
+to stop them collapsing into one another.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class ChecklistRow:
     """One section rule, as the §6 checklist shows it.
@@ -603,16 +628,24 @@ class ChecklistRow:
         return self.lever.locked
 
     def disposition_word(self) -> str:
-        """DROP / KEEP for the expert's rules; AUTOMATIC for the tool's.
+        """DROP / KEEP for the expert's rules; AUTOMATIC and KEPT for the rest.
 
-        A locked row is engaged, so it *is* dropping — but rendering it as
+        An automatic row is engaged, so it *is* dropping — but rendering it as
         "DROP" in the same column and the same accent as a rule the expert
         approved merges the two kinds of omission at a glance, which is
         precisely what ``LEVER_AUTOMATIC`` and D-14 forbid. Only the first kind
         is the expert's to defend, and only the first kind may look like it.
+
+        **A kind -> word MAP, not ``if self.locked``.** :attr:`locked` is
+        ``kind != LEVER_EXPERT`` — a flattening of a three-valued discriminator,
+        which is finding A-3's shape one layer up from an enum. While
+        ``LEVER_AUTOMATIC`` was the only locked kind the branch was correct;
+        A-20 added ``LEVER_RECOGNIZED`` and it silently began printing
+        AUTOMATIC over sections that are KEPT and can never be dropped. A
+        subscript raises on a fourth kind instead of choosing a word for it.
         """
         if self.locked:
-            return "AUTOMATIC"
+            return _LOCKED_DISPOSITION[self.lever.kind]
         return "DROP" if self.dropped else "KEEP"
 
     @property
@@ -641,6 +674,28 @@ class ChecklistRow:
         Automatic rows are attributed to the tool instead, and say plainly that
         no expert approved them.
         """
+        if self.lever.kind == LEVER_RECOGNIZED:
+            # A-20's third kind, and the OPPOSITE claim to the one below. This
+            # branch did not exist: `locked` covered both kinds, so a section
+            # the template refuses to offer — the executive summary, the
+            # critical path narrative, the weather log, the timesheets — was
+            # attributed with "was removed mechanically by the tool. No expert
+            # approved this", about pages that are KEPT and that no approval can
+            # ever remove. Every clause of that sentence was false, on the one
+            # screen whose purpose is an expert approving omissions before a run
+            # commits to them.
+            #
+            # The family's own `rationale` is deliberately NOT rendered here.
+            # `expert_note()` is the field headed "in the expert's own words",
+            # and the rationale is the TEMPLATE's prose; putting it under that
+            # heading would be the tool composing an expert's reasoning, which
+            # is the one thing this screen exists to prevent. It reaches the
+            # reader on the summary waterfall's hint instead, in the tool's
+            # voice, where it belongs.
+            return (f"“{self.lever.label}” is recognized and never offered as "
+                    "an omission. The section template names it and refuses to "
+                    "offer it, so its pages are kept and there is nothing here "
+                    "to approve.")
         if self.locked:
             # NAMES THE CATEGORY, NEVER A MECHANISM. This read "Removed
             # mechanically by DocIQ — exact-hash duplicates and page furniture",
@@ -718,7 +773,28 @@ class ProfileChecklistView:
 
     @property
     def automatic_rows(self) -> tuple[ChecklistRow, ...]:
-        return tuple(r for r in self.rows if r.locked)
+        """Rows the TOOL removed. Keyed on the kind, not on ``locked``.
+
+        This read ``if r.locked`` and therefore swept in every
+        ``LEVER_RECOGNIZED`` row, which :meth:`automatic_summary` then added up
+        into "Separately, DocIQ removes N pages … mechanically" — a count of
+        pages DocIQ never touched, presented as a removal, beside the figure the
+        expert is signing for. Recognized sections are kept; they belong in
+        :attr:`recognized_rows` and in no total at all.
+        """
+        return tuple(r for r in self.rows if r.lever.kind == LEVER_AUTOMATIC)
+
+    @property
+    def recognized_rows(self) -> tuple[ChecklistRow, ...]:
+        """Sections the template names and refuses to offer (A-20).
+
+        Drawn, never totalled. They are on the screen so an expert can see that
+        DocIQ found the weather log and the timesheets and is not touching them
+        — a checklist that silently omitted them would let a reader believe the
+        record holds less than it does, which is the same argument the summary
+        waterfall makes for drawing its recognized rows.
+        """
+        return tuple(r for r in self.rows if r.lever.kind == LEVER_RECOGNIZED)
 
     @property
     def dropped_rows(self) -> tuple[ChecklistRow, ...]:
@@ -746,35 +822,68 @@ class ProfileChecklistView:
     def completeness_note(self) -> str:
         """Whether every rule this profile carries is on screen.
 
-        Four outcomes, all stated: a profile with no rules at all, rules that
-        could not be read, a count that agrees, and a count that does not. The
-        last is the dangerous one — the operator would otherwise approve a list
-        believing it was the whole list.
+        Two outcomes now, not four, and the two that went are the two that
+        counted a PROFILE's declared rules against the rows on screen. Those
+        rows are the TEMPLATE's families (D-35), so the comparison was between
+        unrelated numbers and its "do not run it" sentence fired on every
+        ordinary run — see :attr:`counts_agree` for what that cost and where the
+        guarantee went.
         """
         if self.keeps_everything:
+            # Restored deliberately. This branch is not about counting rules —
+            # it is the benign empty state, and its whole job is to be
+            # distinguishable from CHECKLIST_NO_RULES below. Dropping it while
+            # removing the count comparison would have merged "there is nothing
+            # to drop" with "what would be dropped could not be read", which is
+            # the one conflation this method exists to prevent.
             return ("This profile carries no section rules. Every page is "
                     "kept, and nothing is left out on its authority.")
         if self.empty:
             return CHECKLIST_NO_RULES
-        declared = self.profile.section_rules
-        shown = len(self.expert_rows)
-        if declared != shown:
-            return (
-                f"This profile declares {declared} section "
-                f"rule{'' if declared == 1 else 's'} but "
-                f"{shown} {'is' if shown == 1 else 'are'} shown here. Do not "
-                "run it until that is explained: a rule that is not on this "
-                "screen can still leave pages out."
-            )
+        offered = len(self.expert_rows)
+        kept = len(self.recognized_rows)
         return (
-            f"All {shown} section rule{'' if shown == 1 else 's'} this profile "
-            "carries are listed above. Nothing else is left out on the "
-            "profile's authority."
+            f"All {len(self.rows)} section "
+            f"type{'' if len(self.rows) == 1 else 's'} DocIQ recognizes are "
+            f"listed above: {offered} can be left out if you approve it, and "
+            f"{kept} {'is' if kept == 1 else 'are'} recognized and never "
+            "offered. Nothing is left out until you engage a lever and your "
+            "name is recorded against it."
         )
 
     @property
     def counts_agree(self) -> bool:
-        return self.profile.section_rules == len(self.expert_rows)
+        """Whether the screen showed everything the checklist is about.
+
+        **The subject of this comparison changed under D-35 and the comparison
+        had to change with it, or the screen breaks.** It read
+        ``self.profile.section_rules == len(self.expert_rows)`` — the PROFILE's
+        declared rule count against the rows shown. Once ``profile_rules`` began
+        describing the TEMPLATE those became two unrelated numbers (a profile
+        declaring 2 rules against 11 offerable families), so ``counts_agree`` was
+        permanently False, ``approvable`` was permanently False, and **"Use this
+        profile" was disabled on every path** behind a message telling the
+        operator that rules were being hidden from them. That is A-12 exactly —
+        the amendment behind which this product already shipped one permanently
+        disabled button — and it was found by an adversarial reviewer driving
+        the real screen, by no test.
+
+        What the old check protected against was an ADAPTER losing rules while
+        reading a profile off disk: a YAML file declaring five and rendering
+        three. A shipped template cannot fail that way at runtime — it is Python
+        that versions with the build, ``profile_rules`` iterates
+        ``template.families`` unconditionally, and ``SectionTemplate.validate()``
+        refuses duplicates. The runtime comparison has no second number left to
+        make.
+
+        **The guarantee moved rather than vanished, and the move is a change in
+        KIND that has to be stated rather than absorbed.** It is now a test
+        comparing the real adapter's rows against ``PROGRESS_REPORT.families`` —
+        a check at the layer where the risk actually lives, instead of one the
+        screen cannot perform. What remains here is the distinction that is
+        still live and still load-bearing: rules that could not be READ.
+        """
+        return not self.empty
 
     @property
     def approvable(self) -> bool:
@@ -786,7 +895,7 @@ class ProfileChecklistView:
         — and a button whose meaning is "I have seen what this drops" must then
         refuse.
         """
-        return self.keeps_everything or (not self.empty and self.counts_agree)
+        return self.keeps_everything or not self.empty
 
     def drop_summary(self) -> str:
         """The expert's side of the ledger, never merged with the tool's.

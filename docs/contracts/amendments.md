@@ -1231,3 +1231,279 @@ copy on a machine an operator uploads from is a retention problem and a
 confusion problem — a folder full of package-shaped files, ten minutes after
 they were told to drag one into a Project — and not a build failure. Calling it
 either of the other two would be wrong.
+
+## A-18 — `PageRecord` cannot carry HOW a page's section was recognized
+
+**Raised by:** D-35 and the Sprint-3 taxonomy build, 2026-08-17
+**Affects:** `dociq/contracts.py` — `RecognitionTier` (new), `PageRecord.section_tier`
+**Proposed severity:** MINOR as a type change (additive, safe default `None`);
+**MAJOR in one validation rule**, stated plainly below rather than buried.
+**Status:** **APPLIED** in `4092f76`, and the condition this entry set for
+itself is the one that was checked. It said the flip happens "in the commit that
+carries the tier into `processing_log.json`" — so the tier was put in front of a
+real log before the word changed. On an 8-page PDF whose outline names three
+sections, a run with the template loaded and NOTHING approved writes three
+`sections` entries, each carrying `t1_outline`, and drops zero pages.
+
+**That the unengaged run is the one that was checked is the point**, not an
+incidental choice of fixture. If the tier reached the log only through a drop
+entry, §5.4 would have been satisfied by exactly the runs that need it least and
+this field would be populated by no ordinary run — which is the A-12 shape, and
+is what "RAISED, NOT APPLIED" was guarding against for the one commit it stood.
+
+### The gap
+
+`docs/design/section_taxonomy.md` §5.4 has required the recognition tier per page
+since the day it was written:
+
+> "Dropped because the document's own outline placed this page in PROGRESS
+> PHOTOS" and "dropped because the page matched a photo-page rule" are different
+> claims with different strengths.
+
+There was nowhere to put it. `PageRecord` carried `section` and `drop_rule`, so
+the log could say *which rule* fired and never *what kind of evidence it rested
+on* — and the four tiers are explicitly not equally strong. §3 calls presenting
+them as though they were "the quiet lie in this feature". An expert defending an
+omission in cross-examination is making one of those two claims and needs to know
+which.
+
+### What lands
+
+`RecognitionTier` — `t1_outline`, `t2_toc`, `t3_page_class`, `t4_explicit`,
+ordered strongest first. The values are the audit vocabulary written to disk and
+are as immutable as a `rule_id`; `test_the_tier_values_are_the_stable_audit_vocabulary`
+pins them. `t2_toc` and `t4_explicit` are declared although Sprint 3 builds
+neither, so the log vocabulary does not change when they arrive.
+
+`PageRecord.section_tier`, defaulted to `None`, and a hashed identity input —
+unlike `ocr_conf`, it is a deterministic property of the document and the tier
+that read it, carries no float, and a run that recognized a page by a different
+tier genuinely produced different evidence.
+
+### The rule that is not merely additive
+
+Three validation rules land with the field. Two are symmetry (`section` without a
+tier is refused; a tier without a `section` is refused). The third is a real
+tightening:
+
+> **a DROP page must carry a `section_tier`.**
+
+Principle 1 already makes an unattributable *drop* impossible. Without this, an
+unattributable *tier* stayed possible — §5.4 would have been a docstring that
+some future construction site could satisfy by omission, and a guarantee that is
+optional is one that regresses silently. This is the same reasoning that made
+`SectionRule.validate()` refuse a DROP without notes, applied one level deeper.
+
+It is recorded as a tightening rather than an addition because it can break a
+caller: any code path constructing a DROP page without a tier now raises. In this
+build there is exactly one such path and D-35 deletes it.
+
+### What it does NOT do
+
+It does not record *which* rule matched — `drop_rule` already does — and it does
+not record the approver, which lives on `ApprovedOmission` in the matter folder
+rather than on a page.
+
+*(This paragraph ended "while this entry says RAISED it means it: the field is
+declared, the tiers produce it, and no run writes it to disk yet." It was true
+for one commit and false from `4092f76`, where the header above was flipped to
+APPLIED and this sentence was not — so the entry said both things at once.
+Codex, D-1. The tier now reaches `processing_log.json` on every run that
+recognizes anything, including a run that drops nothing.)*
+
+---
+
+## A-19 — the run identity does not cover the input that now decides which pages drop
+
+**Raised by:** D-34 and D-35, wiring the section taxonomy into the pipeline, 2026-08-17
+**Affects:** `dociq/contracts.py` — `OmissionSnapshot` (new), `RunConfig.omissions`,
+`RunConfig.project_tokens`, `RunConfig.section_template_id` / `_version`
+**Proposed severity:** MINOR (additive, safe defaults throughout)
+**Status:** **APPLIED** in `4092f76`. Measured before the word changed: adding
+one approval moves the run identity, and changing only the APPROVER moves it
+again.
+
+### The gap
+
+**This is A-08's finding, on the input that replaced the one A-08 was about.**
+
+A-08 put profiles into the run identity because profiles decided which pages
+dropped, and it did not argue the point — it measured it twice. Editing a second
+profile's rule without bumping its version moved two pages KEEP → DROP and left
+the recorded identity byte-identical. Swapping two profiles' precedence with no
+content change anywhere did the same.
+
+D-35 deletes that engine. D-34 moves the decision to an approval a person gives
+against a template family. So the deciding input is now
+`ApprovedOmission` — and for exactly as long as it took to wire it, that input
+sat outside the identity in precisely the way profiles had. Two runs over one
+folder, identical in every recorded term, one of them missing a section.
+
+The collision is not hypothetical here either; it is the default. A template
+ships unengaged (D-34), so the ordinary sequence is: run, look at the waterfall,
+engage a lever, run again. Those two runs differ in their corpus and, before
+this, in nothing the identity could see.
+
+### What lands
+
+`OmissionSnapshot` — `family_id`, `approved_by`, `approved_at`, `matter`,
+`template_id`, `template_version` — and `RunConfig.omissions` carrying an
+ordered tuple of them. A snapshot rather than `ApprovedOmission` itself for the
+reason `MasterIndexSnapshot` and `ProfileSnapshot` are snapshots, and for one
+particular to the module: `dociq.sections` imports the contract, so the contract
+cannot import it back.
+
+`RunConfig.project_tokens`, which is the easier one to miss. It changes which
+family a label normalizes to: supply `MV32` and `MV32 APPENDICES` matches an
+appendices rule; withhold it and the page keeps. Same folder, same approvals,
+different corpus.
+
+`RunConfig.section_template_id` and `section_template_version`, recorded even
+when nothing was approved — "the expert engaged nothing" and "no template was
+offered" are different facts about a run, and only one of them is a decision.
+
+### The consequence worth stating rather than burying
+
+**It narrows the determinism claim, and the narrowing is correct.** Two runs
+over one folder that differ only in *who* approved the omission are no longer
+byte-identical, because `approved_by` and `approved_at` are hashed. That is not
+a defect in the identity; it is D-34 being true. The drop log names the approver,
+so the bytes genuinely differ, and an identity that pretended otherwise would be
+claiming sameness about two records that say different things about who is
+answerable.
+
+### What it does NOT do
+
+It does not record the template's *content*. `ProfileSnapshot` carries a
+`profile_hash` because a profile is a file an expert edits between runs; a
+template is shipped Python that versions with the build, so its id and version
+are its content. If templates ever become loadable from disk, that stops being
+true and this needs a hash — recorded here so the next person does not have to
+rediscover why the asymmetry was deliberate.
+
+---
+
+### Extended at CONTRACT_VERSION 1.9.0 — `matter_root`, from Codex r3
+
+**The first version of this amendment scoped an approval by the matter's NAME,
+and a name is not an identity.** `OmissionSnapshot.matter` carried the folder's
+display name, and `C:/Client-A/Production` and `D:/Client-B/Production` are one
+string — so the first client's approval survived the matter change and dropped
+the second client's pages, through the real window path and through Stage 4.
+
+**The error was deriving a SCOPE KEY from a DISPLAY STRING.** They answer
+different questions — *"what should an expert read in the drop log"* and *"are
+these the same matter"* — and one field was doing both jobs. It is the same
+class as the finding before it, one layer along: that one was a field *recorded
+and never enforced*, this one was *enforced against the wrong thing*.
+
+**What lands:** `OmissionSnapshot.matter_root` and
+`dociq.contracts.matter_key()`. `matter` remains, demoted in its own docstring to
+the name a human reads. The key is `normcase(abspath(...))` — a Windows path
+differs in case and not in meaning, and a relative root is the same folder as the
+absolute one — and deliberately **not** `resolve()`, which touches the filesystem
+and would make the key depend on whether a network share happened to be mounted.
+
+`matter_key` is **one** derivation, shared by the capture point
+(`RealPipeline.set_omission`), by the window's retention filter
+(`MainWindow.start_run`) and by Stage 4 (`apply_sections`). Two derivations is
+what produced the defect, so it lives in the contract where neither side can
+grow its own. `ApprovedOmission.validate()` refuses an empty `matter_root`, and
+the capture point refuses to record an approval without the folder it is being
+approved on — a record nothing can check is how this class recurs.
+
+**Recorded as an extension rather than as a new amendment (A-21).** It is the
+same finding's field set corrected, not a new gap: A-19 exists to make the input
+that decides which pages drop part of the identity, and an approval that scoped
+wrongly was that input still not being covered correctly. A new number would have
+split one argument across two entries.
+
+
+---
+
+## A-20 — the waterfall seam cannot say a section is recognized and must never be offered
+
+**Raised by:** D-34 and D-35, wiring the D-14 picker, 2026-08-17
+**Affects:** `dociq/gui/pipeline.py` - `LEVER_RECOGNIZED` (new), `OmissionApproval`
+(new), `ReductionLever.family_id` / `risk` / `tier` / `approved_by`,
+`ReductionLever.locked`, `PipelineAPI.set_omission`, `RunRequest.approvals`
+**Proposed severity:** MINOR as a type change (additive, safe defaults); **MAJOR
+in one predicate**, stated plainly below.
+**Status:** **APPLIED** in `d3cee24`. Measured before the word changed: the
+shipped template's 19 families all reach the checklist, the 8 marked
+`offer=False` are refused by `with_toggled` at the model and by `set_omission`
+at the pipeline, and engaging an offered one returns a record stamped with a
+real account, time and matter.
+
+### The gap
+
+D-14 ruled that the waterfall rows ARE the section picker, so that the picture
+and the next action are the same object. D-34 then ruled that some sections are
+recognized and **never offered**: the shipped template marks eight of its
+nineteen families `offer=False` - the executive summary, the critical path
+narrative, the weather logs, the timesheets, the manpower histograms, the change
+log, the quality/NCR log, the action register. Section 4 grades every one of them
+HIGH risk.
+
+The seam had no way to say it. `ReductionLever` had two kinds, expert and
+automatic, and `locked` meant "automatic". A never-offered section is neither:
+it is not the tool's mechanical saving, and it is not the expert's to toggle.
+Without a third kind the picker would have offered a click that drops the
+weather log - on the screen D-16 made the single forward action.
+
+It also had nowhere to put the three facts an expert needs BEFORE clicking. Risk
+is the load-bearing one, and section 5.3 says why: risk is deliberately not
+correlated with size, so a waterfall sorted by saving puts a HIGH-risk row next
+to a large number and an easy click.
+
+### What lands
+
+`LEVER_RECOGNIZED`, and `ReductionLever` gains `family_id` (what an approval is
+given against), `risk`, `tier` (A-18's evidence strength, in front of the person
+deciding rather than only in the log afterwards) and `approved_by`.
+
+`OmissionApproval` crosses the seam, and `PipelineAPI.set_omission` is D-34's
+capture point. **The GUI never constructs an approval.** It asks the pipeline to
+record one and is handed the record back, so `approved_by` is the machine's
+answer to "who is running this" rather than a string a widget composed - a
+GUI-authored approver is precisely the fiction D-34 was ruled to prevent.
+
+`RunRequest.approvals` carries them into the next run, because engaging a lever
+changes no file: the corpus was written by the run that already finished, which
+is why the summary screen marks itself stale.
+
+### The change that is not merely additive
+
+> **`locked` widens from `kind == LEVER_AUTOMATIC` to `kind != LEVER_EXPERT`.**
+
+Written as "not expert" rather than as a list of locked kinds, because this
+predicate decides whether a page may be dropped and the safe direction is that
+the next kind added is locked until somebody deliberately unlocks it.
+
+**It broke something on the way in, and the break is worth recording because it
+is the shape of this whole amendment.** The waterfall widget split its rows on
+`locked`, so widening the predicate routed every recognized-never-offered
+section into the AUTOMATIC branch - whose row reads *"Removed mechanically by
+the tool, not by an expert decision"*. The eight families the template protects
+would have been drawn to the operator as REMOVED, in the place they go to check
+what happened to the corpus, while those pages were kept. A true statement
+turning false one layer away from where it was edited.
+
+Fixed with a fifth `WaterfallRow` kind rather than by re-narrowing `locked`.
+
+### Where the refusal lives
+
+At the model, twice, and not at the widget:
+
+* `ReductionPlan.with_toggled` ignores a locked row, so no screen can move one;
+* `RealPipeline.set_omission` refuses an unknown family AND a family with
+  `offer=False`, so a caller bypassing the screen is refused too.
+
+"The widget will not send it" is a hope about every future widget.
+
+### What it does NOT do
+
+It does not let the GUI reach `dociq.sections`. `OmissionApproval` is a seam
+record the adapter converts, and `tests/test_import_graph.py` now names
+`sections` in its FORBIDDEN list so the indirection is enforced rather than
+merely intended.

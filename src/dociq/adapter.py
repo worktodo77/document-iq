@@ -32,8 +32,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from dociq import pipeline as core
-from dociq.contracts import Disposition, RunResult
+from dociq.contracts import Disposition, RunResult, matter_key
 from dociq.gui.pipeline import (
+    LEVER_RECOGNIZED,
+    OmissionApproval,
     LEVER_EXPERT,
     BatesConfirm,
     BatesProposal,
@@ -56,8 +58,12 @@ from dociq.profiles.model import (
     FormatProfile,
     ProfileError,
     load_profile,
+    operator_stamp,
     profile_library_dir,
 )
+from dociq.sections.model import ApprovedOmission
+from dociq.sections.normalize import family_key
+from dociq.sections.templates import PROGRESS_REPORT, template_by_id
 from dociq.verify import tokens as vt
 
 __all__ = [
@@ -298,89 +304,91 @@ def _reconciliation(result: RunResult) -> Reconciliation | None:
     )
 
 
-def _section_lever(
+def _family_of(section: str, template, project_tokens: tuple[str, ...]):
+    """The template family a recognized section belongs to, or ``None``.
+
+    ``None`` is a real and common answer — 522 distinct section families were
+    measured in the real corpus against a template that names eighteen — and it
+    means the row is shown and cannot be engaged. Under §1's asymmetry that is
+    the correct direction: a section the template does not know is a section
+    nobody ruled on, and an unruled section keeps.
+    """
+    if template is None:
+        return None
+    key = family_key(section, project_tokens)
+    return None if key is None else template.classify(key)
+
+
+def _template_lever(
     name: str, tokens: int, pages: int, dropped_tokens: int, dropped_pages: int,
-    rules: dict[str, list],
+    *, family, tier: str, approval,
 ) -> ReductionLever:
-    """One waterfall row for one section, whatever fraction of it was dropped.
+    """One waterfall row for one recognized section (D-14, D-34, A-20).
 
-    **The defect this shape exists to prevent, confirmed before it was fixed.**
-    The engaged flag used to be ``dropped == pages`` and the lever always
-    carried the WHOLE section's figures. A section with some pages dropped and
-    some kept therefore drew as KEEP, and its entire token weight counted as
-    still present: on a three-page reproduction the waterfall reported 451
-    tokens remaining where the run had actually published 287. The waterfall and
-    ``tokens_after`` disagreed, and the row said the opposite of what happened.
+    Three outcomes, and which one applies is the template's to decide rather
+    than the screen's:
 
-    **It is reachable through an ordinary valid profile.** Only ``rule_id`` is
-    checked for uniqueness (:meth:`dociq.profiles.model.FormatProfile.validate`);
-    ``label`` is not, and Stage 4 keys a page's section on
-    ``rule.label or matched_text``. So one DROP rule and one KEEP rule sharing a
-    label — in one profile, or in two profiles claiming different documents —
-    put dropped and kept pages under the same section name. Constructed and run
-    before this was changed; it is not a phantom.
+    * **no family** — the template does not name this section. Recognized,
+      shown, not engageable.
+    * **family with** ``offer=False`` — the template names it and refuses to
+      offer it: the executive summary, the critical path narrative, the weather
+      log, the timesheets. Recognized, shown, not engageable. §4 grades these
+      HIGH risk and §1 is why the refusal is structural rather than advisory.
+    * **family with** ``offer=True`` — a lever, carrying its risk, its tier and
+      its rationale, engaged only if an approval names a person.
 
-    A lever means "what this removes when engaged", so a partly-dropped section
-    carries the DROPPED part's figures and is engaged. A section nothing was
-    dropped from carries the whole section's figures and is not engaged: that is
-    the projection "if you dropped this too". Both readings are then consistent
-    with ``ReductionPlan.remaining_tokens``.
-
-    The label says when a row is partial. ``ReductionLever`` has no field for it
-    and the seam is frozen; the label is the string every screen already renders
-    for a lever, so it is the one place the fact cannot be lost.
-
-    ``rule`` and ``note`` are the profile's own pattern and the expert's own
-    stated reason (A-11b). They are populated HERE from the rule that decided
-    the section, and they were populated nowhere before Codex review #2's
-    seam-population probe enumerated every field of every presentation record
-    and found them empty at every construction site in this module — the same
-    shape as B-3, one amendment older.
+    ``note`` is the family's own ``rationale`` — §5.3's stated cost, required on
+    every family precisely so this row can never be drawn without one. ``rule``
+    is the family's matching patterns, which is what A-11b asked for and what
+    the old profile pattern used to supply: what a drop actually catches, not
+    merely that a drop exists.
     """
-    rule, note = _rule_text(name, rules)
-    if dropped_pages == 0:
-        return ReductionLever(key=name, label=name, tokens=tokens, pages=pages,
-                              kind=LEVER_EXPERT, engaged=False,
-                              estimated=False, rule=rule, note=note)
-    label = name if dropped_pages == pages else (
-        f"{name} (part — {dropped_pages:,} of {pages:,} pages)")
-    return ReductionLever(key=name, label=label, tokens=dropped_tokens,
-                          pages=dropped_pages, kind=LEVER_EXPERT,
-                          engaged=True, estimated=False, rule=rule, note=note)
-
-
-def _section_rules(profiles: tuple[FormatProfile, ...]) -> dict[str, list]:
-    """Section name → every rule that could have produced it.
-
-    A LIST, not a rule. Stage 4 keys a page's section on ``rule.label or
-    matched_text`` and only ``rule_id`` is checked for uniqueness, so two rules
-    can share a section name — the documented partial case. Attributing one
-    rule's pattern and one expert's note to pages the other rule decided would
-    put words in an expert's mouth about an omission they did not approve, so
-    an ambiguous name yields nothing rather than a guess.
-    """
-    found: dict[str, list] = {}
-    for profile in profiles:
-        for rule in profile.section_rules:
-            found.setdefault(rule.label or rule.rule_id, []).append(rule)
-    return found
-
-
-def _rule_text(name: str, rules: dict[str, list]) -> tuple[str, str]:
-    """The verbatim pattern and note for a section, or ``("", "")``.
-
-    Empty is a state the checklist renders — "the profile stated no reason" —
-    and never a silent blank: an omission with no stated reason and an omission
-    whose reason was lost on the way to the screen must not look the same.
-    """
-    found = rules.get(name, ())
-    if len(found) != 1:
-        return "", ""
-    return found[0].pattern, found[0].notes or ""
+    if family is None or not family.offer:
+        label = name if family is None else family.display_name
+        return ReductionLever(
+            key=name, label=label, tokens=tokens, pages=pages,
+            kind=LEVER_RECOGNIZED, engaged=False, estimated=False,
+            family_id=family.family_id if family is not None else "",
+            risk=family.risk.value if family is not None else "",
+            tier=tier,
+            # Passed on this branch too. A family that is never OFFERED still
+            # has patterns, and they are what an expert reads to check that the
+            # right pages were recognized as the weather log; a blank here would
+            # be the A-11b defect on the eight rows where getting recognition
+            # wrong is most expensive. Empty only where there is genuinely no
+            # family, and that emptiness is a fact rather than a dropped field.
+            rule=" | ".join(family.patterns) if family is not None else "",
+            # Empty, and it is a FACT rather than a dropped field: this row can
+            # never be engaged, so no approval can exist for it and no name may
+            # appear against it. D-34 — the approver field never holds a
+            # fiction, and a recognized-never-offered section is the one row
+            # where a name would be the plainest fiction available.
+            approved_by="",
+            note=(family.rationale if family is not None else
+                  "Recognized, and no template family names this section — so "
+                  "there is nothing to approve and the pages are kept."),
+        )
+    engaged = approval is not None
+    shown_tokens, shown_pages = (
+        (dropped_tokens, dropped_pages) if dropped_pages else (tokens, pages)
+    )
+    label = family.display_name
+    if dropped_pages and dropped_pages != pages:
+        label = f"{label} (part — {dropped_pages:,} of {pages:,} pages)"
+    return ReductionLever(
+        key=name, label=label, tokens=shown_tokens, pages=shown_pages,
+        kind=LEVER_EXPERT, engaged=engaged, estimated=False,
+        family_id=family.family_id, risk=family.risk.value, tier=tier,
+        rule=" | ".join(family.patterns), note=family.rationale,
+        approved_by=approval.approved_by if approval is not None else "",
+    )
 
 
 def _plan(result: RunResult, before: TokenEstimate,
-          profiles: tuple[FormatProfile, ...] = ()) -> ReductionPlan | None:
+          profiles: tuple[FormatProfile, ...] = (),
+          *, template=None,
+          approvals: tuple[ApprovedOmission, ...] = (),
+          project_tokens: tuple[str, ...] = ()) -> ReductionPlan | None:
     """The D-14 waterfall, from figures this run counted.
 
     One lever per section a profile ruled on, and the lever's saving is the
@@ -407,6 +415,13 @@ def _plan(result: RunResult, before: TokenEstimate,
     # pages, AND the dropped part's. See below — the dropped part is what the
     # lever removes, and it is not always all of the section.
     sections: dict[str, list[int]] = {}
+    # The tier is per SECTION here, and a section recognized by two tiers in one
+    # corpus keeps the STRONGEST — sorting the enum values puts `t1_outline`
+    # ahead of `t3_page_class`, which is the order §3 states and the order the
+    # tiers are declared in. Showing the weaker one would overstate nothing and
+    # understate the evidence, but it would still be the wrong sentence on the
+    # row the expert is deciding from.
+    tiers: dict[str, set[str]] = {}
     for doc in result.documents:
         for page in doc.pages:
             if not page.section:
@@ -415,13 +430,22 @@ def _plan(result: RunResult, before: TokenEstimate,
             tok = vt.measure(page.text).pretokens
             row[0] += tok
             row[1] += 1
+            if page.section_tier is not None:
+                tiers.setdefault(page.section, set()).add(page.section_tier.value)
             if page.disposition is Disposition.DROP:
                 row[2] += tok
                 row[3] += 1
 
-    rules = _section_rules(profiles)
-    levers = tuple(_section_lever(name, *totals, rules=rules)
-                   for name, totals in sorted(sections.items()))
+    by_family = {a.family_id: a for a in approvals}
+    levers = []
+    for name, totals in sorted(sections.items()):
+        family = _family_of(name, template, project_tokens)
+        levers.append(_template_lever(
+            name, *totals, family=family,
+            tier="; ".join(sorted(tiers.get(name, ()))),
+            approval=by_family.get(family.family_id) if family else None,
+        ))
+    levers = tuple(levers)
     if not levers:
         return None
     return ReductionPlan(
@@ -549,9 +573,43 @@ class RealPipeline:
     """Implements :class:`dociq.gui.pipeline.PipelineAPI` against real runs."""
 
     def __init__(self, *, library_dir: str | Path | None = None,
-                 ocr_enabled: bool = True) -> None:
+                 ocr_enabled: bool = True,
+                 template_id: str = "progress-report",
+                 project_tokens: tuple[str, ...] = ()) -> None:
         self._library_dir = library_dir
         self._ocr_enabled = ocr_enabled
+        self._template = template_by_id(template_id) or PROGRESS_REPORT
+        """The section template every run of this adapter recognizes against.
+
+        Defaulted to the one template DocIQ ships rather than to ``None``,
+        because a template costs nothing to load and changes nothing on its own:
+        D-34 makes it structurally incapable of dropping a page. What it buys is
+        the checklist — recognized sections gain a name, a risk grade and a
+        stated cost — and withholding that by default would leave the reduction
+        feature invisible in the product that contains it."""
+
+        self._project_tokens = tuple(project_tokens)
+        """Matter tokens stripped before a family is matched (D-24).
+
+        Empty by default and supplied per matter. Never a list of real project
+        names living in the source: measured, 30.5% of the corpus's section
+        vocabulary carries project-identifying text, and a default here would
+        compile one client's vessel name into the product.
+
+        **NO SCREEN SETS THIS, and saying so is the point.** The parameter
+        reaches the run identity and the family matching; the setup screen has
+        no field for it, so in the shipped GUI it is always empty. That is the
+        A-12 shape — a capability declared, wired to the pipeline, and
+        unreachable by the operator — and A-12 is the amendment this project
+        shipped a permanently disabled button behind, so the gap is written down
+        rather than left to be found.
+
+        What it costs is bounded and it is in the safe direction: an unstripped
+        `MV32 APPENDICES` matches no family, and a section with no family keeps.
+        Measured, that is 30.5% of the vocabulary declining to match rather than
+        matching wrongly. Nothing is dropped that should not be; some things that
+        could be offered are not. Closing it is a setup-screen field and a
+        `RunRequest` entry, and it is named in the Sprint-3 handoff."""
         self.library_issues: tuple[str, ...] = ()
         """Profile files in the library that could not be read, with the reason.
 
@@ -578,6 +636,67 @@ class RealPipeline:
         a stand-in pipeline cannot be mistaken for a real one, and this is the
         real one."""
         return ""
+
+    def set_omission(
+        self, family_id: str, engaged: bool, matter: str, source_root: str = ""
+    ) -> OmissionApproval | None:
+        """Record or withdraw one expert-approved omission (D-34).
+
+        **This is the capture point the ruling names.** Until this call, the
+        template's contribution to a run is recognition and nothing else; after
+        it, a named person has approved an omission on a named matter at a named
+        time, and every drop-log line that omission produces will carry all
+        three.
+
+        The approver is :func:`dociq.profiles.model.operator_stamp`'s reading of
+        who is running the tool — the same stamp a saved profile carries, for
+        the same reason. It is never a parameter: a caller that could pass a
+        name could pass somebody else's.
+
+        Withdrawal returns ``None`` and leaves nothing behind. An approval that
+        was given and taken back before any run acted on it did not omit
+        anything, and a record of it would put a person's name against an
+        omission that never happened.
+
+        Refuses a family the loaded template does not define, and refuses one it
+        defines with ``offer=False``. The screen already locks those rows; this
+        is the same refusal at the layer a screen cannot reach past, because
+        "the widget will not send it" is not a guarantee, it is a hope about
+        every future widget.
+        """
+        if not engaged:
+            return None
+        family = self._template.family(family_id) if self._template else None
+        if family is None:
+            raise ProfileError(
+                f"no family {family_id!r} in template "
+                f"{self._template.template_id if self._template else '(none)'} "
+                "— an approval must name a section the template defines, or the "
+                "drop log would attribute an omission to a rule nobody wrote"
+            )
+        if not family.offer:
+            raise ProfileError(
+                f"family {family_id!r} is recognized and never offered "
+                f"({family.display_name}). {family.rationale}"
+            )
+        stamp = operator_stamp()
+        if not source_root.strip():
+            raise ProfileError(
+                "an omission cannot be approved without the folder it is being "
+                "approved on. The matter's NAME does not scope an approval — "
+                "two clients with a 'Production' folder are two matters and one "
+                "name — so a capture point with no root is one whose record "
+                "nothing can check."
+            )
+        return OmissionApproval(
+            family_id=family_id,
+            approved_by=stamp.username,
+            approved_at=stamp.saved_at,
+            matter=matter,
+            matter_root=matter_key(source_root),
+            template_id=self._template.template_id,
+            template_version=self._template.version,
+        )
 
     def profiles(self) -> tuple[ProfileInfo, ...]:
         """§6's library, plus :data:`NO_PROFILE`.
@@ -634,58 +753,57 @@ class RealPipeline:
         understates the case. See the verification note: the wording is Track
         E's to fix, and the number is not one I may invent.
         """
-        chosen = self._load(profile)
-        if chosen is None:
+        template = self._template
+        if template is None:  # pragma: no cover — a template always loads
             return (), TokenBasis(), ""
 
+        # THE ROWS ARE THE TEMPLATE'S, NOT THE PROFILE'S, and that is the
+        # correction D-35 forces on this screen. A profile's rules no longer
+        # decide anything: the engine that applied them is deleted. Rendering
+        # them here would put "DROP" beside a rule that drops nothing, on the
+        # one screen whose entire purpose is an expert approving omissions
+        # before a run commits to them — the most expensive place in the product
+        # to state a falsehood.
+        #
+        # `profile` is accepted and unused. It stays on the Protocol because the
+        # seam is shared and a screen still selects a profile for identity, the
+        # matter copy and the log; it simply no longer determines what is
+        # offered.
         levers: list[ReductionLever] = []
-        seen: set[str] = set()
-        for rule in chosen.section_rules:
-            # The section as a human names it — the checklist renders this as
-            # `section "<key>"` and an expert has to recognize it. Rule ids are
-            # for the audit trail, and are the fallback only when a label would
-            # be ambiguous, because two rows reading "Photo logs" would be two
-            # omissions the expert cannot tell apart.
-            name = rule.label or rule.rule_id
-            if name in seen:
-                name = f"{name} (rule {rule.rule_id})"
-            seen.add(name)
-            levers.append(
-                ReductionLever(
-                    key=name,
-                    label=name,
-                    tokens=0,
-                    pages=0,
-                    kind=LEVER_EXPERT,
-                    # A TOTAL lookup, not `is Disposition.DROP`. This is the
-                    # one place a Disposition is flattened into a bool that the
-                    # §6 checklist then renders as the WORD "DROP" or "KEEP"
-                    # (view_models.LeverRow.disposition_word). A third member
-                    # would arrive here as `False` and be printed to the expert
-                    # as "KEEP" — a rule they are signing off as harmless. Same
-                    # class as finding A-3; same discipline as
-                    # dociq.runstate.STATUS_PROSE.
-                    engaged=_LEVER_ENGAGED[rule.disposition],
-                    estimated=True,
-                    # A-11b's two fields, populated at last. This is the screen
-                    # the amendment was written for — §6's checklist, where an
-                    # expert approves an omission before the run commits to it —
-                    # and until Codex review #2's seam-population probe both
-                    # were left at their defaults here, so the checklist could
-                    # show only that a DROP rule existed, never what it catches
-                    # or who approved it.
-                    rule=rule.pattern,
-                    note=rule.notes or "",
-                )
-            )
+        for family in template.families:
+            levers.append(ReductionLever(
+                key=family.family_id,
+                label=family.display_name,
+                tokens=0,
+                pages=0,
+                # A family the template refuses to offer is a row that cannot be
+                # clicked, here as on the summary waterfall. Same rule, same
+                # layer, one screen earlier.
+                kind=LEVER_EXPERT if family.offer else LEVER_RECOGNIZED,
+                # Nothing is engaged. D-34: a template ships unengaged, every
+                # lever arrives OFF, and no approver exists until somebody acts.
+                engaged=False,
+                # Before a run there is nothing to count — these are the
+                # template's families, not this matter's pages.
+                estimated=True,
+                family_id=family.family_id,
+                risk=family.risk.value,
+                # No tier before a run: which tier will place a section is a
+                # property of the documents, and none have been read. Empty is
+                # the honest encoding and it is not a default slipped through —
+                # see the ruling in tests/test_seam_population.py.
+                tier="",
+                rule=" | ".join(family.patterns),
+                note=family.rationale,
+                approved_by="",
+            ))
 
         source = (
-            f"read from the profile library: {chosen.profile_id} "
-            f"v{chosen.version}"
-            + (f", saved by {chosen.created_by}" if chosen.created_by else "")
-            + (f" on {chosen.created_at}" if chosen.created_at else "")
-            + ". These are the profile's rules; no pages have been read for "
-            "this matter yet, so no row carries a page or token count."
+            f"the section template DocIQ ships: {template.template_id} "
+            f"v{template.version} — {template.display_name}. Every lever is OFF "
+            "and no omission is approved until you engage one and your name is "
+            "recorded against it. No pages have been read for this matter yet, "
+            "so no row carries a page or token count."
         )
         return tuple(levers), TokenBasis(), source
 
@@ -738,9 +856,28 @@ class RealPipeline:
     ) -> RunOutcome:
         """One real run of §4's six stages, reported as the GUI reads it."""
         profiles = self._profiles_for(request)
+        matter = Path(request.source_root).name
+        template = self._template
+        # The seam records become the pipeline's own, here and nowhere else.
+        # Every field travels: an approval that reached Stage 4 without its
+        # approver would be the half-record D-34 forbids, and
+        # `ApprovedOmission.validate()` refuses it rather than defaulting one.
+        approvals = tuple(
+            ApprovedOmission(
+                family_id=a.family_id,
+                approved_by=a.approved_by,
+                approved_at=a.approved_at,
+                matter=a.matter,
+                matter_root=a.matter_root,
+                template_id=a.template_id,
+                template_version=a.template_version,
+            )
+            for a in request.approvals
+        )
         config = config_from(self._without_sentinel(request))
         config = replace(
-            config, bates_pattern=stored_bates_pattern(request.output_root))
+            config, bates_pattern=stored_bates_pattern(request.output_root),
+            project_tokens=self._project_tokens)
         emitter = _Progress(on_progress)
 
         outcome = core.run(
@@ -755,6 +892,13 @@ class RealPipeline:
                 matter_name=Path(request.source_root).name,
                 master_index_path=request.master_index_path or None,
                 profiles=profiles,
+                # D-34/D-35. The template is what RECOGNIZES; the approvals are
+                # the only thing that can drop. With an empty approval set this
+                # run places every page it can in a section, records the tier,
+                # and omits nothing — which is the state a freshly-installed
+                # DocIQ is in and the state the shipped template arrives in.
+                template=template,
+                approvals=approvals,
                 # §4 Stage 3's confirmation, carried across the seam (A-14,
                 # rehearsal A4). Until this existed the GUI had no way to ask,
                 # so every GUI run left the decision PENDING and a Bates-stamped
@@ -785,8 +929,10 @@ class RealPipeline:
             # describe what an expert dropped from a corpus, and a cancelled run
             # has no corpus — the numbers would describe the fraction that
             # happened to be read before the operator pressed stop.
-            plan=(_plan(result, before, profiles) if outcome.published
-                  else None),
+            plan=(_plan(result, before, profiles, template=template,
+                        approvals=approvals,
+                        project_tokens=self._project_tokens)
+                  if outcome.published else None),
             termination=outcome.termination,
             published=outcome.published,
             # A-16. Carried across even though it describes a SUCCESS:

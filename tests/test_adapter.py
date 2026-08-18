@@ -12,6 +12,9 @@ proven by only one implementation is not proven.
 
 from __future__ import annotations
 
+from dociq.contracts import matter_key
+
+import ast
 import json
 from pathlib import Path
 
@@ -23,7 +26,9 @@ from dociq.gui.pipeline import (
     DIRECT_CONTEXT_TOKENS,
     LEVER_AUTOMATIC,
     LEVER_EXPERT,
+    LEVER_RECOGNIZED,
     ProfileInfo,
+    ReductionPlan,
     RunRequest,
     get_pipeline,
     set_pipeline,
@@ -36,6 +41,8 @@ from dociq.profiles.model import (
     dump_profile,
 )
 from dociq.runstate import TerminalStatus
+from dociq.sections.model import ApprovedOmission
+from dociq.sections.templates import PROGRESS_REPORT
 
 from .conftest import FIXTURES
 
@@ -78,9 +85,39 @@ def _write(library: Path, profile: FormatProfile) -> Path:
     return path
 
 
-def _request(tmp_path, name="out", profile=None, index=None) -> RunRequest:
+def _request(tmp_path, name="out", profile=None, index=None,
+             approvals=()) -> RunRequest:
     return RunRequest(str(FIXTURES), str(tmp_path / name),
-                      profile=profile, master_index_path=index)
+                      profile=profile, master_index_path=index,
+                      approvals=tuple(approvals))
+
+
+# The one family the fixture corpus actually exercises. `_scratch`-free and
+# measured rather than assumed: a run over tests/fixtures recognizes exactly two
+# sections — "Blank page" (blank-page) and "Photograph / figure page"
+# (progress-photographs) — both by Tier 3, both offered. Approving this one is
+# what turns 0 dropped pages into 3.
+FIXTURE_FAMILY = "progress-photographs"
+
+
+def _approval(family_id: str = FIXTURE_FAMILY,
+              approved_by: str = "j.long") -> ApprovedOmission:
+    """One expert-approved omission, built directly (D-34).
+
+    Used where the test is about ``_plan``'s arithmetic rather than about the
+    capture point. Where the capture point IS the subject, the approval comes
+    from :meth:`RealPipeline.set_omission` instead, so ``approved_by`` is the
+    machine's reading of who is running the tool and not a string a test wrote.
+    """
+    return ApprovedOmission(
+        family_id=family_id,
+        approved_by=approved_by,
+        approved_at="2026-08-17T00:00:00Z",
+        matter="the test matter",
+        matter_root=matter_key(str(FIXTURES)),
+        template_id=PROGRESS_REPORT.template_id,
+        template_version=PROGRESS_REPORT.version,
+    )
 
 
 def _run(pipe, request, cancel=lambda: False):
@@ -112,8 +149,15 @@ def test_a_missing_library_is_not_an_error(library, tmp_path):
 
 
 def test_the_rule_count_is_the_real_one(library):
-    """``section_rules`` is what the profile carries, not a placeholder: the
-    operator reads it to see whether a profile will remove anything."""
+    """``section_rules`` is what the profile carries, not a placeholder.
+
+    **Its stated purpose is withdrawn.** This read "the operator reads it to see
+    whether a profile will remove anything" — false since D-35: a profile
+    removes nothing, and that number was precisely what disabled the §6 approve
+    button while it was still being compared against the template's families.
+    The count is still worth asserting as a faithful reading of the file, which
+    is all it now claims to be.
+    """
     _write(library, MPR)
     offered = adapter.RealPipeline().profiles()
     real = [p for p in offered if p.profile_id == "mpr-test"]
@@ -148,19 +192,41 @@ def test_the_offered_order_is_deterministic(library):
 
 
 # ---------------------------------------------------------------------------
-# A-11's hook — §6's profiling checklist
+# A-11's hook — §6's approval checklist
+#
+# REPOINTED AT D-35 / D-34 (commits 4092f76, d3cee24). Every test in this block
+# used to assert that ``profile_rules`` rendered THE CHOSEN PROFILE'S OWN
+# SECTION RULES: one row per rule, a DROP rule arriving engaged, a KEEP rule
+# arriving off. That guarantee is withdrawn at its root — D-35 deleted
+# ``dociq.profiles.apply``, so a profile's DROP rule now drops nothing, and
+# drawing one beside the word DROP would state a falsehood on the one screen
+# whose entire purpose is an expert approving omissions before a run commits.
+#
+# What replaced it, and what these five tests now pin:
+#
+#   * the rows are the loaded SECTION TEMPLATE's families, not the profile's
+#     rules — ``profile`` is accepted and decides nothing;
+#   * every row arrives OFF and names no approver (D-34: a template ships
+#     unengaged and can never approve anything);
+#   * a family the template refuses to offer is a LOCKED row, one screen
+#     earlier than the summary waterfall and by the same rule;
+#   * every row carries its risk, its stated cost and its own patterns, which
+#     is A-11b's guarantee surviving the change of source.
 # ---------------------------------------------------------------------------
 
 
-def test_the_checklist_hook_lists_every_rule_the_profile_carries(library):
-    """FAIL-BEFORE: without ``profile_rules`` the real adapter renders Track E's
-    ``CHECKLIST_NO_RULES`` empty state, which **disables approval** — so §6's
-    profiling workflow cannot be completed against the real pipeline at all.
-    A-11 is now APPLIED (``docs/contracts/amendments.md``, 2026-08-01) and
+def test_the_checklist_lists_every_family_the_template_carries(library):
+    """REPOINTED from ``test_the_checklist_hook_lists_every_rule_the_profile_carries``.
+
+    A-11 is APPLIED (``docs/contracts/amendments.md``, 2026-08-01) and
     ``profile_rules`` is on ``PipelineAPI``; Track E still reaches it through the
     optional ``getattr`` hook, because the loud empty state is the right
-    behaviour for a stand-in that cannot supply the rules. Absent is no longer
-    the expected case — and it is not the case here.
+    behaviour for a stand-in that cannot supply the rows. Absent is not the
+    expected case, and it is not the case here.
+
+    The withdrawn half is the SOURCE of the rows. Where this once asserted
+    ``len(levers) == len(MPR.section_rules)`` and read a DROP rule as an engaged
+    lever, it now asserts the template's families, all of them, all off.
     """
     _write(library, MPR)
     pipe = adapter.RealPipeline()
@@ -168,78 +234,201 @@ def test_the_checklist_hook_lists_every_rule_the_profile_carries(library):
 
     levers, basis, source = pipe.profile_rules(chosen)
 
-    assert len(levers) == len(MPR.section_rules)
-    assert len(levers) == chosen.section_rules, (
-        "the checklist's completeness cross-check would fail: the profile "
-        "declares one count and the rows show another"
+    assert [le.key for le in levers] == [
+        f.family_id for f in PROGRESS_REPORT.families
+    ], "the checklist is not the template's families, in the template's order"
+
+    # D-34, and the reason this replaced "a DROP rule reads KEEP": there is no
+    # longer any input to this call that could make a row arrive engaged.
+    assert not any(le.engaged for le in levers), (
+        "a row arrived ON. A template ships unengaged; an omission exists only "
+        "once a person has approved it"
     )
-    by_key = {le.key: le for le in levers}
-    assert by_key["Progress narrative"].engaged is True, "a DROP rule reads KEEP"
-    assert by_key["Cover"].engaged is False, "a KEEP rule reads DROP"
-    assert all(le.kind == LEVER_EXPERT for le in levers)
+    assert not any(le.approved_by for le in levers), (
+        "the approver field holds a fiction — the exact failure D-34 was ruled "
+        "to prevent"
+    )
+
+    offered = {f.family_id for f in PROGRESS_REPORT.families if f.offer}
+    assert offered, "the shipped template offers nothing; the probe is vacuous"
+    assert {le.key for le in levers if le.kind == LEVER_EXPERT} == offered
+    assert {le.key for le in levers if le.kind == LEVER_RECOGNIZED} == (
+        {f.family_id for f in PROGRESS_REPORT.families} - offered
+    ), "a family the template refuses to offer is drawn as engageable"
+    # NOT `all(le.locked for ... if kind == LEVER_RECOGNIZED)`, which was here
+    # and is a tautology: `locked` is DEFINED as `kind != LEVER_EXPERT`, so it
+    # restates the filter. What is worth asserting is that the model refuses to
+    # move such a row — the property a screen depends on and a definition cannot
+    # give.
+    plan = ReductionPlan(full_tokens=1000, levers=tuple(levers))
+    for row in (le for le in levers if le.kind == LEVER_RECOGNIZED):
+        assert plan.with_toggled(row.key) == plan, (
+            f"{row.key}: a recognized-never-offered row moved when toggled"
+        )
+
+    # §5.3 / A-11b: every row says what it costs and what it catches.
+    assert all(le.risk for le in levers), "a row was drawn without its risk grade"
+    assert all(le.note for le in levers), "a lever offered without a stated cost"
+    assert all(le.rule for le in levers), "a row says a drop exists, not what it catches"
+
+    # Before a run there is nothing counted and no tier has placed anything.
     assert all(le.estimated for le in levers), (
         "a row with no measurement behind it was presented as counted"
     )
     assert all(le.tokens == 0 and le.pages == 0 for le in levers)
-    assert "mpr-test v1.0" in source and "no pages have been read" in source
+    assert all(le.tier == "" for le in levers), (
+        "a tier before a run — which tier places a section is a property of "
+        "documents, and none have been read"
+    )
+
+    assert f"{PROGRESS_REPORT.template_id} v{PROGRESS_REPORT.version}" in source
+    assert "no omission is approved" in source
+    assert "No pages have been read" in source
     assert basis.provenance == ""
 
 
-def test_the_checklist_hook_says_nothing_for_the_no_profile_choice(library):
+def test_the_no_profile_choice_gets_the_same_checklist(library):
+    """REPOINTED from ``test_the_checklist_hook_says_nothing_for_the_no_profile_choice``.
+
+    **The withdrawn claim.** Choosing :data:`adapter.NO_PROFILE` used to produce
+    ``levers == ()`` and ``source == ""``, and that was correct while the rows
+    were the profile's rules: NO_PROFILE has none. D-35 makes the rows the
+    template's, and the template loads whatever the operator picked — so "no
+    profile" no longer means "nothing is offered".
+
+    That is not a loss, and this asserts why: what protected the expert was
+    never the empty list, it was that nothing is ENGAGED and nobody is named.
+    That half is unchanged and is now checked on the choice most likely to be
+    read as "this run drops nothing".
+    """
     levers, _basis, source = adapter.RealPipeline().profile_rules(
         adapter.NO_PROFILE)
-    assert levers == ()
-    assert source == ""
 
-
-def test_two_rules_with_one_label_stay_two_rows(library):
-    """Two rows reading "Photo logs" are two omissions an expert cannot tell
-    apart — and the checklist keys its toggle on the row's key."""
-    clashing = FormatProfile(
-        profile_id="clash", version="1.0", display_name="Clashing labels",
-        section_rules=(
-            SectionRule("a", "AAA", disposition=Disposition.DROP,
-                        label="Photo logs", notes="test"),
-            SectionRule("b", "BBB", disposition=Disposition.DROP,
-                        label="Photo logs", notes="test"),
-        ),
+    assert [le.key for le in levers] == [
+        f.family_id for f in PROGRESS_REPORT.families
+    ], "the no-profile choice gets a different checklist from every other choice"
+    assert not any(le.engaged for le in levers)
+    assert not any(le.approved_by for le in levers)
+    assert PROGRESS_REPORT.template_id in source, (
+        "the screen names no source for rows it is asking an expert to approve"
     )
-    _write(library, clashing)
+
+
+def test_two_families_never_collapse_into_one_row(library):
+    """REPOINTED from ``test_two_rules_with_one_label_stay_two_rows``.
+
+    The hazard is unchanged and is worth restating: two rows an expert cannot
+    tell apart are two omissions he cannot tell apart, and the checklist keys
+    its toggle on the row's key. What changed is where the guarantee comes from.
+    A profile could carry two rules sharing a label — ``FormatProfile.validate``
+    enforces uniqueness on ``rule_id`` only — so the old test built one and
+    checked the adapter kept the rows distinct. A template cannot:
+    :meth:`SectionTemplate.validate` refuses a duplicate ``family_id`` outright,
+    and the row key IS the ``family_id``.
+
+    So this asserts the property on the SHIPPED template rather than on a
+    profile constructed to break it, and it asserts the display names too —
+    those are unenforced by ``validate`` and are the string an expert actually
+    reads.
+    """
+    _write(library, MPR)
     pipe = adapter.RealPipeline()
-    chosen = [p for p in pipe.profiles() if p.profile_id == "clash"][0]
+    chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
     levers, _b, _s = pipe.profile_rules(chosen)
-    assert len({le.key for le in levers}) == 2, [le.key for le in levers]
-    assert len(levers) == chosen.section_rules
+
+    keys = [le.key for le in levers]
+    assert len(set(keys)) == len(keys), (
+        f"two rows share a key, so one toggle would move both: {keys}")
+    labels = [le.label for le in levers]
+    assert len(set(labels)) == len(labels), (
+        f"two rows read the same words — two omissions an expert cannot tell "
+        f"apart: {sorted(labels)}")
+
+    # And the structural half, stated where it lives: a template that tried to
+    # ship a duplicate family would not load at all.
+    from dociq.sections.model import SectionTemplate, TemplateError
+
+    clashing = SectionTemplate(
+        template_id="clash", version="1", display_name="Clashing",
+        families=(PROGRESS_REPORT.families[0], PROGRESS_REPORT.families[0]),
+    )
+    with pytest.raises(TemplateError):
+        clashing.validate()
 
 
-def test_a_vanished_profile_does_not_silently_produce_an_empty_checklist(library):
-    """It raises; Track E's call site catches and renders the loud empty state,
-    which disables approval. An empty list returned quietly would read as "this
-    profile drops nothing"."""
+def test_a_vanished_profile_no_longer_empties_the_checklist(library):
+    """REPOINTED from ``test_a_vanished_profile_does_not_silently_produce_an_empty_checklist``.
+
+    **The withdrawn behaviour.** ``profile_rules`` used to re-read the profile
+    file and raise :class:`ProfileError` when it was gone, so Track E's call
+    site could render the loud empty state that disables approval; an empty list
+    returned quietly would have read as "this profile drops nothing".
+
+    D-35 removes the hazard rather than the guard. The rows come from a template
+    compiled into the build, so a profile file vanishing between the picker and
+    the checklist cannot empty it — there is no longer a state in which this
+    screen is silently blank. The consequence is asserted here, and the
+    remaining half of the old guarantee (a vanished profile must still not be
+    RUN) is asserted by
+    ``test_a_chosen_profile_that_vanished_stops_the_run``, which is unchanged
+    and still passes.
+    """
     _write(library, MPR)
     pipe = adapter.RealPipeline()
     chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
     (library / "mpr-test.v1.0.yaml").unlink()
 
+    levers, _basis, source = pipe.profile_rules(chosen)
+    assert len(levers) == len(PROGRESS_REPORT.families) > 0, (
+        "the checklist emptied when a profile file vanished — the state that "
+        "used to read as 'this drops nothing'")
+    assert PROGRESS_REPORT.template_id in source
+
+    # The run is still refused. The two screens answer different questions and
+    # only one of them depends on the file.
     with pytest.raises(ProfileError):
-        pipe.profile_rules(chosen)
+        pipe._profiles_for(_request(Path("."), profile=chosen))
 
 
-def test_the_checklist_and_the_run_read_one_file_through_one_parser(library):
-    """Same loader for both, so the rules an expert approved on screen are the
-    rules the run applies."""
+def test_the_checklist_and_the_run_offer_one_template(library):
+    """REPOINTED from ``test_the_checklist_and_the_run_read_one_file_through_one_parser``.
+
+    The guarantee is the same sentence with a different noun: what an expert is
+    offered on screen must be what the run can act on. It used to be enforced by
+    both paths reading one YAML file through one parser. D-35 moves the decision
+    off the profile entirely, so it is now enforced by both paths reading one
+    template object — ``RealPipeline._template`` — and by the adapter refusing an
+    approval for anything not on it.
+    """
     _write(library, MPR)
     pipe = adapter.RealPipeline()
     chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
     levers, _b, _s = pipe.profile_rules(chosen)
-    loaded = pipe._profiles_for(_request(Path("."), profile=chosen))
 
-    assert len(loaded) == 1
-    assert len(levers) == len(loaded[0].section_rules)
-    dropped_on_screen = {le.key for le in levers if le.engaged}
-    dropped_in_run = {r.label or r.rule_id for r in loaded[0].section_rules
-                      if r.disposition is Disposition.DROP}
-    assert dropped_on_screen == dropped_in_run
+    # Same rows for the profile choice and for no choice at all: the template
+    # is the source, so there is nothing for the two paths to disagree about.
+    assert [le.key for le in levers] == [
+        le.key for le in pipe.profile_rules(adapter.NO_PROFILE)[0]
+    ]
+
+    engageable = {le.key for le in levers if not le.locked}
+    assert engageable == {f.family_id for f in PROGRESS_REPORT.families if f.offer}
+
+    # Every row the screen says can be engaged, can be. Enumerated rather than
+    # sampled: one family silently unapprovable is a lever that does nothing.
+    for key in sorted(engageable):
+        approval = pipe.set_omission(key, True, "the test matter", str(FIXTURES))
+        assert approval is not None and approval.family_id == key
+        assert approval.template_id == PROGRESS_REPORT.template_id
+        assert approval.template_version == PROGRESS_REPORT.version
+        assert approval.approved_by, "an approval that names nobody (D-34)"
+
+    # And every row it locks is refused at the layer a widget cannot reach past.
+    for locked in sorted({le.key for le in levers} - engageable):
+        with pytest.raises(ProfileError):
+            pipe.set_omission(locked, True, "the test matter", str(FIXTURES))
+    with pytest.raises(ProfileError):
+        pipe.set_omission("no-such-family", True, "the test matter", str(FIXTURES))
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +816,12 @@ def test_bates_is_not_auto_confirmed_for_an_operator_run(tmp_path, library):
 
 @pytest.fixture
 def profiled(tmp_path, library):
+    """A real run with a profile chosen and NO omission approved.
+
+    D-34's shipped state: the template recognizes sections and nothing drops.
+    Named ``profiled`` still because the profile is still an input to the run —
+    it just no longer decides anything.
+    """
     _write(library, MPR)
     pipe = adapter.RealPipeline(ocr_enabled=False)
     chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
@@ -634,15 +829,72 @@ def profiled(tmp_path, library):
     return outcome
 
 
-def test_the_plan_is_built_from_counted_pages(profiled):
-    plan = profiled.plan
-    assert plan is not None, "a profile ran and produced no waterfall"
+@pytest.fixture
+def approved(tmp_path, library):
+    """The same run with one omission ENGAGED, through the seam's own capture
+    point.
+
+    :meth:`RealPipeline.set_omission` rather than a hand-built
+    :class:`ApprovedOmission`, because that is where D-34 says the approver is
+    read off the machine — a test that composed the name would prove the
+    plumbing and not the ruling.
+    """
+    _write(library, MPR)
+    pipe = adapter.RealPipeline(ocr_enabled=False)
+    chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
+    # The matter is derived the SAME WAY the run derives it — from the source
+    # folder — because that is now enforced. Codex's B-2 fix made an approval
+    # valid only on the matter it names, and this fixture had been stamping a
+    # hand-written string while the run computed its own: the approval was
+    # refused, three pages stopped dropping, and the disagreement surfaced here.
+    # A capture point and a run that derive the matter differently is the defect
+    # itself, not a test detail.
+    approval = pipe.set_omission(FIXTURE_FAMILY, True, FIXTURES.name, str(FIXTURES))
+    assert approval is not None
+    outcome, _ = _run(pipe, _request(tmp_path, "approved", chosen,
+                                     approvals=(approval,)))
+    return outcome, approval
+
+
+def test_the_plan_is_built_from_counted_pages(approved):
+    """REPOINTED at D-34/D-35, on two points.
+
+    **The fixture moved from ``profiled`` to ``approved``.** It asserted
+    ``plan.pages_dropped == profiled.result.pages_dropped``, and after D-35 both
+    sides are 0 for a run with no approval — the assertion held and measured
+    nothing. It is now made on a run where three pages actually dropped, so the
+    two figures can disagree.
+
+    **``all(lever.tokens > 0)`` is withdrawn.** It encoded "a profile only ruled
+    on sections that had text". Recognition rules on every section it can place,
+    and a recognized ``Blank page`` is worth one page and zero tokens — that is
+    the measurement, not a hole in it. ``pages > 0`` is the invariant that
+    survives: a row on the waterfall describes at least one real page.
+    """
+    outcome, approval = approved
+    plan = outcome.plan
+    assert plan is not None, "a run with recognized sections produced no waterfall"
     assert plan.levers
     assert all(not lever.estimated for lever in plan.levers), (
         "a counted saving was flagged as projected"
     )
-    assert all(lever.tokens > 0 for lever in plan.levers)
-    assert plan.pages_dropped == profiled.result.pages_dropped
+    assert all(lever.pages > 0 for lever in plan.levers), (
+        "a waterfall row describes no page"
+    )
+    assert plan.pages_dropped == outcome.result.pages_dropped > 0, (
+        "the waterfall and the run disagree about how many pages were omitted"
+    )
+    # The engaged row is the approved one, and it names the person who approved
+    # it. Nothing else on the waterfall does.
+    engaged = plan.engaged
+    assert [le.family_id for le in engaged] == [FIXTURE_FAMILY]
+    assert engaged[0].approved_by == approval.approved_by
+    assert all(not le.approved_by for le in plan.levers if le not in engaged)
+    # Every row states how the section was recognized (§5.4), because a run has
+    # now read documents and the tiers are a fact about them.
+    assert all(le.tier for le in plan.levers), (
+        "a row on the waterfall does not say how the section was recognized"
+    )
 
 
 def test_the_plan_and_the_headline_cannot_disagree(profiled):
@@ -683,12 +935,43 @@ def test_toggling_a_lever_still_reprojects_the_same_run(profiled):
     assert flipped.capacity == plan.capacity
 
 
-def test_a_run_with_no_profile_has_no_waterfall(real_run):
-    """``None`` means the screen shows the record at full size — which is the
-    truth for a corpus nothing was dropped from."""
+def test_a_run_with_no_approval_has_a_waterfall_that_drops_nothing(real_run):
+    """REPOINTED from ``test_a_run_with_no_profile_has_no_waterfall``.
+
+    **The withdrawn claim.** ``plan is None`` for a run with no profile, on the
+    reasoning that "``None`` means the screen shows the record at full size —
+    the truth for a corpus nothing was dropped from". A profile was then the
+    only thing that produced levers. D-35 makes the waterfall a RECOGNITION
+    waterfall: the shipped template names sections whether or not a profile was
+    chosen, so a plan exists for this run and ``None`` would now mean "no
+    section was recognized at all".
+
+    The sentence the old test was protecting — the screen must show the record
+    at full size when nothing was omitted — survives exactly, and is the
+    arithmetic below: no row engaged, no approver named, nothing dropped, and
+    ``remaining_tokens == full_tokens``. That is a stronger assertion than
+    ``plan is None``, because it would also catch a template that dropped a page
+    on its own, which is precisely what D-34 forbids and ``None`` could not see.
+
+    ``plan is None`` is still reachable and still asserted, for the case it now
+    means: a run that published nothing (see
+    ``test_a_cancelled_run_publishes_nothing_and_hands_over_no_figures``).
+    """
     outcome, _events, _root = real_run
-    assert outcome.plan is None
+    plan = outcome.plan
+    assert plan is not None, (
+        "a published run recognized no section at all — the fixture corpus "
+        "recognizes two, so this is a recognition regression, not an empty "
+        "waterfall")
+    assert plan.levers
+    assert plan.engaged == (), "a row is engaged and no one approved anything"
+    assert not any(le.approved_by for le in plan.levers), (
+        "the approver field holds a fiction (D-34)")
+    assert plan.pages_dropped == 0
     assert outcome.result.pages_dropped == 0
+    assert plan.remaining_tokens == plan.full_tokens, (
+        "the screen shows the record at less than full size for a corpus "
+        "nothing was omitted from")
 
 
 # ---------------------------------------------------------------------------
@@ -924,11 +1207,32 @@ def test_the_handoff_SCREEN_drives_the_real_adapter_end_to_end(real_run):
 # ``remaining_tokens`` overstated and the waterfall disagreed with
 # ``tokens_after``.
 #
-# CONSTRUCTED AND CONFIRMED BEFORE IT WAS FIXED, and reachable through an
-# ordinary valid profile: ``FormatProfile.validate`` enforces uniqueness on
-# ``rule_id`` only, and Stage 4 keys a page's section on
+# CONSTRUCTED AND CONFIRMED BEFORE IT WAS FIXED. It was then reachable through
+# an ordinary valid profile: ``FormatProfile.validate`` enforces uniqueness on
+# ``rule_id`` only, and the deleted Stage 4 keyed a page's section on
 # ``rule.label or matched_text`` — so one DROP rule and one KEEP rule sharing a
-# label put dropped and kept pages under the same section name. Not a phantom.
+# label put dropped and kept pages under the same section name.
+#
+# REPOINTED AT D-35 / D-34 (commits 4092f76, d3cee24). The block splits in two
+# and the halves moved differently, which is why this comment is longer than the
+# fix:
+#
+#   * The RENDERING guarantee is intact and still lives in
+#     ``adapter._template_lever``: a row whose section is only partly dropped
+#     carries the DROPPED part's figures and says "(part — N of M pages)". The
+#     three tests below still pin it, now through a template and an approval,
+#     because an approval is the only thing that can drop a page.
+#
+#   * The REACHABILITY claim is WITHDRAWN. ``apply_profiles`` — the function the
+#     old reachability test called — was deleted by 4092f76, and the engine that
+#     replaced it cannot produce the partial case: ``sections.apply`` drops
+#     every page of an approved span or none of them, and ``PageRecord.validate``
+#     refuses the one state that could split a section under one label (a page
+#     carrying a ``section`` without a ``section_tier``). So the partial branch
+#     in ``_template_lever`` is now DEFENSIVE rather than exercised, and saying
+#     so is the honest replacement for a test that asserted the opposite. The
+#     new all-or-nothing guarantee, plus the enumeration of every place in the
+#     package that can drop a page at all, are asserted below.
 
 
 def _partial_section_docs():
@@ -936,7 +1240,8 @@ def _partial_section_docs():
 
     pages = (
         page(1, "PHOTO LOG\n" + "alpha bravo charlie delta " * 40,
-             section="Photo logs", disposition=Disposition.DROP, drop_rule="r1"),
+             section="Photo logs", disposition=Disposition.DROP,
+             drop_rule=f"{PROGRESS_REPORT.template_id}:{FIXTURE_FAMILY}"),
         page(2, "PHOTO LOG\n" + "echo foxtrot golf hotel " * 40,
              section="Photo logs"),
         page(3, "NARRATIVE\n" + "india juliet kilo " * 40, section="Narrative"),
@@ -944,7 +1249,14 @@ def _partial_section_docs():
     return document("a.pdf", pages, doc_id="LI-1"), pages
 
 
-def _plan_for(doc, pages):
+def _plan_for(doc, pages, approvals=(FIXTURE_FAMILY,)):
+    """``_plan`` over one hand-built document.
+
+    ``template=`` and ``approvals=`` are now required to get an ENGAGEABLE row
+    at all: without a template every section is a locked ``LEVER_RECOGNIZED``
+    row, and without an approval no family is engaged. That is D-34 showing
+    through the unit boundary, not a test detail.
+    """
     from dociq.gui.pipeline import TokenEstimate
     from dociq.verify import tokens as vt
 
@@ -952,17 +1264,30 @@ def _plan_for(doc, pages):
         documents = (doc,)
 
     total = sum(vt.measure(p.text).pretokens for p in pages)
-    return adapter._plan(_Result, TokenEstimate(
-        chars=0, ratio_low=3.3, ratio_high=3.6, structural_tokens=total))
+    return adapter._plan(
+        _Result,
+        TokenEstimate(chars=0, ratio_low=3.3, ratio_high=3.6,
+                      structural_tokens=total),
+        template=PROGRESS_REPORT,
+        approvals=tuple(_approval(f) for f in approvals),
+    )
 
 
 def test_a_partly_dropped_section_is_not_drawn_as_kept():
     """FAIL-BEFORE: ``engaged`` False, ``pages`` 2, ``tokens`` 328 — the row
-    said the whole section survived, and one of its pages had not."""
+    said the whole section survived, and one of its pages had not.
+
+    REPOINTED: the section is now recognized as the template family
+    ``progress-photographs`` and engaged because an approval names it, so the
+    row's LABEL is the family's matter-neutral display name (D-24) while the
+    document's own words survive as the row's ``key``. The partial marker is
+    asserted on the label exactly as before.
+    """
     doc, pages = _partial_section_docs()
     lever = next(le for le in _plan_for(doc, pages).levers
                  if le.key == "Photo logs")
     assert lever.engaged, "a section with dropped pages is dropping"
+    assert lever.family_id == FIXTURE_FAMILY
     assert lever.pages == 1, "the lever removes the DROPPED pages, not all of them"
     assert "part" in lever.label and "1 of 2 pages" in lever.label
 
@@ -984,52 +1309,164 @@ def test_the_waterfall_agrees_with_what_the_run_actually_published():
 def test_a_wholly_dropped_and_a_wholly_kept_section_are_unchanged():
     """The fix must not move the two cases that were already right, and the
     label must stay clean for them — "(part — 2 of 2)" on a full drop would be
-    noise that trains the reader to skip the marker."""
+    noise that trains the reader to skip the marker.
+
+    REPOINTED on the KEPT row's label. "Narrative" matches no family the shipped
+    template names, so it is a recognized, LOCKED row and keeps the document's
+    own words. The wholly-dropped row is a family and reads as the family —
+    ``Progress photographs``, not ``Photo logs`` — which is D-24 deliberately:
+    the label an expert approves against is matter-neutral, and what the
+    document itself called the section is preserved on ``key`` and in the drop
+    log.
+    """
     doc, pages = _partial_section_docs()
     levers = {le.key: le for le in _plan_for(doc, pages).levers}
     kept = levers["Narrative"]
     assert not kept.engaged and kept.pages == 1 and kept.label == "Narrative"
+    assert kept.kind == LEVER_RECOGNIZED and kept.locked, (
+        "a section the template names no family for was drawn as engageable"
+    )
 
     from tests.fixtures import document, page
 
     both_dropped = (
         page(1, "PHOTO LOG\nx " * 30, section="Photo logs",
-             disposition=Disposition.DROP, drop_rule="r1"),
+             disposition=Disposition.DROP,
+             drop_rule=f"{PROGRESS_REPORT.template_id}:{FIXTURE_FAMILY}"),
         page(2, "PHOTO LOG\ny " * 30, section="Photo logs",
-             disposition=Disposition.DROP, drop_rule="r1"),
+             disposition=Disposition.DROP,
+             drop_rule=f"{PROGRESS_REPORT.template_id}:{FIXTURE_FAMILY}"),
     )
     d2 = document("b.pdf", both_dropped, doc_id="LI-2")
     lev = _plan_for(d2, both_dropped).levers[0]
-    assert lev.engaged and lev.pages == 2 and lev.label == "Photo logs"
+    assert lev.engaged and lev.pages == 2
+    assert lev.label == "Progress photographs", (
+        "a wholly dropped section carries the partial marker, or lost its "
+        "family name")
+    assert "part" not in lev.label
 
 
-def test_the_partial_case_is_reachable_from_a_valid_profile():
-    """Reachability, not a claim about it. Two rules sharing a label and
-    disagreeing about disposition — a profile that ``validate`` accepts."""
-    from dociq.profiles.apply import apply_profiles
+def test_a_recognized_family_nobody_approved_is_drawn_off(library):
+    """D-34 at the same unit boundary — the state the partial-case tests can no
+    longer reach.
+
+    New with this repointing, and it is the assertion the old ``engaged ==
+    (dropped == pages)`` rule made impossible to write: a section the template
+    names, offers, and could drop must still draw OFF, with no approver, when
+    nobody approved it. Under the old rule "nothing dropped" and "nothing
+    approved" were the same fact; under D-34 they are two, and only one of them
+    is a decision.
+    """
     from tests.fixtures import document, page
 
-    profile = FormatProfile(
-        profile_id="mpr", version="1", display_name="MPR",
-        header_patterns=("MONTHLY PROGRESS",),
-        section_rules=(
-            SectionRule(rule_id="drop_photos", pattern="^PHOTO LOG",
-                        disposition=Disposition.DROP, label="Appendices",
-                        notes="Photo logs dropped per J. Long, 2026-08-01"),
-            SectionRule(rule_id="keep_drawings", pattern="^DRAWING LIST",
-                        disposition=Disposition.KEEP, label="Appendices"),
-        ),
+    pages = (
+        page(1, "PHOTO LOG\nalpha bravo " * 20, section="Photo logs"),
+        page(2, "PHOTO LOG\ncharlie delta " * 20, section="Photo logs"),
     )
-    profile.validate()
-    doc = document("m.pdf", (
-        page(1, "MONTHLY PROGRESS REPORT"),
-        page(2, "PHOTO LOG\nsite photos"),
-        page(3, "DRAWING LIST\ndrawings"),
-    ), doc_id="LI-1")
-    out = apply_profiles((doc,), (profile,)).documents[0]
-    sections = {(p.section, p.disposition) for p in out.pages if p.section}
-    assert ("Appendices", Disposition.DROP) in sections
-    assert ("Appendices", Disposition.KEEP) in sections
+    doc = document("c.pdf", pages, doc_id="LI-3")
+    lever = _plan_for(doc, pages, approvals=()).levers[0]
+
+    assert lever.family_id == FIXTURE_FAMILY
+    assert lever.kind == LEVER_EXPERT, "an offered family was locked"
+    assert not lever.engaged, "a lever nobody engaged is dropping pages"
+    assert lever.approved_by == "", "an omission attributed to nobody (D-34)"
+    assert lever.pages == 2, "an unengaged row must still show the whole section"
+
+
+def test_the_only_drop_site_drops_a_whole_span():
+    """REPOINTED from ``test_the_partial_case_is_reachable_from_a_valid_profile``.
+
+    That test proved the partial case REACHABLE through
+    ``dociq.profiles.apply.apply_profiles``, which commit 4092f76 deleted. It is
+    not repointed at an equivalent — there is no equivalent, and asserting one
+    would be inventing a guarantee. What replaced the reachability is the
+    opposite property, and it is worth more: the single site that can drop a
+    page drops an approved span WHOLE, so a section cannot come out of the
+    pipeline half-omitted at all.
+
+    That is D-35's own sentence made checkable — "a drop is bounded by the span
+    that caused it" — with both ends measured: nothing inside the span survives,
+    and nothing outside it is touched.
+    """
+    from dociq.contracts import RecognitionTier
+    from dociq.sections.apply import apply_sections
+    from dociq.sections.resolve import spans_from_pages
+    from tests.fixtures import document, page
+
+    pages = (
+        page(1, "COVER\ntitle"),
+        page(2, "PHOTO LOG\nsite photos one",
+             section="Photo logs", section_tier=RecognitionTier.PAGE_CLASS),
+        page(3, "PHOTO LOG\nsite photos two",
+             section="Photo logs", section_tier=RecognitionTier.PAGE_CLASS),
+        page(4, "DRAWING LIST\ndrawings",
+             section="Drawing list", section_tier=RecognitionTier.PAGE_CLASS),
+    )
+    doc = document("m.pdf", pages, doc_id="LI-1")
+
+    spans = spans_from_pages(doc.pages)
+    result = apply_sections(doc, spans, template=PROGRESS_REPORT,
+                            approvals=(_approval(),),
+                            matter_root=str(FIXTURES))
+    out = result.documents[0]
+    by_no = {p.page_no: p for p in out.pages}
+
+    assert by_no[2].disposition is Disposition.DROP
+    assert by_no[3].disposition is Disposition.DROP, (
+        "the span's last page survived — a section came out half-omitted")
+    assert by_no[1].disposition is Disposition.KEEP
+    assert by_no[4].disposition is Disposition.KEEP, (
+        "the drop reached past its span, which is the D-35 defect exactly")
+
+    # No section name carries both dispositions: the partial case, refused.
+    by_section: dict[str, set] = {}
+    for p in out.pages:
+        if p.section:
+            by_section.setdefault(p.section, set()).add(p.disposition)
+    assert all(len(v) == 1 for v in by_section.values()), by_section
+
+    # Every drop is attributed to the person who approved it.
+    assert {d.page_no for d in result.drops} == {2, 3}
+    assert all(d.approved_by == "j.long" for d in result.drops)
+    assert all(d.tier is RecognitionTier.PAGE_CLASS for d in result.drops)
+
+
+def test_no_second_place_in_the_package_can_drop_a_page():
+    """The class assertion behind the one above, enumerated rather than asserted.
+
+    ``test_the_only_drop_site_drops_a_whole_span`` is worth nothing if a second
+    site can also set ``Disposition.DROP`` — the D-35 engine WAS such a site, and
+    it lived beside the honest one for a whole sprint. So this enumerates every
+    keyword assignment of ``Disposition.DROP`` in the shipped package and pins
+    the result, which means a third one has to be argued for here before it can
+    exist.
+    """
+    import dociq
+
+    root = Path(dociq.__file__).resolve().parent
+    sites: set[str] = set()
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.keyword) and node.arg == "disposition"):
+                continue
+            if any(isinstance(n, ast.Attribute) and n.attr == "DROP"
+                   for n in ast.walk(node.value)):
+                sites.add(path.relative_to(root).as_posix())
+
+    assert sites == {
+        # The one drop site in the pipeline (D-34/D-35). It requires an
+        # ApprovedOmission naming a person and is bounded by a span.
+        "sections/apply.py",
+        # The Sprint-1 stand-in behind the seam, which fabricates a corpus to
+        # exercise the GUI and never touches an evidence file. It is not the
+        # pipeline and `disclosure()` says so on screen.
+        "gui/mock_pipeline.py",
+    }, (
+        f"a second place can drop a page: {sorted(sites)}. Every drop must go "
+        f"through an ApprovedOmission, or Principle 3's separation between the "
+        f"tool's reductions and the expert's omissions is gone."
+    )
 
 
 # --- B5: UploadPackage.missing must not be dropped on the floor -------------
