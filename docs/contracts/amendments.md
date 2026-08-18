@@ -1381,6 +1381,43 @@ are its content. If templates ever become loadable from disk, that stops being
 true and this needs a hash — recorded here so the next person does not have to
 rediscover why the asymmetry was deliberate.
 
+---
+
+### Extended at CONTRACT_VERSION 1.9.0 — `matter_root`, from Codex r3
+
+**The first version of this amendment scoped an approval by the matter's NAME,
+and a name is not an identity.** `OmissionSnapshot.matter` carried the folder's
+display name, and `C:/Client-A/Production` and `D:/Client-B/Production` are one
+string — so the first client's approval survived the matter change and dropped
+the second client's pages, through the real window path and through Stage 4.
+
+**The error was deriving a SCOPE KEY from a DISPLAY STRING.** They answer
+different questions — *"what should an expert read in the drop log"* and *"are
+these the same matter"* — and one field was doing both jobs. It is the same
+class as the finding before it, one layer along: that one was a field *recorded
+and never enforced*, this one was *enforced against the wrong thing*.
+
+**What lands:** `OmissionSnapshot.matter_root` and
+`dociq.contracts.matter_key()`. `matter` remains, demoted in its own docstring to
+the name a human reads. The key is `normcase(abspath(...))` — a Windows path
+differs in case and not in meaning, and a relative root is the same folder as the
+absolute one — and deliberately **not** `resolve()`, which touches the filesystem
+and would make the key depend on whether a network share happened to be mounted.
+
+`matter_key` is **one** derivation, shared by the capture point
+(`RealPipeline.set_omission`), by the window's retention filter
+(`MainWindow.start_run`) and by Stage 4 (`apply_sections`). Two derivations is
+what produced the defect, so it lives in the contract where neither side can
+grow its own. `ApprovedOmission.validate()` refuses an empty `matter_root`, and
+the capture point refuses to record an approval without the folder it is being
+approved on — a record nothing can check is how this class recurs.
+
+**Recorded as an extension rather than as a new amendment (A-21).** It is the
+same finding's field set corrected, not a new gap: A-19 exists to make the input
+that decides which pages drop part of the identity, and an approval that scoped
+wrongly was that input still not being covered correctly. A new number would have
+split one argument across two entries.
+
 
 ---
 
