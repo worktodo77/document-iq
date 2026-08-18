@@ -78,6 +78,45 @@ than a foundation to extend.
 
 | D-35 | The shipped Stage-4 engine drops the wrong pages, as a class | **REPLACE IT WITH TIER-BASED SPANS (Alex, 2026-08-17).** `profiles/apply.py` matches a rule's regex against every line of every page and carries the matched section forward until another rule matches — so a rule fires on any line that merely *mentions* its section, and the carried state then governs every following page. Reproduced on **five trigger shapes** with a single DROP rule for `PROGRESS PHOTOGRAPHS`: the document's own table of contents, a body-text cross-reference, a transmittal listing enclosures, an appendix cover sheet, and — the worst, needing no confusing text at all — **a CORRECT first match where no later rule marks the section's end**, which runs the drop to the end of the document. The pages lost in the reproductions are the **executive summary, the critical path narrative, the weather log and the timesheets**, four of the categories §4 grades HIGH risk, and the drop log attributes every one of them to `PROGRESS PHOTOGRAPHS` — an audit trail that is complete and is a misdescription. This inverts §1's binding asymmetry: the recognizer does not miss a section, it **invents** one. Ruling: section resolution moves to Tier 1–3 page **spans** and Tier 4 explicit ranges; regex heading matching and carried section state are **deleted**. Rejected: bounding the rules instead (refusing to load a profile whose DROP sections have no end) — it keeps the mechanism §2 measured returning `FPSO ALMIRANTE BARROSO MV32` (1,017) and `PETROBRAS` (981) as its top matches, and does not touch the three shapes where the text merely mentions a section name; and suppressing matches on TOC pages, which is the repro fix for one of five shapes and is how the same defect returns under a new number. **Exposure stated precisely: `apply_profiles` is wired into the real pipeline (`pipeline.py:1435`) and no test covers the carry-forward path — but no built-in profile ships and there is no profile YAML on disk, so the code is reachable only by a hand-authored profile in the D-05 library, and nobody has authored one. Live and unexercised, which is exactly why it must be settled before templates make it exercised on every run.** | 2026-08-17 |
 
+## Sprint-4 kickoff rulings (Alex, 2026-08-18)
+
+Scoped after a read-only survey of every candidate. **Every figure below was
+re-verified against the code before the question was put** — the first fan-out
+that was supposed to produce this survey FAILED (all five investigators errored
+on worktree creation, because the session's working directory is not the repo),
+and its synthesiser correctly refused to pretend otherwise. What follows rests
+on a second, working survey plus direct checks.
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-41 | Sprint 4's objective | **MAKE IT SHIPPABLE TO A HUMAN.** D-38 and D-39 are already ruled and land regardless; what the sprint is FOR is getting a packaged product into Alex's hands and having him drive it. Chosen over chasing criterion 4, over closing the carried risks, and over finishing the taxonomy alone. The reasoning: Sprint 3 built a reduction feature that **no human has ever used**, `python -m dociq.selftest` covers **none** of it (measured: `bates`, `omission`, `waterfall`, `approv` and `template` appear **zero** times in `selftest.py`), and no `.exe` has been built since `sections/` came into existence. | 2026-08-18 |
+| D-42 | What happens to `profile/*.yaml` in existing matter folders when D-38 stops DocIQ writing it | **TOMBSTONE RETIRED NAMES.** A name this build no longer writes stays in `_STALE_PATTERNS` permanently, marked retired, so the tool still knows how to remove it. **This is B-8's first real instance and the survey is what surfaced that:** `profile/*.yaml` is a live emitted deliverable (`pipeline.py:686`), and across the four commits that have ever touched `_STALE_PATTERNS` **no name has ever been retired** — the list has only grown. B-8 has been harmless because nothing ever triggered it; D-38 triggers it. Rejected: leaving it (B-8's first instance would arrive in a client's matter folder rather than in a document), and re-implementing the durable inventory D-32 deleted (it closes the general case and re-adds a file under `.dociq/` that governs deletion — the class that produced six generations of data-loss defects). The tombstone closes every case DocIQ can itself create, which is all of them. | 2026-08-18 |
+| D-43 | The first human-driven session | **THE PACKAGED `.exe`, ON THE PETROBRAS/MODEC CORPUS.** Not the checkout: driving the checkout proves the code, driving the `.exe` proves what would be handed to a colleague — and `packaging/DocumentIQ.spec` has not been touched since 2026-08-03, so it has never been run against a tree containing `sections/`. Not MNFV first: it exercises Sprint-1/2 surface while the taxonomy barely fires on it. **The deciding reason is checkability** — every figure the screen shows on Petrobras/MODEC can be checked against a measurement already on the record (63.01% of pages placed by outline, ~70% recognized in total, ~30% kept unconditionally), so a wrong number is visible rather than merely plausible. | 2026-08-18 |
+
+### What the survey established, and one thing it un-established
+
+* **Criterion 4's blocker is policy, not recognition.** D-28's prefix repair is
+  built and accepts every misread this corpus produces — and it **refuses to
+  run**, because the misreads themselves register as extra prefixes
+  (`refused_reason`: *"3 proposable Bates prefixes ('iCON', 'iiCON', 'jiCON')"*).
+  MNFV's documents are mostly one page, so one misread page reads as 100%
+  document coverage and becomes a second series. On exactly the hard case the
+  rule cancels itself.
+* **And nobody has established the ceiling is reachable.** OCR pages are at
+  29/80 (36.25%); ≥99% overall needs 74/80. The claim that most residual pages
+  carry a repairable token is labelled *"a prediction from measured token data"*
+  in its own document, and the itemized evidence covers 22 pages. **Measuring it
+  needs no code change** — the 51 residual pages are named in the committed
+  artifact. That measurement should precede any decision to fund criterion 4.
+* **No inter-process lock exists anywhere in `src/`** (zero hits for any locking
+  primitive), and `staging_layout()` unconditionally removes `.dociq/staging/`.
+  Two runs against one matter folder is undefined. Classified a CORRECTNESS risk
+  rather than a claim risk, and deferred by D-41 rather than closed.
+* **The one screen that blocks on a person has never been looked at.**
+  `SCREENS` in `tests/test_gui_screen_states.py:350` omits `bates`, and the grid
+  asserts its own completeness *against that list* — so "every screen × every
+  state" passes over a hole. None of the 18 rendered PNGs is the Bates prompt.
+
 ## Sprint-3 close-out rulings (Alex, 2026-08-17)
 
 Harvested one at a time after the sprint went green, per the standing pre-handoff

@@ -222,9 +222,10 @@ class PipelineOptions:
     ask, so every GUI run left :attr:`auto_confirm_bates` False, the decision
     stayed PENDING, and ``apply_bates_reported`` returned every document
     unchanged. **A Bates-stamped production came out of the product with no
-    locators at all** while the acceptance harness measured 92.130% coverage
+    locators at all** while the acceptance harness PROJECTED 92.130% coverage
     through a code path — a hand-built CONFIRMED decision — the product could not
-    reach. Rehearsal finding A4.
+    reach. Rehearsal finding A4. *("measured" until 2026-08-18; D-29 rules it a
+    projection and forbids quoting it flat. Measured end to end: 91.512%.)*
 
     Three outcomes, and they are three, not two:
 

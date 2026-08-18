@@ -1101,9 +1101,12 @@ class BatesConfirmScreen(QWidget):
 
     **This screen is the finding.** Sprint 2 shipped without it, so the format
     never reached CONFIRMED, so a Bates-stamped production came out of DocIQ
-    with no locators at all — while the acceptance harness measured 92.130%
+    with no locators at all — while the acceptance harness PROJECTED 92.130%
     through a decision built in Python that the product could not produce
-    (rehearsal A4). Everything below exists because the pipeline is BLOCKED on
+    (rehearsal A4). *(This said "measured" until 2026-08-18. D-29 rules the
+    figure a projection — 568 native + 29 OCR pages, arithmetic over two runs,
+    not one measurement — and says in terms never to quote it flat. The measured
+    end-to-end figure is 91.512%.)* Everything below exists because the pipeline is BLOCKED on
     this screen: a run is standing still on a worker thread until one of three
     buttons is pressed.
 
