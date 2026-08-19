@@ -120,6 +120,83 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## Codex Sprint-4 round 2 — NOT PASSED, and the sibling hunt found a second one (2026-08-19)
+
+### B-R2-1: the field existed, the amendment claimed it, nothing populated it
+
+Contract 2.1.0 added `OmissionSnapshot.project_tokens`. A-22 said it was "hashed
+like every other field of the snapshot." **The one site that turns approvals
+into the persisted, hashed snapshot never copied it**, so it silently took its
+default. Measured: a run dropping three pages and a run dropping none shared a
+run identity — the exact collision the amendment says it closes.
+
+`apply_sections` was tested and correct. The defect lived in the gap between the
+decision and the record of it, which is the gap a direct unit test cannot see.
+The regression is therefore a **real pipeline run**, as the review required.
+
+**The guard matters more than the fix.** A test now reads the dataclass and the
+construction site and fails if any field present on both `OmissionSnapshot` and
+`ApprovedOmission` is not fed from the approval. A hand-written list would have
+to be maintained by the same change that adds a field — which is the change that
+forgets.
+
+### A-R2-1: the warning I added for B-1 was itself wrong, twice
+
+Both halves were operator-facing and both fired in ordinary use.
+
+* It compared the **raw** field against a **canonical** scope, so typing
+  `MV32, BOMESC` against an approval reviewed under `("BOMESC","MV32")`
+  announced that the pages would be kept pending re-review — moments before the
+  run dropped them under that very approval.
+* It described a **mixed-scope** retained set by its **first** approval's scope.
+  Approve under A, correct the names to B, approve another family under B: the
+  message then claimed all of them still applied or none did, decided by
+  insertion order.
+
+Fixed by comparing with the same canonical rule Stage 4 uses, and by taking one
+scope **per approval** rather than a count and an exemplar.
+
+### A-23: stop finding the components one at a time
+
+The hand-back asked Codex to hunt siblings among `limits`, the master index and
+the Bates pattern. Codex found none, and its reasoning is right — but the hunt I
+ran alongside it found one those three did not cover:
+
+**Whether OCR ran.** A photographed schedule table classifies as
+`Photograph / figure page` unread and as `Schedule / activity table` once OCR
+recovers its grid, so an unchanged approval for progress photographs **drops it
+in one run and keeps it in the other**. `ocr_enabled` is not a `RunConfig` field
+at all — it is a `WalkOptions` parameter — so auditing the contract's fields
+would never have found it. Not reachable from the shipped GUI, which always runs
+OCR on: latent, not live.
+
+**Alex ruled the fingerprint (2026-08-19)** over patching one more field:
+`recognition_fingerprint` covers tokens, template id and version, and whether
+OCR ran, and a new recognition input joins it and is enforced for every approval
+the same day. The named fields stay, because they are what the warning says out
+loud — A-R2-1's lesson one layer down. Amendment **A-23**, contract **2.2.0**.
+
+### Three findings of my own, disclosed
+
+* **Two probes in the sibling hunt proved nothing and I reported the first one's
+  shape before checking.** The first ran with **OCR disabled**, so the three OCR
+  rows could not change a character by construction; it also guessed five
+  `limits` field names that do not exist, each silently skipped, and never
+  tested the master index at all. The second fixed those and still measured
+  nothing, because `RunConfig.limits` is **stamped by the run, not read by it** —
+  only `emit/log.py` reads it, to write the identity. Varying those fields
+  changes nothing because nothing consults them.
+* **A patch script printed "import added" and added nothing — for the third time
+  this sprint.** It matched a parenthesized import spelling the file does not
+  use. Each time the full suite caught the `NameError` and the targeted runs did
+  not, because the failing line sits in a method nothing had called yet. Now
+  guarded: `test_no_module_references_a_name_it_never_defined_or_imported`
+  walks every module's AST and fails on a name that is neither defined,
+  imported, nor a builtin. Watched red against the real defect.
+* **A heredoc turned `` into a literal backspace byte** inside a test's
+  regex, so the guard silently matched nothing and reported every field as
+  unpopulated. Found by reading the bytes, not the text.
+
 ## Codex Sprint-4 round 1 — NOT PASSED, and D-39's central argument was wrong (2026-08-19)
 
 Five blockers. **B-1 refuted the load-bearing claim of the entry below**, in the

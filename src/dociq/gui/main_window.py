@@ -431,10 +431,14 @@ class MainWindow(QMainWindow):
         self._publish_retained_approvals()
 
     def _publish_retained_approvals(self) -> None:
-        """Tell setup what it is carrying, so an edit can warn (Codex B-1)."""
-        self.setup.set_retained_approvals(len(self._approvals))
-        self.setup.set_approved_tokens(
-            tuple(self._approvals[0].project_tokens) if self._approvals else ())
+        """Tell setup what it is carrying, so an edit can warn (Codex B-1).
+
+        Every scope, not a count and the first one: a retained set can hold
+        approvals reviewed under different token sets, and describing them all
+        as the first one's scope is A-R2-1.
+        """
+        self.setup.set_retained_scopes(
+            tuple(tuple(a.project_tokens) for a in self._approvals))
 
     def start_run(self, request: RunRequest) -> None:
         if self.thread_running():

@@ -25,7 +25,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Iterable, Mapping, Sequence
 
-CONTRACT_VERSION = "2.1.0"
+CONTRACT_VERSION = "2.2.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -227,6 +227,26 @@ operator corrected the token list, which is the correction D-39 exists to
 invite. Measured: 0 pages dropped before the edit, 1 after, no new approval.
 Hashed like every other field of the snapshot, because two approvals reviewed
 under different token sets are two configurations.
+
+2.2.0 — amendment A-23, from Alex's ruling of 2026-08-19 after the B-1 sibling
+hunt. :class:`OmissionSnapshot` gains ``recognition``: a fingerprint of
+everything that decides which family a page lands in. Additive with a safe
+default, so MINOR.
+
+A-22 scoped an approval to project tokens. The hunt then found a second
+component of the same configuration — whether OCR ran, since a photographed
+schedule table classifies as a photograph page unread and as a schedule table
+once OCR recovers its grid, so an unchanged approval for progress photographs
+drops it in one run and keeps it in the other. Two found one at a time is the
+signal: scoping component-by-component leaves the next input to whoever
+remembers. The fingerprint covers them all and covers what is added next.
+
+The named fields stay, because they are what the operator's warning says out
+loud; "the recognition fingerprint changed" is the wrong half of A-R2-1's
+lesson. The fingerprint decides, the named fields explain. An empty fingerprint
+means "not recorded" — every approval given before this field existed — and
+falls back to the named fields, so an old approval is neither silently widened
+nor silently voided.
 
 1.9.0 — amendment A-19, extended, from Codex review r2's finding B-2. :class:`OmissionSnapshot`
 gains ``matter_root`` and :func:`matter_key` is added.
@@ -799,6 +819,20 @@ class OmissionSnapshot:
     Carried so Stage 4 can refuse an approval reviewed under a different set
     instead of silently widening it."""
 
+    recognition: str = ""
+    """Fingerprint of the recognition configuration this approval was REVIEWED
+    against (`contracts.recognition_fingerprint`).
+
+    Project tokens and whether OCR ran were each found, one at a time, to change
+    which family a page lands in while an approval reached it unchanged. This
+    covers both and whatever is added next: a new recognition input joins the
+    fingerprint and is enforced for every approval the same day.
+
+    Empty means "not recorded" — every approval given before this field existed.
+    Those are compared on the named fields alone, so an old approval is neither
+    silently widened nor silently voided.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class EffectiveLimits:
@@ -879,6 +913,50 @@ def fold_label(text: str) -> str:
     folded = "".join(c for c in folded if not unicodedata.combining(c))
     folded = re.sub(r"[^A-Za-z0-9]+", " ", folded)
     return folded.strip().upper()
+
+
+def recognition_fingerprint(
+    *,
+    project_tokens: Iterable[str] = (),
+    template_id: str | None = None,
+    template_version: str | None = None,
+    ocr_ran: bool = True,
+) -> str:
+    """Everything that decides which template family a page lands in.
+
+    **Why a fingerprint and not one more field.** Two components of this were
+    found one at a time, each by a review rather than by the code: project
+    tokens (Codex Sprint-4 B-1) and whether OCR ran — a photographed schedule
+    table classifies as a photograph page unread and as a schedule table once
+    OCR recovers its grid, so an unchanged approval for progress photographs
+    drops it in one run and keeps it in the other. Scoping component-by-
+    component leaves the next input to whoever remembers, which is the failure
+    mode this sprint produced three times.
+
+    An approval carries this value, and Stage 4 refuses an approval whose
+    fingerprint is not the run's. A new recognition input joins the arguments
+    here and is enforced the same day, for every approval, without anyone
+    remembering anything.
+
+    **It does not replace the named fields.** `project_tokens` stays on the
+    approval because it is what the operator's warning says out loud, and a
+    message reading "the recognition fingerprint changed" would be the wrong
+    half of Codex A-R2-1's lesson. The fingerprint decides; the named fields
+    explain.
+
+    Stable across spellings that do not change behavior: tokens are
+    canonicalized, and the parts are joined by a separator none of them can
+    contain, so `("A","B|C")` and `("A|B","C")` cannot collide.
+    """
+    parts = (
+        "v1",
+        ",".join(canonical_tokens(project_tokens)),
+        template_id or "",
+        template_version or "",
+        "ocr" if ocr_ran else "no-ocr",
+    )
+    joined = "\x1f".join(parts)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:32]
 
 
 def canonical_tokens(tokens: Iterable[str]) -> tuple[str, ...]:

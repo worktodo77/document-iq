@@ -268,3 +268,12 @@ title = "an approval does not record the recognition configuration it was given 
 raised_by = "Codex Sprint-4 review, finding B-1"
 wired_in = { "src/dociq/contracts.py" = ["OmissionSnapshot", "CONTRACT_VERSION"], "src/dociq/sections/model.py" = ["ApprovedOmission"], "src/dociq/sections/apply.py" = ["apply_sections"], "src/dociq/gui/pipeline.py" = ["OmissionApproval"] }
 tests = ["tests/test_codex_r1_findings.py", "tests/test_run_identity.py", "tests/test_sections.py"]
+
+
+# A-23 is "raised" for exactly ONE commit and flipped in the next, as A-22 was.
+[amendment.A-23]
+status = "raised"
+title = "an approval is scoped to recognition inputs one at a time, and the next one is always missed"
+raised_by = "Alex's ruling 2026-08-19, after the Codex B-1 sibling hunt"
+wired_in = { "src/dociq/contracts.py" = ["recognition_fingerprint", "OmissionSnapshot", "CONTRACT_VERSION"], "src/dociq/sections/model.py" = ["ApprovedOmission"], "src/dociq/sections/apply.py" = ["apply_sections"], "src/dociq/adapter.py" = ["set_omission"], "src/dociq/pipeline.py" = ["run"] }
+tests = ["tests/test_codex_r2_findings.py", "tests/test_contracts.py", "tests/test_import_graph.py"]

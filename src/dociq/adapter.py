@@ -38,6 +38,7 @@ from dociq.contracts import (
     RunResult,
     canonical_tokens,
     matter_key,
+    recognition_fingerprint,
 )
 from dociq.gui.pipeline import (
     LEVER_RECOGNIZED,
@@ -693,6 +694,16 @@ class RealPipeline:
             # (Codex B-1). Canonical, so one review is one value however the
             # operator spelled the list.
             project_tokens=canonical_tokens(project_tokens),
+            # The whole recognition configuration, not only the half we have
+            # so far been bitten by. `ocr_ran` is this pipeline's own setting:
+            # an approval reviewed on a run that read the scans is not an
+            # approval for a run that did not.
+            recognition=recognition_fingerprint(
+                project_tokens=project_tokens,
+                template_id=self._template.template_id,
+                template_version=self._template.version,
+                ocr_ran=self._ocr_enabled,
+            ),
         )
 
     def template_families(
@@ -890,6 +901,7 @@ class RealPipeline:
                 template_id=a.template_id,
                 template_version=a.template_version,
                 project_tokens=tuple(a.project_tokens),
+                recognition=a.recognition,
             )
             for a in request.approvals
         )

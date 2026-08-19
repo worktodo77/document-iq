@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from dociq.contracts import (
+    canonical_tokens,
+    recognition_fingerprint,
     ContractViolation,
     Disposition,
     DocumentRecord,
@@ -1467,6 +1469,12 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
             # The run's own tokens, so an approval reviewed under a different
             # set is refused rather than silently widened (Codex B-1).
             project_tokens=walk_config.project_tokens,
+            recognition=recognition_fingerprint(
+                project_tokens=walk_config.project_tokens,
+                template_id=opts.template.template_id if opts.template else None,
+                template_version=opts.template.version if opts.template else None,
+                ocr_ran=opts.walk.ocr_enabled,
+            ),
             # The matter this run is FOR, so Stage 4 can refuse an approval
             # given on a different one. opts.matter_name is what the adapter
             # derives from the source folder and what the drop log records.
@@ -1530,6 +1538,16 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 matter_root=a.matter_root,
                 template_id=a.template_id,
                 template_version=a.template_version,
+                # The scope the approval was REVIEWED under (A-22). Copied here
+                # or the identity does not cover it: contract 2.1.0 added the
+                # field, the amendment said it was hashed like every other, and
+                # this site silently took the default -- so a run that dropped
+                # three pages and a run that dropped none shared an identity
+                # (Codex round 2, B-R2-1). `apply_sections` was tested and
+                # right; the defect lived in the gap between the decision and
+                # the record of it.
+                project_tokens=canonical_tokens(a.project_tokens),
+                recognition=a.recognition,
             )
             for a in opts.approvals
         ),

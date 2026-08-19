@@ -312,6 +312,20 @@ class ApprovedOmission:
     whose names DocIQ never proposed.
     """
 
+    recognition: str = ""
+    """Fingerprint of the recognition configuration this approval was REVIEWED
+    against (`contracts.recognition_fingerprint`).
+
+    Project tokens and whether OCR ran were each found, one at a time, to change
+    which family a page lands in while an approval reached it unchanged. This
+    covers both and whatever is added next: a new recognition input joins the
+    fingerprint and is enforced for every approval the same day.
+
+    Empty means "not recorded" — every approval given before this field existed.
+    Those are compared on the named fields alone, so an old approval is neither
+    silently widened nor silently voided.
+    """
+
     def validate(self) -> None:
         if not _ID_RE.match(self.family_id):
             raise TemplateError(

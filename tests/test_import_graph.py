@@ -275,3 +275,78 @@ class W:
 '''
     names = _module_names(GUI / "widgets.py", nested)
     assert "dociq.verify" in names, names
+
+
+def test_no_module_references_a_name_it_never_defined_or_imported() -> None:
+    """Undefined names, caught at collection rather than at the call site.
+
+    `compileall` accepts a `NameError` that only fires when a branch runs, and
+    three times in this sprint a patch script "added" an import by matching a
+    spelling the file does not use, printed success, and changed nothing. Each
+    time the full suite caught it and the targeted runs did not — because the
+    failing line is inside a method nobody had reason to call yet.
+
+    A module-level scan is enough to catch that class: it compares every bare
+    name a module reads against what it defines, imports or gets from builtins.
+    Deliberately conservative — attribute access, locals and comprehension
+    targets are not flagged — because a check that cries wolf gets deleted.
+    """
+    import ast
+    import builtins
+
+    # Module dunders are bound by the import machinery, not by builtins.
+    known_builtins = set(dir(builtins)) | {
+        "__file__", "__name__", "__doc__", "__package__", "__spec__",
+        "__loader__", "__builtins__", "__debug__",
+    }
+    offenders: list[str] = []
+
+    for path in sorted((SRC / "dociq").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        defined: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                defined.update(a.asname or a.name.split(".")[0]
+                               for a in node.names)
+            elif isinstance(node, ast.ClassDef):
+                defined.add(node.name)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defined.add(node.name)
+                args = node.args
+                defined.update(a.arg for a in
+                               (*args.posonlyargs, *args.args, *args.kwonlyargs))
+                if args.vararg:
+                    defined.add(args.vararg.arg)
+                if args.kwarg:
+                    defined.add(args.kwarg.arg)
+            elif isinstance(node, ast.Lambda):
+                args = node.args
+                defined.update(a.arg for a in
+                               (*args.posonlyargs, *args.args, *args.kwonlyargs))
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                defined.add(node.id)
+            elif isinstance(node, (ast.comprehension,)):
+                for t in ast.walk(node.target):
+                    if isinstance(t, ast.Name):
+                        defined.add(t.id)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(node.name)
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        for t in ast.walk(item.optional_vars):
+                            if isinstance(t, ast.Name):
+                                defined.add(t.id)
+            elif isinstance(node, ast.Global):
+                defined.update(node.names)
+
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                    and node.id not in defined
+                    and node.id not in known_builtins):
+                offenders.append(
+                    f"{path.relative_to(SRC)}:{node.lineno}: {node.id}")
+
+    assert not offenders, (
+        "names read but never defined, imported or built in:\n  "
+        + "\n  ".join(offenders))

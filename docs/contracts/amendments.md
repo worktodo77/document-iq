@@ -1609,3 +1609,60 @@ directly. The refusal has to sit where the drop is decided.
 reviewed under different token sets are different configurations, and an
 identity that could not tell them apart would say two corpora are the same run
 when one of them dropped pages the other kept.
+
+## A-23 — an approval is scoped to recognition inputs one at a time, and the next one is always missed
+
+**Raised by:** Alex's ruling of 2026-08-19, after the sibling hunt Codex's
+round-2 hand-back asked for.
+**Status:** raised with its wiring; flipped to applied in the next commit.
+
+`OmissionSnapshot` and `ApprovedOmission` gain `recognition` — a fingerprint of
+everything that decides which template family a page lands in. Additive with a
+safe default, so `CONTRACT_VERSION` moves 2.1.0 → **2.2.0**.
+
+### The case the contract could not express
+
+A-22 scoped an approval to project tokens, because tokens change `family_key`
+and so change which pages an approval reaches. The hunt for siblings found a
+second component of the same configuration, and it was not on the list anyone
+would have written:
+
+**Whether OCR ran.** Measured — a photographed schedule table classifies as
+`Photograph / figure page` when its text is unread and as
+`Schedule / activity table` once OCR recovers its grid. An unchanged approval
+for progress photographs therefore **drops that page in one run and keeps it in
+the other**. `ocr_enabled` is not a `RunConfig` field at all; it is a
+`WalkOptions` parameter, so no amount of auditing the contract's fields would
+have surfaced it.
+
+Two components found one at a time is the signal. Scoping the third
+component-by-component leaves it to whoever remembers, and "a rule stated in
+prose that nothing enforces" is the failure this sprint produced three times
+before this amendment and twice more in Codex's two rounds.
+
+### Why a fingerprint, and why the named fields stay
+
+The fingerprint is what Stage 4 compares: a new recognition input joins
+`recognition_fingerprint`'s arguments and is enforced for every approval the
+same day, without a person remembering.
+
+The named fields are **not** replaced. `project_tokens` stays on the approval
+because it is what the operator's warning says out loud, and Codex A-R2-1 was
+exactly about the operator-facing message being wrong. The fingerprint decides;
+the named fields explain.
+
+### The compatibility rule, stated rather than implied
+
+An empty fingerprint means **not recorded** — every approval given before this
+field existed. Those fall back to the named fields. Voiding them would silently
+discard real expert work; enforcing an empty value against a real one would
+compare a run to nothing. Both directions are tested.
+
+### Bounds
+
+Tokens are canonicalized inside the fingerprint, so a spelling that does not
+change behavior does not change the value. The parts are joined on a unit
+separator (0x1f) rather than a printable one: with `|` or `,`, a template id of
+`a|b` with version `c` and an id of `a` with version `b|c` produce one
+fingerprint for two different reviews. That collision is tested against both
+printable separators.

@@ -1,6 +1,6 @@
 """The four screens of §9's primary flow.
 
-    folder → profile → optional master index → Run → progress → summary
+    folder → project names → optional master index → Run → progress → summary
 
 Each screen owns its layout and nothing else: it emits what the operator did and
 the window decides what happens next. That is what keeps the pipeline seam a
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from dociq.contracts import canonical_tokens
 from dociq.gui.pipeline import (
     FolderPreview,
     ProgressEvent,
@@ -128,7 +129,7 @@ class _Step(QWidget):
 
 
 class SetupScreen(QWidget):
-    """Folder → profile → optional master index → output folder → Run."""
+    """Folder → what can be left out → project names → master index → Run."""
 
     run_requested = Signal(object)  # RunRequest
     template_review_requested = Signal()
@@ -211,15 +212,14 @@ class SetupScreen(QWidget):
         # would be a hashed run input the operator can see and cannot fix.
         self._tokens_source = ""
         """Which matter the token field's contents belong to (A-2)."""
-        self._approved_tokens: tuple[str, ...] = ()
-        """The tokens the retained approvals were reviewed against (B-1)."""
         self._tokens = QLineEdit()
         self._tokens.setFont(theme.body(10))
         self._tokens.setPlaceholderText(
             "e.g. MV32, BOMESC, PETROBRAS — separated by commas")
         self._tokens_hint = _muted("", theme, 8)
-        self._retained_approvals = 0
-        """Approvals carried from a previous run of this matter (Codex B-1)."""
+        self._retained_scopes: tuple[tuple[str, ...], ...] = ()
+        """One token scope per approval carried from a previous run of this
+        matter (Codex B-1, corrected per A-R2-1)."""
         self._tokens.textChanged.connect(lambda _t: self._warn_if_stale())
         self._tokens_hint.setWordWrap(True)
         tok_holder = QWidget()
@@ -282,9 +282,9 @@ class SetupScreen(QWidget):
                                "to start.", theme, 9)
         left.addWidget(self._blocker)
         self._reassure = _muted(
-            "Nothing is deleted — every page is accounted for, and the pages a "
-            "profile leaves out are listed in the log with the rule that left "
-            "them out.", theme, 9)
+            "Nothing is deleted — every page is accounted for, and every page left "
+            "out is listed in the log with the section it belonged to and "
+            "the name of the person who approved leaving it out.", theme, 9)
         left.addWidget(self._reassure)
         foot.addLayout(left, 1)
 
@@ -384,35 +384,58 @@ class SetupScreen(QWidget):
             "leaving it empty is safe and simply recognizes fewer sections."
         )
 
-    def set_retained_approvals(self, count: int) -> None:
-        """How many approvals are carried into the next run of this matter.
+    def set_retained_scopes(
+        self, scopes: tuple[tuple[str, ...], ...]
+    ) -> None:
+        """One entry per approval carried into the next run of this matter.
 
-        The setup screen is where the operator edits the project names, so it is
-        where they must be told the edit costs them their approvals (Codex B-1,
-        Alex's ruling 2026-08-19). Stage 4 refuses a mismatched approval either
-        way; without this the first they hear of it is after the run.
+        **Scopes, not a count and one exemplar.** The first version took a count
+        plus the first approval's tokens, which describes a mixed set as though
+        every approval shared the first one's scope — and a mixed set is
+        ordinary: approve under A, correct the names to B, approve another
+        family under B. Depending on insertion order the message then claimed
+        all of them still applied or none did (Codex round 2, A-R2-1).
+
+        The setup screen is where the operator edits the names, so it is where
+        they must learn what the edit costs. Stage 4 refuses a mismatched
+        approval either way; without this the first they hear of it is after the
+        run (Alex's ruling, 2026-08-19).
         """
-        self._retained_approvals = max(0, count)
+        self._retained_scopes = tuple(tuple(s) for s in scopes)
         self._warn_if_stale()
 
     def _warn_if_stale(self) -> None:
-        if not self._retained_approvals:
-            return
-        if self.project_tokens() == self._approved_tokens:
-            self._tokens_hint.setText(
-                f"{self._retained_approvals} approval(s) carried from your last "
-                "run of this matter still apply.")
-            return
-        self._tokens_hint.setText(
-            f"Changing the project names means the {self._retained_approvals} "
-            "approval(s) from your last run of this matter NO LONGER APPLY — "
-            "those sections will be kept until you review and approve them "
-            "again. Nothing is dropped that you have not approved.")
+        """Say which retained approvals the current field still applies to.
 
-    def set_approved_tokens(self, tokens: tuple[str, ...]) -> None:
-        """The token set the retained approvals were reviewed against."""
-        self._approved_tokens = tuple(tokens)
-        self._warn_if_stale()
+        **Compared with the SAME canonical rule Stage 4 uses.** Comparing the
+        raw field against a canonical scope made `MV32, BOMESC` look like a
+        change from `("BOMESC","MV32")` — so the screen announced that pages
+        would be kept pending re-review, moments before the run dropped them
+        under that very approval (A-R2-1).
+        """
+        if not self._retained_scopes:
+            return
+        current = canonical_tokens(self.project_tokens())
+        applies = sum(1 for s in self._retained_scopes
+                      if canonical_tokens(s) == current)
+        total = len(self._retained_scopes)
+        stale = total - applies
+        if stale == 0:
+            self._tokens_hint.setText(
+                f"{total} approval(s) carried from your last run of this "
+                "matter still apply.")
+        elif applies == 0:
+            self._tokens_hint.setText(
+                f"Changing the project names means the {total} approval(s) "
+                "from your last run of this matter NO LONGER APPLY — those "
+                "sections will be kept until you review and approve them "
+                "again. Nothing is dropped that you have not approved.")
+        else:
+            self._tokens_hint.setText(
+                f"{applies} of {total} approval(s) from your last run still "
+                f"apply under these names; {stale} NO LONGER APPLY and those "
+                "sections will be kept until you review and approve them "
+                "again. Nothing is dropped that you have not approved.")
 
     def source_text(self) -> str:
         """The folder currently in the box — so a proposal that arrives after
@@ -1024,7 +1047,7 @@ def _disposition_column_width(theme: Theme) -> int:
 
 
 class ProfileChecklistScreen(QWidget):
-    """§6 step 2/3 — what this profile KEEPs and DROPs, before a run commits.
+    """§6 step 2/3 — which sections the template names, before a run commits.
 
     **Nothing may be dropped that this screen did not show.** That is not a
     slogan: Principle 3 makes an unapproved omission indistinguishable from a
@@ -1147,7 +1170,7 @@ class ProfileChecklistScreen(QWidget):
         self._accept.setEnabled(not alarming)
         self._accept.setToolTip(
             "" if not alarming
-            else "This profile's rules cannot be shown in full, so they "
+            else "This template's sections cannot be shown in full, so they "
                  "cannot be approved here."
         )
 

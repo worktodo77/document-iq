@@ -310,8 +310,10 @@ def test_b1_editing_the_tokens_warns_that_retained_approvals_no_longer_apply(app
     try:
         _pick(window, r"D:\matter-A")
         window.setup._tokens.setText("MV32")
-        window.setup.set_retained_approvals(3)
-        window.setup.set_approved_tokens(("MV32",))
+        # Three approvals, all reviewed under the same scope. The API takes one
+        # scope PER APPROVAL rather than a count and an exemplar: describing a
+        # mixed set by its first member was Codex round 2, A-R2-1.
+        window.setup.set_retained_scopes((("MV32",),) * 3)
         assert "still apply" in window.setup._tokens_hint.text()
 
         window.setup._tokens.setText("MV32, BOMESC")
@@ -329,7 +331,7 @@ def test_b1_no_retained_approvals_means_no_warning(app):
     window = MainWindow(_PerMatter())
     try:
         _pick(window, r"D:\matter-A")
-        window.setup.set_retained_approvals(0)
+        window.setup.set_retained_scopes(())
         window.setup._tokens.setText("MV32, BOMESC")
         assert "NO LONGER APPLY" not in window.setup._tokens_hint.text()
     finally:
