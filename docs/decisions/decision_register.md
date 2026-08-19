@@ -120,6 +120,81 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## Codex Sprint-4 round 1 — NOT PASSED, and D-39's central argument was wrong (2026-08-19)
+
+Five blockers. **B-1 refuted the load-bearing claim of the entry below**, in the
+exact shape the review request asked to be attacked — and which I named in that
+request and did not chase myself.
+
+### B-1: a token edit widens an approval already given
+
+D-39's argument for shipping a demonstrably weak derivation was: a wrong token
+can only make a section MATCH a family, and under D-34 a match is an OFFER,
+never a drop. **True only for a run with no existing approval.** The product
+retains approvals for the next run of the same matter, so:
+
+1. Run a matter, engage a lever on the waterfall.
+2. Notice DocIQ missed `BOMESC` — the derivation provably cannot find it — and
+   type it in. **This is the corrective step D-39 exists to provide.**
+3. Run again. Stage 4 selects the retained approval by `family_id` alone.
+
+Measured on the real resolver: **0 pages dropped before the edit, 1 after, with
+no new approval given.** A drop nobody attributed, reached through the workflow
+the feature was designed around.
+
+**The fix is the rule the contract already stated.** An approval was refused
+across template versions because "a template version can change what a family
+matches, so an approval given against one is not an approval of the other."
+Project tokens have that power through the same function. `ApprovedOmission`
+and `OmissionSnapshot` gain `project_tokens` (amendment **A-22**, contract
+**2.1.0**), enforced beside the matter and template checks, fail-closed with a
+warning naming the ruling that did not apply. **Alex ruled (2026-08-19): warn at
+setup AND fail closed at Stage 4** — so the operator learns when they edit, not
+after a ten-minute run.
+
+Two halves were asserted separately, because refusing *every* approval would
+also have made the failing test pass and would have made the product useless: an
+approval reviewed under the run's tokens **still drops**, and one reviewed under
+a different spelling of the same set is **not** treated as different.
+
+### The other four
+
+* **A-1** — the template checklist's forward button raised `AttributeError` on
+  every click: D-38 deleted `ProfileChecklistView.profile` and `_emit_accept`
+  still emitted it. The existing test proved the button was **enabled** and
+  never pressed it. An enabled button and a working button are two claims.
+* **A-2** — choosing a second matter kept the first matter's project names. The
+  "don't overwrite a human edit" guard was correct and **unscoped**, so it
+  treated matter A's *proposal* as a human edit belonging to matter B, and
+  hashed A's names as B's configuration. Scoped to the source root.
+* **B-2** — `run()` built the config from the request's tokens and the waterfall
+  from the adapter's constructor default, so a drop the run made was redrawn as
+  an unknown, non-engageable row. The regression is behavioral over a real run,
+  as the review asked; a source-text assertion would pass for any rewrite that
+  reintroduced the defect by another spelling.
+* **B-3** — every `output_manifest.json` claimed the run identity covered
+  profile snapshots and `profile_hash`, which contract 2.0.0 removed. **A test
+  asserted those words were PRESENT**, pinning the false claim green. The
+  replacement derives from the live contract instead of a typed list.
+
+### What this round says about the process
+
+**Three of the five were introduced by this sprint's own work, and two of those
+were the same class as defects it had already fixed once.** The register's D-39
+entry records three instances of "a rule asserted in prose that the code did not
+enforce"; B-1 is a fourth, and B-3 is a fifth — a claim that outlived the code
+it described, which is precisely [[withdraw-the-claim-not-just-the-code]].
+
+**A-21 was still sitting at `status = "raised"` three commits after it landed**,
+found only while writing A-22. The registry check cannot catch it: it verifies an
+*applied* amendment names a real commit, and a *raised* one is legitimately
+waiting. The two-step only works if the second step happens.
+
+**And a "success" message measured nothing again.** The script adding
+`canonical_tokens` to `adapter.py` matched a parenthesized import form the file
+does not use, printed "import added", and wrote an unchanged file. The full
+suite caught the `NameError`; the targeted runs never touched that path.
+
 ## D-39 EXECUTED — the corpus proposes its project names, the expert decides them (2026-08-19)
 
 D-39's ruling bound two constraints: the derivation must be **deterministic**,

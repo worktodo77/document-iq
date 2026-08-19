@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from dociq.contracts import (
+    canonical_tokens,
     Disposition,
     matter_key,
     DocumentRecord,
@@ -102,6 +103,7 @@ def apply_sections(
     template: SectionTemplate | None = None,
     approvals: tuple[ApprovedOmission, ...] = (),
     matter_root: str = "",
+    project_tokens: tuple[str, ...] = (),
 ) -> SectionApplyResult:
     """Stamp sections onto a document's pages, and drop only what is approved.
 
@@ -136,6 +138,10 @@ def apply_sections(
             "pages."
         )
     here = matter_key(matter_root) if matter_root.strip() else ""
+    # Compared canonically, because `("MV32","BOMESC")` and `("bomesc","mv32")`
+    # are one recognition configuration and refusing an approval between them
+    # would fail closed on a run that is not different at all.
+    canon_tokens = canonical_tokens(project_tokens)
     approved_by_family: dict[str, ApprovedOmission] = {}
     warnings: list[str] = []
     for approval in approvals:
@@ -167,6 +173,17 @@ def apply_sections(
                 "applied and no page was dropped for it. A template version "
                 "can change what a family matches, so an approval given "
                 "against one is not an approval of the other."
+            )
+            continue
+        if canonical_tokens(approval.project_tokens) != canon_tokens:
+            warnings.append(
+                f"omission of {approval.family_id!r} was approved against "
+                f"project names {list(approval.project_tokens) or 'none'} and "
+                f"this run uses {list(canon_tokens) or 'none'} — it was NOT "
+                "applied and no page was dropped for it. Project names decide "
+                "which labels reach a family, so an approval given under one "
+                "set is not an approval under another: re-run and review the "
+                "sections again before approving."
             )
             continue
         if template is not None and template.family(approval.family_id) is None:

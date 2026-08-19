@@ -281,7 +281,7 @@ class MainWindow(QMainWindow):
         self.checklist.back_requested.connect(
             lambda: self.stack.setCurrentIndex(SETUP))
         self.checklist.profile_accepted.connect(
-            lambda _p: self.stack.setCurrentIndex(SETUP))
+            lambda: self.stack.setCurrentIndex(SETUP))
         self.summary.handoff_requested.connect(self.show_handoff)
         self.handoff.back_requested.connect(
             lambda: self.stack.setCurrentIndex(SUMMARY))
@@ -306,6 +306,11 @@ class MainWindow(QMainWindow):
         window the moment the operator picks a folder, which reads as a hang
         rather than as a feature. Same QThread-and-worker shape as the run.
         """
+        # Point the field at THIS matter first (A-2). Done before the proposal
+        # is asked for, so the previous matter's names are gone while the new
+        # answer is in flight rather than sitting there looking like this
+        # matter's configuration.
+        self.setup.begin_source(path)
         propose = getattr(self._pipeline, "propose_project_tokens", None)
         if propose is None:
             return
@@ -408,13 +413,28 @@ class MainWindow(QMainWindow):
             return
         source_root = self._request.source_root if self._request else ""
         matter = Path(source_root).name if source_root else ""
+        # The tokens the RUN used, which are the tokens the waterfall in
+        # front of the operator was classified with. Not the setup field: by
+        # the time a lever is engaged the field may already have been edited
+        # for the next run, and an approval must record the configuration it
+        # was REVIEWED under, not the one about to replace it.
+        reviewed_under = tuple(
+            self._request.project_tokens if self._request else ())
         try:
-            approval = capture(family_id, engaged, matter, source_root)
+            approval = capture(family_id, engaged, matter, source_root,
+                               reviewed_under)
         except Exception as exc:
             print(f"[dociq] omission {family_id!r} was not recorded: {exc}")
             return
         kept = tuple(a for a in self._approvals if a.family_id != family_id)
         self._approvals = kept + ((approval,) if approval is not None else ())
+        self._publish_retained_approvals()
+
+    def _publish_retained_approvals(self) -> None:
+        """Tell setup what it is carrying, so an edit can warn (Codex B-1)."""
+        self.setup.set_retained_approvals(len(self._approvals))
+        self.setup.set_approved_tokens(
+            tuple(self._approvals[0].project_tokens) if self._approvals else ())
 
     def start_run(self, request: RunRequest) -> None:
         if self.thread_running():
@@ -454,6 +474,10 @@ class MainWindow(QMainWindow):
             print(f"[dociq] {len(self._approvals) - len(kept)} approval(s) from "
                   f"{dropped} were not carried into {request.source_root}")
         self._approvals = kept
+        # Also here, not only at capture: this is the path that DISCARDS
+        # approvals belonging to another matter, and the setup screen's warning
+        # would otherwise keep counting approvals that no longer exist.
+        self._publish_retained_approvals()
         self._request = replace(request, approvals=self._approvals)
         request = self._request
         self.progress.reset()

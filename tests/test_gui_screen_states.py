@@ -756,7 +756,14 @@ def test_the_checklist_has_exactly_one_forward_action(window) -> None:
     primaries = [b for b in window.checklist.findChildren(QPushButton)
                  if b.objectName() == "primary"]
     assert len(primaries) == 1
-    assert primaries[0].text() == "Use this profile"
+    # D-16 pins the COUNT — exactly one forward action. The label is checked for
+    # what it must not say rather than for one exact string: D-38 deleted the
+    # profile system and this assertion went on requiring the button to name it
+    # (Codex Sprint-4 D-1), so a pinned label held a retired mechanism in front
+    # of the operator.
+    label = primaries[0].text()
+    assert label.strip()
+    assert "profile" not in label.lower(), label
 
 
 def test_the_checklist_is_reachable_from_the_setup_screen(window) -> None:

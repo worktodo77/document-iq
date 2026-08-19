@@ -120,10 +120,8 @@ IDENTITY_NOTE = (
     "template id and version it was given against), which is the input that "
     "decides which pages drop; the SECTION TEMPLATE loaded for the run (id and "
     "version), recorded even when nothing was approved; the PROJECT TOKENS "
-    "stripped from a section label before a template family matches it; the "
-    "ORDERED tuple "
-    "of profile snapshots (profile id, version and profile_hash for every "
-    "profile, in precedence order); the master-index snapshot (filename, "
+    "stripped from a section label before a template family matches it, in "
+    "their canonical form; the master-index snapshot (filename, "
     "sha256, row count); the OCR confidence threshold, the OCR engine and "
     "engine version; the confirmed Bates pattern; and RunConfig.limits — the "
     "XLSX/CSV row caps, the ZIP size/member/depth caps, the per-file timeout "
@@ -158,6 +156,18 @@ identity while the log and the acceptance harness both treated the destination
 as irrelevant; three parts of one system cannot describe the identity
 differently.
 
+**Codex Sprint-4 round 1, finding B-3, made it a FOURTH time — in the direction
+that matters most.** D-38 deleted `RunConfig.profiles`, and this note went on
+saying the identity covered the ordered tuple of profile snapshots and every
+`profile_hash`, closing with a sentence insisting they "stay named because they
+are still hashed inputs". They are not fields of the contract at 2.0.0 and
+cannot participate in `run_identity` at all. Not an inert comment:
+:meth:`Manifest.to_dict` writes this string into every `output_manifest.json` as
+`claim_identity`, so every manifest carried a false statement about its own
+evidentiary basis. And `tests/test_run_identity.py` asserted the retired words
+were PRESENT — a test can hold a claim up as easily as it can hold it to
+account. **Withdraw the CLAIM, not just the code.**
+
 **A-19 made the same finding a third time, on the mechanism that replaced the
 one B-R2-2 was about, and this note had it wrong until 2026-08-17.** D-35
 deleted the profile-application engine and D-34 moved the decision to an
@@ -168,8 +178,7 @@ anything and APPROVALS do. :class:`~dociq.contracts.RunConfig` gained
 hashed all four since 4092f76 — while this sentence still described an identity
 covering neither the approvals nor the template. A claim that omits the input
 deciding which pages drop is precisely the uncheckable claim B-2 was raised to
-end. The profile snapshots stay named because they are still hashed inputs; they
-are simply no longer the deciding ones.
+end.
 
 The note now describes exactly what :func:`~dociq.contracts.run_identity`
 hashes, and ``tests/test_run_identity.py`` asserts that field-by-field rather

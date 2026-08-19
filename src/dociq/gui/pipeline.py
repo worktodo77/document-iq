@@ -585,6 +585,16 @@ class OmissionApproval:
     template_id: str
     template_version: str
 
+    project_tokens: tuple[str, ...] = ()
+    """The canonical project names in force when this approval was given
+    (Codex Sprint-4 B-1).
+
+    An approval is a ruling about a set of pages, and the token list decides
+    which labels reach a family — the same power the template version has, and
+    an approval is already refused across versions for exactly that reason.
+    Carried so Stage 4 can refuse an approval reviewed under a different set
+    instead of silently widening it."""
+
 
 @dataclass(frozen=True, slots=True)
 class RunRequest:

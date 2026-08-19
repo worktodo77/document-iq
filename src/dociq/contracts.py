@@ -25,7 +25,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Iterable, Mapping, Sequence
 
-CONTRACT_VERSION = "2.0.0"
+CONTRACT_VERSION = "2.1.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -213,6 +213,20 @@ and will not reproduce byte-for-byte afterwards.**
 
 What replaced it is already here: sections recognise, a template names families,
 and an :class:`OmissionSnapshot` naming a person decides what drops (A-19).
+
+2.1.0 — amendment A-22, from Codex's Sprint-4 review, finding B-1.
+:class:`OmissionSnapshot` gains ``project_tokens``: the canonical project names
+the approval was REVIEWED against. Additive with a safe default, so MINOR.
+
+An approval was already refused across matters and across template versions, the
+latter because "a template version can change what a family matches, so an
+approval given against one is not an approval of the other." Project tokens have
+that same power, through the same function, and were not checked — so an
+approval retained for the next run of a matter silently widened when the
+operator corrected the token list, which is the correction D-39 exists to
+invite. Measured: 0 pages dropped before the edit, 1 after, no new approval.
+Hashed like every other field of the snapshot, because two approvals reviewed
+under different token sets are two configurations.
 
 1.9.0 — amendment A-19, extended, from Codex review r2's finding B-2. :class:`OmissionSnapshot`
 gains ``matter_root`` and :func:`matter_key` is added.
@@ -774,6 +788,16 @@ class OmissionSnapshot:
 
     template_id: str
     template_version: str
+
+    project_tokens: tuple[str, ...] = ()
+    """The canonical project names in force when this approval was given
+    (Codex Sprint-4 B-1).
+
+    An approval is a ruling about a set of pages, and the token list decides
+    which labels reach a family — the same power the template version has, and
+    an approval is already refused across versions for exactly that reason.
+    Carried so Stage 4 can refuse an approval reviewed under a different set
+    instead of silently widening it."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -154,7 +154,7 @@ class SetupScreen(QWidget):
         lay.addWidget(_muted(
             "DocIQ reads every document in a folder and writes one plain-text "
             "file per document, with the original page numbers kept. Nothing is "
-            "removed unless a profile you approved says so.", theme))
+            "removed unless you approved removing it, by name.", theme))
         lay.addSpacing(UNIT * 2)
 
         self._source = QLineEdit()
@@ -209,11 +209,18 @@ class SetupScreen(QWidget):
         # on the real corpus it gets four of seven right and misses the two most
         # frequent project-tokened labels entirely. An uneditable derived list
         # would be a hashed run input the operator can see and cannot fix.
+        self._tokens_source = ""
+        """Which matter the token field's contents belong to (A-2)."""
+        self._approved_tokens: tuple[str, ...] = ()
+        """The tokens the retained approvals were reviewed against (B-1)."""
         self._tokens = QLineEdit()
         self._tokens.setFont(theme.body(10))
         self._tokens.setPlaceholderText(
             "e.g. MV32, BOMESC, PETROBRAS — separated by commas")
         self._tokens_hint = _muted("", theme, 8)
+        self._retained_approvals = 0
+        """Approvals carried from a previous run of this matter (Codex B-1)."""
+        self._tokens.textChanged.connect(lambda _t: self._warn_if_stale())
         self._tokens_hint.setWordWrap(True)
         tok_holder = QWidget()
         tok_box = QVBoxLayout(tok_holder)
@@ -336,12 +343,35 @@ class SetupScreen(QWidget):
             project_tokens=self.project_tokens(),
         )
 
+    def begin_source(self, source: str) -> None:
+        """Point the token field at a new matter, clearing the last one's.
+
+        Codex Sprint-4 A-2. `set_proposed_tokens` refuses to overwrite a
+        non-empty field, which correctly protects a human edit — and, with
+        nothing scoping the field to a folder, treated matter A's PROPOSAL as a
+        human edit belonging to matter B. `Start another run → choose another
+        folder` then recorded and hashed A's project names as B's
+        configuration, and discarded B's derived answer unseen.
+
+        Called before the proposal is asked for, so the field is empty while it
+        is in flight rather than showing the previous matter's answer.
+        """
+        if source == self._tokens_source:
+            return
+        self._tokens_source = source
+        self._tokens.clear()
+        self._tokens_hint.setText("")
+
     def set_proposed_tokens(self, tokens: tuple[str, ...]) -> None:
         """Show what DocIQ read out of the matter, for the operator to correct.
 
         It does NOT overwrite something already typed: a proposal arriving after
         the operator has edited the field would silently discard their
         correction, which is the opposite of what D-39 asked for.
+
+        That guard is scoped to one matter by :meth:`begin_source`. Unscoped it
+        was also the mechanism of A-2 — the field is only "already typed" if it
+        was typed for the folder currently selected.
         """
         if self._tokens.text().strip():
             return
@@ -353,6 +383,36 @@ class SetupScreen(QWidget):
             "No project names found in this matter. Add any you know of; "
             "leaving it empty is safe and simply recognizes fewer sections."
         )
+
+    def set_retained_approvals(self, count: int) -> None:
+        """How many approvals are carried into the next run of this matter.
+
+        The setup screen is where the operator edits the project names, so it is
+        where they must be told the edit costs them their approvals (Codex B-1,
+        Alex's ruling 2026-08-19). Stage 4 refuses a mismatched approval either
+        way; without this the first they hear of it is after the run.
+        """
+        self._retained_approvals = max(0, count)
+        self._warn_if_stale()
+
+    def _warn_if_stale(self) -> None:
+        if not self._retained_approvals:
+            return
+        if self.project_tokens() == self._approved_tokens:
+            self._tokens_hint.setText(
+                f"{self._retained_approvals} approval(s) carried from your last "
+                "run of this matter still apply.")
+            return
+        self._tokens_hint.setText(
+            f"Changing the project names means the {self._retained_approvals} "
+            "approval(s) from your last run of this matter NO LONGER APPLY — "
+            "those sections will be kept until you review and approve them "
+            "again. Nothing is dropped that you have not approved.")
+
+    def set_approved_tokens(self, tokens: tuple[str, ...]) -> None:
+        """The token set the retained approvals were reviewed against."""
+        self._approved_tokens = tuple(tokens)
+        self._warn_if_stale()
 
     def source_text(self) -> str:
         """The folder currently in the box — so a proposal that arrives after
@@ -974,7 +1034,7 @@ class ProfileChecklistScreen(QWidget):
     and — when the rule count it was given disagrees with the count the profile
     declares — refuses to pretend the list is complete.
 
-    Exactly one forward action (D-16): "Use this profile".
+    Exactly one forward action (D-16): "Done reviewing".
     """
 
     back_requested = Signal()
@@ -1037,7 +1097,7 @@ class ProfileChecklistScreen(QWidget):
 
         foot = QHBoxLayout()
         foot.addStretch(1)
-        self._accept = _button("Use this profile", theme, "primary")
+        self._accept = _button("Done reviewing", theme, "primary")
         self._accept.setFont(theme.body_strong(10))
         self._accept.clicked.connect(self._emit_accept)
         foot.addWidget(self._accept)
@@ -1146,8 +1206,16 @@ class ProfileChecklistScreen(QWidget):
         return w
 
     def _emit_accept(self) -> None:
+        """Leave the checklist. Carries no payload, and must not.
+
+        D-38 deleted `ProfileChecklistView.profile` and this went on emitting
+        it, so the enabled forward button raised `AttributeError` on every
+        click. The existing test proved the button was ENABLED and never
+        pressed it — a button's enabled state and a button that works are two
+        different claims, and only one of them was being made.
+        """
         if self._view is not None:
-            self.profile_accepted.emit(self._view.profile)
+            self.profile_accepted.emit()
 
 
 class BatesConfirmScreen(QWidget):

@@ -296,6 +296,22 @@ class ApprovedOmission:
     template_version: str
     host: str = ""
 
+    project_tokens: tuple[str, ...] = ()
+    """The canonical project tokens this approval was REVIEWED against (Codex
+    Sprint-4 B-1).
+
+    Scope, not decoration. Tokens are stripped from a section label before a
+    family matches it, so they decide which pages an approval reaches — the
+    same power :attr:`template_version` has, and it is refused across versions
+    for exactly that reason. Without this field the retained approval that
+    dropped a document's table of contents under `()` silently drops a
+    different set under `(MV32,)`, and no one approved the difference.
+
+    Empty means the approval was given against a run with no tokens, which is
+    every approval before this field existed and the ordinary state of a matter
+    whose names DocIQ never proposed.
+    """
+
     def validate(self) -> None:
         if not _ID_RE.match(self.family_id):
             raise TemplateError(

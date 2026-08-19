@@ -32,7 +32,13 @@ from dataclasses import replace
 from pathlib import Path
 
 from dociq import pipeline as core
-from dociq.contracts import DocIQError, Disposition, RunResult, matter_key
+from dociq.contracts import (
+    DocIQError,
+    Disposition,
+    RunResult,
+    canonical_tokens,
+    matter_key,
+)
 from dociq.gui.pipeline import (
     LEVER_RECOGNIZED,
     OmissionApproval,
@@ -624,7 +630,8 @@ class RealPipeline:
         return ""
 
     def set_omission(
-        self, family_id: str, engaged: bool, matter: str, source_root: str = ""
+        self, family_id: str, engaged: bool, matter: str, source_root: str = "",
+        project_tokens: tuple[str, ...] = (),
     ) -> OmissionApproval | None:
         """Record or withdraw one expert-approved omission (D-34).
 
@@ -682,6 +689,10 @@ class RealPipeline:
             matter_root=matter_key(source_root),
             template_id=self._template.template_id,
             template_version=self._template.version,
+            # The recognition configuration this ruling was given against
+            # (Codex B-1). Canonical, so one review is one value however the
+            # operator spelled the list.
+            project_tokens=canonical_tokens(project_tokens),
         )
 
     def template_families(
@@ -878,6 +889,7 @@ class RealPipeline:
                 matter_root=a.matter_root,
                 template_id=a.template_id,
                 template_version=a.template_version,
+                project_tokens=tuple(a.project_tokens),
             )
             for a in request.approvals
         )
@@ -935,9 +947,16 @@ class RealPipeline:
             # describe what an expert dropped from a corpus, and a cancelled run
             # has no corpus — the numbers would describe the fraction that
             # happened to be read before the operator pressed stop.
+            # The RUN's tokens, canonical, not the adapter's constructor
+            # default (Codex Sprint-4 B-2). The GUI supplies tokens on the
+            # request and leaves the constructor empty, so this rebuilt the
+            # waterfall with a different token set from the one that classified
+            # the corpus — the run could DROP a section that the screen then
+            # redrew as an unknown, non-engageable row, and an unapproved run
+            # never offered the lever at all.
             plan=(_plan(result, before, template=template,
                         approvals=approvals,
-                        project_tokens=self._project_tokens)
+                        project_tokens=config.project_tokens)
                   if outcome.published else None),
             termination=outcome.termination,
             published=outcome.published,

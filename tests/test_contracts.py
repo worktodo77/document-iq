@@ -401,7 +401,7 @@ def test_contract_version_is_the_frozen_one_and_every_bump_is_written_up():
     """
     import pathlib
 
-    assert CONTRACT_VERSION == "2.0.0"
+    assert CONTRACT_VERSION == "2.1.0"
 
     src = pathlib.Path(__file__).parent.parent / "src" / "dociq" / "contracts.py"
     history = src.read_text(encoding="utf-8")
@@ -423,6 +423,9 @@ def test_contract_version_is_the_frozen_one_and_every_bump_is_written_up():
     assert "2.0.0 " + chr(0x2014) + " amendment A-21" in history, (
         "the first MAJOR bump and the first removal from the frozen "
         "contract is not written up")
+    assert "2.1.0 " + chr(0x2014) + " amendment A-22" in history, (
+        "the amendment that binds an approval to the recognition configuration "
+        "it was reviewed against is not written up")
 
 
 # ---------------------------------------------------------------------------

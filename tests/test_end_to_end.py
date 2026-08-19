@@ -885,5 +885,3 @@ def test_the_approver_is_part_of_the_run_identity(engaged):
         omissions=(replace(hot.omissions[0], approved_by="someone-else"),),
     )
     assert run_identity(other) != run_identity(hot)
-
-

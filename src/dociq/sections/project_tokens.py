@@ -139,4 +139,3 @@ def propose_tokens(
         candidates,
         key=lambda t: (-token_labels[t], -len(token_docs[t]), t),
     ))
-

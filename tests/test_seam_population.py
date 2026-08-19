@@ -382,4 +382,3 @@ def test_the_checklists_rule_and_note_reach_the_screen(app, tmp_path) -> None:
             "the expert's stated cost did not reach the screen (A-11b)")
     finally:
         win.deleteLater()
-

@@ -1561,3 +1561,51 @@ nothing be dropped that the expert was not shown never belonged to profiles.
 profile picker and `profiles/detect.py` are gone. Three tests of profile
 precedence and per-document stamping were retired with the field they measured;
 their principle is A-19's and is tested on the input that decides today.
+
+## A-22 — an approval does not record the recognition configuration it was given against
+
+**Raised by:** Codex Sprint-4 review, finding B-1 (2026-08-19).
+**Status:** raised with its wiring; flipped to applied in the next commit.
+
+`OmissionSnapshot` and `ApprovedOmission` gain `project_tokens` — the canonical
+project names the approval was **reviewed** against. Additive with a safe
+default, so `CONTRACT_VERSION` moves 2.0.0 → **2.1.0**.
+
+### The case the contract could not express
+
+D-39's whole argument for shipping an imprecise token derivation was that a
+wrong token can only make a section MATCH a family, and under D-34 a match is an
+OFFER, never a drop. That holds for a run with no existing approval. It is false
+for the workflow the product implements and D-39 depends on:
+
+1. Run a matter, engage a lever on the waterfall. The window retains the
+   approval for the next run of the same matter.
+2. Notice DocIQ's proposal missed `BOMESC` — the derivation demonstrably cannot
+   find it — and type it into the editable field, which is the corrective step
+   D-39 exists to provide.
+3. Run again. The retained approval is selected at Stage 4 by `family_id` alone.
+
+The token set changes `family_key`, so it changes the set of pages the old
+approval reaches. Measured on the real resolver: **0 pages dropped before the
+edit, 1 after, with no new approval given.** That is a drop no person
+attributed, which is the thing Principle 1 forbids and the thing D-34 was
+written to make structurally impossible.
+
+### Why a field and not a workaround
+
+The contract already refuses an approval across template versions, and its
+stated reason is exactly this mechanism: *"A template version can change what a
+family matches, so an approval given against one is not an approval of the
+other."* Project tokens change what a family matches through the same function.
+Enforcing them is not a new rule — it is the rule the contract already states,
+applied to the second input that has the same power.
+
+Scoping this outside the contract was considered and rejected. Any check living
+in the GUI or the adapter leaves `apply_sections` — the only function permitted
+to drop a page, and a public one — able to widen an approval when called
+directly. The refusal has to sit where the drop is decided.
+
+**Hashed, like every other field of the snapshot.** Two runs whose approvals were
+reviewed under different token sets are different configurations, and an
+identity that could not tell them apart would say two corpora are the same run
+when one of them dropped pages the other kept.

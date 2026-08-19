@@ -10,9 +10,9 @@ DocIQ is a **reducer, not an interpreter**. It performs no AI extraction, summar
 
 1. **No silent deletion** — every page in equals a page accounted for in the processing log.
 2. **Original locators preserved** — page markers reference the original document's pagination; Bates numbers carried alongside.
-3. **Expert controls omissions** — all drop rules are created or approved by the expert via versioned format profiles.
+3. **Expert controls omissions** — nothing is removed without an approval that names a person, given against a section template family (D-34).
 4. **Fully offline** — no network access of any kind; all OCR and processing runs locally.
-5. **Deterministic and repeatable** — same inputs + same profile = byte-identical outputs; every run hash-logged.
+5. **Deterministic and repeatable** — same inputs + same approvals = byte-identical outputs; every run hash-logged.
 
 ## Documents
 

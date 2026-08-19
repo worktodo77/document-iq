@@ -177,17 +177,28 @@ def test_the_manifest_claim_names_the_full_identity_it_covers(outcome):
         (outcome.layout.root / mf.MANIFEST_NAME).read_text(encoding="utf-8")
     )
     identity = data["claim_identity"]
-    for named in ("profile", "master-index", "OCR confidence threshold",
+    for named in ("master-index", "OCR confidence threshold",
                   "OCR engine", "Bates", "row caps", "ZIP", "per-file timeout",
                   "retry", "recursed", "OCR model identity"):
         assert named in identity, named
     assert "EXCLUDED" in identity and "workers" in identity
 
-    # B-R2-2. The claim has to describe what is ACTUALLY hashed, and the two
-    # things it previously got wrong are asserted by name.
-    assert "ORDERED" in identity and "profile_hash" in identity, (
-        "the claim still describes the identity as profile id and version, "
-        "which is not the input Stage 4 uses")
+    # Codex Sprint-4 B-3. This block used to assert "profile" and
+    # "profile_hash" were PRESENT, so when D-38 removed those fields from the
+    # contract the test went on pinning the false claim green. A positive
+    # substring list can only ever check that the claim says enough; it cannot
+    # check that the claim says nothing retired. So the retired direction is
+    # asserted too, and derived from the live contract rather than typed —
+    # a hand-written list of removed names has to be maintained by the same
+    # change that removes one.
+    live = {f.name for f in dataclasses.fields(RunConfig)}
+    assert "profiles" not in live, (
+        "this guard assumes D-38 removed the profile inputs; if they came "
+        "back, the claim must name them again")
+    for retired in ("profile_hash", "profile snapshot", "profiles"):
+        assert retired not in identity, (
+            f"the persisted claim names {retired!r}, which is not an input of "
+            f"RunConfig at contract 2.0.0")
     assert "OUTPUT folder" in identity, (
         "the claim does not say the destination is excluded, so it still "
         "disagrees with the log and the acceptance harness")
@@ -485,7 +496,7 @@ def test_every_deadline_limit_is_an_exactly_represented_integer():
 
 def _profile(pid: str, version: str, *, header: str = "", drop: str | None = None):
     from dociq.contracts import Disposition
-    
+
     rules = ()
     if drop is not None:
         rules = (SectionRule(rule_id=f"{pid}-drop", pattern=drop,

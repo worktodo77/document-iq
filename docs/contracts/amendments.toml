@@ -244,8 +244,26 @@ tests = ["tests/test_seam_population.py", "tests/test_view_models.py", "tests/te
 # A-21 lands its wiring and this entry in the same commit -- the A-16/A-17
 # two-step, fourth time -- so it is "raised" for exactly one commit.
 [amendment.A-21]
-status = "raised"
+status = "applied"
+adopted_in = "6448dd7"
 title = "the frozen contract carries fields for a system that no longer exists"
 raised_by = "D-38, deleting the profile system"
 wired_in = { "src/dociq/contracts.py" = ["CONTRACT_VERSION"], "src/dociq/operator.py" = ["operator_stamp"] }
 tests = ["tests/test_contracts.py", "tests/test_run_identity.py"]
+
+
+# A-22 lands its wiring and this entry in the same commit -- the A-16/A-17
+# two-step, fifth time -- so it is "raised" for exactly ONE commit and is
+# flipped with the adopting id in the very next one.
+#
+# "Exactly one" is not a figure of speech here: A-21 was raised in 6448dd7 and
+# was still sitting at "raised" three commits later, found only when this entry
+# was being written. The registry check cannot catch that -- it verifies an
+# applied amendment names a real commit, and a "raised" one is legitimately
+# waiting. The flip has to actually happen.
+[amendment.A-22]
+status = "raised"
+title = "an approval does not record the recognition configuration it was given against"
+raised_by = "Codex Sprint-4 review, finding B-1"
+wired_in = { "src/dociq/contracts.py" = ["OmissionSnapshot", "CONTRACT_VERSION"], "src/dociq/sections/model.py" = ["ApprovedOmission"], "src/dociq/sections/apply.py" = ["apply_sections"], "src/dociq/gui/pipeline.py" = ["OmissionApproval"] }
+tests = ["tests/test_codex_r1_findings.py", "tests/test_run_identity.py", "tests/test_sections.py"]

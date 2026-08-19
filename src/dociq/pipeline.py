@@ -1464,6 +1464,9 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         # the Bates result, and two later call sites read it.
         stage4 = apply_sections(
             doc, spans, template=opts.template, approvals=opts.approvals,
+            # The run's own tokens, so an approval reviewed under a different
+            # set is refused rather than silently widened (Codex B-1).
+            project_tokens=walk_config.project_tokens,
             # The matter this run is FOR, so Stage 4 can refuse an approval
             # given on a different one. opts.matter_name is what the adapter
             # derives from the source folder and what the drop log records.
