@@ -807,6 +807,15 @@ class RealPipeline:
         )
         return tuple(levers), TokenBasis(), source
 
+    def check_folders(self, source: str, output: str) -> str:
+        """The run's own preflight, asked early (D-43's first finding).
+
+        One definition, shared: :func:`dociq.ingest.walker.preflight_folders` is
+        what :func:`walker.run` calls too, so the warning on the setup screen and
+        the refusal at run time cannot give different answers.
+        """
+        return walker.preflight_folders(source, output)
+
     def preview_folder(self, path: str) -> FolderPreview:
         """What is in the folder, before anything is read.
 

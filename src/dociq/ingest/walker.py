@@ -460,6 +460,36 @@ def _root_overlap(source: Path, output: Path) -> str:
     )
 
 
+def preflight_folders(source: str, output: str) -> str:
+    """Why this pair of folders cannot be used, or ``""`` — the checks that are
+    answerable the MOMENT an operator picks them.
+
+    **Exists because the answer arrived too late.** Both of these were only
+    evaluated inside :func:`run`, so an operator chose two folders, pressed the
+    one forward action, waited, and was then told the pair was refused. The
+    setup screen has known both paths since the second click.
+
+    :func:`run` still performs its own checks and must: a folder can be renamed,
+    unmounted or filled between the pick and the press, and a screen's answer is
+    a courtesy rather than a guarantee. Both call THIS function, so the courtesy
+    and the guarantee cannot give different answers — which is the defect the
+    OCR review flag had, one screen over.
+
+    Only the pick-time-answerable checks live here. Disk headroom needs the
+    scan's own file sizes and stays where it can be computed.
+    """
+    if not source or not output:
+        return ""
+    src = Path(source)
+    if not src.is_dir():
+        return (
+            f"The documents folder could not be read: {source}. It is not a "
+            "directory, or the drive or network share it lives on is not "
+            "available. Check the path before starting."
+        )
+    return _root_overlap(src, Path(output))
+
+
 def is_run_state(path: Path) -> bool:
     """Whether a path is DocIQ's own scratch rather than evidence.
 
@@ -1196,6 +1226,10 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
             "not a directory, or the drive or network share it lives on is not "
             "available. Nothing was scanned; check the path and re-run.")
         return blocked_result(blocked)
+    # NOTE: the two checks above and below are also offered to the setup screen
+    # through :func:`preflight_folders`, so an operator is told at the moment of
+    # PICKING rather than after pressing Run. They are still evaluated here, and
+    # must be: a folder can change between the pick and the press.
 
     # Preflight 2 of 4. MEASURED, not hypothesized: a one-document matter run
     # twice with the output folder inside the source folder inventoried 1

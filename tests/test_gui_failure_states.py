@@ -29,10 +29,12 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from PySide6.QtWidgets import QPushButton
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from .conftest import FIXTURES  # noqa: E402
 from dociq.contracts import RunConfig, RunResult  # noqa: E402
 from dociq.gui.pipeline import (  # noqa: E402
     FolderPreview,
@@ -443,3 +445,75 @@ def test_the_build_never_lets_an_exception_reach_the_event_loop(app):
             assert str(error).strip("'") in window.handoff.package_lines(), error
         finally:
             window.close()
+
+
+def test_a_refused_folder_pair_is_caught_when_it_is_PICKED(app) -> None:
+    """D-43's first finding, from the first human-driven session.
+
+    An operator chose a documents folder and an output folder, pressed the one
+    forward action, waited, and was then told the pair was refused because the
+    output folder was a PARENT of the source. The setup screen had known both
+    paths since the second click.
+
+    Two properties, and the second is the one that makes it a preflight rather
+    than a notice: the reason appears where the folders were chosen, AND the
+    forward action is disabled. A refusal an operator can click past is not a
+    preflight — the run would refuse a moment later anyway, which is the
+    experience this removes.
+    """
+    from dociq.adapter import RealPipeline
+    from dociq.gui.main_window import MainWindow
+
+    win = MainWindow(RealPipeline())
+    try:
+        run = [b for b in win.setup.findChildren(QPushButton)
+               if "Build the reduced" in b.text()][0]
+
+        # The line edits MUST be populated, or this test passes for the wrong
+        # reason: the button is disabled whenever either folder is unset, so
+        # emitting the signal alone proves nothing about the warning. Caught by
+        # mutating `ready = chosen and not warning` to `ready = chosen` and
+        # watching this test pass anyway.
+        def pick(src: str, out: str) -> None:
+            win.setup._source.setText(src)
+            win.setup._output.setText(out)
+            win.setup.folders_changed.emit(src, out)
+
+        # Output is a parent of source — the pair that was refused at run time.
+        pick(str(FIXTURES), str(FIXTURES.parent))
+        assert not run.isEnabled(), (
+            "the run button is live over a folder pair the run will refuse")
+        assert "output folder" in win.setup._blocker.text().lower(), (
+            "the operator is not told WHICH choice is the problem")
+
+        # A source folder that is not there.
+        pick(str(FIXTURES / "no-such-folder"), str(FIXTURES.parent / "out"))
+        assert not run.isEnabled()
+        assert "could not be read" in win.setup._blocker.text()
+
+        # A usable pair re-enables it — a check that refuses everything is not
+        # a check.
+        pick(str(FIXTURES), str(FIXTURES.parent / "dociq-out"))
+        assert run.isEnabled(), (
+            "a valid pair is still refused — the check refuses everything")
+    finally:
+        win.deleteLater()
+
+
+def test_the_screen_and_the_run_share_one_folder_rule() -> None:
+    """They must not be able to disagree.
+
+    The OCR review flag had exactly this defect one screen over: the log and the
+    screen each implemented "is this page low-confidence" and answered 99 and 80
+    for the same run. The setup screen therefore does not own a copy of the
+    folder rule — it asks the pipeline, which calls the same function
+    :func:`walker.run` calls.
+    """
+    from dociq.adapter import RealPipeline
+    from dociq.ingest.walker import preflight_folders
+
+    pipe = RealPipeline()
+    for src, out in ((str(FIXTURES), str(FIXTURES.parent)),
+                     (str(FIXTURES), str(FIXTURES.parent / "out")),
+                     (str(FIXTURES / "nope"), str(FIXTURES.parent / "out"))):
+        assert pipe.check_folders(src, out) == preflight_folders(src, out)

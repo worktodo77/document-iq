@@ -224,6 +224,11 @@ class MainWindow(QMainWindow):
 
         self.setup.run_requested.connect(self.start_run)
         self.setup.source_chosen.connect(self._preview_folder)
+        # D-43's first finding, from the first human-driven session: the run
+        # refused a source/output pair AFTER the operator had chosen both and
+        # pressed the one forward action. The screen has known both paths since
+        # the second click.
+        self.setup.folders_changed.connect(self._check_folders)
         self.summary.plan_changed.connect(self._replan)
         # D-34: the row that moved becomes an approval carrying a real name.
         # Connected next to the re-projection because they are two halves of one
@@ -261,6 +266,23 @@ class MainWindow(QMainWindow):
         self.bates.stop_requested.connect(self.cancel_run)
 
     # -- flow ---------------------------------------------------------------
+
+    def _check_folders(self, source: str, output: str) -> None:
+        """Ask the pipeline whether this pair may be used, and tell the screen.
+
+        Failure is non-fatal and SILENT-SAFE in the right direction: an adapter
+        that cannot answer leaves the warning empty and the run performs the same
+        check a moment later, exactly as it did before. What must not happen is a
+        screen inventing an answer of its own.
+        """
+        check = getattr(self._pipeline, "check_folders", None)
+        if check is None:
+            return
+        try:
+            self.setup.set_folder_warning(check(source, output))
+        except Exception as exc:
+            print(f"[dociq] folder check unavailable: {exc}")
+            self.setup.set_folder_warning("")
 
     def _preview_folder(self, path: str) -> None:
         """Ask the pipeline what is in the folder, so the action can state its

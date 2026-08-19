@@ -647,6 +647,20 @@ class PipelineAPI(Protocol):
     def preview_folder(self, path: str) -> FolderPreview:
         ...
 
+    def check_folders(self, source: str, output: str) -> str:
+        """Why this pair of folders cannot be used, or ``""``.
+
+        Asked as the operator picks, so a refusal arrives beside the folder that
+        caused it rather than after the run is started. The pipeline answers,
+        because the rule is the pipeline's: the GUI may not import
+        :mod:`dociq.ingest`, and a screen that re-implemented the check would be
+        a second definition free to disagree with the first.
+
+        An adapter that does not offer it returns ``""`` and the run answers
+        instead, exactly as it did before — later, but never wrong.
+        """
+        ...
+
     def run(
         self,
         request: RunRequest,

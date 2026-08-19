@@ -135,6 +135,13 @@ class SetupScreen(QWidget):
     profile_new_requested = Signal()
     profile_review_requested = Signal(object)  # ProfileInfo
     source_chosen = Signal(str)
+    folders_changed = Signal(str, str)
+    """``(source, output)`` — either folder was picked or cleared.
+
+    The window asks the pipeline whether the pair is usable and pushes the answer
+    back through :meth:`set_folder_warning`. The screen does not decide: the rule
+    belongs to the pipeline, and a screen holding its own copy of it is a second
+    definition free to disagree."""
 
     def __init__(self, theme: Theme, profiles: tuple[ProfileInfo, ...],
                  parent=None) -> None:
@@ -306,6 +313,7 @@ class SetupScreen(QWidget):
         if source:
             self._source.setText(source)
             self.source_chosen.emit(source)
+            self.folders_changed.emit(self._source.text(), self._output.text())
         if output:
             self._output.setText(output)
         if master_index:
@@ -330,13 +338,31 @@ class SetupScreen(QWidget):
             master_index_path=self._index.text() or None,
         )
 
+    def set_folder_warning(self, message: str) -> None:
+        """The pipeline's answer about this pair of folders, shown where they
+        were chosen (D-43's first finding).
+
+        The warning does not merely warn: it DISABLES the forward action. A
+        refusal the operator can click past is not a preflight, and the run would
+        refuse a moment later anyway — which is the experience this removes.
+        """
+        self._folder_warning = message
+        self._refresh()
+
     def _refresh(self) -> None:
-        ready = bool(self._source.text() and self._output.text())
+        chosen = bool(self._source.text() and self._output.text())
+        warning = getattr(self, "_folder_warning", "")
+        ready = chosen and not warning
         self._run.setEnabled(ready)
-        self._blocker.setText(
-            "" if ready
-            else "Choose a documents folder and an output folder to start."
-        )
+        if warning:
+            self._blocker.setText(warning)
+            self._blocker.setStyleSheet(f"color: {self._theme.palette.warn};")
+        else:
+            self._blocker.setStyleSheet("")
+            self._blocker.setText(
+                "" if ready
+                else "Choose a documents folder and an output folder to start."
+            )
 
     def _emit_run(self) -> None:
         self.run_requested.emit(self.request())
@@ -354,12 +380,16 @@ class SetupScreen(QWidget):
             self._source.setText(path)
             self.source_chosen.emit(path)
             self._refresh()
+        self.folders_changed.emit(
+            self._source.text(), self._output.text())
 
     def _pick_output(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose the output folder")
         if path:
             self._output.setText(path)
             self._refresh()
+        self.folders_changed.emit(
+            self._source.text(), self._output.text())
 
     def _pick_index(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
