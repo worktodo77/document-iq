@@ -118,7 +118,7 @@ status = "applied"
 title = "the seam cannot deliver a profile's section rules before a run"
 raised_by = "Track E"
 adopted_in = "18f4d65"
-wired_in = { "src/dociq/gui/pipeline.py" = ["profile_rules"], "src/dociq/adapter.py" = ["profile_rules"] }
+wired_in = { "src/dociq/gui/pipeline.py" = ["template_families"], "src/dociq/adapter.py" = ["template_families"] }
 tests = ["tests/test_gui_screen_states.py", "tests/test_adapter.py"]
 
 # A-11b was invisible to `tools/check_amendments.py` for a reason worth writing
@@ -228,7 +228,7 @@ raised_by = "D-34 and D-35, wiring the section taxonomy into the pipeline"
 # by the matter's NAME, and `matter_key` is the single derivation that replaced
 # it. Codex r3, D-2 -- the registry named the fields the amendment landed and
 # not the ones that corrected it.
-wired_in = { "src/dociq/contracts.py" = ["OmissionSnapshot", "matter_key"], "src/dociq/pipeline.py" = ["_inert_profile_warnings"], "src/dociq/sections/apply.py" = ["apply_sections"] }
+wired_in = { "src/dociq/contracts.py" = ["OmissionSnapshot", "matter_key"], "src/dociq/sections/apply.py" = ["apply_sections"] }
 tests = ["tests/test_run_identity.py", "tests/test_sections.py", "tests/test_contracts.py"]
 
 # A-20 lands its wiring and this entry in the same commit -- the A-16/A-17
@@ -240,3 +240,12 @@ title = "the waterfall seam cannot say a section is recognized and must never be
 raised_by = "D-34 and D-35, wiring the D-14 picker"
 wired_in = { "src/dociq/gui/pipeline.py" = ["LEVER_RECOGNIZED", "OmissionApproval"], "src/dociq/adapter.py" = ["set_omission"], "src/dociq/gui/widgets.py" = ["WaterfallRow"] }
 tests = ["tests/test_seam_population.py", "tests/test_view_models.py", "tests/test_gui_screen_states.py"]
+
+# A-21 lands its wiring and this entry in the same commit -- the A-16/A-17
+# two-step, fourth time -- so it is "raised" for exactly one commit.
+[amendment.A-21]
+status = "raised"
+title = "the frozen contract carries fields for a system that no longer exists"
+raised_by = "D-38, deleting the profile system"
+wired_in = { "src/dociq/contracts.py" = ["CONTRACT_VERSION"], "src/dociq/operator.py" = ["operator_stamp"] }
+tests = ["tests/test_contracts.py", "tests/test_run_identity.py"]

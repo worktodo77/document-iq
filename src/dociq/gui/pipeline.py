@@ -69,19 +69,6 @@ remains true — that it is unmeasured — is the part a reader needs.
 
 
 @dataclass(frozen=True, slots=True)
-class ProfileInfo:
-    """A format profile as the picker shows it (§6)."""
-
-    profile_id: str
-    version: str
-    label: str
-    """Plain-language name — "MODEC monthly progress report", not an id."""
-    section_rules: int = 0
-    """How many KEEP/DROP rules the profile carries. Shown so the operator can
-    see at a glance whether a profile will actually remove anything."""
-
-
-@dataclass(frozen=True, slots=True)
 class FolderPreview:
     """What a folder looks like before a run — shown next to the picker so the
     operator can confirm they chose the right folder without opening Explorer."""
@@ -607,7 +594,6 @@ class RunRequest:
 
     source_root: str
     output_root: str
-    profile: ProfileInfo | None = None
     master_index_path: str | None = None
 
     approvals: tuple[OmissionApproval, ...] = ()
@@ -641,8 +627,6 @@ CancelCheck = Callable[[], bool]
 class PipelineAPI(Protocol):
     """What the GUI is allowed to ask of the pipeline. Nothing more."""
 
-    def profiles(self) -> tuple[ProfileInfo, ...]:
-        ...
 
     def preview_folder(self, path: str) -> FolderPreview:
         ...
@@ -711,8 +695,8 @@ class PipelineAPI(Protocol):
         """
         ...
 
-    def profile_rules(
-        self, profile: ProfileInfo
+    def template_families(
+        self,
     ) -> tuple[tuple[ReductionLever, ...], TokenBasis, str]:
         """The profile's KEEP/DROP rules, what each is worth, and — in the
         pipeline's own words — where the rules and the figures came from
@@ -822,8 +806,6 @@ def config_from(request: RunRequest) -> RunConfig:
     return RunConfig(
         source_root=request.source_root,
         output_root=request.output_root,
-        profile_id=request.profile.profile_id if request.profile else None,
-        profile_version=request.profile.version if request.profile else None,
     )
 
 
@@ -833,7 +815,6 @@ __all__ = [
     "LEVER_EXPERT",
     "LEVER_RECOGNIZED",
     "OmissionApproval",
-    "ProfileInfo",
     "TokenBasis",
     "ReductionLever",
     "ReductionPlan",

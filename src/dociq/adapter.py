@@ -32,7 +32,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from dociq import pipeline as core
-from dociq.contracts import Disposition, RunResult, matter_key
+from dociq.contracts import DocIQError, Disposition, RunResult, matter_key
 from dociq.gui.pipeline import (
     LEVER_RECOGNIZED,
     OmissionApproval,
@@ -40,7 +40,6 @@ from dociq.gui.pipeline import (
     BatesConfirm,
     BatesProposal,
     FolderPreview,
-    ProfileInfo,
     ProgressEvent,
     Reconciliation,
     ReconciliationRow,
@@ -55,12 +54,6 @@ from dociq.gui.pipeline import (
 )
 from dociq.ingest import walker
 from dociq.operator import operator_stamp
-from dociq.profiles.model import (
-    FormatProfile,
-    ProfileError,
-    load_profile,
-    profile_library_dir,
-)
 from dociq.sections.model import ApprovedOmission
 from dociq.sections.normalize import family_key
 from dociq.sections.templates import PROGRESS_REPORT, template_by_id
@@ -68,7 +61,6 @@ from dociq.verify import tokens as vt
 
 __all__ = [
     "RealPipeline",
-    "NO_PROFILE",
     "SECONDS_PER_GB_OCR_ON",
     "SECONDS_PER_GB_OCR_OFF",
     "seconds_per_gb",
@@ -77,24 +69,19 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# The one built-in profile
+# Refusing an omission
 # ---------------------------------------------------------------------------
 
-NO_PROFILE = ProfileInfo("none", "-", "No profile — keep every page",
-                         section_rules=0)
-"""The choice that drops nothing, always offered and always last.
 
-It is the only profile DocIQ ships, and that is a decision rather than an
-omission. §6 step 4 requires a profile to be saved with the expert's username and
-timestamp, and :meth:`~dociq.profiles.model.SectionRule.validate` refuses a DROP
-rule that carries no note recording why the section is omitted and who approved
-it. A built-in "MODEC monthly progress report" profile with photo logs pre-marked
-DROP would therefore either fail validation or ship an omission decision no
-expert made, attributed to nobody — under a Principle-3 product whose entire
-argument is that the expert's omissions are separable from the tool's. The
-profiling workflow (§6) is where a real profile comes from; until an expert has
-run it, the honest library is empty and the honest picker offers this.
-"""
+class OmissionRefused(DocIQError):
+    """An omission was offered against a family the template does not define, or
+    one it defines and refuses to offer.
+
+    Was ``ProfileError`` until D-38 deleted the profile system. The refusals it
+    carries were never about profiles — they are D-34's, about who may approve
+    what — and they outlived the exception class they happened to borrow."""
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +372,6 @@ def _template_lever(
 
 
 def _plan(result: RunResult, before: TokenEstimate,
-          profiles: tuple[FormatProfile, ...] = (),
           *, template=None,
           approvals: tuple[ApprovedOmission, ...] = (),
           project_tokens: tuple[str, ...] = ()) -> ReductionPlan | None:
@@ -648,7 +634,7 @@ class RealPipeline:
         time, and every drop-log line that omission produces will carry all
         three.
 
-        The approver is :func:`dociq.profiles.model.operator_stamp`'s reading of
+        The approver is :func:`dociq.operator.operator_stamp`'s reading of
         who is running the tool — the same stamp a saved profile carries, for
         the same reason. It is never a parameter: a caller that could pass a
         name could pass somebody else's.
@@ -668,20 +654,20 @@ class RealPipeline:
             return None
         family = self._template.family(family_id) if self._template else None
         if family is None:
-            raise ProfileError(
+            raise OmissionRefused(
                 f"no family {family_id!r} in template "
                 f"{self._template.template_id if self._template else '(none)'} "
                 "— an approval must name a section the template defines, or the "
                 "drop log would attribute an omission to a rule nobody wrote"
             )
         if not family.offer:
-            raise ProfileError(
+            raise OmissionRefused(
                 f"family {family_id!r} is recognized and never offered "
                 f"({family.display_name}). {family.rationale}"
             )
         stamp = operator_stamp()
         if not source_root.strip():
-            raise ProfileError(
+            raise OmissionRefused(
                 "an omission cannot be approved without the folder it is being "
                 "approved on. The matter's NAME does not scope an approval — "
                 "two clients with a 'Production' folder are two matters and one "
@@ -698,38 +684,8 @@ class RealPipeline:
             template_version=self._template.version,
         )
 
-    def profiles(self) -> tuple[ProfileInfo, ...]:
-        """§6's library, plus :data:`NO_PROFILE`.
-
-        Never empty — an empty picker is indistinguishable from a broken one.
-        ``section_rules`` is the real count of rules the profile carries, so the
-        operator can see at a glance whether a profile will remove anything;
-        nothing here is a placeholder.
-        """
-        found: list[ProfileInfo] = []
-        issues: list[str] = []
-        directory = profile_library_dir(self._library_dir)
-        if directory.is_dir():
-            for path in sorted(directory.glob("*.yaml")):
-                try:
-                    profile = load_profile(path)
-                except (ProfileError, OSError) as exc:
-                    issues.append(f"{path.name}: {exc}")
-                    continue
-                found.append(
-                    ProfileInfo(
-                        profile_id=profile.profile_id,
-                        version=profile.version,
-                        label=profile.display_name or profile.profile_id,
-                        section_rules=len(profile.section_rules),
-                    )
-                )
-        self.library_issues = tuple(issues)
-        found.sort(key=lambda p: (p.label.lower(), p.profile_id, p.version))
-        return tuple(found) + (NO_PROFILE,)
-
-    def profile_rules(
-        self, profile: ProfileInfo
+    def template_families(
+        self,
     ) -> tuple[tuple[ReductionLever, ...], TokenBasis, str]:
         """§6's checklist: which rules this profile carries, and where they came
         from. Amendment A-11's shape, implemented.
@@ -864,7 +820,6 @@ class RealPipeline:
         confirm_bates: BatesConfirm | None = None,
     ) -> RunOutcome:
         """One real run of §4's six stages, reported as the GUI reads it."""
-        profiles = self._profiles_for(request)
         matter = Path(request.source_root).name
         template = self._template
         # The seam records become the pipeline's own, here and nowhere else.
@@ -883,7 +838,7 @@ class RealPipeline:
             )
             for a in request.approvals
         )
-        config = config_from(self._without_sentinel(request))
+        config = config_from(request)
         config = replace(
             config, bates_pattern=stored_bates_pattern(request.output_root),
             project_tokens=self._project_tokens)
@@ -900,7 +855,6 @@ class RealPipeline:
                 on_stage=emitter.from_stage,
                 matter_name=Path(request.source_root).name,
                 master_index_path=request.master_index_path or None,
-                profiles=profiles,
                 # D-34/D-35. The template is what RECOGNIZES; the approvals are
                 # the only thing that can drop. With an empty approval set this
                 # run places every page it can in a section, records the tier,
@@ -938,7 +892,7 @@ class RealPipeline:
             # describe what an expert dropped from a corpus, and a cancelled run
             # has no corpus — the numbers would describe the fraction that
             # happened to be read before the operator pressed stop.
-            plan=(_plan(result, before, profiles, template=template,
+            plan=(_plan(result, before, template=template,
                         approvals=approvals,
                         project_tokens=self._project_tokens)
                   if outcome.published else None),
@@ -1064,54 +1018,6 @@ class RealPipeline:
         )
 
     # -- internals ----------------------------------------------------------
-
-    def _without_sentinel(self, request: RunRequest) -> RunRequest:
-        """:data:`NO_PROFILE` is a picker entry, not a profile.
-
-        Letting it through ``config_from`` would stamp ``profile_id="none"`` into
-        :class:`~dociq.contracts.RunConfig` — a hashed identity field — so a run
-        with no profile and a run with a profile called "none" would be recorded
-        identically, and every document in the index would be labelled with a
-        profile that does not exist.
-        """
-        if request.profile is not None and request.profile.profile_id == \
-                NO_PROFILE.profile_id:
-            return replace(request, profile=None)
-        return request
-
-    def _profiles_for(self, request: RunRequest) -> tuple[FormatProfile, ...]:
-        """Load the chosen profile from the library.
-
-        The GUI passes an identifier; the run needs the rules. A chosen profile
-        that cannot be loaded RAISES rather than falling back to "no profile":
-        silently running without an expert's rules and publishing the result as a
-        reduced corpus is the failure mode this whole product is against.
-        """
-        chosen = self._load(request.profile)
-        return (chosen,) if chosen is not None else ()
-
-    def _load(self, profile: ProfileInfo | None) -> FormatProfile | None:
-        """The library file behind a picker entry, or ``None`` for no profile.
-
-        One loader for the run and for the §6 checklist, so the rules an expert
-        approves on screen are read from the same file, by the same parser, as
-        the rules the run applies. Two readers would eventually show one thing
-        and drop another.
-        """
-        if profile is None or profile.profile_id == NO_PROFILE.profile_id:
-            return None
-        directory = profile_library_dir(self._library_dir)
-        path = directory / f"{profile.profile_id}.v{profile.version}.yaml"
-        if not path.is_file():
-            raise ProfileError(
-                f"The profile '{profile.label}' ({profile.profile_id} "
-                f"v{profile.version}) is no longer in the profile library at "
-                f"{directory}. It was offered when this run was set up and has "
-                "been moved, renamed or deleted since. DocIQ will not run "
-                "without the rules it was told to apply."
-            )
-        return load_profile(path)
-
 
 class _Progress:
     """Turns the pipeline's two progress channels into the seam's one.

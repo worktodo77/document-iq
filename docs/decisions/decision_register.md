@@ -78,6 +78,48 @@ than a foundation to extend.
 
 | D-35 | The shipped Stage-4 engine drops the wrong pages, as a class | **REPLACE IT WITH TIER-BASED SPANS (Alex, 2026-08-17).** `profiles/apply.py` matches a rule's regex against every line of every page and carries the matched section forward until another rule matches — so a rule fires on any line that merely *mentions* its section, and the carried state then governs every following page. Reproduced on **five trigger shapes** with a single DROP rule for `PROGRESS PHOTOGRAPHS`: the document's own table of contents, a body-text cross-reference, a transmittal listing enclosures, an appendix cover sheet, and — the worst, needing no confusing text at all — **a CORRECT first match where no later rule marks the section's end**, which runs the drop to the end of the document. The pages lost in the reproductions are the **executive summary, the critical path narrative, the weather log and the timesheets**, four of the categories §4 grades HIGH risk, and the drop log attributes every one of them to `PROGRESS PHOTOGRAPHS` — an audit trail that is complete and is a misdescription. This inverts §1's binding asymmetry: the recognizer does not miss a section, it **invents** one. Ruling: section resolution moves to Tier 1–3 page **spans** and Tier 4 explicit ranges; regex heading matching and carried section state are **deleted**. Rejected: bounding the rules instead (refusing to load a profile whose DROP sections have no end) — it keeps the mechanism §2 measured returning `FPSO ALMIRANTE BARROSO MV32` (1,017) and `PETROBRAS` (981) as its top matches, and does not touch the three shapes where the text merely mentions a section name; and suppressing matches on TOC pages, which is the repro fix for one of five shapes and is how the same defect returns under a new number. **Exposure stated precisely: `apply_profiles` is wired into the real pipeline (`pipeline.py:1435`) and no test covers the carry-forward path — but no built-in profile ships and there is no profile YAML on disk, so the code is reachable only by a hand-authored profile in the D-05 library, and nobody has authored one. Live and unexercised, which is exactly why it must be settled before templates make it exercised on every run.** | 2026-08-17 |
 
+## D-38 EXECUTED — the profile system is deleted (2026-08-19)
+
+Alex ruled it in D-38 and authorized the work directly. Amendment **A-21**,
+**CONTRACT_VERSION 2.0.0 — the first MAJOR bump and the first REMOVAL from the
+frozen contract.** Every previous amendment was additive with a safe default;
+this one takes fields away, so a caller reading `config.profiles` fails loudly
+rather than reading something plausible.
+
+**The prerequisite, done first and in its own commit.** `operator_stamp()` lived
+inside the package being deleted and is what signs an expert's approved omission
+(D-34), what the log records as the operator, and what the determinism harness
+holds fixed. Three unrelated guarantees were resting on a file about to be
+removed. It is now `dociq/operator.py`.
+
+**Gone:** `dociq/profiles/` entirely (`model.py`, `detect.py`), `ProfileSnapshot`,
+`RunConfig.profiles` / `profile_id` / `profile_version`, `DocumentRecord`'s two
+profile fields, the D-05 YAML library, the setup screen's profile picker, and
+`tests/test_profiles.py`.
+
+**Kept, and the distinction is the point.** §6's checklist SURVIVES and now
+describes the template — its requirement that nothing be dropped that the expert
+was not shown never belonged to profiles. Six Stage-4 guarantees moved from
+`test_profiles.py` into `test_sections.py` rather than dying with the file that
+happened to hold them: KEEP by default, attribution, page accounting,
+pass-through, and stability over repeated runs are properties of
+`apply_sections` and always were.
+
+**Retired with the thing they guarded, and named rather than quietly dropped:**
+three tests of profile precedence and per-document profile stamping, three
+apply-tests that were *about* a profile claiming a document, and
+`test_no_profile_keeps_every_page`. Their principle — the input that decides
+which pages drop must move the identity — is A-19's, and is tested on the input
+that decides today.
+
+**Consequence, accepted before the ruling and restated here:** matter folders
+written before 2.0.0 recorded a run identity computed WITH a profile snapshot,
+and will not reproduce byte-for-byte afterwards.
+
+Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
+checks and determinism over 8 sequential runs at one corpus hash, amendment
+registry OK at 23 entries.
+
 ## The OCR review flag, re-grounded (Alex, 2026-08-18)
 
 Raised by Alex driving the packaged `.exe` on a real matter: *"we had 99

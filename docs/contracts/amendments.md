@@ -1507,3 +1507,57 @@ It does not let the GUI reach `dociq.sections`. `OmissionApproval` is a seam
 record the adapter converts, and `tests/test_import_graph.py` now names
 `sections` in its FORBIDDEN list so the indirection is enforced rather than
 merely intended.
+
+---
+
+## A-21 — the frozen contract carries fields for a system that no longer exists
+
+**Raised by:** D-38, deleting the profile system, 2026-08-19
+**Affects:** `dociq/contracts.py` - `ProfileSnapshot` (removed), `RunConfig.profiles`
+/ `profile_id` / `profile_version` (removed), `DocumentRecord.profile_id` /
+`profile_version` (removed); `dociq/operator.py` (new)
+**Proposed severity:** **MAJOR.** The first one, and the first REMOVAL.
+**Status:** **RAISED, NOT APPLIED** - flipped with the adopting commit id in the
+commit that follows. The A-16/A-17 two-step, fourth time of asking.
+
+### Why this one is MAJOR when eighteen were MINOR
+
+Every previous amendment was additive with a safe default, so no existing
+construction site was obliged to change and nothing could break quietly. This
+one takes fields away. A caller reading `config.profiles` now fails loudly
+rather than reading something plausible instead, and that is the point of doing
+it as a removal rather than a deprecation.
+
+### What it removes, and what had already stopped being true
+
+D-35 deleted the engine that applied profile rules in Sprint 3. From that
+moment a profile decided nothing: it was loaded, hashed into the run identity,
+copied into the matter folder and recorded in the log, and none of that changed
+a single page. Alex ruled it removed rather than carried (D-38).
+
+**The consequence was stated before the ruling and accepted on the record:**
+matter folders written before this bump recorded a run identity computed WITH a
+profile snapshot in it, and **will not reproduce byte-for-byte afterwards.**
+
+### The prerequisite nobody had recorded
+
+`operator_stamp()` lived in `profiles/model.py` - inside the package being
+deleted - and is what signs an expert's approved omission (D-34), what the log
+records as the operator of a run, and what the determinism harness holds fixed.
+Three unrelated guarantees were resting on a file about to be removed. It moved
+to `dociq/operator.py` first, in its own commit, before anything was deleted.
+
+### What replaced it, already present
+
+Sections recognise (Tiers 1 and 3), a template names families, and an
+`OmissionSnapshot` naming a person decides what drops - A-19, which put the
+deciding input into the identity for the reason A-08 had put profiles there.
+
+### What went with it, and what did not
+
+The §6 checklist SURVIVES and now describes the template: §6's requirement that
+nothing be dropped that the expert was not shown never belonged to profiles.
+`FormatProfile`, `SectionRule`, the D-05 YAML library, the setup screen's
+profile picker and `profiles/detect.py` are gone. Three tests of profile
+precedence and per-document stamping were retired with the field they measured;
+their principle is A-19's and is tested on the input that decides today.

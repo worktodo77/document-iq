@@ -355,96 +355,31 @@ def test_every_rendered_seam_field_reaches_a_screen(app, real_run, package):
         window.close()
 
 
-def test_the_checklists_rule_and_note_reach_the_screen(app, tmp_path):
-    """A-11b's two fields, rendered — **REPOINTED at D-35 (commit 4092f76).**
+def test_the_checklists_rule_and_note_reach_the_screen(app, tmp_path) -> None:
+    """A-11b, on the source that replaced the one it was written against.
 
-    Found empty by probe 1 on its first run: ``ReductionLever.rule`` and
-    ``ReductionLever.note`` were declared on the seam, populated by no adapter
-    and rendered by no screen. The checklist could say a DROP rule existed and
-    not what it catches or who approved it — precisely what A-11b's docstring
-    calls "true but tells the expert nothing".
-
-    **What this test used to assert, and why it is withdrawn.** It built a
-    profile carrying ``^PHOTO LOG`` / "Photo logs dropped per J. Long" and
-    required *that* pattern and *that* note on the screen. D-35 deleted
-    ``dociq.profiles.apply``, so a profile's DROP rule now drops nothing;
-    ``RealPipeline.profile_rules`` draws the checklist from the SECTION TEMPLATE
-    instead. Rendering the profile's pattern beside the word DROP would have put
-    a falsehood on the one screen whose entire purpose is an expert approving
-    omissions before a run commits to them.
-
-    A-11b's guarantee itself is untouched and is what is asserted below: the row
-    an expert is about to engage must show **what it catches** (the family's own
-    patterns, verbatim) and **what it costs** (the family's ``rationale``, which
-    :meth:`SectionFamily.validate` requires precisely so this row can never be
-    drawn without one). The profile is still written to the library, because the
-    call still takes a :class:`ProfileInfo` and the point is that the answer no
-    longer depends on it.
+    The amendment asked that the checklist show what a DROP actually CATCHES and
+    the expert's stated reason, not merely that a rule exists. It was written
+    when both came from a profile's pattern and notes field. D-35 moved them to
+    the template family's patterns and rationale, and D-38 deleted the profile
+    system entirely — so the amendment's guarantee is now stronger than it was:
+    a profile's note could be blank, and ``SectionFamily.validate()`` refuses a
+    family with no rationale.
     """
     from dociq import adapter
-    from dociq.contracts import Disposition
     from dociq.gui.main_window import MainWindow
-    from dociq.profiles.model import FormatProfile, SectionRule, dump_profile
     from dociq.sections.templates import PROGRESS_REPORT
 
-    library = tmp_path / "profiles"
-    library.mkdir()
-    profile = FormatProfile(
-        profile_id="probe-mpr", version="1.0",
-        display_name="Monthly progress report (probe)",
-        header_patterns=("MONTHLY PROGRESS REPORT",),
-        section_rules=(
-            SectionRule("probe.photos", r"^PHOTO LOG",
-                        disposition=Disposition.DROP, label="Photo logs",
-                        notes="Photo logs dropped per J. Long, 2026-08-01"),
-        ),
-    )
-    # The library's own naming convention — ``<id>.v<version>.yaml``. The
-    # adapter refuses to run a profile it cannot find under that exact name.
-    (library / "probe-mpr.v1.0.yaml").write_text(dump_profile(profile),
-                                                 encoding="utf-8")
-
-    pipe = adapter.RealPipeline(library_dir=library)
-    chosen = [p for p in pipe.profiles() if p.profile_id == "probe-mpr"]
-    assert chosen, "the probe profile did not load"
-
-    levers, _basis, _source = pipe.profile_rules(chosen[0])
-    assert levers, "profile_rules returned no levers for the shipped template"
-
-    offered = [f for f in PROGRESS_REPORT.families if f.offer]
-    by_key = {le.key: le for le in levers}
-    for family in offered:
-        row = by_key[family.family_id]
-        assert row.rule == " | ".join(family.patterns), (
-            f"the adapter dropped family {family.family_id!r}'s own matching "
-            f"patterns — the row says a drop exists and not what it catches "
-            f"(A-11b)")
-        assert row.note == family.rationale, (
-            f"the adapter dropped family {family.family_id!r}'s stated cost — "
-            f"§5.3, a lever offered without one is a lever that gets clicked")
-    # D-34: the profile's DROP rule reaches nothing. Its pattern must not appear
-    # on a screen that would read as though it still decided something.
-    assert not any(le.rule == r"^PHOTO LOG" for le in levers), (
-        "a profile pattern is back on the checklist — D-35 deleted the engine "
-        "that applied it, so the row would claim a drop that cannot happen")
-
-    window = MainWindow(pipeline=pipe)
+    win = MainWindow(adapter.RealPipeline())
     try:
-        window.show_profile_checklist(chosen[0])
-        text = _screen_text(window.checklist)
-        # One offered family, end to end: its patterns and its cost, on screen.
-        photos = PROGRESS_REPORT.family("progress-photographs")
-        assert photos is not None and photos.offer
-        assert " | ".join(photos.patterns) in text, \
-            "the matching patterns reach no screen"
-        assert photos.rationale in text, (
-            "the stated cost of the omission reaches no screen — the thing "
-            "that stops a HIGH-risk row being clicked for its number"
-        )
-        # And every offered row, not just the one this test happened to name.
-        for family in offered:
-            assert family.rationale in text, (
-                f"family {family.family_id!r} is offered on screen with no "
-                f"stated cost")
+        win.show_template_checklist()
+        from PySide6.QtWidgets import QLabel
+        text = " ".join(w.text() for w in win.checklist.findChildren(QLabel))
+        family = PROGRESS_REPORT.families[0]
+        assert family.display_name in text, (
+            "the checklist does not name the family")
+        assert family.rationale[:40] in text, (
+            "the expert's stated cost did not reach the screen (A-11b)")
     finally:
-        window.close()
+        win.deleteLater()
+

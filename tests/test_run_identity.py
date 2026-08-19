@@ -11,6 +11,15 @@ a worse failure, because nothing goes red.
 Amendment A-04 added ``RunConfig.limits``. These tests are about it being
 *populated*, *hashed*, and *named in the claim*, which is the half the amendment
 could not do by itself.
+
+**Two tests were removed here by D-38**, both of the profile snapshot set:
+``test_every_profile_in_the_library_is_snapshotted_by_content`` and
+``test_an_unprofiled_run_records_an_empty_profile_set``, plus the
+three that measured profile precedence and per-document stamping. They tested a field
+that no longer exists. Their PRINCIPLE -- the input that decides which pages
+drop must move the identity -- was A-08's, is now A-19's, and is tested on the
+input that decides today by ``test_approving_an_omission_moves_the_identity``
+and ``test_changing_who_approved_the_omission_moves_the_identity``.
 """
 
 from __future__ import annotations
@@ -425,84 +434,11 @@ def test_the_pipeline_hands_the_walk_the_configuration_it_will_record(tmp_path):
     # NOT be told about it.
     def _comparable(cfg):
         return dataclasses.replace(
-            cfg, bates_pattern=None, profile_id=None, profile_version=None)
+            cfg, bates_pattern=None)
 
     assert _comparable(walked) == _comparable(recorded), (
         "the walk ran under a different configuration than the run recorded")
 
-
-def test_the_walk_does_not_stamp_a_profile_onto_documents_it_did_not_claim(tmp_path):
-    """Why ``profile_id`` stays OUT of the pre-walk configuration.
-
-    ``walker._record`` stamps the walk config's profile onto every
-    ``DocumentRecord``. Resolving ``PipelineOptions.profiles[0]`` into the
-    pre-walk config (the obvious tidy-up while fixing F-4a, and one this package
-    started to make) would therefore label documents with a profile that did not
-    match them: a false statement in the document index and in hashed content
-    both.
-
-    **The reason this test used to give is withdrawn, and the guarantee is
-    STRONGER without it.** It said Stage 4 "overwrites that stamp only on
-    documents a profile actually CLAIMED — an unclaimed document keeps what it
-    arrived with", so the damage was confined to unclaimed documents. D-35
-    (commit 4092f76) deleted the engine that claimed documents:
-    ``dociq.sections.apply.apply_sections`` touches ``section``,
-    ``section_tier`` and the disposition only, and NOTHING downstream of the
-    walk writes ``DocumentRecord.profile_id`` at all. So a profile resolved into
-    the pre-walk config would now label EVERY document in the corpus, with no
-    later pass to correct any of them.
-
-    The assertion below is unchanged because it never depended on the mechanism:
-    no document may carry a profile that did not match it. ``src/dociq/pipeline.py``
-    carries the same withdrawal at the site itself.
-    """
-    from dociq.profiles.model import FormatProfile
-
-    never_matches = FormatProfile(
-        profile_id="mpr-monthly",
-        version="1.0",
-        display_name="Monthly progress report",
-        header_patterns=("THIS STRING APPEARS IN NO FIXTURE WHATSOEVER",),
-    )
-    cfg = RunConfig(
-        source_root=str(FIXTURES),
-        output_root=str(tmp_path / "out"),
-        ocr_engine_version=ex.ocr_engine_version(),
-    )
-    outcome = pipeline.run(cfg, pipeline.PipelineOptions(
-        walk=walker.WalkOptions(ocr_enabled=False, resume=False),
-        profiles=(never_matches,),
-        stamp=STAMP,
-    ))
-
-    claimed = [d.rel_path for d in outcome.result.documents
-               if d.profile_id == "mpr-monthly"]
-    assert not claimed, (
-        "documents no profile matched were stamped with the profile anyway: "
-        + repr(claimed[:5]))
-    # The run configuration still records the library that was supplied — that
-    # IS true of the run, and it is where the fact belongs.
-    assert outcome.result.config.profile_id == "mpr-monthly"
-
-
-@pytest.mark.parametrize("a,b", [(1.1, 1.4), (0.5, 0.9), (3599.4, 3599.6)])
-def test_deadlines_that_differ_are_recorded_differently(a, b):
-    """Round-2 F-4b. ``round(seconds)`` collapsed 1.1 s and 1.4 s onto the same
-    identity while abandoning different files — a determinism collision inside
-    the field A-04 added to close one. Integer milliseconds keep the capability
-    and remove the collision (amendment A-08)."""
-    la = walker.effective_limits(walker.WalkOptions(file_timeout_s=a))
-    lb = walker.effective_limits(walker.WalkOptions(file_timeout_s=b))
-    assert la.file_timeout_ms != lb.file_timeout_ms, (
-        f"{a}s and {b}s recorded the same deadline")
-    assert la != lb
-    assert content_hash(RunConfig(source_root="s", output_root="o", limits=la)) \
-        != content_hash(RunConfig(source_root="s", output_root="o", limits=lb))
-    assert walker._resume_identity(
-        RunConfig(source_root="s", output_root="o", limits=la)
-    ) != walker._resume_identity(
-        RunConfig(source_root="s", output_root="o", limits=lb)
-    )
 
 
 def test_every_deadline_limit_is_an_exactly_represented_integer():
@@ -549,15 +485,13 @@ def test_every_deadline_limit_is_an_exactly_represented_integer():
 
 def _profile(pid: str, version: str, *, header: str = "", drop: str | None = None):
     from dociq.contracts import Disposition
-    from dociq.profiles.model import FormatProfile, SectionRule
-
+    
     rules = ()
     if drop is not None:
         rules = (SectionRule(rule_id=f"{pid}-drop", pattern=drop,
                              disposition=Disposition.DROP, label="dropped",
                              notes="test fixture; approved by the test"),)
-    return FormatProfile(
-        profile_id=pid, version=version, display_name=pid,
+    return FormatProfile( version=version, display_name=pid,
         header_patterns=(header,) if header else (),
         section_rules=rules)
 
@@ -736,137 +670,6 @@ def test_the_identity_covers_every_input_that_decides_a_disposition(tmp_path):
             f"A-19's fields")
 
 
-def test_editing_a_later_profile_without_a_version_bump_moves_the_identity(
-    tmp_path,
-):
-    """Codex round-2 B-R2-2's counterexample — **REPOINTED at D-35 (4092f76).**
-
-    **What this asserted and why half of it is withdrawn.** Keep profile 1's id
-    and version, alter profile 2's rule, run the same corpus. Before A-08 the
-    recorded identity was byte-identical while the corpus hash moved and TWO
-    PAGES WENT KEEP → DROP; the manifest asserted "same run identity" over
-    evidence that was not the same. D-35 deleted the engine that applied the
-    rule, so the page movement is gone: measured on this branch, ``a`` and ``b``
-    below drop zero pages each and emit a byte-identical deterministic file set.
-    The old ``pages_dropped != pages_dropped`` assertion is withdrawn because
-    the behaviour behind it is, not because it became inconvenient.
-
-    **What still holds, and is asserted instead.** A profile is still a recorded
-    input, still snapshotted by content, and still hashed — so an edit that
-    bumps no version still moves the identity. That is the honest remaining
-    claim: not "the evidence changed", but "the recorded inputs did, and the
-    identity noticed". The evidence-changing case now lives in
-    ``test_approving_an_omission_moves_the_identity``.
-
-    No attacker model is needed, and that still matters — nothing enforces that
-    an edited profile gets a new version, so this is the ordinary way a profile
-    library drifts between runs.
-    """
-    p1 = _profile("p1", "1.0", header="NO SUCH HEADER ANYWHERE")
-    p2_before = _profile("p2", "2.0", drop="MATCHES NOTHING AT ALL")
-    p2_after = _profile("p2", "2.0", drop=r"Daily")
-
-    a = _profiled_run(tmp_path, "a", [p1, p2_before])
-    b = _profiled_run(tmp_path, "b", [p1, p2_after])
-
-    assert a.result.config.profile_id == b.result.config.profile_id == "p1"
-    assert a.result.config.profile_version == b.result.config.profile_version
-
-    # MEASURED, and stated rather than assumed: the profile edit changes NO
-    # deliverable. If this ever fails, a profile has started deciding
-    # dispositions again and D-35 has been reopened without saying so.
-    assert a.manifest.deterministic == b.manifest.deterministic, (
-        "a profile edit changed the emitted evidence — D-35 deleted the engine "
-        "that could do that, so either it is back or something else now reads "
-        "profile rules")
-    assert a.result.pages_dropped == b.result.pages_dropped == 0
-
-    assert run_identity(a.result.config) != run_identity(b.result.config), (
-        "a profile edit that bumped no version left the run identity unchanged "
-        "— the profiles are recorded inputs and a recorded input that cannot "
-        "be told apart between runs is not recorded")
-    assert a.manifest.run_identity_sha256 != b.manifest.run_identity_sha256
-    # By CONTENT, which is what makes the un-bumped version detectable at all.
-    assert ([s.profile_hash for s in a.result.config.profiles]
-            != [s.profile_hash for s in b.result.config.profiles])
-
-
-def test_swapping_profile_precedence_moves_the_identity(tmp_path):
-    """The order half of B-R2-2 — **REPOINTED at D-35 (4092f76).**
-
-    **The withdrawn prose.** "``apply_profiles`` claims a document with the
-    FIRST profile whose header patterns match, so precedence alone decides which
-    rules a document is subject to." ``apply_profiles`` no longer exists;
-    precedence decides nothing about dispositions.
-
-    **The withdrawn assertion, and why it was worse than merely stale.** This
-    required ``c.manifest.corpus_sha256 != d.manifest.corpus_sha256`` under the
-    message "the fixture did not actually change the evidence". It still passes
-    on this branch — and for the wrong reason: ``corpus_sha256`` folds in
-    ``log_content_sha256``, and the processing log records the ordered profile
-    set, so the hash moves because the CONFIGURATION was written down, not
-    because any evidence differs. Measured: ``c`` and ``d`` emit an identical
-    deterministic file set. A green assertion proving the opposite of what its
-    message claims is worse than a red one, so it is replaced by the two
-    statements that are true.
-
-    What survives is the guarantee A-08 actually bought: profiles are recorded
-    as an ORDERED tuple, and the order is part of the hashed input.
-    """
-    fixed = _profile("p0", "1.0", header="NO SUCH HEADER ANYWHERE")
-    x = _profile("px", "1.0", drop=r"Daily")
-    y = _profile("py", "1.0", drop=r"NOTICE")
-
-    c = _profiled_run(tmp_path, "c", [fixed, x, y])
-    d = _profiled_run(tmp_path, "d", [fixed, y, x])
-
-    assert c.result.config.profile_id == d.result.config.profile_id == "p0"
-    assert c.manifest.deterministic == d.manifest.deterministic, (
-        "profile precedence changed the emitted evidence — D-35 says it cannot")
-
-    assert run_identity(c.result.config) != run_identity(d.result.config), (
-        "precedence order is part of the recorded input and the identity did "
-        "not notice it move")
-
-    # And the recorded snapshots are the ordered set, not a set.
-    assert [s.profile_id for s in c.result.config.profiles] == ["p0", "px", "py"]
-    assert [s.profile_id for s in d.result.config.profiles] == ["p0", "py", "px"]
-
-
-def test_every_profile_in_the_library_is_snapshotted_by_content(tmp_path):
-    """The class: not just the first, and not just by name.
-
-    Enumerated over the whole library so a future change that records only some
-    of them fails here.
-
-    REPOINTED in one word. The old message read "the snapshot records a name,
-    not the content that decides drops"; profiles decide no drops since D-35.
-    The guarantee is unchanged — a hashed input recorded by name only cannot be
-    told apart between runs — and the message now says that instead of naming a
-    mechanism that no longer exists.
-    """
-    profiles = [
-        _profile("p0", "1.0", header="NO SUCH HEADER ANYWHERE"),
-        _profile("p1", "1.1", drop=r"Daily"),
-        _profile("p2", "2.5", drop=r"NOTICE"),
-    ]
-    outcome = _profiled_run(tmp_path, "lib", profiles)
-    snaps = outcome.result.config.profiles
-
-    assert len(snaps) == len(profiles), "the library was not recorded in full"
-    for snap, prof in zip(snaps, profiles):
-        assert snap.profile_id == prof.profile_id
-        assert snap.version == prof.version
-        assert snap.profile_hash == prof.profile_hash, (
-            "the snapshot records a name, not the content of a hashed input — "
-            "two runs under an edited profile would be indistinguishable")
-        assert len(snap.profile_hash) == 64
-
-
-def test_an_unprofiled_run_records_an_empty_profile_set(outcome):
-    """The ordinary case (section 4 Stage 4) stays honest: no profiles, not a
-    fabricated one."""
-    assert outcome.result.config.profiles == ()
 
 
 def test_a_run_nobody_ruled_on_records_an_empty_omission_set(outcome):

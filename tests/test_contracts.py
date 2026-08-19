@@ -29,7 +29,6 @@ from dociq.contracts import (
     PageKind,
     PageRecord,
     ProcessingStatus,
-    ProfileSnapshot,
     RecognitionTier,
     TerminalStatus,
     ReconciliationReport,
@@ -402,15 +401,15 @@ def test_contract_version_is_the_frozen_one_and_every_bump_is_written_up():
     """
     import pathlib
 
-    assert CONTRACT_VERSION == "1.9.0"
+    assert CONTRACT_VERSION == "2.0.0"
 
     src = pathlib.Path(__file__).parent.parent / "src" / "dociq" / "contracts.py"
     history = src.read_text(encoding="utf-8")
     major, minor, _patch = (int(part) for part in CONTRACT_VERSION.split("."))
     undocumented = [
-        f"{major}.{m}.0"
-        for m in range(1, minor + 1)
-        if f"\n{major}.{m}.0 — amendment" not in history
+        f"1.{m}.0"
+        for m in range(1, 10)
+        if f"\n1.{m}.0 — amendment" not in history
     ]
     assert not undocumented, (
         f"contract versions bumped with no amendment entry: {undocumented} — "
@@ -421,6 +420,9 @@ def test_contract_version_is_the_frozen_one_and_every_bump_is_written_up():
     assert "1.7.0 — amendment A-18" in history
     assert "1.8.0 — amendment A-19" in history
     assert "1.9.0 — amendment A-19, extended" in history
+    assert "2.0.0 " + chr(0x2014) + " amendment A-21" in history, (
+        "the first MAJOR bump and the first removal from the frozen "
+        "contract is not written up")
 
 
 # ---------------------------------------------------------------------------

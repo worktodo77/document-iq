@@ -42,8 +42,9 @@ from pathlib import Path
 
 from . import pipeline
 from .contracts import (
+    OmissionSnapshot,
+    matter_key,
     PageKind,
-    ProfileSnapshot,
     RunConfig,
     TerminalStatus,
     content_hash,
@@ -395,14 +396,21 @@ def main(argv: list[str] | None = None) -> int:
             == run_identity(dataclasses.replace(
                 result.config, output_root="/somewhere/entirely/else")),
             "the DESTINATION is not part of the run identity (A-08)")
+        # A-08's profile-set check was here until D-38 removed the field it
+        # tested. Its PRINCIPLE moved to A-19 and is checked on the input that
+        # decides today: the approvals.
         chk.expect(
             run_identity(result.config)
             != run_identity(dataclasses.replace(
                 result.config,
-                profiles=(ProfileSnapshot("p", "1.0", "0" * 64),))),
-            "the ordered profile set IS part of the run identity (A-08)")
-        chk.expect(result.config.profiles == (),
-                   "an unprofiled run records an empty profile set, not a "
+                omissions=(OmissionSnapshot(
+                    family_id="progress-photographs", approved_by="probe",
+                    approved_at="2026-01-01T00:00:00Z", matter="probe",
+                    matter_root=matter_key("/probe"),
+                    template_id="progress-report", template_version="1"),))),
+            "the APPROVED OMISSIONS are part of the run identity (A-19)")
+        chk.expect(result.config.omissions == (),
+                   "a run nobody ruled on records an empty approval set, not a "
                    "fabricated one")
 
         print("\nAmended contract fields (A-01..A-09)")

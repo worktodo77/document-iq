@@ -683,7 +683,6 @@ def _doc_from_jsonable(d: dict) -> DocumentRecord:
         status=ProcessingStatus(d["status"]), parent_doc_id=d["parent_doc_id"],
         container_order=d["container_order"],
         detected_dates=tuple(d["detected_dates"]), doc_type=d["doc_type"],
-        profile_id=d["profile_id"], profile_version=d["profile_version"],
         li_file_no=d["li_file_no"], notes=tuple(d["notes"]), error=d["error"])
 
 
@@ -862,8 +861,6 @@ def _record(entry: FileEntry, filename: str, ext: str, size: int, sha: str,
         pages=_stamped(got.pages, got.spans), status=got.status,
         parent_doc_id=parent,
         container_order=order, detected_dates=dates,
-        profile_id=config.profile_id if config else None,
-        profile_version=config.profile_version if config else None,
         notes=notes,
         error=ex.sanitize_message(got.error) if got.error else None)
     doc.validate()

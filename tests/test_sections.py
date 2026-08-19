@@ -49,6 +49,7 @@ from dociq.sections.resolve import overlaps, section_for_page
 from dociq.sections.templates import PROGRESS_REPORT
 from dociq.sections.tier1_outline import spans_from_outline
 from dociq.sections.tier3_pageclass import PageSignals, spans_from_page_classes
+from tests.fixtures import MPR_PAGES, corpus
 
 
 # ---------------------------------------------------------------------------
@@ -837,3 +838,207 @@ def test_two_matters_of_the_same_name_are_not_the_same_matter():
         "the approval stopped applying on the folder it was given on — a scope "
         "check that refuses everything is not a scope check"
     )
+
+
+# ---------------------------------------------------------------------------
+# The Stage-4 guarantees, moved here when D-38 deleted tests/test_profiles.py
+#
+# They were re-pointed at apply_sections in Sprint 3 while still living in a
+# file named for the profile system. That file is gone: its schema and
+# detection groups tested code D-38 deleted, and three of its nine apply
+# tests were ABOUT profiles (a profile claiming a document, a profile's
+# inert DROP rules being reported, nothing consulting a profile) and die
+# with the thing they guarded. These six do not -- KEEP by default,
+# attribution, page accounting, pass-through, and stability over repeated
+# runs are properties of apply_sections and always were.
+# ---------------------------------------------------------------------------
+
+MPR_OUTLINE = [
+    ("2 EXECUTIVE SUMMARY", 1),
+    ("3 SCHEDULE STATUS", 2),
+    ("4 HSE STATISTICS", 3),
+    ("5 PHOTO LOG", 4),
+    ("6 ORGANISATION CHART", 5),
+]
+"""``(title, page0)`` as PyMuPDF's ``get_toc(simple=True)`` gives it. Page 1 of
+``MPR_PAGES`` is the cover and no entry claims it, so it belongs to nobody."""
+
+MPR_TEMPLATE = SectionTemplate(
+    template_id="mpr-under-test",
+    version="1",
+    display_name="Monthly progress report",
+    families=(
+        SectionFamily(
+            family_id="hse-stats",
+            display_name="HSE statistics",
+            patterns=(r"^HSE STATISTICS",),
+            risk=Risk.LOW,
+            rationale=(
+                "Incident counts and man-hours. Carries no delay evidence and "
+                "no narrative an expert would quote."
+            ),
+        ),
+        SectionFamily(
+            family_id="photo-log",
+            display_name="Photo log",
+            patterns=(r"^PHOTO LOG",),
+            risk=Risk.HIGH,
+            rationale=(
+                "Image captions only, but often the only proof of site "
+                "condition on a date. A page-count saving, not a token saving."
+            ),
+        ),
+        SectionFamily(
+            family_id="org-chart",
+            display_name="Organisation chart",
+            patterns=(r"^ORGANISATION CHART",),
+            risk=Risk.LOW,
+            rationale=(
+                "Static org data repeated verbatim every month; the same names "
+                "survive in the correspondence the chart summarises."
+            ),
+        ),
+    ),
+)
+
+MPR_APPROVALS = tuple(
+    ApprovedOmission(
+        family_id=family_id,
+        approved_by="abachowski",
+        approved_at="2026-08-17T12:00:00Z",
+        matter="MODEC-4412",
+        matter_root=matter_key("MODEC-4412"),
+        template_id="mpr-under-test",
+        template_version="1",
+    )
+    for family_id in ("hse-stats", "photo-log", "org-chart")
+)
+
+
+def mpr_spans(page_count: int = len(MPR_PAGES)):
+    return spans_from_outline(MPR_OUTLINE, page_count)
+
+
+def applied(doc=None):
+    """Stage 4 over one MPR document, fully engaged."""
+    return apply_sections(
+        doc if doc is not None else corpus(1)[0],
+        mpr_spans(),
+        template=MPR_TEMPLATE,
+        approvals=MPR_APPROVALS,
+        matter_root="MODEC-4412",
+    )
+
+
+
+# --- apply: the Stage-4 guarantees, at the engine that holds them now --------
+#
+# Every test in this group used to run through `profiles.apply.apply_profile` /
+# `apply_profiles`, deleted by commit 4092f76 under D-35. The guarantees are not
+# deleted with it: each one below names what it used to assert and against what
+# it asserts it now.
+
+
+def test_keep_is_the_default_for_unmatched_pages():
+    """Re-pointed to :func:`~dociq.sections.apply.apply_sections` (D-35, 4092f76).
+
+    The guarantee is unchanged and is the first rule of the new engine: KEEP is
+    the default and needs no justification. What changed is only how many roads
+    lead to it. The old engine had one — no rule matched the page. This one has
+    three, and two are exercised here: no span covers the page at all, and a
+    span covers it but matches no family the template knows. (The third, a
+    family with no approval, is D-34's and is pinned in `test_sections.py`.)
+    """
+    out = applied().documents[0]
+
+    assert out.pages[0].disposition is Disposition.KEEP  # cover page, no span
+    assert out.pages[0].section is None, "no span reached it, so no section"
+
+    assert out.pages[1].disposition is Disposition.KEEP  # no family matches it
+    assert out.pages[1].section == "2 EXECUTIVE SUMMARY", (
+        "recognized and kept — the two are independent, and a page the log "
+        "calls a section is not thereby a page the log calls dropped"
+    )
+    assert out.pages[1].section_tier is RecognitionTier.OUTLINE
+
+
+def test_every_drop_is_attributed():
+    """Re-pointed to :func:`~dociq.sections.apply.apply_sections` (D-35, 4092f76).
+
+    The old form asserted a rule id and its ``rule_notes`` on every drop entry.
+    The attribution a drop now carries is strictly larger — D-34 requires the
+    *person*, and A-18 requires the *tier* — so the successor assertion is
+    stronger rather than merely different: no page drops without a family id, a
+    named approver, the matter he approved it on, and the kind of evidence that
+    placed the page.
+    """
+    result = applied()
+    out = result.documents[0]
+
+    dropped = [p for p in out.pages if p.disposition is Disposition.DROP]
+    assert {p.page_no for p in dropped} == {4, 5, 6}
+    assert all(p.drop_rule for p in dropped)
+    assert all(p.section_tier is RecognitionTier.OUTLINE for p in dropped)
+
+    assert {e.family_id for e in result.drops} == {
+        "hse-stats", "photo-log", "org-chart"
+    }
+    assert all(e.drop_rule == f"mpr-under-test:{e.family_id}" for e in result.drops)
+    assert all(e.approved_by == "abachowski" for e in result.drops)
+    assert all(e.approved_at and e.matter == "MODEC-4412" for e in result.drops)
+    assert all(e.evidence for e in result.drops), (
+        "§5.4 — an expert defending the omission has to be able to say what "
+        "was read to place the page"
+    )
+
+
+def test_accounting_holds_after_a_drop():
+    """Re-pointed to :func:`~dociq.sections.apply.apply_sections` (D-35, 4092f76).
+    Unchanged guarantee: the contract's own page arithmetic survives Stage 4."""
+    out = applied().documents[0]
+    out.validate()
+    assert out.pages_in == out.pages_kept + out.pages_dropped == 6
+
+
+def test_a_document_no_section_covers_passes_through_whole():
+    """Re-pointed from ``test_document_no_profile_claims_passes_through_whole``
+    (D-35, 4092f76).
+
+    The antecedent changed — no profile claims anything now — but the guarantee
+    did not: a document Stage 4 recognizes nothing in comes back **identical**,
+    not merely equal, and contributes no drop-log entry.
+
+    ``ProfileApplyResult.profiled_doc_ids`` has no successor field and none is
+    asserted here. It recorded which documents a profile claimed, and with no
+    claiming left there is nothing for it to hold; the run records
+    ``section_template_id``/``section_template_version`` instead (A-19), which
+    is a fact about the run rather than about which profile won a document.
+    """
+    doc = document("misc/letter.pdf", (page(1, "Dear Sir"), page(2, "PHOTO LOG")))
+    result = apply_sections(doc, (), template=MPR_TEMPLATE, approvals=MPR_APPROVALS,
+                            matter_root="MODEC-4412")
+    assert result.documents[0] is doc
+    assert result.drops == ()
+
+
+def test_a_drop_without_a_rule_cannot_be_constructed():
+    """The contract enforces attribution independently of any engine.
+
+    Unchanged by D-35, and that is the point of it: it was written to hold
+    whether or not the Stage-4 engine of the day was correct, and the engine of
+    the day has since been replaced entirely. A-18 added a second rule of the
+    same kind (a DROP must also carry a ``section_tier``); this one still fires
+    first, so the assertion below is the same one it always was.
+    """
+    doc = corpus(1)[0]
+    with pytest.raises(ContractViolation, match="DROP without a drop_rule"):
+        doc.pages[0].evolve(disposition=Disposition.DROP).validate()
+
+
+def test_apply_is_stable_over_repeated_runs():
+    """Re-pointed to :func:`~dociq.sections.apply.apply_sections` (D-35, 4092f76).
+    Unchanged guarantee: Stage 4 is a pure function of its inputs."""
+    docs = corpus(3)
+    first = [applied(doc) for doc in docs]
+    for _ in range(8):
+        assert [applied(doc) for doc in docs] == first

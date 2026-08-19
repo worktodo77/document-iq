@@ -30,7 +30,6 @@ from dociq.gui.pipeline import (
     LEVER_EXPERT,
     LEVER_RECOGNIZED,
     PackageResult,
-    ProfileInfo,
     ReductionLever,
     ReductionPlan,
     RunOutcome,
@@ -234,7 +233,7 @@ def _projection_note(rows) -> str:
     not is the same defect one level up — and the summary is the sentence
     approval is given against, so it is the one that must not read as a count.
 
-    The dangerous case is a projected ZERO. ``RealPipeline.profile_rules``
+    The dangerous case is a projected ZERO. ``RealPipeline.template_families``
     returns ``tokens=0, pages=0, estimated=True`` for every row, because before
     a run there is nothing to count. Unmarked, the approval sentence reads
     "3 section types left out on your approval: 0 pages, about 0 tokens" — an
@@ -461,7 +460,7 @@ class SummaryView:
                     "rather than counted.")
         return (f"You are leaving out {len(expert)} section "
                 f"type{'' if len(expert) == 1 else 's'}: {names}. Each one is "
-                "listed in the processing log with the profile rule that left "
+                "listed in the processing log with the omission that left "
                 f"it out.{note}")
 
     def capacity_source_line(self) -> str:
@@ -568,10 +567,10 @@ def build_summary(outcome: RunOutcome,
 # ---------------------------------------------------------------------------
 
 CHECKLIST_NO_RULES = (
-    "This profile's section rules are not available from the pipeline, so this "
-    "screen can show nothing. Nothing may be dropped that was not shown here — "
-    "run without a profile, or fix the profile, rather than assuming a rule "
-    "that is not on screen."
+    "The section template is not available from the pipeline, so this screen "
+    "cannot say what DocIQ would recognize. Nothing may be left out that was "
+    "not shown here — investigate before running, rather than assuming there "
+    "is nothing to show."
 )
 """The empty state, said out loud.
 
@@ -614,7 +613,6 @@ class ChecklistRow:
     """
 
     lever: ReductionLever
-    profile: ProfileInfo
 
     @property
     def key(self) -> str:
@@ -667,8 +665,8 @@ class ChecklistRow:
     def attribution(self) -> str:
         """*Why* this page is being left out — the thing Principle 3 turns on.
 
-        The rule is named by its own identity: the profile that carries it, the
-        version of that profile, and the section it matches. That is what an
+        The rule is named by its own identity: the template family that carries
+        it and the section it matches. That is what an
         expert would have to point at to defend the omission, and it is what
         ``processing_log.json`` records against every dropped page.
 
@@ -713,10 +711,10 @@ class ChecklistRow:
             # it and where it is recorded.
             return (f"“{self.lever.label}” was removed mechanically by the "
                     "tool. No expert approved this; it is recorded separately "
-                    "from the profile's drops in the processing log.")
-        where = f"{self.profile.profile_id} v{self.profile.version}"
+                    "from the expert's omissions in the processing log.")
+        where = f"template family “{self.lever.family_id}”"
         if self.dropped:
-            return (f"Rule {where} → section “{self.lever.key}” → DROP. Every "
+            return (f"{where} → section “{self.lever.key}” → DROP. Every "
                     "page it leaves out is listed in processing_log.json "
                     "against this rule.")
         return (f"Rule {where} → section “{self.lever.key}” → KEEP. Nothing is "
@@ -752,16 +750,17 @@ class ChecklistRow:
 
 @dataclass(frozen=True, slots=True)
 class ProfileChecklistView:
-    """§6 step 2/3: what this profile KEEPs and DROPs, before a run commits.
+    """§6 step 2/3: what DocIQ recognizes and what it will offer to leave out,
+    before a run commits.
 
-    **The completeness claim is the whole point.** §6 makes the checklist the
-    place an expert approves omissions, and Principle 3 makes an unapproved
-    omission indistinguishable from a missing document. So this view does not
-    merely list what it was given — it compares what it was given against the
-    rule count the profile declares, and says so when they disagree.
+    **It describes the TEMPLATE.** It described a profile until D-38 deleted the
+    profile system; the completeness claim it used to make — comparing the rows
+    shown against the rule count a profile declared — went with it, and its
+    successor is a test comparing the real adapter's rows against the shipped
+    template's families. What survives here is the distinction that is still
+    live: rules that could not be READ.
     """
 
-    profile: ProfileInfo
     rows: tuple[ChecklistRow, ...]
     basis: TokenBasis = TokenBasis()
     source: str = ""
@@ -809,17 +808,6 @@ class ProfileChecklistView:
     def empty(self) -> bool:
         return not self.rows
 
-    @property
-    def keeps_everything(self) -> bool:
-        """A profile that genuinely carries no rules.
-
-        Distinct from "the rules could not be read", and the distinction is the
-        whole safety property: both render an empty list, one is a fact about
-        the profile and the other is an absence of knowledge. Conflating them
-        would let an unreadable profile be approved as a harmless one.
-        """
-        return self.empty and self.profile.section_rules == 0
-
     def completeness_note(self) -> str:
         """Whether every rule this profile carries is on screen.
 
@@ -830,7 +818,7 @@ class ProfileChecklistView:
         ordinary run — see :attr:`counts_agree` for what that cost and where the
         guarantee went.
         """
-        if self.keeps_everything:
+        if False:  # keeps_everything: removed with the profile system (D-38)
             # Restored deliberately. This branch is not about counting rules —
             # it is the benign empty state, and its whole job is to be
             # distinguishable from CHECKLIST_NO_RULES below. Dropping it while
@@ -896,7 +884,7 @@ class ProfileChecklistView:
         — and a button whose meaning is "I have seen what this drops" must then
         refuse.
         """
-        return self.keeps_everything or not self.empty
+        return not self.empty
 
     def drop_summary(self) -> str:
         """The expert's side of the ledger, never merged with the tool's.
@@ -906,7 +894,7 @@ class ProfileChecklistView:
         most dangerous sentence on the screen: the operator's own summary line
         telling them an omission they cannot see does not exist.
         """
-        if self.empty and not self.keeps_everything:
+        if self.empty:
             return ("Not known. This profile's rules could not be read, so what "
                     "it would leave out cannot be stated — and must not be "
                     "assumed to be nothing.")
@@ -937,15 +925,13 @@ class ProfileChecklistView:
 
 
 def build_profile_checklist(
-    profile: ProfileInfo,
     levers: tuple[ReductionLever, ...] = (),
     basis: TokenBasis = TokenBasis(),
     source: str = "",
 ) -> ProfileChecklistView:
-    """Project a profile and its section rules into the §6 checklist."""
+    """Project the template's families into the §6 checklist."""
     return ProfileChecklistView(
-        profile=profile,
-        rows=tuple(ChecklistRow(lever, profile) for lever in levers),
+        rows=tuple(ChecklistRow(lever) for lever in levers),
         basis=basis,
         source=source,
     )

@@ -41,7 +41,6 @@ from dociq.contracts import (
     OmissionSnapshot,
     PageKind,
     ProcessingStatus,
-    ProfileSnapshot,
     ReconciliationRow,
     RunConfig,
     RunResult,
@@ -87,7 +86,6 @@ from dociq.identify.bates import (
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
 from dociq.operator import OperatorStamp, operator_stamp
-from dociq.profiles.model import FormatProfile, write_matter_copy
 from dociq.sections.apply import SectionApplyResult, SectionDropEntry, apply_sections
 from dociq.sections.model import ApprovedOmission, SectionTemplate
 from dociq.sections.resolve import spans_from_pages
@@ -116,7 +114,7 @@ STAGES: tuple[tuple[int, str], ...] = (
     (1, "Reading the folder"),
     (2, "Extracting text"),
     (3, "Bates numbers and document IDs"),
-    (4, "Applying the profile"),
+    (4, "Deciding what to leave out"),
     (5, "Writing the deliverables"),
     (6, "Checking the results"),
 )
@@ -177,15 +175,6 @@ class PipelineOptions:
     matter_name: str = ""
     master_index: MasterIndex | None = None
     master_index_path: str | None = None
-    profiles: tuple[FormatProfile, ...] = ()
-    """The expert-authored profile library this run was given.
-
-    **A profile no longer decides a disposition (D-35).** The engine that
-    matched a rule's regex against every line of every page and carried the
-    matched section forward is deleted, so what a profile contributes to a run
-    today is its identity, its matter copy and its record in the log — not a
-    KEEP or a DROP. A profile whose rules would have dropped pages is reported
-    (:func:`_inert_profile_warnings`) rather than silently ignored."""
 
     template: SectionTemplate | None = None
     """The section template this run recognizes against
@@ -478,17 +467,13 @@ def _stored_pattern(
     source)``, or ``None`` when the matter carries none.
 
     Two places can hold one: the run's own configuration and a format profile.
-    The run configuration wins, because it is the record of what this matter
-    was last run with, while a profile's pattern is the recurring format's
-    default. A disagreement between them is not silently resolved — the loser
-    is named in the warnings, because "the profile's format was not used" is
-    exactly the kind of fact an operator finds out too late.
+    **One place holds it now.** Until D-38 a format profile could also carry a
+    confirmed Bates pattern, so this function existed to reconcile two sources
+    and to name the loser in the warnings rather than resolve them silently. The
+    profile system is deleted; the run configuration is the only source left, and
+    a reconciliation with nothing to reconcile is a branch that can only rot.
     """
-    from_profiles = [
-        (p.bates_pattern, f"profile {p.profile_id} v{p.version}")
-        for p in options.profiles
-        if p.bates_pattern
-    ]
+    from_profiles: list[tuple[str, str]] = []
     if config.bates_pattern:
         for pattern, source in from_profiles:
             if pattern != config.bates_pattern:
@@ -620,38 +605,6 @@ def _bates_decision(
     return BatesDecision(
         DecisionStatus.CONFIRMED, proposal.format, "auto-confirmed", stamp.saved_at
     )
-
-
-def _inert_profile_warnings(
-    profiles: Sequence[FormatProfile],
-) -> list[str]:
-    """Report a supplied profile whose DROP rules no longer drop anything.
-
-    D-35 deleted the engine those rules drove. The rules are still valid YAML,
-    still load, still hash into the run identity — and now do nothing. An
-    operator who authored one and watched a run keep every page would have no
-    way to learn why, and "the feature silently stopped working" is the shape of
-    failure this project has twice shipped and once caught in review.
-
-    Stated as what it is rather than as an error: the profile is not malformed,
-    the product changed underneath it, and the named replacement is the
-    template plus an approval.
-    """
-    out: list[str] = []
-    for profile in profiles:
-        dropping = [r.rule_id for r in profile.section_rules
-                    if r.disposition is Disposition.DROP]
-        if not dropping:
-            continue
-        out.append(
-            f"profile {profile.profile_id!r} v{profile.version} carries "
-            f"{len(dropping)} DROP rule(s) ({', '.join(sorted(dropping))}) and "
-            "they dropped nothing. Section dispositions are decided by a "
-            "section template and an expert's approval (D-34/D-35); the "
-            "heading-matching engine these rules were written for has been "
-            "removed. The profile is still recorded as an input to this run."
-        )
-    return out
 
 
 def _hashes_of(written: Sequence[Path], layout: OutputLayout) -> dict[str, str]:
@@ -991,7 +944,6 @@ def _abort(
                 reconciliation, index_supplied=index_supplied),
             renumbering=renumbering,
             drops=drops,
-            profiles=opts.profiles,
             bates_decision=bates_decision,
             bates_ranges=bates_ranges,
             token_estimate=after,
@@ -1302,47 +1254,7 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         ocr_engine=config.ocr_engine if ocr_ran else OCR_DISABLED,
         ocr_engine_version=config.ocr_engine_version if ocr_ran else "",
         master_index=index.snapshot if index else config.master_index,
-        # The ORDERED profile set, by content (amendment A-08, from Codex
-        # review #1 round 2 finding B-R2-2). Recording only
-        # ``opts.profiles[0].profile_id`` and its version was not recording the
-        # input the run used, when the profile engine still decided
-        # dispositions. It no longer does (D-35) — see RunConfig.profiles, where
-        # the claim is withdrawn in full. The snapshot stays: a profile is still
-        # loaded, hashed, matter-copied and logged, and hashing an input that
-        # can no longer change the output is the conservative direction.
-        #
-        # Measured on the fixture corpus, both without any attacker model:
-        # editing a second profile's rule without bumping its version moved 2
-        # pages KEEP → DROP and changed the corpus hash while the recorded
-        # identity stayed byte-identical; swapping two profiles' precedence
-        # with no content change did the same.
-        #
-        # Built here rather than at the `effective` block below because the
-        # resume key is derived from the walk config, and a journal written
-        # under one profile library must not be replayed under another.
-        profiles=tuple(
-            ProfileSnapshot(p.profile_id, p.version, p.profile_hash)
-            for p in opts.profiles
-        ),
     )
-    # ``profile_id`` / ``profile_version`` are DELIBERATELY not resolved from
-    # ``opts.profiles`` here.
-    #
-    # **The reason this note used to give is withdrawn.** It said Stage 4
-    # "overwrites that stamp only on documents a profile actually CLAIMED", so
-    # resolving the library's first profile here would mislabel unclaimed
-    # documents. Stage 4 no longer claims documents and no longer stamps a
-    # profile onto any of them: D-35 deleted the engine that did, and
-    # :func:`~dociq.sections.apply.apply_sections` touches ``section``,
-    # ``section_tier`` and the disposition only.
-    #
-    # The conclusion survives its reasoning, on a plainer ground. Whatever the
-    # walk config carries is stamped by :func:`walker._record` onto EVERY
-    # document, and nothing downstream corrects it, so resolving a library's
-    # first profile here would now label every document in the corpus with a
-    # profile — including the ones nobody wrote it for. That is a false
-    # statement in the index and in hashed content, and it is worse than the
-    # one the old note describes, not better.
 
     # ---- Stages 1-2 --------------------------------------------------------
     t = time.monotonic()
@@ -1513,7 +1425,6 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     # unchanged — the recognition-only state a freshly-installed DocIQ is in.
     stage(4)
     t = time.monotonic()
-    warnings.extend(_inert_profile_warnings(opts.profiles))
     classified: list[DocumentRecord] = []
     section_drops: list[SectionDropEntry] = []
     for doc in documents:
@@ -1567,10 +1478,6 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         # profile claimed. What the run was configured with, and what matched a
         # given document, are two different facts and only Stage 4 knows the
         # second.
-        profile_id=opts.profiles[0].profile_id if opts.profiles else config.profile_id,
-        profile_version=(
-            opts.profiles[0].version if opts.profiles else config.profile_version
-        ),
         # A-19. The approvals are the input that decides which pages dropped, so
         # they are the input the identity has to cover — the same finding A-08
         # made about profiles, on the mechanism that replaced them.
@@ -1700,8 +1607,6 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
     written.append(write_index_csv(rows, stage_out))
     if index is not None:
         written.append(write_reconciliation_csv(report, stage_out))
-    for profile in opts.profiles:
-        written.append(write_matter_copy(profile, stage_out.root))
 
     # The ledger is read above, from the DESTINATION, before this line writes the
     # new one into staging: comparing a run against the ledger it just wrote
@@ -1722,7 +1627,6 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         reconciliation=_log_reconciliation(report, index_supplied=index is not None),
         renumbering=renumbering,
         drops=drops,
-        profiles=opts.profiles,
         bates_decision=decision,
         bates_ranges=ranges,
         token_estimate=after,

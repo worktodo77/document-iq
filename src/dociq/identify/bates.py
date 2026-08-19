@@ -23,7 +23,8 @@ zone and is reported rather than papered over.
 
 **The persisted confirmation is the complete grammar.** A confirmed format is
 carried between runs as ``RunConfig.bates_pattern`` (and, for a recurring
-production, ``FormatProfile.bates_pattern``). A bare regex cannot carry it: a
+production; a format profile could also carry one until D-38 deleted them).
+A bare regex cannot carry it: a
 set of allowed digit widths flattens into a ``{min,max}`` span, and nothing in
 the escaped text says where the prefix stops and the separator starts. So
 :attr:`BatesFormat.pattern` emits a *canonical* string in two halves::
@@ -32,7 +33,7 @@ the escaped text says where the prefix stops and the separator starts. So
 
 The leading ``(?#...)`` is a regular-expression comment — inert to matching,
 so the string remains a valid regex that any consumer can compile and that
-:meth:`FormatProfile.validate` accepts — and it carries the format's fields
+a profile's own validation accepted — and it carries the format's fields
 percent-encoded (``%``-escaping keeps ``;``, ``=`` and ``)`` out of the values,
 so the token can always be split back apart). The grammar of the token is:
 

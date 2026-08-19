@@ -45,7 +45,6 @@ from dociq.gui.pipeline import (  # noqa: E402
     LEVER_AUTOMATIC,
     LEVER_EXPERT,
     LEVER_RECOGNIZED,
-    ProfileInfo,
     ReductionLever,
     ReductionPlan,
     RunOutcome,
@@ -105,7 +104,7 @@ def window(app):
 def _request(profile_index: int = 0, with_index: bool = True) -> RunRequest:
     mp = MockPipeline()
     return RunRequest(
-        r"D:\m", r"D:\m\out", profile=mp.profiles()[profile_index],
+        r"D:\m", r"D:\m\out",
         master_index_path=r"D:\m\index.xlsx" if with_index else None)
 
 
@@ -248,43 +247,31 @@ def _template_checklist_rows():
     and touches no disk beyond it, and ``profile_rules`` ignores the profile it
     is handed (D-35 — the rows are the template's, not the profile's).
     """
-    from dociq.adapter import NO_PROFILE, RealPipeline
+    from dociq.adapter import RealPipeline
 
-    levers, basis, source = RealPipeline().profile_rules(NO_PROFILE)
+    levers, basis, source = RealPipeline().template_families()
     offered = sum(1 for le in levers if le.kind == LEVER_EXPERT)
     return levers, basis, source, offered
 
 
 def _drive_checklist(window, state: str) -> int:
-    profiles = MockPipeline().profiles()
     if state == "recognized":
         levers, basis, source, offered = _template_checklist_rows()
         window.checklist.show_checklist(build_profile_checklist(
-            ProfileInfo("progress-report", "1", "Progress report template",
-                        section_rules=offered),
             levers, basis, source))
         window.stack.setCurrentIndex(CHECKLIST)
         return CHECKLIST
-    if state == "complete":
-        window.show_profile_checklist(profiles[0])
-    elif state == "two-rules":
-        window.show_profile_checklist(profiles[1])
-    elif state == "keeps-everything":
-        window.show_profile_checklist(profiles[2])
-    elif state == "unavailable":
-        window.checklist.show_checklist(build_profile_checklist(
-            ProfileInfo("mystery", "0.1", "A profile whose rules did not load",
-                        section_rules=4)))
-        window.stack.setCurrentIndex(CHECKLIST)
-    elif state == "mismatch":
-        levers = MockPipeline().profile_rules(profiles[0])[0]
-        window.checklist.show_checklist(build_profile_checklist(
-            ProfileInfo("modec-mpr", "1.3", "MODEC monthly progress report",
-                        section_rules=9),
-            levers))
-        window.stack.setCurrentIndex(CHECKLIST)
+    if state == "unavailable":
+        # The loud empty state: the pipeline could not say what it recognizes.
+        window.checklist.show_checklist(build_profile_checklist())
+    else:
+        # Every other state now renders the same screen — the template is one
+        # shipped artifact, not a library to pick from. The states that
+        # distinguished profiles ("complete", "two-rules", "keeps-everything")
+        # collapsed into it when D-38 deleted the profile system.
+        window.show_template_checklist()
+    window.stack.setCurrentIndex(CHECKLIST)
     return CHECKLIST
-
 
 def _drive_handoff(window, state: str) -> int:
     outcome = _cancelled() if state == "unpublished" else _outcome()
@@ -522,8 +509,7 @@ def test_every_drop_on_the_checklist_is_attributable(window) -> None:
     (see :func:`test_a_recognized_never_offered_row_is_kept_and_never_automatic`).
     The guarantee is not withdrawn — it is now stated per kind.
     """
-    profile = MockPipeline().profiles()[0]
-    window.show_profile_checklist(profile)
+    window.show_template_checklist()
     view = window.checklist._view
     assert view.dropped_rows
     text = _all_text(window.checklist)
@@ -542,7 +528,10 @@ def test_every_drop_on_the_checklist_is_attributable(window) -> None:
             assert row.disposition_word() == "KEPT"
             assert not row.expert_drop
         else:
-            assert f"{profile.profile_id} v{profile.version}" in attribution
+            # Attributed to the TEMPLATE FAMILY since D-38, not to a profile
+            # id and version. The guarantee is unchanged: every drop on this
+            # screen names what decided it.
+            assert row.lever.family_id in attribution or "family" in attribution
             assert row.disposition_word() in attribution
             assert row.expert_drop == row.dropped
     marks = {r.disposition_word() for r in view.rows}
@@ -631,10 +620,10 @@ def test_the_checklist_shows_every_family_the_template_carries() -> None:
     check moves with it: against the REAL adapter, every family in the shipped
     template must reach the screen, offerable and never-offered alike.
     """
-    from dociq.adapter import NO_PROFILE, RealPipeline
+    from dociq.adapter import RealPipeline
     from dociq.sections.templates import PROGRESS_REPORT
 
-    levers, _basis, source = RealPipeline().profile_rules(NO_PROFILE)
+    levers, _basis, source = RealPipeline().template_families()
     assert len(levers) == len(PROGRESS_REPORT.families), (
         "the checklist dropped a family between the template and the seam: "
         f"{len(PROGRESS_REPORT.families)} carried, {len(levers)} shown"
@@ -653,7 +642,7 @@ def test_a_profile_whose_rules_did_not_load_cannot_be_approved(window) -> None:
     reads as "nothing is dropped"; the truth is "not known"."""
     _drive_checklist(window, "unavailable")
     view = window.checklist._view
-    assert view.empty and not view.keeps_everything
+    assert view.empty
     assert not view.approvable
     assert CHECKLIST_NO_RULES in _all_text(window.checklist)
     accept = [b for b in window.checklist.findChildren(QPushButton)
@@ -690,13 +679,13 @@ def test_the_approve_button_is_enabled_on_the_real_product_path(app) -> None:
     so its checklist always agrees with itself. No mock-driven assertion could
     have caught this, and none did.
     """
-    from dociq.adapter import NO_PROFILE, RealPipeline
+    from dociq.adapter import RealPipeline
     from dociq.gui.main_window import MainWindow
 
     win = MainWindow(RealPipeline())
     try:
-        for profile in (NO_PROFILE, *RealPipeline().profiles()):
-            win.show_profile_checklist(profile)
+        for _ in (1,):
+            win.show_template_checklist()
             view = win.checklist._view
             assert view.approvable, (
                 f"{profile.profile_id}: the checklist refuses approval over a "
@@ -712,20 +701,9 @@ def test_the_approve_button_is_enabled_on_the_real_product_path(app) -> None:
         win.deleteLater()
 
 
-def test_a_profile_with_no_rules_is_benign_not_alarming(window) -> None:
-    """"Keeps every page" and "rules unreadable" both render an empty list. One
-    is a fact about the profile; the other is an absence of knowledge."""
-    _drive_checklist(window, "keeps-everything")
-    view = window.checklist._view
-    assert view.keeps_everything and view.approvable
-    assert "carries no section rules" in _all_text(window.checklist)
-    accept = [b for b in window.checklist.findChildren(QPushButton)
-              if b.objectName() == "primary"]
-    assert accept[0].isEnabled()
-
 
 def test_the_checklist_never_merges_the_two_kinds_of_omission(window) -> None:
-    window.show_profile_checklist(MockPipeline().profiles()[0])
+    window.show_template_checklist()
     view = window.checklist._view
     text = _all_text(window.checklist)
     assert view.drop_summary() in text
@@ -737,7 +715,7 @@ def test_the_checklist_never_merges_the_two_kinds_of_omission(window) -> None:
 def test_a_projected_checklist_figure_says_so_beside_the_figure(window) -> None:
     """Not in a tooltip: a projection standing in the same column, in the same
     type, as a counted figure is a claim the run cannot support."""
-    window.show_profile_checklist(MockPipeline().profiles()[0])
+    window.show_template_checklist()
     view = window.checklist._view
     for row in view.rows:
         assert row.lever.estimated
@@ -774,7 +752,7 @@ def test_no_disposition_word_is_silently_clipped(window) -> None:
 
 
 def test_the_checklist_has_exactly_one_forward_action(window) -> None:
-    window.show_profile_checklist(MockPipeline().profiles()[0])
+    window.show_template_checklist()
     primaries = [b for b in window.checklist.findChildren(QPushButton)
                  if b.objectName() == "primary"]
     assert len(primaries) == 1
@@ -785,7 +763,7 @@ def test_the_checklist_is_reachable_from_the_setup_screen(window) -> None:
     window.stack.setCurrentIndex(SETUP)
     links = [b for b in window.setup.findChildren(QPushButton)
              if b.objectName() == "link"]
-    review = [b for b in links if "keeps and drops" in b.text()]
+    review = [b for b in links if "recognizes" in b.text()]
     assert len(review) == 1
     review[0].click()
     assert window.stack.currentIndex() == CHECKLIST
@@ -794,36 +772,36 @@ def test_the_checklist_is_reachable_from_the_setup_screen(window) -> None:
                 if b.objectName() == "primary"]) == 1
 
 
-def test_a_pipeline_with_no_profile_rules_hook_renders_the_absence(app) -> None:
-    """A pipeline that does not offer ``profile_rules`` must produce the loud
+def test_a_pipeline_with_no_template_families_hook_renders_the_absence(app) -> None:
+    """A pipeline that does not offer ``template_families`` must produce the loud
     empty state, not a crash and not a confident blank.
 
-    The docstring used to say "the seam has no ``profile_rules`` (stop-the-line
+    The docstring used to say "the seam has no ``template_families`` (stop-the-line
     A-11)". **A-11 was applied on 2026-08-01** and the method is on
     ``PipelineAPI``, so that sentence became false; the test is not, and is worth
     more now than it was. A Protocol is structural typing — a stand-in that omits
     the method still type-checks in practice — so the screen must still survive
     its absence, and this is what proves it does."""
     class _NoRules(MockPipeline):
-        profile_rules = None
+        template_families = None
 
     win = MainWindow(pipeline=_NoRules())
     try:
-        win.show_profile_checklist(win._pipeline.profiles()[0])
+        win.show_template_checklist()
         assert win.stack.currentIndex() == CHECKLIST
         assert CHECKLIST_NO_RULES in _all_text(win.checklist)
     finally:
         win.close()
 
 
-def test_a_profile_rules_hook_that_raises_does_not_take_the_window(app) -> None:
+def test_a_template_families_hook_that_raises_does_not_take_the_window(app) -> None:
     class _Angry(MockPipeline):
-        def profile_rules(self, profile):
+        def template_families(self):
             raise RuntimeError("profile library unreachable")
 
     win = MainWindow(pipeline=_Angry())
     try:
-        win.show_profile_checklist(win._pipeline.profiles()[0])
+        win.show_template_checklist()
         assert CHECKLIST_NO_RULES in _all_text(win.checklist)
     finally:
         win.close()

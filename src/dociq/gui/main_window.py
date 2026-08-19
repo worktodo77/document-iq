@@ -26,7 +26,6 @@ from dociq.gui.pipeline import (
     BatesProposal,
     OmissionApproval,
     PipelineAPI,
-    ProfileInfo,
     ProgressEvent,
     RunOutcome,
     RunRequest,
@@ -209,7 +208,7 @@ class MainWindow(QMainWindow):
             lay.addWidget(DisclosureBar(disclosure, self.theme))
 
         self.stack = QStackedWidget()
-        self.setup = SetupScreen(self.theme, self._pipeline.profiles())
+        self.setup = SetupScreen(self.theme)
         self.progress = ProgressScreen(self.theme)
         self.summary = SummaryScreen(self.theme)
         self.detail = DetailScreen(self.theme)
@@ -248,7 +247,7 @@ class MainWindow(QMainWindow):
         self.summary.open_output_requested.connect(self._open_output)
         self.detail.back_requested.connect(
             lambda: self.stack.setCurrentIndex(SUMMARY))
-        self.setup.profile_review_requested.connect(self.show_profile_checklist)
+        self.setup.template_review_requested.connect(self.show_template_checklist)
         self.checklist.back_requested.connect(
             lambda: self.stack.setCurrentIndex(SETUP))
         self.checklist.profile_accepted.connect(
@@ -496,35 +495,31 @@ class MainWindow(QMainWindow):
 
     # -- §6 profiling checklist (E-1) ---------------------------------------
 
-    def show_profile_checklist(self, profile: ProfileInfo) -> None:
-        """Show what a profile keeps and drops, before a run commits to it.
+    def show_template_checklist(self) -> None:
+        """Show what DocIQ recognizes and what it can leave out, before a run.
 
-        The section rules come over the seam. **A-11 is APPLIED** —
-        ``PipelineAPI.profile_rules`` is on the Protocol — and this docstring
-        said otherwise for two days after it landed.
+        Took a ``ProfileInfo`` until D-38 deleted the profile system. §6's
+        requirement — that nothing be dropped that the expert was not shown —
+        never belonged to profiles and survives it; what changed is that there
+        is one shipped template rather than a library to choose from.
 
-        The ``getattr`` below is nonetheless kept deliberately, and its reason
-        has changed: not "the seam cannot carry this yet" but "an adapter may
-        legitimately not offer it". Their absence stays a state the screen
-        renders rather than a crash, because an empty checklist that says it is
-        empty is safe and an empty checklist that looks complete is not.
+        The ``getattr`` is kept for the reason it was kept before: an adapter may
+        legitimately not offer this, and an empty checklist that SAYS it is empty
+        is safe where one that looks complete is not.
         """
-        rules = getattr(self._pipeline, "profile_rules", None)
+        families = getattr(self._pipeline, "template_families", None)
         levers, basis, source = (), None, ""
-        if rules is not None:
+        if families is not None:
             try:
-                levers, basis, source = rules(profile)
-            except Exception as exc:  # a bad profile must not take the window
-                print(f"[dociq] profile rules unavailable for "
-                      f"{profile.profile_id}: {exc}")
+                levers, basis, source = families()
+            except Exception as exc:  # a bad template must not take the window
+                print(f"[dociq] template families unavailable: {exc}")
                 levers, basis, source = (), None, ""
         from dociq.gui.pipeline import TokenBasis
 
         self.checklist.show_checklist(build_profile_checklist(
-            profile, tuple(levers), basis or TokenBasis(), source))
+            tuple(levers), basis or TokenBasis(), source))
         self.stack.setCurrentIndex(CHECKLIST)
-
-    # -- §8 handoff (E-3) ---------------------------------------------------
 
     def show_handoff(self) -> None:
         self._scope = PackageScope()

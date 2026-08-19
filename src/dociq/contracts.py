@@ -23,7 +23,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-CONTRACT_VERSION = "1.9.0"
+CONTRACT_VERSION = "2.0.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -106,7 +106,7 @@ each left the run identity byte-identical while the corpus hash moved.
 Snapshots rather than the profiles themselves, for the same reason
 :class:`MasterIndexSnapshot` exists: the identity needs an immutable
 fingerprint of the input, not the input. ``profile_hash`` is
-:attr:`~dociq.profiles.model.FormatProfile.profile_hash`, which already exists
+``FormatProfile.profile_hash`` (deleted with the profile system by D-38), which existed
 and which the processing log already writes into hashed content — the fact that
 profile *content* is evidence-affecting was established; it was just missing
 from the projection the manifest calls the run identity. Hashing the content
@@ -194,6 +194,23 @@ facts about a run and only one of them is a decision.
 
 Additive with safe defaults throughout: an empty approval set is the state of
 every freshly-installed DocIQ and of every run nobody has ruled on.
+
+2.0.0 — amendment A-21, from D-38. **The first MAJOR bump, and the first
+REMOVAL from the frozen contract.** :class:`ProfileSnapshot` is deleted;
+:class:`RunConfig` loses ``profiles``, ``profile_id`` and ``profile_version``;
+:class:`DocumentRecord` loses ``profile_id`` and ``profile_version``.
+
+Every previous amendment was additive with a safe default, which is why every
+previous bump was MINOR. This one takes fields away, so a caller reading
+``config.profiles`` breaks loudly rather than silently reading something else —
+and that is the point. The profile system stopped deciding anything when D-35
+deleted its engine, and Alex ruled it removed rather than carried
+(D-38), with the consequence accepted on the record: **matter folders written
+before this bump recorded a run identity computed WITH a profile snapshot in it,
+and will not reproduce byte-for-byte afterwards.**
+
+What replaced it is already here: sections recognise, a template names families,
+and an :class:`OmissionSnapshot` naming a person decides what drops (A-19).
 
 1.9.0 — amendment A-19, extended, from Codex review r2's finding B-2. :class:`OmissionSnapshot`
 gains ``matter_root`` and :func:`matter_key` is added.
@@ -551,10 +568,10 @@ class DocumentRecord:
     """ISO-8601 dates found in the document, in first-appearance order."""
 
     doc_type: str | None = None
-    """From the active profile or a filename pattern. Never inferred by AI."""
+    """From a filename pattern. Never inferred by AI.
 
-    profile_id: str | None = None
-    profile_version: str | None = None
+    Read "from the active profile or a filename pattern" until D-38 deleted the
+    profile system; no profile ever set it."""
 
     li_file_no: str | None = None
     """The master index's "Original Sort" value when matched (§5), else None."""
@@ -620,31 +637,6 @@ class MasterIndexSnapshot:
     filename: str
     sha256: str
     row_count: int
-
-
-@dataclass(frozen=True, slots=True)
-class ProfileSnapshot:
-    """Immutable fingerprint of one format profile, for the run identity
-    (amendment A-08, from Codex review #1 round 2 finding B-R2-2).
-
-    A snapshot rather than the profile itself, for exactly the reason
-    :class:`MasterIndexSnapshot` is a snapshot: the identity needs a fixed
-    fingerprint of what went in, not a live object that can be edited
-    afterwards.
-
-    ``version`` alone would not do. Nothing enforces that an edited profile
-    gets a new version, so a rule can change under a version that did not —
-    measured on the fixture corpus, that moved two pages from KEEP to DROP and
-    left the recorded identity byte-identical. ``profile_hash`` covers the
-    content whether or not anyone remembered the version.
-    """
-
-    profile_id: str
-    version: str
-    profile_hash: str
-    """:attr:`dociq.profiles.model.FormatProfile.profile_hash` — the content
-    hash, including the operator stamp, because a profile re-saved by a
-    different expert is a different ruling."""
 
 
 OCR_REVIEW_MIN_CHARS = 40
@@ -863,11 +855,6 @@ class RunConfig:
     the processing log and the criterion-7 harness ignored it — the harness
     runs to two different destinations precisely to prove one identity."""
 
-    profile_id: str | None = None
-    """The profile the run was DRIVEN by, for display and for the per-document
-    stamp. Not sufficient as identity on its own — see :attr:`profiles`."""
-
-    profile_version: str | None = None
     master_index: MasterIndexSnapshot | None = None
     ocr_conf_threshold_pct: int = 80
     """§4 Stage 2 default. Pages whose confidence falls below this are flagged
@@ -943,35 +930,6 @@ class RunConfig:
     run, and only one of them is a decision."""
 
     section_template_version: str | None = None
-
-    profiles: tuple[ProfileSnapshot, ...] = ()
-    """Every profile the run was given, **in precedence order** (A-08).
-
-    ``profile_id``/``profile_version`` above name only the first one, and that
-    is not the input the run used.
-
-    **A profile no longer decides a disposition, and this docstring said
-    otherwise (D-35, 2026-08-17).** It read: *"Stage 4 applies the FIRST profile
-    whose header patterns claim a document, so every profile's content and the
-    order they are tried in decide which pages drop."* Stage 4 does not claim
-    documents and does not read a profile's rules; the engine that did is
-    deleted, and section dispositions come from a template family and an
-    expert's approval. A-08's two measured counterexamples were true of the
-    mechanism they were measured on and are left standing in this module's
-    version history as the record of why the field exists.
-
-    **What the field is now.** Profiles remain a hashed run INPUT: they are
-    loaded, snapshotted by content, copied into the matter folder and recorded
-    in the log. Keeping them in the identity is the conservative direction — it
-    can only make two runs look more different than they are — and a supplied
-    profile whose DROP rules no longer drop anything is reported by
-    :func:`dociq.pipeline._inert_profile_warnings` rather than silently ignored.
-
-    The input that decides dispositions is :attr:`omissions`, and A-19 is the
-    amendment that put it here for exactly the reason A-08 put profiles here.
-
-    A tuple, because order was part of the input. Empty for an unprofiled run,
-    which is the ordinary case."""
 
     @property
     def ocr_conf_threshold(self) -> float:
@@ -1322,7 +1280,6 @@ __all__ = [
     "ReconciliationReport",
     "EffectiveLimits",
     "MasterIndexSnapshot",
-    "ProfileSnapshot",
     "RunConfig",
     "RunResult",
     "DocIQError",

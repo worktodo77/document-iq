@@ -81,11 +81,6 @@ from dociq.identify.bates import (
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
 from dociq.operator import OperatorStamp
-from dociq.profiles.model import (
-    MATTER_COPY_DIRNAME,
-    FormatProfile,
-    SectionRule,
-)
 from dociq.sections.apply import SectionDropEntry, apply_sections
 from dociq.sections.model import ApprovedOmission
 from dociq.sections.resolve import spans_from_pages
@@ -892,65 +887,3 @@ def test_the_approver_is_part_of_the_run_identity(engaged):
     assert run_identity(other) != run_identity(hot)
 
 
-def test_a_profile_supplied_today_drops_nothing_and_says_so(matter, tmp_path_factory):
-    """WITHDRAW THE CLAIM: the profile that used to drop these pages.
-
-    D-35 deleted the engine, not the profile format. A profile still loads,
-    still hashes into the run identity, and now decides nothing — and an
-    operator who authored one and watched every page survive would have no way
-    to learn why. Both halves are asserted: the run drops nothing, and it says
-    out loud that the DROP rules did nothing.
-
-    The profile is built here rather than imported from
-    ``tests/test_profiles.py`` deliberately. This file's claim is about what a
-    profile no longer does, so it must be able to collect and run while that
-    module is itself being repointed.
-    """
-    inert = FormatProfile(
-        profile_id="modec-mpr",
-        version="1",
-        display_name="Recurring progress report",
-        header_patterns=("MONTHLY PROGRESS REPORT",),
-        section_rules=(
-            SectionRule("photo-log", r"^PROGRESS PHOTOGRAPHS", Disposition.DROP,
-                        notes="Image captions only. Approved by A. Bachowski."),
-            SectionRule("weather", r"^WEATHER LOG", Disposition.DROP,
-                        notes="Superseded by the met station export. Approved."),
-            SectionRule("exec-summary", r"^EXECUTIVE SUMMARY", Disposition.KEEP),
-        ),
-    )
-    outcome = run_pipeline(
-        matter, tmp_path_factory.mktemp("inert") / "out", profiles=(inert,)
-    )
-    assert outcome.ok, outcome.accounting.render()
-    assert all(
-        p.disposition is Disposition.KEEP
-        for d in outcome.result.documents
-        for p in d.pages
-    ), "a profile DROP rule dropped a page — the D-35 engine is back"
-
-    notice = next(
-        (w for w in outcome.result.warnings if "modec-mpr" in w), None
-    )
-    assert notice is not None, (
-        "a profile whose DROP rules stopped working was accepted in silence"
-    )
-    assert "photo-log, weather" in notice
-    assert "removed" in notice and "approval" in notice
-    assert "exec-summary" not in notice, (
-        "a KEEP rule was reported as having stopped working; it never dropped "
-        "anything and nothing changed for it"
-    )
-
-    # …and the half that did NOT change. The matter copy is the record of what
-    # a run was given and on whose authority (§6 step 4b, D-05); D-35 removed
-    # the engine, not the obligation to record the input. Asserted here because
-    # the composed run above no longer supplies a profile at all, so without
-    # this the write would be exercised by nothing end to end.
-    matter_copies = outcome.layout.root / MATTER_COPY_DIRNAME
-    assert matter_copies.is_dir(), f"no {MATTER_COPY_DIRNAME}/ in the matter folder"
-    names = sorted(p.name for p in matter_copies.glob("*.yaml"))
-    assert names == ["modec-mpr.v1.yaml"], (
-        f"the profile the run was given was not recorded beside the evidence: "
-        f"{names}"
-    )

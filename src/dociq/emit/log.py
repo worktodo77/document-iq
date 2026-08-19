@@ -8,8 +8,9 @@ The file has two top-level sections and the split is the whole point:
   byte-identical claim would look like hand-waving.
 * ``content`` — everything derived from the inputs: per-document page
   accounting, every drop with its rule, OCR flags, unsupported files, hashes,
-  profile version, Doc ID regime and master-index snapshot. Two runs over the
-  same folder, profile and index produce identical ``content`` bytes.
+  Doc ID regime and master-index snapshot. Two runs over the same folder, the
+  same approvals by the same person, and the same index produce identical
+  ``content`` bytes.
 
 ``content_sha256`` is the SHA-256 of ``content``'s canonical form. Because
 ``content`` contains no floats and no field named ``ocr_conf``, the identity
@@ -47,7 +48,6 @@ from dociq.docid.reconcile import ReconciliationReport, RenumberWarning
 from dociq.emit.paths import OutputLayout, write_text_deterministic
 from dociq.identify.bates import BatesDecision, BatesRange
 from dociq.operator import OperatorStamp, operator_stamp
-from dociq.profiles.model import FormatProfile
 from dociq.sections.apply import SectionDropEntry
 from dociq.verify import tokens as tokens_mod
 from dociq.verify.accounting import AccountingReport
@@ -143,8 +143,6 @@ def _document_entry(doc: DocumentRecord) -> dict[str, Any]:
         "parent_doc_id": doc.parent_doc_id,
         "container_order": doc.container_order,
         "doc_type": doc.doc_type,
-        "profile_id": doc.profile_id,
-        "profile_version": doc.profile_version,
         "detected_dates": list(doc.detected_dates),
         "pages_in": doc.pages_in,
         "pages_kept": doc.pages_kept,
@@ -224,7 +222,6 @@ def build_log(
     reconciliation: ReconciliationReport | None = None,
     renumbering: Sequence[RenumberWarning] = (),
     drops: Sequence[SectionDropEntry] = (),
-    profiles: Sequence[FormatProfile] = (),
     bates_decision: BatesDecision | None = None,
     bates_ranges: Mapping[tuple[str, str, int], BatesRange] | None = None,
     token_estimate: TokenEstimate | None = None,
@@ -250,14 +247,14 @@ def build_log(
 
     They go in ``run``, and that placement is not a filing convenience — it is
     criterion 7. A run that was refused and a run that was not differ in their
-    INVOCATION, not in their evidence: the same corpus, the same profile and the
-    same index must produce the same ``content`` bytes whether or not this
+    INVOCATION, not in their evidence: the same corpus, the same approvals and
+    the same index must produce the same ``content`` bytes whether or not this
     particular attempt tripped a gate. Hashing a gate outcome, a manifest of a
     discarded staging set or a wall clock would make the byte-identical claim
     false on its face, which is exactly what ``output_root`` and an elapsed-time
     string each did here before and had to be unpicked. ``content`` keeps only
-    the input-derived facts — the assignment, the reconciliation, the drops, the
-    profiles, the Bates section — and those ARE passed on the refusal path now,
+    the input-derived facts — the assignment, the reconciliation, the drops and
+    the Bates section — and those ARE passed on the refusal path now,
     because a refused run established them and blanking them makes the record
     lie about what the run did.
     """
@@ -428,8 +425,6 @@ def build_log(
         "run_identity_sha256": run_identity(config),
         "config": {
             "source_root": config.source_root,
-            "profile_id": config.profile_id,
-            "profile_version": config.profile_version,
             "ocr_conf_threshold_pct": config.ocr_conf_threshold_pct,
             "ocr_engine": config.ocr_engine,
             "ocr_engine_version": config.ocr_engine_version,
@@ -498,21 +493,6 @@ def build_log(
         "ocr_flagged_pages": flagged,
         "bates": bates_section,
         "doc_ids": id_section,
-        "profiles": [
-            {
-                "profile_id": p.profile_id,
-                "version": p.version,
-                "display_name": p.display_name,
-                "created_by": p.created_by,
-                "created_at": p.created_at,
-                "profile_hash": p.profile_hash,
-                "drop_rules": [
-                    {"rule_id": r.rule_id, "pattern": r.pattern, "notes": r.notes}
-                    for r in p.drop_rules
-                ],
-            }
-            for p in profiles
-        ],
         "reconciliation": (
             {
                 "totals": reconciliation.totals,

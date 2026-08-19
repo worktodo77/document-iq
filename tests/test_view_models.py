@@ -35,7 +35,6 @@ def _outcome(with_index: bool = True, profile_index: int = 0):
     request = RunRequest(
         source_root=r"D:\Matters\x",
         output_root=r"D:\Matters\x\out",
-        profile=mp.profiles()[profile_index],
         master_index_path=r"D:\Matters\x\index.xlsx" if with_index else None,
     )
     return mp.run(request, lambda _e: None, lambda: False)
@@ -85,13 +84,6 @@ def test_ocr_flag_counts_only_pages_under_the_run_threshold() -> None:
     assert view.flag(FLAG_OCR).count == expected
     assert expected > 0, "the fixture must exercise the flag it claims to test"
 
-
-def test_no_profile_keeps_every_page() -> None:
-    """Principle 1's default, visible on the screen: profile "none" drops
-    nothing, so the summary must show zero dropped."""
-    view = build_summary(_outcome(profile_index=2))
-    assert view.pages_dropped == 0
-    assert view.pages_kept == view.pages_in
 
 
 def test_capacity_reading_is_conservative_at_the_boundary() -> None:
@@ -634,17 +626,15 @@ def test_the_frozen_seam_module_has_no_positional_rebuild():
 
 def _projected_checklist(n: int = 3):
     """The shape ``RealPipeline.profile_rules`` actually returns."""
-    from dociq.gui.pipeline import LEVER_EXPERT, ProfileInfo, ReductionLever
+    from dociq.gui.pipeline import LEVER_EXPERT, ReductionLever
     from dociq.gui.view_models import build_profile_checklist
 
-    profile = ProfileInfo(profile_id="mpr", version="1", label="MPR",
-                          section_rules=n)
     levers = tuple(
         ReductionLever(key=f"s{i}", label=f"Section {i}", tokens=0, pages=0,
                        kind=LEVER_EXPERT, engaged=True, estimated=True)
         for i in range(n)
     )
-    return build_profile_checklist(profile, levers)
+    return build_profile_checklist(levers)
 
 
 def test_the_approval_sentence_never_reports_a_projected_zero_as_a_zero() -> None:
@@ -666,7 +656,7 @@ def test_the_projection_marker_matches_the_rows_own_wording() -> None:
 
 
 def test_a_mixed_checklist_says_how_many_of_the_figures_are_projected() -> None:
-    from dociq.gui.pipeline import LEVER_EXPERT, ProfileInfo, ReductionLever
+    from dociq.gui.pipeline import LEVER_EXPERT, ReductionLever
     from dociq.gui.view_models import build_profile_checklist
 
     levers = (
@@ -676,7 +666,6 @@ def test_a_mixed_checklist_says_how_many_of_the_figures_are_projected() -> None:
                        kind=LEVER_EXPERT, engaged=True, estimated=True),
     )
     view = build_profile_checklist(
-        ProfileInfo(profile_id="p", version="1", label="P", section_rules=2),
         levers)
     summary = view.drop_summary()
     assert "1 of these 2 are projected, not counted" in summary, summary
@@ -687,13 +676,12 @@ def test_a_mixed_checklist_says_how_many_of_the_figures_are_projected() -> None:
 def test_a_counted_checklist_carries_no_projection_marker() -> None:
     """The marker must MEAN something: on a counted set it must be absent, or
     it degrades into decoration nobody reads."""
-    from dociq.gui.pipeline import LEVER_EXPERT, ProfileInfo, ReductionLever
+    from dociq.gui.pipeline import LEVER_EXPERT, ReductionLever
     from dociq.gui.view_models import build_profile_checklist
 
     levers = (ReductionLever(key="a", label="A", tokens=41_000, pages=612,
                              kind=LEVER_EXPERT, engaged=True, estimated=False),)
     view = build_profile_checklist(
-        ProfileInfo(profile_id="p", version="1", label="P", section_rules=1),
         levers)
     assert "projected" not in view.drop_summary()
 
@@ -742,7 +730,6 @@ def test_every_aggregate_over_levers_marks_a_projection() -> None:
     from dociq.gui.pipeline import (
         LEVER_AUTOMATIC,
         LEVER_EXPERT,
-        ProfileInfo,
         ReductionLever,
         ReductionPlan,
     )
@@ -754,7 +741,6 @@ def test_every_aggregate_over_levers_marks_a_projection() -> None:
                           kind=LEVER_AUTOMATIC, engaged=True, estimated=True)
 
     checklist = build_profile_checklist(
-        ProfileInfo(profile_id="p", version="1", label="P", section_rules=1),
         (expert, auto))
     outcome = _outcome()
     view = build_summary(

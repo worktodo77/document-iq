@@ -34,7 +34,6 @@ from PySide6.QtWidgets import (
 
 from dociq.gui.pipeline import (
     FolderPreview,
-    ProfileInfo,
     ProgressEvent,
     RunRequest,
 )
@@ -132,8 +131,7 @@ class SetupScreen(QWidget):
     """Folder → profile → optional master index → output folder → Run."""
 
     run_requested = Signal(object)  # RunRequest
-    profile_new_requested = Signal()
-    profile_review_requested = Signal(object)  # ProfileInfo
+    template_review_requested = Signal()
     source_chosen = Signal(str)
     folders_changed = Signal(str, str)
     """``(source, output)`` — either folder was picked or cleared.
@@ -143,11 +141,10 @@ class SetupScreen(QWidget):
     belongs to the pipeline, and a screen holding its own copy of it is a second
     definition free to disagree."""
 
-    def __init__(self, theme: Theme, profiles: tuple[ProfileInfo, ...],
+    def __init__(self, theme: Theme,
                  parent=None) -> None:
         super().__init__(parent)
         self._theme = theme
-        self._profiles = profiles
         page, lay = _page(theme)
 
         title = QLabel("Reduce a matter folder to a text corpus")
@@ -183,51 +180,29 @@ class SetupScreen(QWidget):
         src_box.addWidget(self._source_hint)
         lay.addWidget(_Step(1, "Documents folder", theme, src_holder))
 
-        self._profile = QComboBox()
-        self._profile.setFont(theme.body(10))
-        # A combo sizes its minimum to its LONGEST item, so a profile named
-        # "MODEC monthly progress report · 4 section rules" pushed step 2's row
-        # past the viewport and made the whole setup page scroll sideways at
-        # the product's minimum window. Capped here rather than by shortening
-        # the label: the label is the operator's plain-language handle on the
-        # profile and is not the layout's to trim.
-        self._profile.setMinimumContentsLength(24)
-        self._profile.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        for p in profiles:
-            suffix = (f"  ·  {p.section_rules} section rules"
-                      if p.section_rules else "")
-            self._profile.addItem(f"{p.label}{suffix}", p)
-        prof_row = QHBoxLayout()
-        prof_row.setContentsMargins(0, 0, 0, 0)
-        prof_row.addWidget(self._profile, 1)
-        # A link, not a second button: §9 offers it as an alternative to
-        # choosing a profile, and giving it the same weight as the forward
-        # action is what made the earlier layout read as two equal choices.
-        new_profile = _button("Profile new format…", theme, "link")
-        new_profile.clicked.connect(self.profile_new_requested.emit)
-        prof_row.addWidget(new_profile)
+        # Step 2 was "Format profile": a combo of expert-authored YAML
+        # profiles, a "Profile new format…" link, and a review link. D-38
+        # deleted the profile system, so there is nothing to choose between —
+        # DocIQ recognizes sections from the document's own structure and offers
+        # a fixed set of section types from the shipped template.
+        #
+        # The REVIEW survives, and must: §6 requires that nothing be dropped
+        # that the expert was not shown, and that requirement never belonged to
+        # profiles. It stays a LINK rather than a button so the screen keeps
+        # exactly one forward action (D-16).
         prof_holder = QWidget()
         prof_box = QVBoxLayout(prof_holder)
         prof_box.setContentsMargins(0, 0, 0, 0)
         prof_box.setSpacing(UNIT // 2)
-        prof_inner = QWidget()
-        prof_inner.setLayout(prof_row)
-        prof_box.addWidget(prof_inner)
-        # A LINK, not a peer button. D-16 removed "Review what gets dropped" as
-        # a button because a second button beside the primary read as a
-        # prerequisite step — but §6 still requires the checklist to exist and
-        # requires that nothing be dropped that the expert was not shown. A
-        # link alongside the existing "Profile new format…" link keeps exactly
-        # one forward action on this screen while leaving the review reachable.
-        self._review = _button("See what this profile keeps and drops…",
-                               theme, "link")
+        self._review = _button("See what DocIQ recognizes, and what it can "
+                               "leave out…", theme, "link")
         self._review.clicked.connect(self._emit_review)
         prof_box.addWidget(self._review, alignment=Qt.AlignmentFlag.AlignLeft)
         lay.addWidget(_Step(
-            2, "Format profile", theme, prof_holder,
-            "A profile lists the sections an expert approved for removal. "
-            "With no profile, every page is kept."))
+            2, "What can be left out", theme, prof_holder,
+            "DocIQ recognizes section types from each document's own structure. "
+            "Nothing is left out unless you approve it after the run, and your "
+            "name is recorded against it."))
 
         self._index = QLineEdit()
         self._index.setPlaceholderText("Optional — LI master document index (.xlsx / .csv)")
@@ -334,7 +309,6 @@ class SetupScreen(QWidget):
         return RunRequest(
             source_root=self._source.text(),
             output_root=self._output.text(),
-            profile=self._profile.currentData(),
             master_index_path=self._index.text() or None,
         )
 
@@ -368,9 +342,7 @@ class SetupScreen(QWidget):
         self.run_requested.emit(self.request())
 
     def _emit_review(self) -> None:
-        profile = self._profile.currentData()
-        if profile is not None:
-            self.profile_review_requested.emit(profile)
+        self.template_review_requested.emit()
 
     # -- pickers ------------------------------------------------------------
 
@@ -955,7 +927,7 @@ class ProfileChecklistScreen(QWidget):
     """
 
     back_requested = Signal()
-    profile_accepted = Signal(object)  # ProfileInfo
+    profile_accepted = Signal()
 
     def __init__(self, theme: Theme, parent=None) -> None:
         super().__init__(parent)
@@ -1026,15 +998,16 @@ class ProfileChecklistScreen(QWidget):
 
     def show_checklist(self, view: ProfileChecklistView) -> None:
         self._view = view
-        self._title.setText(view.profile.label)
+        self._title.setText("Section types DocIQ recognizes")
+        offered = len(view.expert_rows)
+        kept = len(view.recognized_rows)
         self._subtitle.setText(
-            f"{view.profile.profile_id} · version {view.profile.version} "
-            f"· {view.profile.section_rules} declared section "
-            f"rule{'' if view.profile.section_rules == 1 else 's'}"
+            f"{len(view.rows)} recognized · {offered} can be left out · "
+            f"{kept} never offered"
         )
         self._source.setText(
             view.source
-            or "The pipeline did not say where these rules came from."
+            or "The pipeline did not say where these families came from."
         )
 
         clear_layout(self._rows_lay, keep_trailing=1)  # keep the stretch

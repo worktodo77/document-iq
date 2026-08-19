@@ -273,7 +273,7 @@ class ApprovedOmission:
 
     approved_at: str
     """ISO-8601 UTC, seconds precision — the same grammar as
-    :class:`dociq.profiles.model.OperatorStamp`, and for the same reason: it is
+    :class:`dociq.operator.OperatorStamp`, and for the same reason: it is
     read by humans and compared between runs."""
 
     matter: str

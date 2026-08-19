@@ -27,18 +27,10 @@ from dociq.gui.pipeline import (
     LEVER_AUTOMATIC,
     LEVER_EXPERT,
     LEVER_RECOGNIZED,
-    ProfileInfo,
     ReductionPlan,
     RunRequest,
     get_pipeline,
     set_pipeline,
-)
-from dociq.profiles.model import Disposition as _D  # noqa: F401  (re-export check)
-from dociq.profiles.model import (
-    FormatProfile,
-    ProfileError,
-    SectionRule,
-    dump_profile,
 )
 from dociq.runstate import TerminalStatus
 from dociq.sections.model import ApprovedOmission
@@ -49,46 +41,13 @@ from .conftest import FIXTURES
 # The fixture corpus's native PDF opens "MONTHLY PROGRESS REPORT" and its second
 # page opens "2. PROGRESS NARRATIVE" — a real header and a real section, so the
 # profile below drops a real page rather than a contrived one.
-MPR = FormatProfile(
-    profile_id="mpr-test",
-    version="1.0",
-    display_name="Monthly progress report (test)",
-    header_patterns=("MONTHLY PROGRESS REPORT",),
-    section_rules=(
-        SectionRule("mpr.narrative", r"PROGRESS NARRATIVE",
-                    disposition=Disposition.DROP, label="Progress narrative",
-                    notes="dropped for the test; approved by nobody, which is "
-                          "why this profile lives in a test and not in the app"),
-        SectionRule("mpr.cover", r"MONTHLY PROGRESS REPORT",
-                    disposition=Disposition.KEEP, label="Cover"),
-    ),
-)
 
 
-@pytest.fixture
-def library(tmp_path, monkeypatch):
-    """An empty profile library, pointed away from the real ``%APPDATA%`` one.
-
-    The environment override rather than the constructor argument, because it is
-    the path a shipped run takes (D-05) and because it also covers the code that
-    resolves the library a second time when a chosen profile is loaded.
-    """
-    lib = tmp_path / "profiles"
-    monkeypatch.setenv("DOCIQ_PROFILE_LIBRARY", str(lib))
-    return lib
-
-
-def _write(library: Path, profile: FormatProfile) -> Path:
-    library.mkdir(parents=True, exist_ok=True)
-    path = library / f"{profile.profile_id}.v{profile.version}.yaml"
-    path.write_text(dump_profile(profile.stamped()), encoding="utf-8", newline="\n")
-    return path
 
 
 def _request(tmp_path, name="out", profile=None, index=None,
              approvals=()) -> RunRequest:
-    return RunRequest(str(FIXTURES), str(tmp_path / name),
-                      profile=profile, master_index_path=index,
+    return RunRequest(str(FIXTURES), str(tmp_path / name), master_index_path=index,
                       approvals=tuple(approvals))
 
 
@@ -128,311 +87,6 @@ def _run(pipe, request, cancel=lambda: False):
 
 # ---------------------------------------------------------------------------
 # D-1 — profiles()
-# ---------------------------------------------------------------------------
-
-
-def test_an_empty_library_still_offers_a_choice(library):
-    """FAIL-BEFORE: returning the library verbatim gives ``()`` on a machine
-    that has never profiled a format — which is every machine on first launch —
-    and an empty picker is indistinguishable from a broken one."""
-    assert not library.exists()
-    offered = adapter.RealPipeline().profiles()
-    assert offered == (adapter.NO_PROFILE,)
-    assert offered[-1].section_rules == 0
-
-
-def test_a_missing_library_is_not_an_error(library, tmp_path):
-    """The library may be a shared LI drive that is not reachable (D-05). That
-    must not stop a matter from being run without a profile."""
-    pipe = adapter.RealPipeline(library_dir=tmp_path / "nowhere" / "at" / "all")
-    assert pipe.profiles() == (adapter.NO_PROFILE,)
-
-
-def test_the_rule_count_is_the_real_one(library):
-    """``section_rules`` is what the profile carries, not a placeholder.
-
-    **Its stated purpose is withdrawn.** This read "the operator reads it to see
-    whether a profile will remove anything" — false since D-35: a profile
-    removes nothing, and that number was precisely what disabled the §6 approve
-    button while it was still being compared against the template's families.
-    The count is still worth asserting as a faithful reading of the file, which
-    is all it now claims to be.
-    """
-    _write(library, MPR)
-    offered = adapter.RealPipeline().profiles()
-    real = [p for p in offered if p.profile_id == "mpr-test"]
-    assert len(real) == 1
-    assert real[0].section_rules == 2, "the rule count is not the profile's"
-    assert real[0].version == "1.0"
-    assert real[0].label == "Monthly progress report (test)"
-    assert offered[-1] is adapter.NO_PROFILE, "the no-profile choice moved"
-
-
-def test_an_unreadable_profile_is_skipped_and_recorded(library):
-    """A broken YAML file must not take the picker down with it — and must not
-    vanish silently either."""
-    _write(library, MPR)
-    (library / "broken.v1.yaml").write_text("profile_id: [\n", encoding="utf-8")
-
-    pipe = adapter.RealPipeline()
-    offered = pipe.profiles()
-    assert [p.profile_id for p in offered] == ["mpr-test", "none"]
-    assert len(pipe.library_issues) == 1
-    assert "broken.v1.yaml" in pipe.library_issues[0]
-
-
-def test_the_offered_order_is_deterministic(library):
-    for pid in ("zeta", "alpha", "middle"):
-        _write(library, FormatProfile(profile_id=pid, version="1.0",
-                                      display_name=pid.title()))
-    first = adapter.RealPipeline().profiles()
-    second = adapter.RealPipeline().profiles()
-    assert first == second
-    assert [p.profile_id for p in first] == ["alpha", "middle", "zeta", "none"]
-
-
-# ---------------------------------------------------------------------------
-# A-11's hook — §6's approval checklist
-#
-# REPOINTED AT D-35 / D-34 (commits 4092f76, d3cee24). Every test in this block
-# used to assert that ``profile_rules`` rendered THE CHOSEN PROFILE'S OWN
-# SECTION RULES: one row per rule, a DROP rule arriving engaged, a KEEP rule
-# arriving off. That guarantee is withdrawn at its root — D-35 deleted
-# ``dociq.profiles.apply``, so a profile's DROP rule now drops nothing, and
-# drawing one beside the word DROP would state a falsehood on the one screen
-# whose entire purpose is an expert approving omissions before a run commits.
-#
-# What replaced it, and what these five tests now pin:
-#
-#   * the rows are the loaded SECTION TEMPLATE's families, not the profile's
-#     rules — ``profile`` is accepted and decides nothing;
-#   * every row arrives OFF and names no approver (D-34: a template ships
-#     unengaged and can never approve anything);
-#   * a family the template refuses to offer is a LOCKED row, one screen
-#     earlier than the summary waterfall and by the same rule;
-#   * every row carries its risk, its stated cost and its own patterns, which
-#     is A-11b's guarantee surviving the change of source.
-# ---------------------------------------------------------------------------
-
-
-def test_the_checklist_lists_every_family_the_template_carries(library):
-    """REPOINTED from ``test_the_checklist_hook_lists_every_rule_the_profile_carries``.
-
-    A-11 is APPLIED (``docs/contracts/amendments.md``, 2026-08-01) and
-    ``profile_rules`` is on ``PipelineAPI``; Track E still reaches it through the
-    optional ``getattr`` hook, because the loud empty state is the right
-    behaviour for a stand-in that cannot supply the rows. Absent is not the
-    expected case, and it is not the case here.
-
-    The withdrawn half is the SOURCE of the rows. Where this once asserted
-    ``len(levers) == len(MPR.section_rules)`` and read a DROP rule as an engaged
-    lever, it now asserts the template's families, all of them, all off.
-    """
-    _write(library, MPR)
-    pipe = adapter.RealPipeline()
-    chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
-
-    levers, basis, source = pipe.profile_rules(chosen)
-
-    assert [le.key for le in levers] == [
-        f.family_id for f in PROGRESS_REPORT.families
-    ], "the checklist is not the template's families, in the template's order"
-
-    # D-34, and the reason this replaced "a DROP rule reads KEEP": there is no
-    # longer any input to this call that could make a row arrive engaged.
-    assert not any(le.engaged for le in levers), (
-        "a row arrived ON. A template ships unengaged; an omission exists only "
-        "once a person has approved it"
-    )
-    assert not any(le.approved_by for le in levers), (
-        "the approver field holds a fiction — the exact failure D-34 was ruled "
-        "to prevent"
-    )
-
-    offered = {f.family_id for f in PROGRESS_REPORT.families if f.offer}
-    assert offered, "the shipped template offers nothing; the probe is vacuous"
-    assert {le.key for le in levers if le.kind == LEVER_EXPERT} == offered
-    assert {le.key for le in levers if le.kind == LEVER_RECOGNIZED} == (
-        {f.family_id for f in PROGRESS_REPORT.families} - offered
-    ), "a family the template refuses to offer is drawn as engageable"
-    # NOT `all(le.locked for ... if kind == LEVER_RECOGNIZED)`, which was here
-    # and is a tautology: `locked` is DEFINED as `kind != LEVER_EXPERT`, so it
-    # restates the filter. What is worth asserting is that the model refuses to
-    # move such a row — the property a screen depends on and a definition cannot
-    # give.
-    plan = ReductionPlan(full_tokens=1000, levers=tuple(levers))
-    for row in (le for le in levers if le.kind == LEVER_RECOGNIZED):
-        assert plan.with_toggled(row.key) == plan, (
-            f"{row.key}: a recognized-never-offered row moved when toggled"
-        )
-
-    # §5.3 / A-11b: every row says what it costs and what it catches.
-    assert all(le.risk for le in levers), "a row was drawn without its risk grade"
-    assert all(le.note for le in levers), "a lever offered without a stated cost"
-    assert all(le.rule for le in levers), "a row says a drop exists, not what it catches"
-
-    # Before a run there is nothing counted and no tier has placed anything.
-    assert all(le.estimated for le in levers), (
-        "a row with no measurement behind it was presented as counted"
-    )
-    assert all(le.tokens == 0 and le.pages == 0 for le in levers)
-    assert all(le.tier == "" for le in levers), (
-        "a tier before a run — which tier places a section is a property of "
-        "documents, and none have been read"
-    )
-
-    assert f"{PROGRESS_REPORT.template_id} v{PROGRESS_REPORT.version}" in source
-    assert "no omission is approved" in source
-    assert "No pages have been read" in source
-    assert basis.provenance == ""
-
-
-def test_the_no_profile_choice_gets_the_same_checklist(library):
-    """REPOINTED from ``test_the_checklist_hook_says_nothing_for_the_no_profile_choice``.
-
-    **The withdrawn claim.** Choosing :data:`adapter.NO_PROFILE` used to produce
-    ``levers == ()`` and ``source == ""``, and that was correct while the rows
-    were the profile's rules: NO_PROFILE has none. D-35 makes the rows the
-    template's, and the template loads whatever the operator picked — so "no
-    profile" no longer means "nothing is offered".
-
-    That is not a loss, and this asserts why: what protected the expert was
-    never the empty list, it was that nothing is ENGAGED and nobody is named.
-    That half is unchanged and is now checked on the choice most likely to be
-    read as "this run drops nothing".
-    """
-    levers, _basis, source = adapter.RealPipeline().profile_rules(
-        adapter.NO_PROFILE)
-
-    assert [le.key for le in levers] == [
-        f.family_id for f in PROGRESS_REPORT.families
-    ], "the no-profile choice gets a different checklist from every other choice"
-    assert not any(le.engaged for le in levers)
-    assert not any(le.approved_by for le in levers)
-    assert PROGRESS_REPORT.template_id in source, (
-        "the screen names no source for rows it is asking an expert to approve"
-    )
-
-
-def test_two_families_never_collapse_into_one_row(library):
-    """REPOINTED from ``test_two_rules_with_one_label_stay_two_rows``.
-
-    The hazard is unchanged and is worth restating: two rows an expert cannot
-    tell apart are two omissions he cannot tell apart, and the checklist keys
-    its toggle on the row's key. What changed is where the guarantee comes from.
-    A profile could carry two rules sharing a label — ``FormatProfile.validate``
-    enforces uniqueness on ``rule_id`` only — so the old test built one and
-    checked the adapter kept the rows distinct. A template cannot:
-    :meth:`SectionTemplate.validate` refuses a duplicate ``family_id`` outright,
-    and the row key IS the ``family_id``.
-
-    So this asserts the property on the SHIPPED template rather than on a
-    profile constructed to break it, and it asserts the display names too —
-    those are unenforced by ``validate`` and are the string an expert actually
-    reads.
-    """
-    _write(library, MPR)
-    pipe = adapter.RealPipeline()
-    chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
-    levers, _b, _s = pipe.profile_rules(chosen)
-
-    keys = [le.key for le in levers]
-    assert len(set(keys)) == len(keys), (
-        f"two rows share a key, so one toggle would move both: {keys}")
-    labels = [le.label for le in levers]
-    assert len(set(labels)) == len(labels), (
-        f"two rows read the same words — two omissions an expert cannot tell "
-        f"apart: {sorted(labels)}")
-
-    # And the structural half, stated where it lives: a template that tried to
-    # ship a duplicate family would not load at all.
-    from dociq.sections.model import SectionTemplate, TemplateError
-
-    clashing = SectionTemplate(
-        template_id="clash", version="1", display_name="Clashing",
-        families=(PROGRESS_REPORT.families[0], PROGRESS_REPORT.families[0]),
-    )
-    with pytest.raises(TemplateError):
-        clashing.validate()
-
-
-def test_a_vanished_profile_no_longer_empties_the_checklist(library):
-    """REPOINTED from ``test_a_vanished_profile_does_not_silently_produce_an_empty_checklist``.
-
-    **The withdrawn behaviour.** ``profile_rules`` used to re-read the profile
-    file and raise :class:`ProfileError` when it was gone, so Track E's call
-    site could render the loud empty state that disables approval; an empty list
-    returned quietly would have read as "this profile drops nothing".
-
-    D-35 removes the hazard rather than the guard. The rows come from a template
-    compiled into the build, so a profile file vanishing between the picker and
-    the checklist cannot empty it — there is no longer a state in which this
-    screen is silently blank. The consequence is asserted here, and the
-    remaining half of the old guarantee (a vanished profile must still not be
-    RUN) is asserted by
-    ``test_a_chosen_profile_that_vanished_stops_the_run``, which is unchanged
-    and still passes.
-    """
-    _write(library, MPR)
-    pipe = adapter.RealPipeline()
-    chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
-    (library / "mpr-test.v1.0.yaml").unlink()
-
-    levers, _basis, source = pipe.profile_rules(chosen)
-    assert len(levers) == len(PROGRESS_REPORT.families) > 0, (
-        "the checklist emptied when a profile file vanished — the state that "
-        "used to read as 'this drops nothing'")
-    assert PROGRESS_REPORT.template_id in source
-
-    # The run is still refused. The two screens answer different questions and
-    # only one of them depends on the file.
-    with pytest.raises(ProfileError):
-        pipe._profiles_for(_request(Path("."), profile=chosen))
-
-
-def test_the_checklist_and_the_run_offer_one_template(library):
-    """REPOINTED from ``test_the_checklist_and_the_run_read_one_file_through_one_parser``.
-
-    The guarantee is the same sentence with a different noun: what an expert is
-    offered on screen must be what the run can act on. It used to be enforced by
-    both paths reading one YAML file through one parser. D-35 moves the decision
-    off the profile entirely, so it is now enforced by both paths reading one
-    template object — ``RealPipeline._template`` — and by the adapter refusing an
-    approval for anything not on it.
-    """
-    _write(library, MPR)
-    pipe = adapter.RealPipeline()
-    chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
-    levers, _b, _s = pipe.profile_rules(chosen)
-
-    # Same rows for the profile choice and for no choice at all: the template
-    # is the source, so there is nothing for the two paths to disagree about.
-    assert [le.key for le in levers] == [
-        le.key for le in pipe.profile_rules(adapter.NO_PROFILE)[0]
-    ]
-
-    engageable = {le.key for le in levers if not le.locked}
-    assert engageable == {f.family_id for f in PROGRESS_REPORT.families if f.offer}
-
-    # Every row the screen says can be engaged, can be. Enumerated rather than
-    # sampled: one family silently unapprovable is a lever that does nothing.
-    for key in sorted(engageable):
-        approval = pipe.set_omission(key, True, "the test matter", str(FIXTURES))
-        assert approval is not None and approval.family_id == key
-        assert approval.template_id == PROGRESS_REPORT.template_id
-        assert approval.template_version == PROGRESS_REPORT.version
-        assert approval.approved_by, "an approval that names nobody (D-34)"
-
-    # And every row it locks is refused at the layer a widget cannot reach past.
-    for locked in sorted({le.key for le in levers} - engageable):
-        with pytest.raises(ProfileError):
-            pipe.set_omission(locked, True, "the test matter", str(FIXTURES))
-    with pytest.raises(ProfileError):
-        pipe.set_omission("no-such-family", True, "the test matter", str(FIXTURES))
-
-
-# ---------------------------------------------------------------------------
-# D-2 — preview_folder()
 # ---------------------------------------------------------------------------
 
 
@@ -770,36 +424,7 @@ def _last_core_outcome(root):
     )
 
 
-def test_the_no_profile_sentinel_never_reaches_the_run_identity(tmp_path, library):
-    """FAIL-BEFORE: passing :data:`adapter.NO_PROFILE` straight through
-    ``config_from`` stamps ``profile_id='none'`` into the hashed
-    :class:`RunConfig`, so "no profile" and "a profile called none" record
-    identically and every document is labelled with a profile that does not
-    exist."""
-    pipe = adapter.RealPipeline(ocr_enabled=False)
-    outcome, _ = _run(pipe, _request(tmp_path, "matter", adapter.NO_PROFILE))
-    assert outcome.result.config.profile_id is None
-    assert outcome.result.config.profile_version is None
-    assert not outcome.result.config.profiles
-    log = json.loads((tmp_path / "matter" / "processing_log.json")
-                     .read_text(encoding="utf-8"))
-    assert "none" not in json.dumps(log["content"]["config"])
-
-
-def test_a_chosen_profile_that_vanished_stops_the_run(tmp_path, library):
-    """Running without the rules the operator chose, and publishing the result
-    as a reduced corpus, is the failure this product exists to prevent."""
-    _write(library, MPR)
-    pipe = adapter.RealPipeline()
-    offered = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
-    (library / "mpr-test.v1.0.yaml").unlink()
-
-    with pytest.raises(ProfileError) as exc:
-        _run(pipe, _request(tmp_path, "matter", offered))
-    assert "no longer in the profile library" in str(exc.value)
-
-
-def test_bates_is_not_auto_confirmed_for_an_operator_run(tmp_path, library):
+def test_bates_is_not_auto_confirmed_for_an_operator_run(tmp_path):
     """§4 Stage 3 confirmation is the operator's. Until the seam can ask, the
     run must behave as every unattended run does — detect, decline to apply, and
     say so — rather than confirm on the expert's behalf."""
@@ -815,22 +440,20 @@ def test_bates_is_not_auto_confirmed_for_an_operator_run(tmp_path, library):
 
 
 @pytest.fixture
-def profiled(tmp_path, library):
-    """A real run with a profile chosen and NO omission approved.
+def profiled(tmp_path):
+    """A real run with NO omission approved.
 
     D-34's shipped state: the template recognizes sections and nothing drops.
     Named ``profiled`` still because the profile is still an input to the run —
     it just no longer decides anything.
     """
-    _write(library, MPR)
     pipe = adapter.RealPipeline(ocr_enabled=False)
-    chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
-    outcome, _ = _run(pipe, _request(tmp_path, "matter", chosen))
+    outcome, _ = _run(pipe, _request(tmp_path, "matter"))
     return outcome
 
 
 @pytest.fixture
-def approved(tmp_path, library):
+def approved(tmp_path):
     """The same run with one omission ENGAGED, through the seam's own capture
     point.
 
@@ -839,9 +462,7 @@ def approved(tmp_path, library):
     read off the machine — a test that composed the name would prove the
     plumbing and not the ruling.
     """
-    _write(library, MPR)
     pipe = adapter.RealPipeline(ocr_enabled=False)
-    chosen = [p for p in pipe.profiles() if p.profile_id == "mpr-test"][0]
     # The matter is derived the SAME WAY the run derives it — from the source
     # folder — because that is now enforced. Codex's B-2 fix made an approval
     # valid only on the matter it names, and this fixture had been stamping a
@@ -851,7 +472,7 @@ def approved(tmp_path, library):
     # itself, not a test detail.
     approval = pipe.set_omission(FIXTURE_FAMILY, True, FIXTURES.name, str(FIXTURES))
     assert approval is not None
-    outcome, _ = _run(pipe, _request(tmp_path, "approved", chosen,
+    outcome, _ = _run(pipe, _request(tmp_path, "approved",
                                      approvals=(approval,)))
     return outcome, approval
 
@@ -943,7 +564,7 @@ def test_a_run_with_no_approval_has_a_waterfall_that_drops_nothing(real_run):
     the truth for a corpus nothing was dropped from". A profile was then the
     only thing that produced levers. D-35 makes the waterfall a RECOGNITION
     waterfall: the shipped template names sections whether or not a profile was
-    chosen, so a plan exists for this run and ``None`` would now mean "no
+    recognized, so a plan exists for this run and ``None`` would mean "no
     section was recognized at all".
 
     The sentence the old test was protecting — the screen must show the record
@@ -1004,7 +625,7 @@ def test_the_mock_is_still_installable():
     assert isinstance(get_pipeline(), adapter.RealPipeline)
 
 
-def test_the_window_builds_against_the_real_pipeline(library):
+def test_the_window_builds_against_the_real_pipeline():
     """The swap, end to end: the shipped entry point, the real adapter, no mock.
 
     A unit test of ``get_pipeline()`` proves the wiring and not the fit — the
@@ -1032,20 +653,6 @@ def test_the_window_builds_against_the_real_pipeline(library):
         assert preview.file_count > 0
     finally:
         window.close()
-
-
-def test_both_implementations_satisfy_the_same_protocol():
-    from dociq.gui.mock_pipeline import MockPipeline
-
-    for pipe in (adapter.RealPipeline(), MockPipeline()):
-        assert isinstance(pipe.profiles(), tuple)
-        assert all(isinstance(p, ProfileInfo) for p in pipe.profiles())
-        assert isinstance(pipe.disclosure(), str)
-
-
-# ---------------------------------------------------------------------------
-# D-5 / A-12 — §8 handoff: Path B checked, Path A built
-# ---------------------------------------------------------------------------
 
 
 def test_path_b_note_says_it_LOOKED(real_run):
@@ -1346,7 +953,7 @@ def test_a_wholly_dropped_and_a_wholly_kept_section_are_unchanged():
     assert "part" not in lev.label
 
 
-def test_a_recognized_family_nobody_approved_is_drawn_off(library):
+def test_a_recognized_family_nobody_approved_is_drawn_off():
     """D-34 at the same unit boundary — the state the partial-case tests can no
     longer reach.
 

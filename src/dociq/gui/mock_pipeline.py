@@ -52,7 +52,6 @@ from dociq.gui.pipeline import (
     LEVER_AUTOMATIC,
     LEVER_EXPERT,
     FolderPreview,
-    ProfileInfo,
     ProgressEvent,
     Reconciliation,
     ReconciliationRow,
@@ -158,13 +157,6 @@ action. Rated on bytes rather than on file count because a folder of 40 scanned
 MPRs and a folder of 40 emails are not the same job. Replaced by a measured rate
 once Sprint 2 has a timed end-to-end run."""
 
-PROFILES: tuple[ProfileInfo, ...] = (
-    ProfileInfo("modec-mpr", "1.3", "MODEC monthly progress report",
-                section_rules=4),
-    ProfileInfo("petrobras-cer", "1.0", "Petrobras change/extension request",
-                section_rules=2),
-    ProfileInfo("none", "-", "No profile — keep every page", section_rules=0),
-)
 
 # (section, plain label, dropped by default under the MPR profile)
 SECTIONS: tuple[tuple[str, str, bool], ...] = (
@@ -335,7 +327,7 @@ def _fixture_doc_type(rel_path: str) -> str | None:
 
 def _build_document(index: int, rel_path: str, pages: int, scanned: int,
                     status: ProcessingStatus, apply_profile: bool,
-                    profile: ProfileInfo | None) -> DocumentRecord:
+                    profile=None) -> DocumentRecord:
     records: list[PageRecord] = []
     for page_no in range(1, pages + 1):
         is_ocr = page_no > pages - scanned
@@ -382,8 +374,6 @@ def _build_document(index: int, rel_path: str, pages: int, scanned: int,
         status=status,
         detected_dates=_fixture_dates(rel_path),
         doc_type=_fixture_doc_type(rel_path),
-        profile_id=profile.profile_id if (apply_profile and profile) else None,
-        profile_version=profile.version if (apply_profile and profile) else None,
         li_file_no=f"{6000 + index * 7}",
     )
     doc.validate()  # the mock must not be able to hand the GUI an invalid record
@@ -598,40 +588,16 @@ class MockPipeline:
             "direct-context capacity."
         )
 
-    def profiles(self) -> tuple[ProfileInfo, ...]:
-        return PROFILES
-
-    # -- adapter hooks (docs/contracts/amendments.md A-11 and A-12) -----------
-    #
-    # A-11 and A-12 are APPLIED (2026-08-01) and both of these are now on
-    # ``PipelineAPI``. The comment here used to read "NOT part of PipelineAPI …
-    # raised as amendments and duck-typed in the meantime", and cited A-13 —
-    # which is the DIRECT_CONTEXT_TOKENS docstring, not a hook — for the §8 pair.
-    # Both claims are withdrawn.
-    #
-    # The GUI still asks with ``getattr`` and renders the absence, and that stays:
-    # A-12 explicitly permits an adapter with no Path A to OMIT ``build_package``
-    # rather than return an empty result, so absence is a supported state to be
-    # shown, not a gap to be assumed away.
-
-    def profile_rules(
-        self, profile: ProfileInfo
+    def template_families(
+        self,
     ) -> tuple[tuple[ReductionLever, ...], TokenBasis, str]:
-        """The §6 checklist's rows: what this profile keeps and drops.
+        """The stand-in's illustrative families.
 
-        Sliced to the profile's own declared rule count rather than always
-        returning all four fixture sections — a checklist that showed rules a
-        profile does not carry is the same defect as one that hides rules it
-        does, and the screen's completeness check has to be exercised by a mock
-        that can actually disagree with itself.
-        """
-        if profile.section_rules <= 0:
-            return (), _PROFILE_BASIS, _PROFILE_SOURCE
-        levers = tuple(
-            lever for lever in _PROFILE_LEVERS if not lever.locked
-        )[: profile.section_rules]
-        automatic = tuple(le for le in _PROFILE_LEVERS if le.locked)
-        return levers + automatic, _PROFILE_BASIS, _PROFILE_SOURCE
+        It has no template to read since D-38, and its job is to render every
+        screen in a state worth looking at — an empty checklist renders the loud
+        empty state, which is the right answer for a pipeline that CANNOT
+        answer and the wrong one for a stand-in that is pretending to."""
+        return _PROFILE_LEVERS, _PROFILE_BASIS, _PROFILE_SOURCE
 
     def matter_layout_note(self, outcome: RunOutcome) -> str:
         """§8 Path B: what is in the matter folder, in the pipeline's words.
@@ -684,8 +650,13 @@ class MockPipeline:
         ``tests/test_bates_confirmation.py`` asserts every implementation
         carries it.
         """
-        profile = request.profile
-        apply_profile = bool(profile and profile.profile_id != "none")
+        profile = None
+        # The stand-in still ENGAGES its illustrative levers. It has no profile
+        # to read since D-38 and no approval to honour since D-34 — but its
+        # whole job is to render every screen in its interesting state, and a
+        # waterfall with nothing engaged renders the empty one. The standing
+        # disclosure that this pipeline is not real is what keeps that honest.
+        apply_profile = True
         total = len(_CORPUS) + len(_UNSUPPORTED)
         documents: list[DocumentRecord] = []
 
@@ -732,8 +703,6 @@ class MockPipeline:
             config = RunConfig(
                 source_root=config.source_root,
                 output_root=config.output_root,
-                profile_id=config.profile_id,
-                profile_version=config.profile_version,
                 master_index=MasterIndexSnapshot(
                     filename=request.master_index_path.rsplit("\\", 1)[-1]
                     .rsplit("/", 1)[-1],
