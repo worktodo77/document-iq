@@ -931,6 +931,20 @@ class RunConfig:
 
     section_template_version: str | None = None
 
+    def __post_init__(self) -> None:
+        """Canonicalize the token list here, where no caller can skip it.
+
+        Two entry points supply tokens — the setup screen and the CLI — and a
+        normalization applied at either would leave the other minting spurious
+        identities. Correct by construction: a `RunConfig` cannot hold a token
+        list in a spelling that differs from its behavior.
+        """
+        from dociq.sections.project_tokens import canonical_tokens
+
+        canon = canonical_tokens(self.project_tokens)
+        if canon != self.project_tokens:
+            object.__setattr__(self, "project_tokens", canon)
+
     @property
     def ocr_conf_threshold(self) -> float:
         """The threshold as a ``[0,1]`` fraction, for comparison against

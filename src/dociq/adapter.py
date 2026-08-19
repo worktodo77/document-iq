@@ -763,6 +763,49 @@ class RealPipeline:
         )
         return tuple(levers), TokenBasis(), source
 
+    def propose_project_tokens(self, source: str) -> tuple[str, ...]:
+        """Read the matter's own outlines and filenames, and propose (D-39).
+
+        Opens each PDF only for its outline — no page rendering, no OCR — so the
+        cost is a header read per file rather than a run.
+        """
+        root = Path(source)
+        if not root.is_dir():
+            return ()
+        import fitz
+
+        from dociq.sections.normalize import normalize_label, strip_numbering
+        from dociq.sections.project_tokens import propose_tokens
+
+        labels: dict[str, list[str]] = {}
+        names: list[str] = []
+        for pdf in sorted(root.rglob("*.pdf")):
+            names.append(pdf.stem)
+            try:
+                doc = fitz.open(pdf)
+            except Exception:
+                continue  # an unreadable file proposes nothing and stops nothing
+            try:
+                found = []
+                for item in doc.get_toc(simple=True):
+                    if len(item) < 3 or not isinstance(item[2], int) or item[2] < 1:
+                        continue
+                    key = strip_numbering(normalize_label(str(item[1])))
+                    if key:
+                        found.append(key)
+                if found:
+                    # Keyed by path relative to the matter, not by basename: two
+                    # `Weekly Report.pdf` in different subfolders are two
+                    # documents, and collapsing them undercounts the spread a
+                    # token needs to clear `min_documents`. The failure is a
+                    # name quietly NOT proposed, which nothing would show.
+                    labels[str(pdf.relative_to(root))] = found
+            except Exception:
+                continue
+            finally:
+                doc.close()
+        return propose_tokens(labels, names)
+
     def check_folders(self, source: str, output: str) -> str:
         """The run's own preflight, asked early (D-43's first finding).
 
@@ -841,7 +884,7 @@ class RealPipeline:
         config = config_from(request)
         config = replace(
             config, bates_pattern=stored_bates_pattern(request.output_root),
-            project_tokens=self._project_tokens)
+            project_tokens=tuple(request.project_tokens) or self._project_tokens)
         emitter = _Progress(on_progress)
 
         outcome = core.run(

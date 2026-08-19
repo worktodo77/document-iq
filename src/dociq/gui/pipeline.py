@@ -596,6 +596,14 @@ class RunRequest:
     output_root: str
     master_index_path: str | None = None
 
+    project_tokens: tuple[str, ...] = ()
+    """The matter's project names, as the operator left them (D-39).
+
+    DocIQ PROPOSES these (:meth:`PipelineAPI.propose_project_tokens`) and the
+    operator corrects them. What travels here is the corrected list, because the
+    proposal is measurably wrong about roughly half its suggestions and the run
+    must record what was actually used."""
+
     approvals: tuple[OmissionApproval, ...] = ()
     """The omissions an expert engaged on the waterfall, carried into the run
     that will act on them (D-34).
@@ -629,6 +637,20 @@ class PipelineAPI(Protocol):
 
 
     def preview_folder(self, path: str) -> FolderPreview:
+        ...
+
+    def propose_project_tokens(self, source: str) -> tuple[str, ...]:
+        """Candidate project names read from the matter itself (D-39).
+
+        A PROPOSAL, and the screen must present it as one. Measured on the real
+        corpus it gets four of seven right and misses the two most frequent
+        project-tokened labels entirely, because they appear in no filename.
+        Shown and editable is what makes that safe; a silent derived list would
+        not be.
+
+        An adapter that cannot answer returns ``()`` — no tokens is the state
+        every run was in before D-39 and nothing is dropped by it.
+        """
         ...
 
     def check_folders(self, source: str, output: str) -> str:

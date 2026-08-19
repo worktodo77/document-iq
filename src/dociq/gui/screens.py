@@ -204,6 +204,29 @@ class SetupScreen(QWidget):
             "Nothing is left out unless you approve it after the run, and your "
             "name is recorded against it."))
 
+        # D-39. DocIQ proposes the matter's project names and the operator
+        # corrects them. Presented as a PROPOSAL because it measurably is one:
+        # on the real corpus it gets four of seven right and misses the two most
+        # frequent project-tokened labels entirely. An uneditable derived list
+        # would be a hashed run input the operator can see and cannot fix.
+        self._tokens = QLineEdit()
+        self._tokens.setFont(theme.body(10))
+        self._tokens.setPlaceholderText(
+            "e.g. MV32, BOMESC, PETROBRAS — separated by commas")
+        self._tokens_hint = _muted("", theme, 8)
+        self._tokens_hint.setWordWrap(True)
+        tok_holder = QWidget()
+        tok_box = QVBoxLayout(tok_holder)
+        tok_box.setContentsMargins(0, 0, 0, 0)
+        tok_box.setSpacing(UNIT // 2)
+        tok_box.addWidget(self._tokens)
+        tok_box.addWidget(self._tokens_hint)
+        lay.addWidget(_Step(
+            3, "Project names in this matter", theme, tok_holder,
+            "A vessel, client or yard name inside a section heading stops DocIQ "
+            "recognizing the section. Naming them here lets it see past them. "
+            "Getting one wrong costs an offer, never a page."))
+
         self._index = QLineEdit()
         self._index.setPlaceholderText("Optional — LI master document index (.xlsx / .csv)")
         self._index.setReadOnly(True)
@@ -220,7 +243,7 @@ class SetupScreen(QWidget):
         idx_holder = QWidget()
         idx_holder.setLayout(idx_row)
         lay.addWidget(_Step(
-            3, "Master index (optional)", theme, idx_holder,
+            4, "Master index (optional)", theme, idx_holder,
             "Supply it and documents take their LI File No. as their ID, and "
             "you get a completeness check against the index."))
 
@@ -236,7 +259,7 @@ class SetupScreen(QWidget):
         out_row.addWidget(out_browse)
         out_holder = QWidget()
         out_holder.setLayout(out_row)
-        lay.addWidget(_Step(4, "Output folder", theme, out_holder))
+        lay.addWidget(_Step(5, "Output folder", theme, out_holder))
 
         lay.addStretch(1)
         # ONE forward action, named for the outcome rather than the mechanism:
@@ -310,7 +333,35 @@ class SetupScreen(QWidget):
             source_root=self._source.text(),
             output_root=self._output.text(),
             master_index_path=self._index.text() or None,
+            project_tokens=self.project_tokens(),
         )
+
+    def set_proposed_tokens(self, tokens: tuple[str, ...]) -> None:
+        """Show what DocIQ read out of the matter, for the operator to correct.
+
+        It does NOT overwrite something already typed: a proposal arriving after
+        the operator has edited the field would silently discard their
+        correction, which is the opposite of what D-39 asked for.
+        """
+        if self._tokens.text().strip():
+            return
+        self._tokens.setText(", ".join(tokens))
+        self._tokens_hint.setText(
+            f"Read from this matter: {len(tokens)} name(s) proposed. Correct "
+            "them — the proposal is right about roughly half."
+            if tokens else
+            "No project names found in this matter. Add any you know of; "
+            "leaving it empty is safe and simply recognizes fewer sections."
+        )
+
+    def source_text(self) -> str:
+        """The folder currently in the box — so a proposal that arrives after
+        the operator moved on can be recognized as stale and dropped."""
+        return self._source.text()
+
+    def project_tokens(self) -> tuple[str, ...]:
+        return tuple(
+            t.strip() for t in self._tokens.text().split(",") if t.strip())
 
     def set_folder_warning(self, message: str) -> None:
         """The pipeline's answer about this pair of folders, shown where they

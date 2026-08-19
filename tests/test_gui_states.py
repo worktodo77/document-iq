@@ -350,6 +350,25 @@ def test_the_chrome_is_us_english() -> None:
     assert not offenders, "en-GB spelling found:\n" + "\n".join(offenders)
 
 
+def test_the_setup_steps_are_numbered_1_to_n_exactly_once(window) -> None:
+    """The numbers are the operator's place in a sequence, so two steps sharing
+    one is a wrong instruction, not a cosmetic slip.
+
+    Asserted as a PROPERTY of the whole screen rather than against a fixed list,
+    because the defect this catches is created by *inserting* a step: D-39's
+    project-names field went in as step 3 and left the output folder still
+    reading 4. Pinning the expected numbers would have to be edited by the same
+    change that breaks them, and would not have caught it.
+    """
+    from PySide6.QtWidgets import QLabel
+
+    numbers = [lab.text().strip()
+               for lab in window.setup.findChildren(QLabel)
+               if lab.text().strip().isdigit() and len(lab.text().strip()) <= 2]
+    assert numbers == [str(n) for n in range(1, len(numbers) + 1)], numbers
+    assert len(numbers) >= 4
+
+
 def test_the_offline_indicator_is_always_present(window) -> None:
     """Principle 4 is a selling point to law-firm IT, so it is standing chrome
     on every screen — not a line in an about box."""

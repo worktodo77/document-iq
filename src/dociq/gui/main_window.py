@@ -165,6 +165,34 @@ class _RunWorker(QObject):
         self.finished.emit(outcome)
 
 
+class _TokenWorker(QObject):
+    """Reads a matter's project-name proposal without blocking the window.
+
+    Emits the SOURCE alongside the tokens so a late answer can be matched to
+    the folder it was asked about. A worker that emitted only the tokens would
+    make the stale-proposal race unfixable at the receiving end.
+
+    It never raises into the thread: a matter DocIQ cannot read proposes
+    nothing, which is the safe direction — no tokens means fewer sections
+    recognized, never a page dropped.
+    """
+
+    proposed = Signal(str, object)
+
+    def __init__(self, propose, source: str) -> None:
+        super().__init__()
+        self._propose, self._source = propose, source
+
+    def start(self) -> None:
+        try:
+            tokens = tuple(self._propose(self._source))
+        except Exception as exc:
+            print(f"[dociq] project-name proposal unavailable for "
+                  f"{self._source}: {exc}")
+            tokens = ()
+        self.proposed.emit(self._source, tokens)
+
+
 class MainWindow(QMainWindow):
     """LI Document IQ."""
 
@@ -174,6 +202,7 @@ class MainWindow(QMainWindow):
         self._pipeline = pipeline or get_pipeline()
         self.theme = theme or build_theme()
         self._thread: QThread | None = None
+        self._token_jobs: list[tuple[QThread, _TokenWorker]] = []
         self._worker: _RunWorker | None = None
         self._view: SummaryView | None = None
         self._outcome: RunOutcome | None = None
@@ -223,6 +252,7 @@ class MainWindow(QMainWindow):
 
         self.setup.run_requested.connect(self.start_run)
         self.setup.source_chosen.connect(self._preview_folder)
+        self.setup.source_chosen.connect(self._propose_tokens)
         # D-43's first finding, from the first human-driven session: the run
         # refused a source/output pair AFTER the operator had chosen both and
         # pressed the one forward action. The screen has known both paths since
@@ -265,6 +295,47 @@ class MainWindow(QMainWindow):
         self.bates.stop_requested.connect(self.cancel_run)
 
     # -- flow ---------------------------------------------------------------
+
+    def _propose_tokens(self, path: str) -> None:
+        """Ask the matter what it calls itself, and offer the answer for
+        correction (D-39).
+
+        **Off the GUI thread, because it is not free.** It opens every PDF in
+        the tree for its outline: measured at 0.2-0.7s over the 298-file
+        corpus, but **2.79s over a 2,528-file tree** — three seconds of frozen
+        window the moment the operator picks a folder, which reads as a hang
+        rather than as a feature. Same QThread-and-worker shape as the run.
+        """
+        propose = getattr(self._pipeline, "propose_project_tokens", None)
+        if propose is None:
+            return
+        thread = QThread(self)
+        worker = _TokenWorker(propose, path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.start)
+        worker.proposed.connect(self._tokens_proposed)
+        worker.proposed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        # Held on the window: a thread whose last reference goes out of scope is
+        # destroyed while running, and Qt aborts the process for it.
+        self._token_jobs.append((thread, worker))
+        thread.finished.connect(self._reap_token_jobs)
+        thread.start()
+
+    def _tokens_proposed(self, source: str, tokens: object) -> None:
+        """Apply a proposal, unless the operator has moved on.
+
+        Picking folder A then folder B before A's proposal returns would
+        otherwise fill the field with A's names while B is selected — a
+        confident, wrong, and completely silent statement about the matter.
+        """
+        if source != self.setup.source_text():
+            return
+        self.setup.set_proposed_tokens(tuple(tokens))
+
+    def _reap_token_jobs(self) -> None:
+        self._token_jobs = [(t, w) for t, w in self._token_jobs
+                            if not t.isFinished()]
 
     def _check_folders(self, source: str, output: str) -> None:
         """Ask the pipeline whether this pair may be used, and tell the screen.

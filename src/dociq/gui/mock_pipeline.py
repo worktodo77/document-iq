@@ -214,6 +214,17 @@ def _corpus() -> tuple[tuple[str, int, int, ProcessingStatus], ...]:
 
 _CORPUS = _corpus()
 
+MOCK_PROJECT_TOKENS: tuple[str, ...] = (
+    "MODEC", "CER", "CONTRACT", "CORRESPONDENCE", "DELAY", "NOTICE", "MEETING",
+    "COST", "TOPSIDES",
+)
+"""What D-39's derivation proposes over :data:`_CORPUS`.
+
+Computed, not chosen — and pinned by `test_the_mocks_proposal_is_what_the_rule
+_actually_returns`, which recomputes it from the real rule. A literal the GUI
+can hold without importing a pipeline package, that cannot quietly go stale.
+"""
+
 _UNSUPPORTED: tuple[tuple[str, str], ...] = (
     ("Legacy/Transmittal 2019-11-02.doc",
      "Legacy Word format — open in Word and Save-As DOCX or PDF to include"),
@@ -615,6 +626,28 @@ class MockPipeline:
             "layout Expert Assist's evidence-mining skill expects, with no "
             "rearrangement. Sample data: nothing on disk was checked."
         )
+
+    def propose_project_tokens(self, source: str) -> tuple[str, ...]:
+        """D-39's proposal for the mock matter.
+
+        `--mock` is a shipped flag, so a person can drive the whole product
+        without touching a real matter, and a step that silently never
+        populates there reads as a broken feature.
+
+        A LITERAL rather than a call to the derivation, because the GUI may not
+        import a pipeline package (`test_import_graph`) — and the first draft of
+        this method broke that rule to look clever. The literal is not invented:
+        it is what :func:`dociq.sections.project_tokens.propose_tokens` returns
+        over this mock corpus, and `test_project_tokens.py` recomputes it and
+        fails if the two ever drift.
+
+        **Not a demonstration of accuracy.** The mock has no outlines, so each
+        document's stem stands in for its labels — which makes the "also in the
+        filenames" test vacuous here, since the labels ARE the filenames. Hence
+        nine names, one of them a project. On a real matter that test does real
+        work.
+        """
+        return MOCK_PROJECT_TOKENS
 
     def preview_folder(self, path: str) -> FolderPreview:
         by_ext: dict[str, int] = {}

@@ -120,6 +120,150 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-39 EXECUTED — the corpus proposes its project names, the expert decides them (2026-08-19)
+
+D-39's ruling bound two constraints: the derivation must be **deterministic**,
+because the token list is a hashed run input (A-19); and the derived list must
+be **shown**, so "DocIQ treated MV32 and PETROBRAS as project names" is a
+visible statement rather than an inference. Both are met. The first is
+mechanical. The second turned out to be the one carrying the weight.
+
+**The derivation was measured before it was built, and it is not good.** Four
+deterministic rules were run over the real corpus (89 outlined documents, 298
+files):
+
+| rule | what it returned |
+|---|---|
+| by label frequency | PROGRESS, ENGINEERING, TOPSIDE — section words. §2's failure, reproduced exactly. |
+| not in the template | barely different: the template names 19 families, the corpus has 522, so most real section words are already "unknown". |
+| **also in the FILENAMES** | MV32, MI20, T1R1 — and REV, 001, WEEKLY. |
+
+The third rule is the one that ships, and **no threshold separates its hits
+from its misses.** Raising the filename bar to catch `MI20` (24) and `T1R1`
+(33) drops `MV32` (5), the most important token in the corpus; lowering it to
+keep `MV32` admits `TOPSIDE`. Worse, `BOMESC` and `YARD` — the two
+highest-frequency project-tokened labels at 48 occurrences each — **appear in
+no filename at all**, so this rule cannot find them by construction.
+
+Measured over three real folders, precision is not merely imperfect, it is
+**unstable in the folder's size and mix**:
+
+| folder | PDFs | proposed | genuine |
+|---|---:|---|---:|
+| Monthly Reports | 91 | MV32, MI20, T1R1, PB, MEETING | 4 of 5 |
+| Weekly Progress Reports | 207 | TOPSIDE, MV32, PROJECT | 1 of 3 |
+| both together | 298 | TOPSIDE, MV32, PROJECT, MI20, T1R1, PB, MEETING | 4 of 7 |
+| a 2,528-file multi-matter tree | 2,528 | 21 names incl. SCHEDULE, CRITICAL, DELAY, PLAN, IMPACT, EXHIBIT | 4 of 21 |
+
+`BOMESC` and `YARD` appear in none of them. The last row is not a matter — it
+is a folder holding several — but an operator can point at one, and what it
+shows is the rule degrading toward §2's original failure as the vocabulary
+widens.
+
+**So the ruling's second constraint is not a nicety, it is what makes the first
+half shippable.** The list lands in an editable field on the setup screen with
+a hint that says what it is; the operator strikes out the wrong ones and types
+the missed ones; and what they leave is what the run records and hashes. A
+proposal arriving after they have typed does not overwrite them — the late
+proposal is discarded, not the correction. An empty proposal says so in words
+rather than presenting a blank box that reads as a broken feature.
+
+**The cost of a wrong token is bounded, and in the direction that matters.**
+Stripping a token can only make a section MATCH a template family, and under
+D-34 a match is an OFFER. A wrong token costs an offer; it cannot lose a page.
+That is the whole reason a rule this unreliable is allowed near the pipeline,
+and it should be read as the load-bearing sentence of this entry.
+
+**It runs off the GUI thread, and that was measured rather than assumed.** The
+proposal opens every PDF in the tree for its outline: 0.22s over 207 files,
+0.65s over 298 — and **2.79s over 2,528**. Three seconds of frozen window at
+the moment a folder is picked reads as a hang, not as a feature, so it moved to
+the same QThread-and-worker shape the run uses. That surfaced a second defect
+worth naming: an asynchronous proposal can arrive **after the operator has
+picked a different folder**, filling the field with matter A's names while
+matter B is selected — confident, wrong, and silent. The worker therefore emits
+the source path alongside the tokens and a proposal whose folder is no longer
+selected is discarded.
+
+**One identity defect found and closed while wiring it.** `("BOMESC", "MV32")`,
+`("MV32", "BOMESC")` and `("MV32", "bomesc")` produced three different run
+identities for one run: matching folds case and removes every token regardless
+of order, so all three reduce identically. An identity that moves when the
+reduction does not is a false "different configuration" the next time two runs
+are compared — the mirror of the defect A-19 exists to prevent. Canonicalized
+(upper-cased, de-duplicated, sorted, blanks dropped) in `RunConfig.__post_init__`
+rather than at either entry point, because the setup screen and the CLI both
+supply tokens and a normalization applied at one would leave the other minting
+spurious identities. Measured: five spellings, one identity; a genuinely
+different set still moves it.
+
+**No new amendment.** `project_tokens` entered the contract as an A-19 identity
+input and its meaning is unchanged; the canonicalization narrows the spellings
+that reach the hash, and no shipped run could have carried a non-canonical one
+because until this commit nothing supplied the list.
+
+**A defect in the first draft of the tests, recorded because the class is the
+point.** Two guards read green under mutation. The noise filter had been written
+twice — once per loop — so removing either copy left the other one filtering;
+and the fixtures spelled their filenames `REPORT-REV3`, which tokenizes to
+`REV3`, so the tests never contained the token they asserted about. Fixed as a
+class: one `_is_noise` predicate both loops call, and fixtures carrying the bare
+token. The determinism test was weak for a third reason — every document listed
+its tokens in the same sequence, so reversing document order changed no
+ordering at all; it now reverses within each document as well, over two tokens
+deliberately tied on count, so only a total sort key can pass it.
+
+Twelve guards mutated one at a time, each watched RED against its own test by
+full node id, then green on revert.
+
+**`--mock` is a shipped flag, so the mock implements it too** — and the first
+attempt broke an architectural rule to do it. A person can drive the whole
+product without touching a real matter, and a step that silently never
+populates there reads as a broken feature; so the mock was given the proposal by
+*calling the real derivation over its own corpus*. `test_import_graph` failed on
+all eight verification runs: **the GUI may not import a pipeline package**, and
+`dociq.sections` is one. The rule is right and the clever version was wrong. The
+mock now holds a literal, computed from the rule rather than chosen, and a test
+outside the GUI recomputes it and fails if the two drift — so the boundary holds
+and the list cannot go stale.
+
+It is *not* a demonstration of accuracy: the mock has no outlines, so each
+document's stem stands in for its labels, which makes the filename test vacuous
+and the proposal noisy (nine names, one of them a project). Recorded in the
+method, because a reader watching the mock propose `CORRESPONDENCE` should know
+why.
+
+**The rule that caught it is worth naming.** `FORBIDDEN` in
+`test_import_graph.py` enumerates the pipeline packages the GUI must not reach
+into. It cost eight full-suite runs to find because it was introduced *after*
+the targeted suites I had been re-running — the failure was outside the three
+files I was watching. A targeted re-run is not a verification.
+
+**A fourth, found by asking what the corpus does not exercise.** The proposal
+keyed its documents by BASENAME, so two `Weekly Report.pdf` in different
+subfolders counted as one document — undercounting the spread a token needs to
+clear `min_documents`, and withholding a name with no symptom at all. Measured:
+**zero colliding basenames** across both the 298-file corpus and the 2,528-file
+tree, so nothing here would ever have shown it. That silence selects nothing:
+the failure arrives on the first matter that collides, and it arrives quietly.
+Keyed by path relative to the matter instead, and watched red against the old
+keying.
+
+**A third defect, found by rendering the screen rather than by reading it.**
+Inserting the field as step 3 left the output folder still labelled 4, so the
+setup screen showed **1, 2, 3, 4, 4** — a wrong instruction about where the
+operator is, not a cosmetic slip. Guarded as a property of the whole screen
+(the numbers must be 1..n exactly once) rather than against an expected list,
+because the defect is created by *inserting* a step and a pinned list would be
+edited by the same change that breaks it. Watched red against the real bug.
+
+**A measurement in the first draft of this entry was itself wrong**, and is
+corrected above rather than quietly removed: it reported that an 11-document
+folder proposed nothing, from a path that does not exist. The proposal was
+empty because there were no files to read. The empty case is real and tested —
+it is what a matter with no repeated identifier produces, and it is the safe
+direction — but no real folder in this corpus was observed producing it.
+
 ## D-42 EXECUTED — retired names are tombstoned (2026-08-19)
 
 `_STALE_PATTERNS` splits into `_EMITTED_PATTERNS` (what this build writes) and
