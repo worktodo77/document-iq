@@ -120,6 +120,33 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-42 EXECUTED — retired names are tombstoned (2026-08-19)
+
+`_STALE_PATTERNS` splits into `_EMITTED_PATTERNS` (what this build writes) and
+`_RETIRED_PATTERNS` (what it used to write and still removes). `profile/*.yaml`
+is the first tombstone.
+
+**B-8's first real instance, and it arrived exactly where the scoping survey
+predicted.** B-8 says a file at a name this build no longer emits stays in a
+matter folder forever, unaccounted for — the manifest is built over STAGING and
+has never seen the destination. It stayed theoretical for three sprints for one
+reason: across every commit that ever touched the cleanup list, **no name had
+ever been retired.** D-38 retired the first one.
+
+Measured, not argued: a Sprint-2 matter folder holding
+`profile/modec-mpr.v1.yaml`, run through this build, has the file removed. With
+the tombstone deleted the file survives — watched red.
+
+**What this closes and what it does not.** It closes every case DocIQ can create
+itself, which is all of them for now. It does NOT close B-8's general case: D-32
+deleted the durable inventory of what the last run actually published, so a file
+some other tool left, or one written by a build older than this list, is still
+unaccounted for. The register should not read as though B-8 is closed.
+
+**The list only ever grows**, and a test pins it by name rather than by count —
+a count passes when one entry is swapped for another, which is exactly the edit
+that would strand a file.
+
 ## The OCR review flag, re-grounded (Alex, 2026-08-18)
 
 Raised by Alex driving the packaged `.exe` on a real matter: *"we had 99

@@ -629,7 +629,7 @@ def _hashes_of(written: Sequence[Path], layout: OutputLayout) -> dict[str, str]:
     }
 
 
-_STALE_PATTERNS = (
+_EMITTED_PATTERNS = (
     "clean_text/*.txt",
     "sources.json",
     "document_index.csv",
@@ -638,10 +638,36 @@ _STALE_PATTERNS = (
     "processing_log.json",
     "run_summary.pdf",
     mf.MANIFEST_NAME,
-    "profile/*.yaml",
     f"{INCOMPLETE_DIR}/*",
     "upload_package/*",
 )
+"""What THIS BUILD writes into a matter folder."""
+
+_RETIRED_PATTERNS = (
+    # Written by every build up to CONTRACT_VERSION 2.0.0; D-38 deleted the
+    # profile system, so nothing emits it now. It stays here because a name this
+    # build stopped writing is exactly the name B-8 is about.
+    "profile/*.yaml",
+)
+"""Names DocIQ NO LONGER WRITES and still knows how to remove — tombstones
+(D-42).
+
+**This list only ever grows.** Removing an entry re-opens B-8 for that name: the
+file goes on sitting in an expert's matter folder, unaccounted for by any
+manifest, because the manifest is built over STAGING and has never seen the
+destination. `tests/test_emit_atomicity.py` asserts the growth-only property, so
+a future deletion here fails rather than quietly stranding a file.
+
+**Why this closes the case that matters and not the general one.** D-32 deleted
+the durable inventory of what the last run actually published, so DocIQ cannot
+know about a file some *other* tool left, or one written by a build older than
+this list. What it can know is what IT used to write — and until D-38 that set
+was empty, which is the only reason B-8 stayed theoretical for three sprints.
+The tombstone covers every case DocIQ can itself create. Nothing here recovers
+the general case, and nothing here pretends to.
+"""
+
+_STALE_PATTERNS = _EMITTED_PATTERNS + _RETIRED_PATTERNS
 """Deliverables a re-run replaces.
 
 ``doc_ids_issued.json`` is absent because it is this run's *input* to the D-04
@@ -703,12 +729,15 @@ def _stale_deliverables(
     it.
 
     **One source, and its limit is the point** (D-32). :data:`_STALE_PATTERNS`
-    is what THIS BUILD knows how to write. The durable inventory of what the
-    last run actually published — which could name a deliverable an older DocIQ
-    left under a retired name — was part of the publication protocol D-32
-    removed, and went with it. B-8's second case is therefore live again and is
-    recorded as a known limitation rather than left to be rediscovered: a file at
-    a name this build no longer writes stays in the folder.
+    is what this build knows how to write (:data:`_EMITTED_PATTERNS`) PLUS what
+    it used to write and still removes (:data:`_RETIRED_PATTERNS`, D-42).
+
+    The durable inventory of what the last run actually published was part of
+    the publication protocol D-32 removed, and went with it. So B-8's general
+    case stands: a file some other tool left, or one written by a build older
+    than this list, is still not accounted for. What D-42 closes is the case
+    DocIQ creates itself — and until D-38 retired ``profile/*.yaml`` that set
+    was empty, which is the only reason B-8 stayed theoretical.
 
     Entries are filtered to what is ON DISK once, here. This function runs at the
     TOP of Stage 5 and the removals it plans happen after Stage 6, which on a

@@ -803,3 +803,72 @@ def test_nothing_on_disk_can_block_a_run(tmp_path):
         "state_residue_before_run"], (
         "a set-aside tree left by the pre-D-32 build holds a previous run's "
         "deliverables and was not reported")
+
+
+# ---------------------------------------------------------------------------
+# D-42 — tombstones: names DocIQ no longer writes and still removes
+# ---------------------------------------------------------------------------
+
+
+def test_a_deliverable_this_build_no_longer_writes_is_still_removed(tmp_path):
+    """B-8's first REAL instance, and the reason D-42 exists.
+
+    B-8 says a file at a name this build no longer emits stays in the matter
+    folder forever, unaccounted for — the manifest is built over STAGING and has
+    never seen the destination. It stayed theoretical for three sprints for one
+    reason: across every commit that ever touched the cleanup list, **no name had
+    ever been retired**. The list only grew.
+
+    D-38 retired the first one. A Sprint-2 matter folder holds
+    ``profile/modec-mpr.v1.yaml``; this build cannot write that name, and without
+    a tombstone would leave it there permanently.
+    """
+    out = tmp_path / "matter"
+    (out / "profile").mkdir(parents=True)
+    leftover = out / "profile" / "modec-mpr.v1.yaml"
+    leftover.write_text("profile_id: modec-mpr\n", encoding="utf-8")
+    assert leftover.is_file()
+
+    outcome = pipeline.run(
+        RunConfig(source_root=str(FIXTURES), output_root=str(out),
+                  ocr_engine_version=ex.ocr_engine_version()),
+        pipeline.PipelineOptions(
+            walk=walker.WalkOptions(ocr_enabled=False, resume=False),
+            matter_name="tombstone", stamp=OperatorStamp("a", "t"),
+            write_workbook=False, write_summary_pdf=False, write_package=False))
+    assert outcome.published
+
+    assert not leftover.exists(), (
+        "a deliverable this build no longer writes survived a complete run — "
+        "B-8, on the first name the product ever retired")
+
+
+def test_the_tombstone_list_only_ever_grows(tmp_path):
+    """Removing a tombstone re-opens B-8 for that name, silently.
+
+    Pinned by name rather than by count: a count passes when one entry is
+    swapped for another, which is exactly the edit that would strand a file.
+    """
+    from dociq.pipeline import _RETIRED_PATTERNS
+
+    # Every name ever retired. Append here when a deliverable is retired; never
+    # remove, because the file it names is still on somebody's disk.
+    ever_retired = ("profile/*.yaml",)
+    missing = [n for n in ever_retired if n not in _RETIRED_PATTERNS]
+    assert not missing, (
+        f"tombstones were removed: {missing}. A name DocIQ used to write and no "
+        "longer cleans is a file that sits in an expert's matter folder forever, "
+        "unaccounted for by any manifest")
+
+
+def test_a_retired_name_is_not_claimed_as_something_this_build_emits(tmp_path):
+    """The two lists must stay disjoint.
+
+    If a retired name crept back into the emitted set, the run would assert it
+    writes something it does not — and the next reader would have no way to tell
+    a live deliverable from a tombstone.
+    """
+    from dociq.pipeline import _EMITTED_PATTERNS, _RETIRED_PATTERNS
+
+    overlap = set(_EMITTED_PATTERNS) & set(_RETIRED_PATTERNS)
+    assert not overlap, f"a name is both emitted and retired: {sorted(overlap)}"
