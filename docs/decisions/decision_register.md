@@ -249,6 +249,37 @@ the failure arrives on the first matter that collides, and it arrives quietly.
 Keyed by path relative to the matter instead, and watched red against the old
 keying.
 
+**The canonicalization above was itself wrong, twice, and both were found by
+testing the claim rather than the code.** "Matching folds case and ignores
+order" is the sentence the whole design rests on, and neither half of it was
+true as written:
+
+* **It folded LESS than the matching does.** `strip_project_tokens` folds each
+  token with `normalize_label` — accents removed, non-alphanumerics collapsed —
+  so `PETROBRÁS`/`PETROBRAS` and `T1-R1`/`T1 R1` strip identically. Upper-casing
+  alone left each pair as two run identities for one reduction: the exact defect
+  canonicalization was added to close, half-closed. Fixed by defining the fold
+  ONCE, as `contracts.fold_label`, with `normalize_label` delegating to it —
+  two copies of a fold are a fold that can disagree with itself.
+* **Sorting the list CHANGED the reduction.** Tokens were applied in the
+  caller's order, and a token that is a word-subsequence of another gives a
+  different answer depending which runs first: `("FPSO ALMIRANTE BARROSO",
+  "BARROSO")` removes the whole vessel name, and the sorted order — `BARROSO`
+  first — strands `FPSO ALMIRANTE` in the label. So the canonical form silently
+  altered the reduction it claimed to be the canonical form OF. Fixed by
+  applying tokens LONGEST FIRST, which makes order-independence a property of
+  the code rather than an assertion about the operator.
+
+Naming an FPSO and its short name in one list is an ordinary thing for an
+expert to do, not a contrived input.
+
+**Three instances of one class in one sprint** — the mock importing
+`dociq.sections`, the contract importing it back, and a canonical form that did
+not agree with the behavior it normalized. Each was fixed where it was found and
+the class was not hunted until the third. That is the failure mode
+"fix the class, not the repro" names, recorded here because the register is
+where it will be read next time.
+
 **A third defect, found by rendering the screen rather than by reading it.**
 Inserting the field as step 3 left the output folder still labelled 4, so the
 setup screen showed **1, 2, 3, 4, 4** — a wrong instruction about where the

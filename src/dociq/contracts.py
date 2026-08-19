@@ -20,6 +20,8 @@ from __future__ import annotations
 import enum
 import hashlib
 import json
+import re
+import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Iterable, Mapping, Sequence
 
@@ -834,6 +836,27 @@ class EffectiveLimits:
     interpretable."""
 
 
+def fold_label(text: str) -> str:
+    """Fold text for comparison: accents removed, non-alphanumerics collapsed to
+    single spaces, upper-cased.
+
+    **The single definition.** `dociq.sections.normalize.normalize_label` IS
+    this function — it delegates rather than reimplementing, and keeps the name
+    the pipeline reads it by. It lives here because :func:`canonical_tokens`
+    needs the identical fold and the contract may not import a pipeline package.
+    Two copies would be a fold that can silently disagree with itself, which is
+    the defect this arrangement makes unrepresentable.
+
+    Accent folding is load-bearing rather than tidy — this corpus is Brazilian
+    and its outlines carry ``PÁGINA EM BRANCO`` with and without the accent in
+    the same production run.
+    """
+    folded = unicodedata.normalize("NFKD", text)
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    folded = re.sub(r"[^A-Za-z0-9]+", " ", folded)
+    return folded.strip().upper()
+
+
 def canonical_tokens(tokens: Iterable[str]) -> tuple[str, ...]:
     """One spelling of a project-token list, so the identity tracks the BEHAVIOR.
 
@@ -852,8 +875,15 @@ def canonical_tokens(tokens: Iterable[str]) -> tuple[str, ...]:
     and the rule was broken all the same. `dociq.sections.project_tokens`
     re-exports it, so it is still importable from the module that owns the
     vocabulary.
+
+    **Folded with** :func:`fold_label`, the same fold the matching uses.
+    Upper-casing alone was not enough and shipped a defect of exactly the shape
+    this function exists to prevent: `PETROBRÁS` and `PETROBRAS` strip
+    identically and got two identities, as did `T1-R1` and `T1 R1`. A canonical
+    form must be the form the behavior keys on, or it is just another spelling.
     """
-    return tuple(sorted({t.strip().upper() for t in tokens if t and t.strip()}))
+    folded = {fold_label(t) for t in tokens}
+    return tuple(sorted(f for f in folded if f))
 
 
 @dataclass(frozen=True, slots=True)

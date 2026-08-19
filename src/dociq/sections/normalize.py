@@ -34,7 +34,8 @@ nothing here assumes the record is in English.
 from __future__ import annotations
 
 import re
-import unicodedata
+
+from dociq.contracts import fold_label
 
 __all__ = [
     "family_key",
@@ -70,11 +71,13 @@ def normalize_label(text: str) -> str:
     Accent folding is load-bearing rather than tidy — this corpus is Brazilian
     and its outlines carry ``PÁGINA EM BRANCO`` with and without the accent in
     the same production run.
+
+    **Delegates to** :func:`dociq.contracts.fold_label`, which is the one
+    definition. `RunConfig` must canonicalize a project token with the identical
+    fold, or the run identity moves where the reduction does not — and the
+    contract may not import this package, so the fold lives there.
     """
-    folded = unicodedata.normalize("NFKD", text)
-    folded = "".join(c for c in folded if not unicodedata.combining(c))
-    folded = re.sub(r"[^A-Za-z0-9]+", " ", folded)
-    return folded.strip().upper()
+    return fold_label(text)
 
 
 def strip_numbering(key: str) -> str:
@@ -101,11 +104,18 @@ def strip_project_tokens(key: str, project_tokens: tuple[str, ...] = ()) -> str:
     """
     if not project_tokens:
         return key
-    for token in project_tokens:
-        folded = normalize_label(token)
-        if not folded:
-            continue
-        key = re.sub(rf"\b{re.escape(folded)}\b", " ", key)
+    # LONGEST FIRST, and that is correctness rather than tidiness. Applied
+    # in the caller's order, ("BARROSO", "FPSO ALMIRANTE BARROSO") removes
+    # the short token first and strands `FPSO ALMIRANTE` in the label, while
+    # the reverse order removes the whole name — one token list, two
+    # reductions, decided by the order the operator typed. The identity
+    # canonicalizes that list by SORTING it (contracts.canonical_tokens), so
+    # without this the canonical form would change the very reduction it
+    # claims to be the canonical form OF. Removing the most specific match
+    # first makes the result independent of typing order by construction.
+    folded = {f for f in (normalize_label(t) for t in project_tokens) if f}
+    for token in sorted(folded, key=lambda f: (-len(f), f)):
+        key = re.sub(rf"\b{re.escape(token)}\b", " ", key)
     return re.sub(r"\s+", " ", key).strip()
 
 
