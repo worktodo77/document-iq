@@ -417,8 +417,18 @@ def test_ocr_confidence_reaches_the_log_as_an_integer_percent(tmp_path):
 
 
 def test_low_confidence_pages_are_flagged_against_the_threshold(tmp_path):
+    """The pages carry REAL text now, and that is the point of the change.
+
+    They read ``"a"`` and ``"b"`` — one character each — which since 2026-08-18
+    exercises the blank-page exclusion rather than the threshold: a page with
+    nothing on it has nothing for a human to check, so it is counted in the log
+    and kept out of the review list. The guarantee under test here is still
+    "a page below the threshold is flagged", so the fixture now gives it a page
+    that can express it.
+    """
     docs = (
-        document("scan.pdf", (ocr_page(1, "a", 0.60), ocr_page(2, "b", 0.99))),
+        document("scan.pdf", (ocr_page(1, "a page of real scanned text " * 4, 0.60),
+                              ocr_page(2, "another page of real text " * 4, 0.99))),
     )
     docs = assign_doc_ids(docs, None).documents
     bundle = build_log(config(tmp_path, ocr_conf_threshold_pct=85), docs,

@@ -29,6 +29,7 @@ from typing import Any, Mapping, Sequence
 
 from dociq.contracts import (
     CONTRACT_VERSION,
+    OCR_REVIEW_MIN_CHARS,
     ContractViolation,
     Disposition,
     DocumentRecord,
@@ -36,6 +37,7 @@ from dociq.contracts import (
     RunConfig,
     canonical_json,
     content_hash,
+    needs_ocr_review,
     document_sort_key,
     run_identity,
     to_jsonable,
@@ -151,6 +153,13 @@ def _document_entry(doc: DocumentRecord) -> dict[str, Any]:
         "ocr_pages": len(ocr_pages),
         "ocr_mean_conf_pct": _conf_pct(sum(confs) / len(confs)) if confs else None,
         "ocr_low_conf_lines": sum(p.ocr_low_conf_lines for p in doc.pages),
+        # Excluded from review because there is nothing on them to check, and
+        # counted here so they leave the review list without leaving the record.
+        "ocr_pages_without_usable_text": sum(
+            1 for p in doc.pages
+            if p.kind is PageKind.OCR
+            and len(p.text.strip()) < OCR_REVIEW_MIN_CHARS
+        ),
         "notes": list(doc.notes),
         "error": doc.error,
     }
@@ -159,10 +168,13 @@ def _document_entry(doc: DocumentRecord) -> dict[str, Any]:
 def _flagged_pages(doc: DocumentRecord, threshold_pct: int) -> list[dict[str, Any]]:
     out = []
     for page in doc.pages:
-        if page.ocr_conf is None:
+        # ONE predicate, shared with the screen and the extractor. This compared
+        # the rounded percent while the screen compared the raw float, and 19
+        # pages of the GTG run were shown to the operator and left out of here.
+        if not needs_ocr_review(page, threshold_pct):
             continue
         pct = _conf_pct(page.ocr_conf)
-        if pct is not None and pct < threshold_pct:
+        if True:
             out.append(
                 {
                     "doc_id": doc.doc_id,

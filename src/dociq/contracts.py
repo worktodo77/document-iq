@@ -647,6 +647,71 @@ class ProfileSnapshot:
     different expert is a different ruling."""
 
 
+OCR_REVIEW_MIN_CHARS = 40
+"""Below this many characters, a page has nothing for a human to check.
+
+Measured on the GTG progress report: of 99 pages the 85% threshold flagged, 11
+carried FEWER THAN 20 CHARACTERS. Their confidences repeat exactly across
+different documents — 71.76% three times, 74.97% twice — which is the signature
+of the same speck of scanner noise being recognized as the same token. A
+confidence score over two glyphs is not a measurement of anything.
+
+Aligned with ``extract._NATIVE_TEXT_FLOOR``, deliberately: that constant decides
+a page has no usable TEXT LAYER and must be OCR'd, and this one decides the OCR
+came back with no usable text either. Same question, same answer, one number.
+
+Paired with :data:`OCR_REVIEW_MIN_LINES`: both must hold, so a page that
+returned little text across many lines still flags.
+
+Such a page is EXCLUDED FROM REVIEW AND NOT FROM THE RECORD — the log counts it
+under ``ocr_pages_without_usable_text``. Principle 1 forbids a page quietly
+leaving the account; it does not require sending an expert to proofread a blank.
+"""
+
+
+OCR_REVIEW_MIN_LINES = 2
+"""Companion to :data:`OCR_REVIEW_MIN_CHARS`, and the half that guards the case
+this corpus happens not to contain.
+
+A blank page yields one or two tokens; measured, all 84 low-character pages of
+the GTG run returned 0-2 lines and none returned more. A page returning forty
+lines that total thirty characters is a different animal — a dense page the
+recognizer failed on — and it must reach a human rather than be filed as blank.
+"""
+
+
+def needs_ocr_review(page: "PageRecord", threshold_pct: int) -> bool:
+    """**The** definition of "a human should check this page against the
+    original" — one predicate, used by the log, the screen and the extractor.
+
+    It exists because those three disagreed. The screen compared the RAW float
+    (``ocr_conf < 0.85``), the log compared the value ROUNDED to a whole percent
+    (``85 < 85`` is false), and 19 pages of the GTG run — confidences like
+    84.73% — were shown to the operator and omitted from the audit record. A
+    tool whose argument is that the log is the auditable account cannot have the
+    log and the screen disagree about which pages need review.
+
+    **The rounded comparison wins, and that is deliberate.** The integer percent
+    is the number written to disk and rendered on screen, so deciding on it means
+    the figure a reader sees explains the decision they are looking at. Deciding
+    on a hidden float would leave a page marked for review beside a displayed
+    "85%", which is the same class of confusion one level down.
+    """
+    if page.ocr_conf is None:
+        return False
+    # "Nothing to review" needs BOTH conditions, and the second is the one this
+    # corpus does not exercise. Few characters across MANY lines is not a blank
+    # page — it is a dense page whose reading collapsed, and that is precisely a
+    # page a human must see. Measured on the GTG run: all 84 low-character pages
+    # returned 0-2 lines, so the guard changes nothing there. It is written this
+    # way because "the corpus does not exercise it" selects nothing: the failure
+    # would arrive on the first matter that scans worse than this one.
+    if (len(page.text.strip()) < OCR_REVIEW_MIN_CHARS
+            and page.ocr_line_count <= OCR_REVIEW_MIN_LINES):
+        return False
+    return round(page.ocr_conf * 100) < threshold_pct
+
+
 def matter_key(source_root: str) -> str:
     """The one derivation of "which matter is this" (Codex r2, B-2).
 
@@ -804,9 +869,27 @@ class RunConfig:
 
     profile_version: str | None = None
     master_index: MasterIndexSnapshot | None = None
-    ocr_conf_threshold_pct: int = 85
+    ocr_conf_threshold_pct: int = 80
     """§4 Stage 2 default. Pages whose confidence falls below this are flagged
     for human review.
+
+    **80, not 85, and the change is measured rather than tuned.** 85 came from
+    the requirements as a plausible-sounding figure and was never calibrated
+    against rapidocr, whose confidence is not a probability of correctness. On
+    377 OCR pages of the GTG progress report the distribution is ONE population
+    — median 86.3%, p90 90.3%, modal band 85-89 holding 236 pages — and 85 was
+    planted on that band's left edge, flagging 99 pages (26.3%) of which 58 sat
+    in the 80-84 band. D-19's bake-off had already measured the engine's mean at
+    86.28% on this corpus, so the average healthy page cleared the old bar by
+    1.3 points and ordinary variation dipped under it.
+
+    80 is where the distribution actually breaks: 35 pages (9.3%), against a
+    thin tail below it and dense mass above. Full histogram and sweep in
+    ``docs/verification/ocr_threshold_2026-08-18.md``.
+
+    **Fitted to one corpus of 11 documents**, which is better-grounded than 85
+    and is not thereby universal — and it is a hashed identity input, so
+    changing it changes the run identity of every run that does not set it.
 
     An integer percent, not a float fraction — deliberately. This value is part
     of the run identity (change it and the flagged-page set, and therefore the

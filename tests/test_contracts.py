@@ -14,6 +14,9 @@ import json
 import pytest
 
 from dociq.contracts import (
+    needs_ocr_review,
+    OCR_REVIEW_MIN_LINES,
+    OCR_REVIEW_MIN_CHARS,
     matter_key,
     CONTRACT_VERSION,
     ContractViolation,
@@ -370,8 +373,11 @@ def test_ocr_threshold_is_an_int_percent_with_a_fraction_view():
     # Stored as int so it can sit in the run identity without putting a float
     # there; exposed as a fraction so it compares directly against ocr_conf.
     cfg = RunConfig(source_root="s", output_root="o")
-    assert cfg.ocr_conf_threshold_pct == 85
-    assert cfg.ocr_conf_threshold == pytest.approx(0.85)
+    # 85 -> 80 on 2026-08-18, measured. This test is about the int/fraction
+    # RELATIONSHIP, not the value; the value is pinned by
+    # test_the_threshold_default_is_the_measured_one.
+    assert cfg.ocr_conf_threshold_pct == 80
+    assert cfg.ocr_conf_threshold == pytest.approx(0.80)
     assert "ocr_conf_threshold" not in json.loads(canonical_json(cfg))
 
 
@@ -817,3 +823,79 @@ def test_enum_disk_values_are_frozen(enum_cls, expected):
     # the byte-identical claim against every prior run — a MAJOR contract
     # change however cosmetic it looks.
     assert {m.value for m in enum_cls} == expected
+
+
+# ---------------------------------------------------------------------------
+# The OCR review flag — one predicate, measured threshold, blank exclusion
+# ---------------------------------------------------------------------------
+
+
+def _ocr_page(conf: float, chars: int = 900, lines: int = 40) -> PageRecord:
+    return PageRecord(page_no=1, text="x" * chars, kind=PageKind.OCR,
+                      ocr_conf=conf, ocr_line_count=lines)
+
+
+def test_the_screen_and_the_log_cannot_disagree_about_which_pages_need_review():
+    """The GTG run showed 99 on screen and recorded 80 in the log.
+
+    The screen compared the RAW float (``ocr_conf < 0.85``); the log compared the
+    value ROUNDED to a whole percent (``85 < 85`` is false). Nineteen pages with
+    confidences like 84.73% were put in front of the operator and left out of the
+    audit record — in a tool whose argument is that the log is the auditable
+    account of the run.
+
+    Both now call :func:`needs_ocr_review`, so the disagreement is not fixed at
+    two call sites, it is unrepresentable.
+    """
+    page = _ocr_page(0.8473)
+    # The boundary that produced the 19: raw is below 85, rounded is not.
+    assert page.ocr_conf < 0.85
+    assert round(page.ocr_conf * 100) == 85
+    assert needs_ocr_review(page, 85) is False, (
+        "the predicate must decide on the percent it DISPLAYS, or a page is "
+        "marked for review beside a rendered '85%'")
+    assert needs_ocr_review(_ocr_page(0.844), 85) is True
+
+
+def test_a_page_with_nothing_on_it_is_not_sent_for_review():
+    """11 of the GTG run's 99 flagged pages carried fewer than 20 characters.
+
+    Their confidences repeated exactly across different documents — 71.76% three
+    times — which is one speck of scanner noise recognized as one token. A
+    confidence over two glyphs measures nothing, and a review flag that fires on
+    blank pages trains an operator to ignore review flags.
+    """
+    blank = PageRecord(page_no=1, text="ABC", kind=PageKind.OCR,
+                       ocr_conf=0.7176, ocr_line_count=1)
+    assert needs_ocr_review(blank, 80) is False
+    # ...and it is excluded from REVIEW, not from the RECORD.
+    assert len(blank.text.strip()) < OCR_REVIEW_MIN_CHARS
+
+
+def test_a_dense_page_that_failed_to_read_still_flags():
+    """The half the corpus does not exercise, and therefore the half worth
+    pinning.
+
+    Few characters across MANY lines is not a blank page — it is a page whose
+    reading collapsed. All 84 low-character pages of the GTG run returned 0-2
+    lines, so this case is absent there; "the corpus does not exercise it"
+    selects nothing, and the failure would arrive on the first matter that scans
+    worse than this one.
+    """
+    failed = PageRecord(page_no=1, text="x" * 30, kind=PageKind.OCR,
+                        ocr_conf=0.70, ocr_line_count=40)
+    assert failed.ocr_line_count > OCR_REVIEW_MIN_LINES
+    assert needs_ocr_review(failed, 80) is True, (
+        "a dense page that returned almost nothing was filed as blank")
+
+
+def test_the_threshold_default_is_the_measured_one():
+    """80, not 85. 85 was never calibrated against this engine: the measured
+    distribution over 377 OCR pages is one population with a median of 86.3%,
+    and 85 sat on the left edge of its modal band, flagging 26.3% of pages.
+
+    Pinned as a literal because it is a hashed identity input — changing it
+    changes the run identity of every run that does not set it, which is a
+    ruling and not a tuning.
+    """
+    assert RunConfig(source_root="s", output_root="o").ocr_conf_threshold_pct == 80

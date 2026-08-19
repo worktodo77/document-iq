@@ -54,7 +54,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-from ..contracts import ExtractionError, PageKind, PageRecord, ProcessingStatus
+from ..contracts import (
+    ExtractionError,
+    PageKind,
+    PageRecord,
+    ProcessingStatus,
+    needs_ocr_review,
+)
 from ..identify.bates import FOOTER_BLOCK_MAX_LINES
 from ..sections.model import SectionSpan
 from ..sections.resolve import resolve_sections
@@ -2182,8 +2188,11 @@ def extract(filename: str, raw: bytes,
     # cleanly to nothing does NOT flag: a blank page inside a native PDF is
     # ordinary, and flagging it would train the operator to ignore the flag.
     # It is still disclosed, as a page note and a document note.
+    # Same predicate again. A page that FAILED to OCR still flags regardless of
+    # confidence — that is a failure, not a reading the threshold can judge.
+    threshold_pct = round(opt.conf_threshold * 100)
     flagged = any(
-        (p.ocr_conf is not None and p.ocr_conf < opt.conf_threshold)
+        needs_ocr_review(p, threshold_pct)
         or any(n.startswith(M_OCR_PAGE) for n in p.notes)
         for p in pages
     )

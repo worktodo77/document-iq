@@ -19,6 +19,7 @@ from pathlib import PureWindowsPath
 from dociq.contracts import (
     Disposition,
     IdRegime,
+    needs_ocr_review,
     PageKind,
     ProcessingStatus,
     RunResult,
@@ -129,15 +130,15 @@ def format_tokens(estimate: TokenEstimate) -> tuple[str, str]:
 
 
 def _ocr_flags(result: RunResult) -> FlagGroup:
-    threshold = result.config.ocr_conf_threshold
     items: list[FlagItem] = []
     total = 0
     for doc in result.documents:
-        low = [
-            p for p in doc.pages
-            if p.kind is PageKind.OCR and p.ocr_conf is not None
-            and p.ocr_conf < threshold
-        ]
+        # The SAME predicate the log uses. This compared the raw float while
+        # the log compared the rounded percent, so the screen said 99 and the
+        # audit record said 80 for the same run.
+        low = [p for p in doc.pages
+               if p.kind is PageKind.OCR
+               and needs_ocr_review(p, result.config.ocr_conf_threshold_pct)]
         if not low:
             continue
         total += len(low)
