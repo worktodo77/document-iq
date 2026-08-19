@@ -1614,7 +1614,7 @@ when one of them dropped pages the other kept.
 
 **Raised by:** Alex's ruling of 2026-08-19, after the sibling hunt Codex's
 round-2 hand-back asked for.
-**Status:** raised with its wiring; flipped to applied in the next commit.
+**Status:** APPLIED in `e8a9a7c`.
 
 `OmissionSnapshot` and `ApprovedOmission` gain `recognition` — a fingerprint of
 everything that decides which template family a page lands in. Additive with a
