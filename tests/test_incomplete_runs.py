@@ -31,7 +31,7 @@ from dociq.emit import paths as emit_paths
 from dociq.emit.paths import OutputLayout
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
-from dociq.profiles.model import OperatorStamp
+from dociq.operator import OperatorStamp
 from dociq.runstate import COMPLETED, INCOMPLETE_DIR, RunTermination, TerminalStatus
 from dociq.verify import manifest as mf
 

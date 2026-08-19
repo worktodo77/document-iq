@@ -28,7 +28,7 @@ import make_fixtures
 from dociq import pipeline
 from dociq.contracts import RunConfig
 from dociq.ingest import extract as ex, walker
-from dociq.profiles.model import OperatorStamp
+from dociq.operator import OperatorStamp
 from dociq.verify import offline
 
 work = pathlib.Path(tempfile.mkdtemp())
@@ -415,7 +415,7 @@ def test_a_whole_pipeline_run_makes_zero_outbound_attempts(tmp_path):
     from dociq.contracts import PageKind, RunConfig
     from dociq.ingest import extract as ex
     from dociq.ingest import walker
-    from dociq.profiles.model import OperatorStamp
+    from dociq.operator import OperatorStamp
 
     src = make_fixtures.build(tmp_path / "fixtures")
     ex._OCR_ENGINE = None  # construction must happen INSIDE the guard

@@ -30,7 +30,7 @@ from dociq.contracts import (
 )
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
-from dociq.profiles.model import OperatorStamp
+from dociq.operator import OperatorStamp
 from dociq.verify import manifest as mf
 
 from .conftest import FIXTURES

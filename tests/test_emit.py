@@ -56,7 +56,7 @@ from dociq.identify.bates import (
     document_ranges,
     propose_format,
 )
-from dociq.profiles.model import OperatorStamp
+from dociq.operator import OperatorStamp
 from dociq.sections.apply import apply_sections
 from dociq.sections.model import ApprovedOmission
 from dociq.sections.resolve import resolve_sections

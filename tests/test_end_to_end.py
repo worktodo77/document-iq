@@ -80,10 +80,10 @@ from dociq.identify.bates import (
 )
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
+from dociq.operator import OperatorStamp
 from dociq.profiles.model import (
     MATTER_COPY_DIRNAME,
     FormatProfile,
-    OperatorStamp,
     SectionRule,
 )
 from dociq.sections.apply import SectionDropEntry, apply_sections

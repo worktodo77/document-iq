@@ -21,7 +21,7 @@ from dociq import pipeline
 from dociq.contracts import Disposition, PageKind, RunConfig
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
-from dociq.profiles.model import OperatorStamp
+from dociq.operator import OperatorStamp
 from tests.test_docid_assign import write_index
 
 from .conftest import FIXTURES

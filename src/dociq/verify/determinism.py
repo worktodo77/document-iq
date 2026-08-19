@@ -109,7 +109,7 @@ import sys
 from dociq.contracts import RunConfig
 from dociq.ingest import extract as ex, walker
 from dociq import pipeline
-from dociq.profiles.model import OperatorStamp
+from dociq.operator import OperatorStamp
 
 src, out = sys.argv[1], sys.argv[2]
 cfg = RunConfig(source_root=src, output_root=out,

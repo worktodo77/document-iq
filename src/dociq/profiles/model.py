@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from dociq.contracts import CONTRACT_VERSION, Disposition, DocIQError, content_hash
+from dociq.operator import OperatorStamp, operator_stamp
 
 __all__ = [
     "ProfileError",
@@ -104,39 +105,6 @@ class SectionRule:
                 f"rule {self.rule_id!r}: a DROP rule must carry notes recording "
                 "why the section is omitted and who approved it (§6 step 4)"
             )
-
-
-@dataclass(frozen=True, slots=True)
-class OperatorStamp:
-    """Who saved a profile and when (§6 step 4)."""
-
-    username: str
-    saved_at: str
-    """ISO-8601 UTC, seconds precision. Seconds, not microseconds, because the
-    stamp is read by humans and compared between runs."""
-
-    host: str = ""
-
-
-def operator_stamp(*, now: datetime | None = None) -> OperatorStamp:
-    """Capture the current Windows user and time.
-
-    ``USERNAME`` first because that is the Windows account name §6 asks for;
-    :func:`getpass.getuser` is the cross-platform fallback so the test suite
-    runs anywhere.
-    """
-    username = os.environ.get("USERNAME") or ""
-    if not username:
-        try:
-            username = getpass.getuser()
-        except Exception:  # pragma: no cover - only on an account-less host
-            username = "unknown"
-    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    return OperatorStamp(
-        username=username,
-        saved_at=moment.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        host=os.environ.get("COMPUTERNAME", ""),
-    )
 
 
 @dataclass(frozen=True, slots=True)

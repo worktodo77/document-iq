@@ -54,11 +54,11 @@ from dociq.gui.pipeline import (
     config_from,
 )
 from dociq.ingest import walker
+from dociq.operator import operator_stamp
 from dociq.profiles.model import (
     FormatProfile,
     ProfileError,
     load_profile,
-    operator_stamp,
     profile_library_dir,
 )
 from dociq.sections.model import ApprovedOmission

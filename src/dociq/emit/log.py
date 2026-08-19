@@ -46,7 +46,8 @@ from dociq.docid.assign import AssignmentResult
 from dociq.docid.reconcile import ReconciliationReport, RenumberWarning
 from dociq.emit.paths import OutputLayout, write_text_deterministic
 from dociq.identify.bates import BatesDecision, BatesRange
-from dociq.profiles.model import FormatProfile, OperatorStamp, operator_stamp
+from dociq.operator import OperatorStamp, operator_stamp
+from dociq.profiles.model import FormatProfile
 from dociq.sections.apply import SectionDropEntry
 from dociq.verify import tokens as tokens_mod
 from dociq.verify.accounting import AccountingReport

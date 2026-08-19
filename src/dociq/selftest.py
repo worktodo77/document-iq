@@ -52,7 +52,7 @@ from .contracts import (
 from .ingest import extract as ex
 from .ingest import walker
 from .ingest.pagemodel import normalize
-from .profiles.model import OperatorStamp
+from .operator import OperatorStamp
 from .verify import determinism
 from .verify import manifest as mf
 

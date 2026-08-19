@@ -40,15 +40,14 @@ from dociq.profiles.detect import (
     looks_like_header,
     normalize_label,
 )
+from dociq.operator import OperatorStamp, operator_stamp
 from dociq.profiles.model import (
     FormatProfile,
-    OperatorStamp,
     ProfileError,
     SectionRule,
     dump_profile,
     load_profile,
     loads_profile,
-    operator_stamp,
     profile_library_dir,
     save_to_library,
     write_matter_copy,

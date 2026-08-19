@@ -86,7 +86,8 @@ from dociq.identify.bates import (
 )
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
-from dociq.profiles.model import FormatProfile, OperatorStamp, operator_stamp, write_matter_copy
+from dociq.operator import OperatorStamp, operator_stamp
+from dociq.profiles.model import FormatProfile, write_matter_copy
 from dociq.sections.apply import SectionApplyResult, SectionDropEntry, apply_sections
 from dociq.sections.model import ApprovedOmission, SectionTemplate
 from dociq.sections.resolve import spans_from_pages
