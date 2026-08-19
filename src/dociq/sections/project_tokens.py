@@ -40,6 +40,12 @@ from collections import Counter, defaultdict
 
 __all__ = ["propose_tokens", "canonical_tokens", "DOCUMENT_LIFECYCLE_WORDS"]
 
+# Re-exported, not defined here: the contract normalizes its own field, and the
+# contract may not import this package (see `RunConfig.project_tokens`). Kept
+# importable from the module that owns the vocabulary so callers reading about
+# tokens find it where they look.
+from dociq.contracts import canonical_tokens  # noqa: E402
+
 _WORD = re.compile(r"[A-Za-z0-9]{2,}")
 
 DOCUMENT_LIFECYCLE_WORDS = frozenset({
@@ -134,18 +140,3 @@ def propose_tokens(
         key=lambda t: (-token_labels[t], -len(token_docs[t]), t),
     ))
 
-
-def canonical_tokens(tokens) -> tuple[str, ...]:
-    """One spelling of a token list, so the identity tracks the BEHAVIOR.
-
-    Matching already ignores case and order: :func:`strip_project_tokens` folds
-    each token and removes them all. So `("BOMESC", "MV32")`, `("MV32",
-    "bomesc")` and `("MV32", "BOMESC", "MV32")` are one run — and before this
-    they were three run identities. An identity that moves when nothing about
-    the reduction moved is a false "different configuration" the next time two
-    runs are compared, which is the thing the identity exists to answer.
-
-    Upper-cased, de-duplicated, sorted, and empty entries dropped: an operator
-    typing a trailing comma must not mint a new identity either.
-    """
-    return tuple(sorted({t.strip().upper() for t in tokens if t and t.strip()}))

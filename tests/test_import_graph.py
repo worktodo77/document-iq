@@ -118,6 +118,30 @@ def test_gui_imports_no_pipeline_package(path: Path) -> None:
             )
 
 
+def test_the_contract_imports_no_pipeline_package() -> None:
+    """`contracts.py` states this rule about itself and nothing enforced it.
+
+    `OmissionSnapshot`'s docstring: "dociq.sections imports the contract, so the
+    contract cannot import it back." D-39's first draft put `canonical_tokens`
+    in `dociq.sections.project_tokens` and reached back for it from
+    `RunConfig.__post_init__`. Deferred inside the method, so no import cycle
+    fired at load and every test passed — the rule was broken all the same.
+
+    `_module_names` walks the whole AST, so a function-level import is caught
+    exactly like a module-level one. That is the point: the version that broke
+    this was function-level, and a check that only read the file's header would
+    have agreed with it.
+    """
+    path = SRC / "dociq" / "contracts.py"
+    for name in _module_names(path):
+        for banned in FORBIDDEN:
+            assert not name.startswith(f"dociq.{banned}"), (
+                f"contracts.py imports {name}: the contract is what the pipeline "
+                f"packages import, so it cannot import '{banned}' back "
+                f"(OmissionSnapshot, and the pagemodel freeze)"
+            )
+
+
 @pytest.mark.parametrize("path", sorted(BRANDING.rglob("*.py")), ids=lambda p: p.name)
 def test_branding_is_toolkit_free(path: Path) -> None:
     """The generators must run without Qt.

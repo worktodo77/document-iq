@@ -21,7 +21,7 @@ import enum
 import hashlib
 import json
 from dataclasses import dataclass, field, replace
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 CONTRACT_VERSION = "2.0.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
@@ -834,6 +834,28 @@ class EffectiveLimits:
     interpretable."""
 
 
+def canonical_tokens(tokens: Iterable[str]) -> tuple[str, ...]:
+    """One spelling of a project-token list, so the identity tracks the BEHAVIOR.
+
+    Matching already ignores case and order — `strip_project_tokens` folds each
+    token and removes them all — so `("BOMESC", "MV32")`, `("MV32", "bomesc")`
+    and `("MV32", "BOMESC", "MV32")` are ONE run, and before this they were
+    three run identities. An identity that moves when the reduction did not is a
+    false "different configuration" the next time two runs are compared, which
+    is the question the identity exists to answer.
+
+    **Defined here rather than beside the derivation that produces the list**,
+    for the reason stated on :class:`OmissionSnapshot`: `dociq.sections` imports
+    the contract, so the contract cannot import it back. The first version put
+    this in `dociq.sections.project_tokens` and reached back for it from
+    `RunConfig.__post_init__` — a deferred import, so nothing failed at load,
+    and the rule was broken all the same. `dociq.sections.project_tokens`
+    re-exports it, so it is still importable from the module that owns the
+    vocabulary.
+    """
+    return tuple(sorted({t.strip().upper() for t in tokens if t and t.strip()}))
+
+
 @dataclass(frozen=True, slots=True)
 class RunConfig:
     """Everything that can change output bytes.
@@ -939,8 +961,6 @@ class RunConfig:
         identities. Correct by construction: a `RunConfig` cannot hold a token
         list in a spelling that differs from its behavior.
         """
-        from dociq.sections.project_tokens import canonical_tokens
-
         canon = canonical_tokens(self.project_tokens)
         if canon != self.project_tokens:
             object.__setattr__(self, "project_tokens", canon)
