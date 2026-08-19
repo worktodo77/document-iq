@@ -1565,7 +1565,7 @@ their principle is A-19's and is tested on the input that decides today.
 ## A-22 — an approval does not record the recognition configuration it was given against
 
 **Raised by:** Codex Sprint-4 review, finding B-1 (2026-08-19).
-**Status:** raised with its wiring; flipped to applied in the next commit.
+**Status:** APPLIED in `045280e`.
 
 `OmissionSnapshot` and `ApprovedOmission` gain `project_tokens` — the canonical
 project names the approval was **reviewed** against. Additive with a safe

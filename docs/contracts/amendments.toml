@@ -262,7 +262,8 @@ tests = ["tests/test_contracts.py", "tests/test_run_identity.py"]
 # applied amendment names a real commit, and a "raised" one is legitimately
 # waiting. The flip has to actually happen.
 [amendment.A-22]
-status = "raised"
+status = "applied"
+adopted_in = "045280e"
 title = "an approval does not record the recognition configuration it was given against"
 raised_by = "Codex Sprint-4 review, finding B-1"
 wired_in = { "src/dociq/contracts.py" = ["OmissionSnapshot", "CONTRACT_VERSION"], "src/dociq/sections/model.py" = ["ApprovedOmission"], "src/dociq/sections/apply.py" = ["apply_sections"], "src/dociq/gui/pipeline.py" = ["OmissionApproval"] }
