@@ -177,16 +177,34 @@ def apply_sections(
                 "against one is not an approval of the other."
             )
             continue
-        if (approval.recognition and run_recognition
-                and approval.recognition != run_recognition):
+        # ASYMMETRIC ON PURPOSE, and the asymmetry is the ruling (Codex round
+        # 3 gate question; Alex, 2026-08-19).
+        #
+        # An approval with NO fingerprint predates contract 2.2.0. It is
+        # compared on its named fields, because voiding it would discard real
+        # expert work for a field that did not exist when it was given.
+        #
+        # An approval WITH a fingerprint, under a run that has none, is
+        # refused. The approval asserts it was reviewed under a particular
+        # recognition configuration; a run that cannot produce a fingerprint
+        # cannot show it matches, and the safe reading of "cannot show" is
+        # "does not". No shipped path reaches it — the pipeline always supplies
+        # one — which is exactly why it costs nothing to close, and why leaving
+        # it open would be the same "no path reaches it" argument that left the
+        # OCR sibling latent rather than absent.
+        if approval.recognition and approval.recognition != run_recognition:
+            approved_under = (
+                "a different recognition configuration than this run uses"
+                if run_recognition else
+                "a recorded recognition configuration and this run states none"
+            )
             warnings.append(
-                f"omission of {approval.family_id!r} was approved against a "
-                "different recognition configuration than this run uses — it "
-                "was NOT applied and no page was dropped for it. What a section "
-                "is recognized as decides which pages an approval reaches, so "
-                "an approval given under one recognition is not an approval "
-                "under another: re-run and review the sections again before "
-                "approving."
+                f"omission of {approval.family_id!r} was approved against "
+                f"{approved_under} — it was NOT applied and no page was "
+                "dropped for it. What a section is recognized as decides which "
+                "pages an approval reaches, so an approval given under one "
+                "recognition is not an approval under another: re-run and "
+                "review the sections again before approving."
             )
             continue
         if canonical_tokens(approval.project_tokens) != canon_tokens:

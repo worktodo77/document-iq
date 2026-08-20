@@ -217,6 +217,12 @@ class SetupScreen(QWidget):
         self._tokens.setPlaceholderText(
             "e.g. MV32, BOMESC, PETROBRAS — separated by commas")
         self._tokens_hint = _muted("", theme, 8)
+        self._proposal_hint = ""
+        """The token-proposal guidance (D-39)."""
+        self._approval_hint = ""
+        """The retained-approval status (Codex B-1). Separate from the
+        proposal hint because they share one label and each used to overwrite
+        the other (A-R3-2)."""
         self._retained_scopes: tuple[tuple[str, ...], ...] = ()
         """One token scope per approval carried from a previous run of this
         matter (Codex B-1, corrected per A-R2-1)."""
@@ -376,13 +382,14 @@ class SetupScreen(QWidget):
         if self._tokens.text().strip():
             return
         self._tokens.setText(", ".join(tokens))
-        self._tokens_hint.setText(
+        self._proposal_hint = (
             f"Read from this matter: {len(tokens)} name(s) proposed. Correct "
             "them — the proposal is right about roughly half."
             if tokens else
             "No project names found in this matter. Add any you know of; "
             "leaving it empty is safe and simply recognizes fewer sections."
         )
+        self._render_hint()
 
     def set_retained_scopes(
         self, scopes: tuple[tuple[str, ...], ...]
@@ -412,8 +419,17 @@ class SetupScreen(QWidget):
         change from `("BOMESC","MV32")` — so the screen announced that pages
         would be kept pending re-review, moments before the run dropped them
         under that very approval (A-R2-1).
+
+        **The empty case sets the status to nothing and re-renders**, rather
+        than returning early. Returning early left the previous message on
+        screen after the last approval was withdrawn, so the operator was told
+        an approval remained when none did (Codex round 3, A-R3-2). An early
+        return is a promise to have written nothing; this method had already
+        written something.
         """
         if not self._retained_scopes:
+            self._approval_hint = ""
+            self._render_hint()
             return
         current = canonical_tokens(self.project_tokens())
         applies = sum(1 for s in self._retained_scopes
@@ -421,21 +437,34 @@ class SetupScreen(QWidget):
         total = len(self._retained_scopes)
         stale = total - applies
         if stale == 0:
-            self._tokens_hint.setText(
+            self._approval_hint = (
                 f"{total} approval(s) carried from your last run of this "
                 "matter still apply.")
         elif applies == 0:
-            self._tokens_hint.setText(
+            self._approval_hint = (
                 f"Changing the project names means the {total} approval(s) "
                 "from your last run of this matter NO LONGER APPLY — those "
                 "sections will be kept until you review and approve them "
                 "again. Nothing is dropped that you have not approved.")
         else:
-            self._tokens_hint.setText(
+            self._approval_hint = (
                 f"{applies} of {total} approval(s) from your last run still "
                 f"apply under these names; {stale} NO LONGER APPLY and those "
                 "sections will be kept until you review and approve them "
                 "again. Nothing is dropped that you have not approved.")
+        self._render_hint()
+
+    def _render_hint(self) -> None:
+        """One label, two authors — rendered from both, never overwritten.
+
+        The proposal guidance and the retained-approval status are separate
+        facts about separate things, and each used to write the label directly.
+        Whichever spoke last erased the other, which is how withdrawing an
+        approval could leave its message standing and how clearing it would
+        have taken the proposal guidance with it.
+        """
+        parts = [p for p in (self._approval_hint, self._proposal_hint) if p]
+        self._tokens_hint.setText("  ".join(parts))
 
     def source_text(self) -> str:
         """The folder currently in the box — so a proposal that arrives after

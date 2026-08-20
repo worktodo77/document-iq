@@ -120,6 +120,70 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## Codex Sprint-4 round 3 — NOT PASSED, and both blockers came from the round-2 fixes (2026-08-19)
+
+### A-R3-1: the A-23 wiring crashed the public API's simplest call
+
+`run(config)` with no options at all — the signature's own documented default —
+raised `AttributeError` at Stage 4. `PipelineOptions.walk` is optional and
+`run()` constructs `PipelineOptions()` itself, so `opts.walk` is `None`.
+
+**The function already had the answer.** Two hundred lines above the crash it
+derives `ocr_ran = (opts.walk or walker.WalkOptions()).ocr_enabled`, for exactly
+this reason. My fingerprint call read `opts.walk.ocr_enabled` instead of using
+it. The fix is one identifier.
+
+**Why 1,521 tests over eight runs did not see it:** every completed-run case in
+the suite supplies explicit walk options. Nothing exercised the default. A suite
+can be large, green, repeated, and still silent about the shortest path through
+the code — which is the same lesson as B-R2-1 wearing different clothes, and the
+second time this sprint that a green suite was not evidence about the thing I
+had just changed.
+
+### A-R3-2: withdrawing the last approval left its message standing
+
+`_warn_if_stale` returned early on an empty scope collection **without clearing
+what it had already written**, so the setup screen went on saying "1 approval(s)
+carried … still apply" after the last approval was withdrawn.
+
+The root cause is worth naming because the naive fix is also wrong: one label,
+`_tokens_hint`, carried two different facts — the D-39 token-proposal guidance
+and the retained-approval status — and each author wrote it directly, so
+whichever spoke last erased the other. Blanking it on withdrawal would have
+taken the proposal guidance with it. The two strings are now held separately and
+the label is rendered from both, which makes the empty case a re-render rather
+than a special case, so there is no early return to forget.
+
+**An early return is a promise to have written nothing.** This method had
+already written something.
+
+### The gate question, ruled
+
+Codex asked whether an empty RUN fingerprint should fail closed when the
+approval carries one. **Alex ruled yes (2026-08-19).** The fallback exists for
+one case — an approval given before contract 2.2.0, compared on its named fields
+— and the symmetric condition covered a second case nobody intended. The
+asymmetry is now deliberate and commented as such: an approval that asserts a
+recognition configuration is refused by a run that cannot produce one, because
+the safe reading of "cannot show it matches" is "does not".
+
+No shipped path reaches it, which is exactly why it costs nothing to close.
+Leaving it open would have been the same "no path reaches it" argument that left
+the OCR sibling latent rather than absent.
+
+### D-R3-1: my own guard reported what it could see, not what was true
+
+The undefined-name guard added last round built **one module-wide `defined`
+set**, so a local, a parameter or an `except … as` name anywhere in a file made
+every load of that spelling look defined. Codex supplied a two-function
+counterexample. Rewritten on :mod:`symtable`, which distinguishes a global
+reference from a local binding of the same name — the distinction the guard
+needed and did not have.
+
+**And the guard now guards itself**, against all three shapes the review named.
+A guard whose own failure mode is untested reports what it can see; that is why
+this was found by a reviewer rather than by its own suite.
+
 ## Codex Sprint-4 round 2 — NOT PASSED, and the sibling hunt found a second one (2026-08-19)
 
 ### B-R2-1: the field existed, the amendment claimed it, nothing populated it

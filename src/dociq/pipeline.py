@@ -1473,7 +1473,14 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 project_tokens=walk_config.project_tokens,
                 template_id=opts.template.template_id if opts.template else None,
                 template_version=opts.template.version if opts.template else None,
-                ocr_ran=opts.walk.ocr_enabled,
+                # `ocr_ran`, the value this function derived two hundred
+                # lines above — NOT `opts.walk.ocr_enabled`. `PipelineOptions
+                # .walk` is optional and `run(config)` builds its own
+                # `PipelineOptions()`, so reading it directly crashed the
+                # public API's simplest documented call (Codex round 3,
+                # A-R3-1). The effective value already existed; this just
+                # failed to use it.
+                ocr_ran=ocr_ran,
             ),
             # The matter this run is FOR, so Stage 4 can refuse an approval
             # given on a different one. opts.matter_name is what the adapter
