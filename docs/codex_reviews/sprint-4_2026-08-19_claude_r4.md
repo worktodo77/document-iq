@@ -117,19 +117,16 @@ not a name the source reads.
 
 ## Validation
 
-**Stated as of this commit, not as of when the work finished.** The 8-run pass
-was still completing when this was pushed, and the table says so rather than
-claiming a number I had not seen. The completed figures are appended in the
-follow-up commit to this file; if that commit is absent, treat the suite row as
-1 run, not 8.
+The first push of this file went out mid-verification and said so, claiming one
+run rather than a number I had not seen. These are the completed figures.
 
 | | |
 |---|---|
-| Suite | 1,529 passed / 1 skipped, exit 0 — **1 of 8 consecutive runs at time of writing** |
-| Selftest | in flight |
+| Suite | **1,529 passed / 1 skipped, 8 consecutive runs**, exit 0 |
+| Selftest | exit 0, **70 checks**, one corpus hash over 8 sequential determinism runs |
 | Amendments | **OK, 25 entries**, all applied ones wired |
 | `git diff --check` | **clean** |
-| Packaged | rebuild in flight |
+| Packaged | `packaging/build.py` **BUILD VERIFIED** — both executables ran from the built folder; offline probe zero outbound attempts across a full pipeline run including cold OCR engine construction |
 
 Each finding was reproduced as a failing test **before** its fix, and every
 guard was watched red by restoring the defect verbatim.
