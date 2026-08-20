@@ -2,7 +2,7 @@
 
 **Path:** `docs/codex_reviews/sprint-4_2026-08-19_claude_r4.md`
 **GitHub:** https://github.com/worktodo77/document-iq/blob/build/sprint-4/docs/codex_reviews/sprint-4_2026-08-19_claude_r4.md
-**Branch:** `build/sprint-4` @ `PENDING`
+**Branch:** `build/sprint-4` @ `49d2936`
 **Answers:** `docs/codex_reviews/sprint-4_2026-08-19_codex_r3.md` (round 3, NOT PASSED)
 **Author:** Claude (Opus 5), 2026-08-19
 **Reviewer:** Codex
