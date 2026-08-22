@@ -120,6 +120,70 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## Sprint-5 kickoff — D-44, and the selftest finally proves the feature (2026-08-19)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-44 | Sprint 5's objective | **FINISH D-41.** Sprint 4 closed one of D-41's three stated gaps (the `.exe` is built and verified) and left two: no human has driven the product, and `selftest` did not cover the reduction feature. Chosen over the citation checker (new scope on a product nobody has driven), criterion 4 (well-defined but does not need the product driven), and tiers 2/4 (grows a feature nobody has used — Sprint 3's mistake, which D-41 was written to correct). | 2026-08-19 |
+| D-45 | Sprint 4's merge | **MERGED to main at `6e119a5`** on Alex's explicit authorization, with the Codex round-4 review **skipped**. Recorded plainly: rounds 1–3 were reviewed and closed; the round-4 delta — the two A-R3 fixes, the gate-question ruling and the `symtable` guard — is the one part of this sprint nothing external checked. | 2026-08-19 |
+
+### The selftest now drops a page, and says who approved it
+
+D-41 measured `omission`/`approv` at zero occurrences in `selftest.py`. By the
+end of Sprint 4 they read 4 and 5 — and the selftest still **dropped zero
+pages**, because every one of those references was an identity probe. The
+diagnostic a colleague runs on their install could not tell them whether the
+feature that removes pages from their evidence worked.
+
+Five checks now exercise it end to end, on a **second run** rather than a
+modified first: the first run's corpus hash is what the determinism proof rests
+on, and reducing it would move that hash and re-baseline the very claim the
+proof exists to make.
+
+| check | measured |
+|---|---|
+| an approved omission actually DROPS pages | 3 pages, `progress-photographs` |
+| every dropped page names the person who approved it | 3 entries, 3 with approver and time |
+| the run identity records the approval that caused the drop | 1 omission snapshot |
+| page accounting reconciles WITH pages dropped | 25 in = 22 kept + 3 dropped |
+| withdrawing the approval keeps every page | 0 still dropped |
+
+**Watched red, accidentally but validly.** A mutation script that removed
+`approved_by_family[approval.family_id] = approval` was killed by a timeout
+before its `finally` could restore the file, leaving the product broken for
+several minutes. The selftest reported exactly the two failures it should —
+*"0 page(s) dropped"* and *"0 drop entry/entries"* — which is the fail-before
+these checks needed.
+
+**And it cost me a wrong diagnosis on the way**, recorded because the lesson is
+about method rather than code: I read the 0-drop result as a possible
+nondeterminism in the product and spent four probes on it before checking
+`git status`. **A killed patch script leaves the tree in its mutated state; the
+first question after a surprising result is what the working tree actually
+contains.**
+
+### Two defects found in passing
+
+* **`--runs 1` failed the gate meaninglessly.** Determinism is a comparison
+  between runs, and one run has nothing to compare against — but the flag
+  accepted it and printed a bare `DETERMINISM FAILED`, which reads as "this
+  product is non-deterministic". Now refused with that sentence as the reason.
+* **The drop log's shape is not what the first draft of the check assumed.**
+  Attribution lives in `content.drops`, not `documents[].sections_dropped`. The
+  check failed against a correct product until it was corrected — worth the
+  comment it now carries, because a diagnostic that calls a right answer wrong
+  teaches an operator to distrust the diagnostic instead of the evidence.
+
+### Not measured: the gate's wall clock
+
+The two added runs cost **0.6 s** measured directly (0.3 s each, OCR disabled,
+against an 11.2 s OCR run). A full selftest timed at 161 s earlier in the day
+and 322 s afterwards, but **that comparison is contaminated** — two pytest
+processes under the system interpreter were consuming ~880 CPU-seconds during
+the second measurement, and a third external workload started after. No
+wall-clock claim is made here; the 0.6 s delta is the part that was measured
+cleanly.
+
 ## Codex Sprint-4 round 3 — NOT PASSED, and both blockers came from the round-2 fixes (2026-08-19)
 
 ### A-R3-1: the A-23 wiring crashed the public API's simplest call

@@ -42,8 +42,10 @@ from pathlib import Path
 
 from . import pipeline
 from .contracts import (
+    Disposition,
     OmissionSnapshot,
     matter_key,
+    recognition_fingerprint,
     PageKind,
     RunConfig,
     TerminalStatus,
@@ -54,8 +56,17 @@ from .ingest import extract as ex
 from .ingest import walker
 from .ingest.pagemodel import normalize
 from .operator import OperatorStamp
+from .sections.model import ApprovedOmission
+from .sections.templates import PROGRESS_REPORT
 from .verify import determinism
 from .verify import manifest as mf
+
+REDUCED_FAMILY = "progress-photographs"
+"""The family the self-test corpus actually exercises.
+
+Measured rather than chosen: approving it turns 0 dropped pages into 3 on this
+fixture set. A family the corpus does not contain would make every check below
+vacuous while still reporting PASS."""
 
 MARKER_FRAGMENT = "===== PAGE"
 
@@ -200,8 +211,8 @@ def _check_no_network(chk: _Check) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="dociq.selftest")
-    ap.add_argument("--runs", type=int, default=8,
-                    help="determinism repetitions (default 8)")
+    ap.add_argument("--runs", type=int, default=8, metavar="N",
+                    help="determinism repetitions, 2 or more (default 8)")
     ap.add_argument("--concurrency", type=int, default=1,
                     help="how many determinism repetitions run AT ONCE "
                          "(default 1 = sequential). Above 1 exercises the "
@@ -210,6 +221,14 @@ def main(argv: list[str] | None = None) -> int:
                          "sequential so the gate's wall clock is unchanged")
     ap.add_argument("--keep", action="store_true", help="keep the work directory")
     args = ap.parse_args(argv)
+    if args.runs < 2:
+        # Two is the minimum that can compare anything: with one run there is
+        # no second corpus for the first to be identical TO. `--runs 1` used to
+        # print a bare "DETERMINISM FAILED" and fail the gate, which reads as
+        # "this product is non-deterministic" when it means "you asked for a
+        # comparison with nothing to compare".
+        ap.error("--runs must be 2 or more: determinism is a comparison "
+                 "between runs, and one run has nothing to compare against")
 
     chk = _Check()
     # A fixed work dir when asked for. `source_root` is inside the hashed
@@ -494,6 +513,108 @@ def main(argv: list[str] | None = None) -> int:
                    "run_summary.pdf and document_index.xlsx are declared "
                    "outside the claim, with reasons",
                    "; ".join(f"{k}" for k in sorted(man.excluded)))
+
+        print("\nD-34 — the reduction feature, exercised end to end")
+        # THE GAP D-41 NAMED AND SPRINT 4 DID NOT CLOSE. Until this section
+        # existed the selftest ran one unreduced pass, reported 70 checks, and
+        # dropped zero pages: every approval-related check was an identity
+        # probe. A diagnostic that cannot tell an operator whether the feature
+        # that REMOVES PAGES FROM THEIR EVIDENCE works is not a diagnostic of
+        # this product.
+        #
+        # A second run, not a modified first: the first run's corpus hash is
+        # what the determinism proof above rests on, and reducing it would move
+        # that hash and re-baseline the claim.
+        reduced_out = work / "out-reduced"
+        approval = ApprovedOmission(
+            family_id=REDUCED_FAMILY,
+            approved_by="selftest",
+            approved_at="2026-07-30T00:00:00Z",
+            matter="DocIQ self-test corpus",
+            matter_root=matter_key(str(src)),
+            template_id=PROGRESS_REPORT.template_id,
+            template_version=PROGRESS_REPORT.version,
+            recognition=recognition_fingerprint(
+                project_tokens=(),
+                template_id=PROGRESS_REPORT.template_id,
+                template_version=PROGRESS_REPORT.version,
+                ocr_ran=False,
+            ),
+        )
+        reduced = pipeline.run(
+            RunConfig(source_root=str(src), output_root=str(reduced_out),
+                      ocr_engine_version=ex.ocr_engine_version()),
+            pipeline.PipelineOptions(
+                walk=walker.WalkOptions(resume=False, ocr_enabled=False),
+                matter_name="DocIQ self-test corpus",
+                template=PROGRESS_REPORT,
+                approvals=(approval,),
+                stamp=OperatorStamp("selftest", "2026-07-30T00:00:00Z",
+                                    "selftest")))
+
+        dropped = [pg for d in reduced.result.documents for pg in d.pages
+                   if pg.disposition is not Disposition.KEEP]
+        chk.expect(bool(dropped),
+                   "an approved omission actually DROPS pages",
+                   f"{len(dropped)} page(s) dropped from "
+                   f"{REDUCED_FAMILY!r}")
+
+        # Principle 1: no unattributable drop. A page that leaves the corpus
+        # without a named person against it is the one thing D-34 exists to
+        # make impossible, so the check is that EVERY drop is attributed, not
+        # that a drop log exists.
+        drops = reduced.result.config.omissions
+        log_path = reduced.layout.root / mf.LOG_NAME
+        logged = json.loads(log_path.read_text(encoding="utf-8"))
+        # `content.drops`, read from the file the operator would open. The
+        # first draft of this check read a path that does not exist and failed
+        # against a correct product -- which is worth the comment, because a
+        # check that reports the log is wrong when the log is right teaches an
+        # operator to distrust the diagnostic instead of the evidence.
+        entries = logged.get("content", {}).get("drops", [])
+        attributed = [e for e in entries
+                      if e.get("approved_by") and e.get("approved_at")]
+        chk.expect(
+            bool(entries) and len(attributed) == len(entries) == len(dropped),
+            "every dropped page names the person who approved it",
+            f"{len(entries)} drop entry/entries for {len(dropped)} dropped "
+            f"page(s), {len(attributed)} carrying an approver and a time")
+
+        chk.expect(bool(drops) and all(o.approved_by for o in drops),
+                   "the run identity records the approval that caused the drop",
+                   f"{len(drops)} omission snapshot(s)")
+
+        # The accounting must still reconcile WITH pages removed. Zero
+        # discrepancy on a run that drops nothing is a weaker statement than it
+        # looks, and it was the only one this selftest made.
+        pages_in = sum(d.pages_in for d in reduced.result.documents)
+        kept = sum(1 for d in reduced.result.documents for pg in d.pages
+                   if pg.disposition is Disposition.KEEP)
+        chk.expect(pages_in == kept + len(dropped),
+                   "page accounting reconciles WITH pages dropped",
+                   f"{pages_in} in = {kept} kept + {len(dropped)} dropped")
+
+        # Withdrawal. The product invites it -- engage a lever, run, change your
+        # mind -- and the failure it used to produce was a page left DROP with
+        # no drop-log entry: the unattributable drop reached by withdrawal
+        # rather than by omission.
+        withdrawn = pipeline.run(
+            RunConfig(source_root=str(src),
+                      output_root=str(work / "out-withdrawn"),
+                      ocr_engine_version=ex.ocr_engine_version()),
+            pipeline.PipelineOptions(
+                walk=walker.WalkOptions(resume=False, ocr_enabled=False),
+                matter_name="DocIQ self-test corpus",
+                template=PROGRESS_REPORT,
+                approvals=(),
+                stamp=OperatorStamp("selftest", "2026-07-30T00:00:00Z",
+                                    "selftest")))
+        still_dropped = [pg for d in withdrawn.result.documents
+                         for pg in d.pages
+                         if pg.disposition is not Disposition.KEEP]
+        chk.expect(not still_dropped,
+                   "withdrawing the approval keeps every page",
+                   f"{len(still_dropped)} page(s) still dropped")
 
         print("\nPrinciple 5 — determinism (over the REAL emit layer)")
         det = determinism.prove(src, runs=args.runs, workdir=work / "det",
