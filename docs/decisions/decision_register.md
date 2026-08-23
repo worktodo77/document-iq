@@ -120,12 +120,12 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
-## Sprint-5 kickoff — D-44, and the selftest finally proves the feature (2026-08-19)
+## Sprint-5 kickoff — D-46, and the selftest finally proves the feature (2026-08-19)
 
 | # | Decision | Ruling | Date |
 |---|---|---|---|
-| D-44 | Sprint 5's objective | **FINISH D-41.** Sprint 4 closed one of D-41's three stated gaps (the `.exe` is built and verified) and left two: no human has driven the product, and `selftest` did not cover the reduction feature. Chosen over the citation checker (new scope on a product nobody has driven), criterion 4 (well-defined but does not need the product driven), and tiers 2/4 (grows a feature nobody has used — Sprint 3's mistake, which D-41 was written to correct). | 2026-08-19 |
-| D-45 | Sprint 4's merge | **MERGED to main at `6e119a5`** on Alex's explicit authorization, with the Codex round-4 review **skipped**. Recorded plainly: rounds 1–3 were reviewed and closed; the round-4 delta — the two A-R3 fixes, the gate-question ruling and the `symtable` guard — is the one part of this sprint nothing external checked. | 2026-08-19 |
+| D-46 | Sprint 5's objective | **FINISH D-41.** Sprint 4 closed one of D-41's three stated gaps (the `.exe` is built and verified) and left two: no human has driven the product, and `selftest` did not cover the reduction feature. Chosen over the citation checker (new scope on a product nobody has driven), criterion 4 (well-defined but does not need the product driven), and tiers 2/4 (grows a feature nobody has used — Sprint 3's mistake, which D-41 was written to correct). | 2026-08-19 |
+| D-47 | Sprint 4's merge | **MERGED to main at `6e119a5`** on Alex's explicit authorization, with the Codex round-4 review **skipped**. Recorded plainly: rounds 1–3 were reviewed and closed; the round-4 delta — the two A-R3 fixes, the gate-question ruling and the `symtable` guard — is the one part of this sprint nothing external checked. | 2026-08-19 |
 
 ### The selftest now drops a page, and says who approved it
 
