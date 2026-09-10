@@ -10,11 +10,25 @@ reasoning is measured rather than asserted — see *Measured* below.
 
 ## The command
 
+**Current, verified 2026-09-10 (D-48 / G-08).** Run from the repository root:
+
 ```
-pip install pyinstaller==6.20.0      # into document-iq\.venv — see "Authorization" below
-cd C:\Users\Alex\document-iq-wt\track-f
-C:\Users\Alex\document-iq\.venv\Scripts\python.exe packaging\build.py
+cd C:\Users\Alex\document-iq
+.venv\Scripts\python.exe packaging\build.py
 ```
+
+`packaging\` lives at the repository root and PyInstaller **6.20.0 is present in
+`.venv`** — both checked directly on 2026-09-10. No install step is needed.
+
+> The command previously printed here was
+> `pip install pyinstaller==6.20.0` followed by
+> `cd C:\Users\Alex\document-iq-wt\track-f`. Both were wrong by the time anyone
+> would have read them: `document-iq-wt\track-f` does not exist (the parent
+> directory survives, holding only `_preserved_from_deleted_worktrees` and
+> `timing`), and the install line contradicted this file's own Authorization
+> note two paragraphs later saying PyInstaller was *not* installed. A build
+> procedure nobody can execute is not a procedure. The history is kept below
+> because *how* the first artifact was produced is evidence about that artifact.
 
 That is the whole build. It cleans `build_out\`, runs PyInstaller against the
 committed `packaging\DocumentIQ.spec`, **runs the built artifact**, and writes
@@ -28,7 +42,12 @@ packaging change that was never launched is not a deliverable.
 | `packaging/dociq_launcher.py` | the frozen entry point: bundle bootstrap plus `--version` / `--selftest` / `--offline-probe` / `--diagnose` |
 | `packaging/rthook_offline.py` | runtime hook: pins the bundled model directory and the ecosystem offline flags before any import |
 
-### Authorization note — PyInstaller is not installed in the venv
+### Authorization note — HISTORICAL; PyInstaller is now present
+
+> **Superseded 2026-09-10 (D-48 / G-08).** `.venv` now reports PyInstaller
+> **6.20.0**, checked directly. The paragraph below describes the state when
+> this file was written and explains the provenance of the *first* artifact,
+> which is worth keeping. It no longer describes the venv.
 
 D-11 pins the dependency set to `document-iq\.venv`, and PyInstaller is **not**
 in it. Installing it needs Alex's authorization, which had not been given when

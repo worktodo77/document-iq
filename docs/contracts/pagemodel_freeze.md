@@ -1,5 +1,14 @@
 # Sprint-1 Contract Freeze — `src/dociq/contracts.py`
 
+> **HISTORICAL ORIGIN DOCUMENT — the version below is 1.0.0; the contract is now
+> 2.2.0.** Banner added 2026-09-10 per D-48 (G-07). This records what was frozen
+> on day one and why, which is worth keeping. It is *not* the current contract:
+> the profile-based identity prose here describes a system D-38 deleted, and
+> two later amendments (A-22 project-token scoping, A-23 recognition
+> fingerprint) are not reflected in it. The authoritative current value is
+> `CONTRACT_VERSION` in `src/dociq/contracts.py`; the amendments are in the
+> decision register and wired checks are in `tools/check_amendments.py`.
+
 **Frozen:** 2026-07-30, day one of Sprint 1, per the D-10 contract-first rule.
 **Contract version:** 1.0.0
 **Applies to:** Track A (ingestion spine), Track B (identity & deliverables),
