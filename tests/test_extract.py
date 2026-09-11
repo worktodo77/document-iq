@@ -256,10 +256,14 @@ def test_ocr_disabled_leaves_the_scanned_pages_empty_and_says_so():
     assert any("OCR disabled" in n for n in got.notes)
 
 
-def test_docx_is_one_synthetic_page_with_the_approximation_disclosed():
+def test_docx_is_one_synthetic_page_with_the_layout_approximation_disclosed():
+    # D-50 withdraws the old "DOCX carries no page boundaries" claim: it was
+    # false for the corpus files that DO carry a rendered page break. The
+    # replacement note says something true for every DOCX instead of
+    # denying page breaks exist.
     got = _pages("05_letter.docx")
     assert len(got.pages) == 1 and got.pages[0].kind is PageKind.SYNTHETIC
-    assert any("no page boundaries" in n for n in got.notes)
+    assert any("layout is not reproduced" in n.lower() for n in got.notes)
 
 
 def test_xlsx_is_one_page_per_worksheet():

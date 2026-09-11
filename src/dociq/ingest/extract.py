@@ -181,6 +181,17 @@ M_ATTACH_SKIPPED = "attachment content was not brought in"
 # document holds".
 M_IMAGE_UNREAD = "page image content was not read"
 
+# D-50 (the Word fidelity package). Two markers, not one folded into
+# M_IMAGE_UNREAD, because they answer different questions: one is "this
+# construct was never read at all" (altChunk, a chart, SmartArt, a large
+# picture), the other is "this text WAS read and then deliberately left out
+# of the default view" (a tracked deletion). Keeping them apart means the
+# still-open ruling on whether deleted text should ALSO be shown (D-50 part
+# 8, zero corpus exposure) can change without touching the vocabulary the
+# unread-construct notes key off.
+M_WORD_UNREAD = "Word content was not read"
+M_WORD_TRACKED_DELETION = "tracked deletion(s) were not shown"
+
 FINAL_MARKERS: tuple[str, ...] = (
     M_EML_PARSE,
     M_ATTACH_SKIPPED,
@@ -207,6 +218,10 @@ FINAL_MARKERS: tuple[str, ...] = (
     # re-read the same way reach the same wall. What changes the answer is
     # enabling OCR or installing the models — an operator action, not a retry.
     M_IMAGE_UNREAD,
+    # D-50: the same bytes hold the same unread construct and the same
+    # omitted deletion every time this file is re-read.
+    M_WORD_UNREAD,
+    M_WORD_TRACKED_DELETION,
 )
 
 
@@ -1501,18 +1516,24 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
 
     ocr_by_page: dict[int, _OcrPage] = {}
     need = [i for i, t in enumerate(native) if len(t.strip()) < _NATIVE_TEXT_FLOOR]
+    # D-49/D-50: a scanned page nobody read IS page image content that was
+    # not read, so both notes below carry M_IMAGE_UNREAD — the same marker
+    # the geometry-based (A-24) notes further down already carry. Only the
+    # PREFIX changes; "OCR disabled" and "OCR is unavailable" stay in the
+    # text verbatim, because an existing test asserts the first substring.
     if need and opt.ocr_enabled:
         if not ocr_available():
             notes.append(
-                f"{len(need)} page(s) have no usable text layer and OCR is "
-                f"unavailable: {ocr_models_present()[1]}")
+                f"{M_IMAGE_UNREAD}: {len(need)} page(s) have no usable text "
+                f"layer and OCR is unavailable: {ocr_models_present()[1]}")
         else:
             try:
                 ocr_by_page = _ocr_pdf_pages(raw, need)
             except Exception as exc:
                 notes.append(f"{M_OCR_DOC}: {exc}")
     elif need and not opt.ocr_enabled:
-        notes.append(f"{len(need)} page(s) have no usable text layer; OCR disabled")
+        notes.append(f"{M_IMAGE_UNREAD}: {len(need)} page(s) have no usable "
+                     f"text layer; OCR disabled")
 
     # --- A-24: the page that is BOTH ---------------------------------------
     # The routing above asks one question — does this page have a text layer —
@@ -1712,21 +1733,447 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     return pages, notes
 
 
+##############################################################################
+# DOCX — read at the XML level (D-50)
+##############################################################################
+#
+# python-docx's own ``Paragraph.text`` and ``iter_inner_content`` walk the
+# EDITING model, which is exactly what silently drops content controls,
+# tracked insertions and field results — they show what Word would display
+# with track-changes-off preview and content controls "flattened", neither
+# of which is a promise this codebase can rely on part-by-part. So
+# python-docx is used here for exactly the two things it already solves
+# correctly — confirming the package really is a Word document, and OPC
+# relationship resolution (header/footer parts, external hyperlink targets)
+# — and every character that can reach the page text is read straight off
+# the part XML with lxml instead. What follows is the D-50 build spec,
+# parts 1-9, in one reader that serves the body, every table cell, every
+# text box, every header and footer, and every footnote, endnote and
+# comment — one walker, so a fix to how deleted text is skipped cannot be
+# made in only three of the four places that needed it.
+
+_DOCX_NS = {
+    "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "dgm": "http://schemas.openxmlformats.org/drawingml/2006/diagram",
+}
+
+WORD_LAYOUT_NOTE = (
+    "Word's page layout is not reproduced, including any rendered page "
+    "breaks; this document is emitted as one synthetic page"
+)
+"""D-50 part 7: replaces the old ``"DOCX carries no page boundaries"`` claim,
+which was false for the 43-of-53-corpus files that DO carry a rendered page
+break — Word simply never re-lays out at extraction time to find out where
+one would fall. This wording holds for every DOCX rather than describing one
+class of it, so it never needs to know whether THIS file has a break. Not an
+evidence marker: it is a description of the page model, not a gap in it."""
+
+
+def _local(el) -> str:
+    """``el``'s tag with its namespace stripped.
+
+    A plain string split rather than ``lxml.etree.QName`` because this runs
+    once per element of every text-bearing part: Clark notation is always
+    ``"{uri}local"``, so a ``rsplit`` is exact and does not pay for a QName
+    object on the hottest path in this reader. Local names are unique enough
+    within one OOXML part that comparing them as bare strings reads closer to
+    the spec's own wording ("w:sdt", "w:txbxContent") than a wall of
+    namespace-qualified constants would.
+    """
+    tag = el.tag
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _docx_part_path(target: str) -> str:
+    """An OPC relationship ``Target``, resolved against ``word/`` (every
+    part this reader follows a relationship to — headers, footers,
+    hyperlinks — is itself inside ``word/``), as a zip member name."""
+    import posixpath
+
+    return posixpath.normpath(posixpath.join("word", target))
+
+
+def _docx_rels(zf, part_name: str) -> dict[str, tuple[str, bool]]:
+    """``{r:id: (target, is_external)}`` for the ``.rels`` part belonging to
+    ``part_name`` (e.g. ``"word/header2.xml"`` -> ``"word/_rels/header2.xml.rels"``).
+
+    Absent is ordinary, not corrupt: a part with no relationships of its own
+    (05_letter.docx's body has none; this fixture's footnotes/endnotes/
+    comments parts have none) simply has no ``.rels`` member.
+    """
+    from lxml import etree
+
+    dirname, base = part_name.rsplit("/", 1)
+    rels_path = f"{dirname}/_rels/{base}.rels"
+    if rels_path not in zf.namelist():
+        return {}
+    root = etree.fromstring(zf.read(rels_path))
+    out: dict[str, tuple[str, bool]] = {}
+    for rel in root:
+        rid, target = rel.get("Id"), rel.get("Target")
+        if rid and target:
+            out[rid] = (target, rel.get("TargetMode") == "External")
+    return out
+
+
+class _DocxWalker:
+    """Reads one DOCX package's text-bearing parts (D-50 parts 1-9).
+
+    One instance per file, holding the state every part's walk needs:
+    document.xml's own relationships (for hyperlinks), whether settings.xml
+    asks for even-page headers/footers, the final section's page area (for
+    the large-picture test), the disclosure counters, and which physical
+    header/footer parts have already been emitted (a part can be referenced
+    by more than one section and must still be read only once).
+    """
+
+    def __init__(self, zf):
+        self.zf = zf
+        self.names = set(zf.namelist())
+        self.rels = _docx_rels(zf, "word/document.xml")
+        self.even_and_odd = self._settings_have_even_odd()
+        self.page_area_emu2: float | None = None
+        self.counters = {"altchunk": 0, "chart": 0, "smartart": 0,
+                          "picture": 0, "tracked_del": 0}
+        self._seen_header_parts: set[str] = set()
+        self._seen_footer_parts: set[str] = set()
+
+    def _settings_have_even_odd(self) -> bool:
+        if "word/settings.xml" not in self.names:
+            return False
+        from lxml import etree
+
+        root = etree.fromstring(self.zf.read("word/settings.xml"))
+        return any(_local(el) == "evenAndOddHeaders" for el in root)
+
+    # -- D-50 part 2: one paragraph's inline text, plus any text boxes it
+    #    anchors (D-50 part 3), collected but not inlined ------------------
+
+    def _inline_text(self, p_el, part_rels: dict, in_body: bool
+                     ) -> tuple[str, list[list[str]]]:
+        parts: list[str] = []
+        boxes: list[list[str]] = []
+
+        def walk(node) -> None:
+            for child in node:
+                name = _local(child)
+                if name in ("del", "moveFrom"):
+                    # The default view: insertions read as ordinary text
+                    # (below, by falling through to the generic recursion —
+                    # w:ins is never special-cased), deletions and
+                    # move-froms omitted and counted for disclosure.
+                    self.counters["tracked_del"] += 1
+                    continue
+                if name == "txbxContent":
+                    # Walked as BLOCK content and returned to the caller to
+                    # emit right after this paragraph's own line (D-50 part
+                    # 3) — never inlined into the paragraph's own text.
+                    boxes.append(self._block_lines(list(child), part_rels,
+                                                    in_body=False))
+                    continue
+                if name == "AlternateContent":
+                    # Read Choice only when present, never both: the text
+                    # box in this fixture stores its content verbatim in
+                    # BOTH mc:Choice and mc:Fallback, and reading both would
+                    # double it.
+                    choice = next((c for c in child if _local(c) == "Choice"), None)
+                    fallback = next((c for c in child if _local(c) == "Fallback"), None)
+                    walk(choice if choice is not None else (fallback if fallback is not None else ()))
+                    continue
+                if name == "t":
+                    if child.text:
+                        parts.append(child.text)
+                    continue
+                if name == "tab":
+                    parts.append("\t")
+                    continue
+                if name in ("br", "cr"):
+                    parts.append("\n")
+                    continue
+                if name == "noBreakHyphen":
+                    parts.append("-")
+                    continue
+                if name in ("instrText", "delText"):
+                    continue  # field code / deleted text: excluded by name
+                if name == "hyperlink":
+                    before = len(parts)
+                    walk(child)
+                    display = "".join(parts[before:])
+                    rel = part_rels.get(child.get(_rq("id")))
+                    # An internal w:anchor link has no r:id and so no
+                    # relationship: it adds nothing beyond the display text
+                    # already appended above.
+                    if rel and rel[1] and rel[0] not in display:
+                        parts.append(f" <{rel[0]}>")
+                    continue
+                if name == "drawing":
+                    if in_body:
+                        self._note_drawing(child)
+                    walk(child)  # a text box's txbxContent can be nested here
+                    continue
+                walk(child)  # w:r, w:ins, w:sdt, w:smartTag, w:pPr, ... — transparent
+
+        walk(p_el)
+        return "".join(parts), boxes
+
+    # -- D-50 part 9: chart / SmartArt / large-picture disclosure ----------
+
+    def _note_drawing(self, drawing_el) -> None:
+        """Classify one BODY ``w:drawing`` for disclosure.
+
+        Only called for body drawings (the sole caller gates on
+        ``in_body``), so a header/footer logo is never counted — D-50 part 9
+        keeps those out on the corpus's own evidence that they are logos.
+        """
+        for gd in drawing_el.iter(f"{{{_DOCX_NS['a']}}}graphicData"):
+            uri = gd.get("uri", "")
+            if uri.endswith("/chart"):
+                self.counters["chart"] += 1
+            elif uri == _DOCX_NS["dgm"]:
+                self.counters["smartart"] += 1
+            elif uri.endswith("/picture"):
+                self._note_picture(drawing_el)
+
+    def _note_picture(self, drawing_el) -> None:
+        if not self.page_area_emu2:
+            return  # no pgSz on this file: the share cannot be measured
+        extent = next(drawing_el.iter(f"{{{_DOCX_NS['wp']}}}extent"), None)
+        if extent is None:
+            return
+        try:
+            cx, cy = float(extent.get("cx", 0)), float(extent.get("cy", 0))
+        except (TypeError, ValueError):
+            return
+        if cx > 0 and cy > 0 and (cx * cy) / self.page_area_emu2 >= PHOTO_MIN_IMAGE_AREA_SHARE:
+            self.counters["picture"] += 1
+
+    # -- D-50 part 1 / part 4: the one block walker for body, cells, text
+    #    boxes, headers, footers, footnotes, endnotes and comments --------
+
+    def _block_lines(self, elements, part_rels: dict, *, in_body: bool) -> list[str]:
+        lines: list[str] = []
+        for el in elements:
+            name = _local(el)
+            if name == "p":
+                text, boxes = self._inline_text(el, part_rels, in_body)
+                lines.append(text)
+                for box in boxes:
+                    lines.extend(box)
+            elif name == "tbl":
+                lines.extend(self._table_lines(el, part_rels, in_body))
+            elif name == "sdt":
+                content = next((c for c in el if _local(c) == "sdtContent"), None)
+                if content is not None:
+                    lines.extend(self._block_lines(list(content), part_rels,
+                                                    in_body=in_body))
+            elif name == "customXml":
+                lines.extend(self._block_lines(list(el), part_rels, in_body=in_body))
+            elif name == "altChunk" and in_body:
+                self.counters["altchunk"] += 1
+            # w:sectPr and anything else (bookmarks, proofErr, ...): ignored.
+        return lines
+
+    def _table_lines(self, tbl_el, part_rels: dict, in_body: bool) -> list[str]:
+        rows = []
+        for tr in (c for c in tbl_el if _local(c) == "tr"):
+            cells = [self._cell_text(tc, part_rels, in_body)
+                     for tc in tr if _local(tc) == "tc"]
+            rows.append("\t".join(cells))  # D-50 part 4: row = cells joined by tab
+        return rows
+
+    def _cell_text(self, tc_el, part_rels: dict, in_body: bool) -> str:
+        tc_pr = next((c for c in tc_el if _local(c) == "tcPr"), None)
+        if tc_pr is not None:
+            vmerge = next((c for c in tc_pr if _local(c) == "vMerge"), None)
+            if vmerge is not None and vmerge.get(_wq("val")) != "restart":
+                # D-50 part 4: a vMerge continuation cell is empty, never a
+                # copy of the cell it continues — whatever its own paragraphs
+                # literally hold.
+                return ""
+        content = [c for c in tc_el if _local(c) != "tcPr"]
+        # D-50 part 4: a cell's lines joined by newline; a nested table (the
+        # FERRET case) is walked in order with the cell's own paragraphs by
+        # the same block walker that reads the body.
+        return "\n".join(self._block_lines(content, part_rels, in_body=in_body))
+
+    # -- D-50 part 5: headers and footers -----------------------------------
+
+    def _section_refs(self, sect_pr) -> tuple[list[str], list[str]]:
+        """This section's header/footer PART NAMES, in priority order:
+        first-page (only when ``w:titlePg`` is present on this section),
+        then default, then even (only when settings.xml carries
+        ``w:evenAndOddHeaders``)."""
+        has_title_pg = any(_local(c) == "titlePg" for c in sect_pr)
+        order = (["first"] if has_title_pg else []) + ["default"] + \
+                (["even"] if self.even_and_odd else [])
+        headers = {c.get(_wq("type")): c.get(_rq("id"))
+                   for c in sect_pr if _local(c) == "headerReference"}
+        footers = {c.get(_wq("type")): c.get(_rq("id"))
+                   for c in sect_pr if _local(c) == "footerReference"}
+        h_parts = [self.rels[headers[t]][0] for t in order
+                   if headers.get(t) and headers[t] in self.rels]
+        f_parts = [self.rels[footers[t]][0] for t in order
+                   if footers.get(t) and footers[t] in self.rels]
+        return h_parts, f_parts
+
+    def read_headers_and_footers(self, body_el) -> tuple[list[str], list[str]]:
+        header_lines: list[str] = []
+        footer_lines: list[str] = []
+        for sect_pr in body_el.iter(_wq("sectPr")):
+            h_targets, f_targets = self._section_refs(sect_pr)
+            for target in h_targets:
+                part = _docx_part_path(target)
+                if part in self._seen_header_parts or part not in self.names:
+                    continue
+                self._seen_header_parts.add(part)
+                header_lines.extend(self._read_hdr_ftr_part(part))
+            for target in f_targets:
+                part = _docx_part_path(target)
+                if part in self._seen_footer_parts or part not in self.names:
+                    continue
+                self._seen_footer_parts.add(part)
+                footer_lines.extend(self._read_hdr_ftr_part(part))
+        return header_lines, footer_lines
+
+    def _read_hdr_ftr_part(self, part_name: str) -> list[str]:
+        from lxml import etree
+
+        root = etree.fromstring(self.zf.read(part_name))
+        part_rels = _docx_rels(self.zf, part_name)
+        return self._block_lines(list(root), part_rels, in_body=False)
+
+    # -- D-50 part 6: footnotes, endnotes, comments -------------------------
+
+    def read_notes(self) -> list[str]:
+        lines = self._read_note_part("word/footnotes.xml", "footnote")
+        lines += self._read_note_part("word/endnotes.xml", "endnote")
+        lines += self._read_comments()
+        return lines
+
+    def _read_note_part(self, part_name: str, tag: str) -> list[str]:
+        if part_name not in self.names:
+            return []
+        from lxml import etree
+
+        root = etree.fromstring(self.zf.read(part_name))
+        part_rels = _docx_rels(self.zf, part_name)
+        out = []
+        for note in (c for c in root if _local(c) == tag):
+            if note.get(_wq("type")) not in (None, "normal"):
+                continue  # separator / continuationSeparator: not real notes
+            text = "\n".join(self._block_lines(list(note), part_rels, in_body=False))
+            out.append(f"[{tag} {note.get(_wq('id'))}] {text}")
+        return out
+
+    def _read_comments(self) -> list[str]:
+        part_name = "word/comments.xml"
+        if part_name not in self.names:
+            return []
+        from lxml import etree
+
+        root = etree.fromstring(self.zf.read(part_name))
+        part_rels = _docx_rels(self.zf, part_name)
+        out = []
+        for c in (c for c in root if _local(c) == "comment"):
+            # w:date is deliberately never read: it is metadata about the
+            # review, not evidence the document asserts, and rendering it
+            # would let a comment's timestamp masquerade as a page's own
+            # first date.
+            text = "\n".join(self._block_lines(list(c), part_rels, in_body=False))
+            out.append(f"[comment by {c.get(_wq('author')) or ''}] {text}")
+        return out
+
+    # -- D-50 part 9: the disclosure notes themselves -----------------------
+
+    def disclosure_notes(self) -> list[str]:
+        c = self.counters
+        notes = []
+        if c["altchunk"]:
+            notes.append(f"{M_WORD_UNREAD}: {c['altchunk']} altChunk(s)")
+        if c["chart"]:
+            notes.append(f"{M_WORD_UNREAD}: {c['chart']} chart(s)")
+        if c["smartart"]:
+            notes.append(f"{M_WORD_UNREAD}: {c['smartart']} SmartArt drawing(s)")
+        if c["picture"]:
+            notes.append(
+                f"{M_WORD_UNREAD}: {c['picture']} picture(s), each covering "
+                f"at least {PHOTO_MIN_IMAGE_AREA_SHARE:.0%} of the page")
+        if c["tracked_del"]:
+            notes.append(f"{M_WORD_TRACKED_DELETION}: {c['tracked_del']}")
+        return notes
+
+
+def _wq(local: str) -> str:
+    return f"{{{_DOCX_NS['w']}}}{local}"
+
+
+def _rq(local: str) -> str:
+    return f"{{{_DOCX_NS['r']}}}{local}"
+
+
 def _extract_docx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], list[str]]:
+    """D-50: every character in the document's text-bearing parts reaches
+    the page text, or is named in a note carrying an evidence marker.
+
+    python-docx opens the package only to confirm it really is one --
+    ``Document(...)`` raises the same way it always did on a corrupt or
+    non-OOXML file. Everything that becomes page text comes from
+    :class:`_DocxWalker` reading the part XML directly; see its docstring
+    and the D-50 build spec (parts 1-9) for why.
+    """
     try:
         import docx  # python-docx
     except ImportError as exc:  # pragma: no cover — declared
         raise ExtractionError("Word support requires 'python-docx'.") from exc
     try:
-        document = docx.Document(io.BytesIO(raw))
-        parts = [p.text for p in document.paragraphs]
-        for table in document.tables:
-            for row in table.rows:
-                parts.append("\t".join(cell.text for cell in row.cells))
+        docx.Document(io.BytesIO(raw))
     except Exception as exc:
         raise ExtractionError(f"Could not read Word document: {exc}") from exc
-    note = "DOCX carries no page boundaries; emitted as one synthetic page"
-    return synthetic_pages(["\n".join(parts)], notes=(note,)), [note]
+
+    try:
+        import zipfile
+
+        from lxml import etree
+
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            doc_root = etree.fromstring(zf.read("word/document.xml"))
+            body_el = next(c for c in doc_root if _local(c) == "body")
+            walker = _DocxWalker(zf)
+
+            # D-50 part 9: page area for the large-picture test, from the
+            # BODY's own (i.e. final) sectPr — the section governing the
+            # last page Word would have rendered. A section break's earlier
+            # sectPr lives inside a paragraph's pPr and is not this one.
+            body_sect_pr = next(
+                (c for c in reversed(list(body_el)) if _local(c) == "sectPr"), None)
+            if body_sect_pr is not None:
+                pg_sz = next((c for c in body_sect_pr if _local(c) == "pgSz"), None)
+                if pg_sz is not None:
+                    try:
+                        w = int(pg_sz.get(_wq("w")))
+                        h = int(pg_sz.get(_wq("h")))
+                        walker.page_area_emu2 = (w * 635.0) * (h * 635.0)
+                    except (TypeError, ValueError):
+                        pass  # unmeasurable: _note_picture disclaims rather than guesses
+
+            body_lines = walker._block_lines(list(body_el), walker.rels, in_body=True)
+            header_lines, footer_lines = walker.read_headers_and_footers(body_el)
+            note_lines = walker.read_notes()
+    except ExtractionError:
+        raise
+    except Exception as exc:
+        raise ExtractionError(f"Could not read Word document: {exc}") from exc
+
+    # D-50 part 5: headers START the page text, footers END it, with no
+    # label lines — the Bates head zone is 3 lines and a label could push a
+    # stamp out of it. Notes (part 6) land after the body and before the
+    # footer, per the same reasoning applied to where they appear at all.
+    all_lines = header_lines + body_lines + note_lines + footer_lines
+    notes = [WORD_LAYOUT_NOTE] + walker.disclosure_notes()
+    return synthetic_pages(["\n".join(all_lines)], notes=tuple(notes)), notes
 
 
 def _xlsx_cell(v) -> str:

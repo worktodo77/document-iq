@@ -257,6 +257,308 @@ def docx(path: Path) -> None:
     _pin_ooxml(path)
 
 
+_WC_NS_ALL = (
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+    'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
+    'xmlns:v="urn:schemas-microsoft-com:vml" '
+    'xmlns:o="urn:schemas-microsoft-com:office:office" '
+    'xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+)
+_WC_W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+_WC_TRACKED_DATE = "2018-05-06T00:00:00Z"
+
+_WC_FOOTNOTES_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    '<w:footnotes ' + _WC_W + '>'
+    '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+    '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+    '<w:footnote w:id="1"><w:p>'
+    '<w:r><w:footnoteRef/></w:r>'
+    '<w:r><w:t xml:space="preserve"> SALAMANDER is the footnote text.</w:t></w:r>'
+    '</w:p></w:footnote>'
+    '</w:footnotes>'
+)
+
+_WC_ENDNOTES_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    '<w:endnotes ' + _WC_W + '>'
+    '<w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>'
+    '<w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote>'
+    '<w:endnote w:id="1"><w:p>'
+    '<w:r><w:endnoteRef/></w:r>'
+    '<w:r><w:t xml:space="preserve"> URCHIN is the endnote text.</w:t></w:r>'
+    '</w:p></w:endnote>'
+    '</w:endnotes>'
+)
+
+_WC_CHART_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+    '<c:chart><c:plotArea><c:layout/></c:plotArea></c:chart>'
+    '</c:chartSpace>'
+)
+
+_WC_ALTCHUNK_HTML = b"<html><body>ALTCHUNK PLACEHOLDER CONTENT</body></html>"
+_WC_OLE_BIN = b"OLE-PLACEHOLDER-BYTES-NOT-A-REAL-COMPOUND-FILE"
+_WC_OLE_IMG = b"EMF-PLACEHOLDER-NOT-A-REAL-IMAGE"
+
+
+def word_constructs_docx(path: Path) -> None:
+    """D-50 fixture: one sentinel word per Word construct the extractor must
+    (or must not) surface. See ``docs/reviews`` / the D-50 build spec for the
+    full sentinel table. Built with python-docx's API where it has one and raw
+    injected OOXML where it does not (content controls, tracked changes,
+    fields, text box, footnotes, endnotes, altChunk, OLE object, chart,
+    rendered page break) -- the same technique ``docx()`` above uses for
+    determinism (``_pin_ooxml``) and the scratchpad ``build_docx.py`` showed
+    for footnote/endnote part injection.
+
+    Never client text (D-12): every sentinel is an invented animal name (or,
+    for the footer stamp, an invented production prefix), chosen so none is a
+    substring of another.
+    """
+    import docx as _docx
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import qn
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    d = _docx.Document()
+    body = d.element.body
+    sect_pr = body.find(qn('w:sectPr'))
+
+    def insert_raw(xml: str) -> None:
+        # Inserted immediately before sectPr, which -- because add_paragraph
+        # and add_table ALSO always land immediately before sectPr -- keeps
+        # every insertion (python-docx or raw) in true call order.
+        sect_pr.addprevious(parse_xml(xml))
+
+    # 1. AARDVARK -- first body paragraph.
+    d.add_paragraph("AARDVARK opens this synthetic construct fixture.")
+
+    # 2. Table: BADGER (gridSpan 2), CARIBOU (vMerge restart), DINGO,
+    #    ELAND (+ nested table holding FERRET).
+    t = d.add_table(rows=2, cols=3)
+    badger_cell = t.cell(0, 0).merge(t.cell(0, 1))
+    badger_cell.text = "BADGER spans two grid columns."
+    caribou_cell = t.cell(0, 2).merge(t.cell(1, 2))
+    caribou_cell.text = "CARIBOU vertical merge restart."
+    t.cell(1, 0).text = "DINGO is the first cell of row two."
+    eland_cell = t.cell(1, 1)
+    eland_cell.text = "ELAND paragraph beside a nested table."
+    nested = eland_cell.add_table(rows=1, cols=1)
+    nested.cell(0, 0).text = "FERRET is the nested table's only cell."
+
+    # 3. GAZELLE -- paragraph after the table; one run carries a rendered
+    #    page break marker.
+    gazelle_p = d.add_paragraph(
+        "GAZELLE follows the table and one run marks a rendered page break.")
+    gazelle_p._p.append(parse_xml('<w:r ' + _WC_W + '><w:lastRenderedPageBreak/></w:r>'))
+
+    # 4. HERON -- paragraph inside a BLOCK content control (body-level w:sdt).
+    insert_raw(
+        '<w:sdt ' + _WC_NS_ALL + '><w:sdtPr><w:id w:val="2001"/></w:sdtPr>'
+        '<w:sdtContent><w:p><w:r><w:t>HERON is inside a block content control.'
+        '</w:t></w:r></w:p></w:sdtContent></w:sdt>')
+
+    # 5. IBEX (inline content control) + JACKAL (tracked ins) + KOALA (tracked
+    #    del) + LYNX (fldSimple cached result) + MARMOT/NARWHAL (complex
+    #    field) -- all in the "next paragraph" after HERON.
+    p5_el = d.add_paragraph()._p
+    p5_el.append(parse_xml(
+        '<w:sdt ' + _WC_NS_ALL + '><w:sdtPr><w:id w:val="2002"/></w:sdtPr>'
+        '<w:sdtContent><w:r><w:t>IBEX</w:t></w:r></w:sdtContent></w:sdt>'))
+    p5_el.append(parse_xml(
+        '<w:ins w:id="2003" w:author="DocIQ fixtures" w:date="' + _WC_TRACKED_DATE
+        + '" ' + _WC_W + '><w:r><w:t>JACKAL</w:t></w:r></w:ins>'))
+    p5_el.append(parse_xml(
+        '<w:del w:id="2004" w:author="DocIQ fixtures" w:date="' + _WC_TRACKED_DATE
+        + '" ' + _WC_W + '><w:r><w:delText>KOALA</w:delText></w:r></w:del>'))
+    p5_el.append(parse_xml(
+        '<w:fldSimple w:instr=" DOCPROPERTY LYNXFIELD " ' + _WC_W
+        + '><w:r><w:t>LYNX</w:t></w:r></w:fldSimple>'))
+    p5_el.append(parse_xml('<w:r ' + _WC_W + '><w:fldChar w:fldCharType="begin"/></w:r>'))
+    p5_el.append(parse_xml(
+        '<w:r ' + _WC_W + '><w:instrText xml:space="preserve"> DOCPROPERTY NARWHAL </w:instrText></w:r>'))
+    p5_el.append(parse_xml('<w:r ' + _WC_W + '><w:fldChar w:fldCharType="separate"/></w:r>'))
+    p5_el.append(parse_xml('<w:r ' + _WC_W + '><w:t>MARMOT</w:t></w:r>'))
+    p5_el.append(parse_xml('<w:r ' + _WC_W + '><w:fldChar w:fldCharType="end"/></w:r>'))
+
+    # 6. OCELOT -- external hyperlink; display text OCELOT, target carries
+    #    PELICAN.
+    p6 = d.add_paragraph()
+    r_id = d.part.relate_to(
+        "https://example.invalid/PELICAN", RT.HYPERLINK, is_external=True)
+    p6._p.append(parse_xml(
+        '<w:hyperlink r:id="' + r_id + '" ' + _WC_NS_ALL + '>'
+        '<w:r><w:t>OCELOT</w:t></w:r></w:hyperlink>'))
+
+    # 7. QUAIL anchors a text box; RAVEN is stored as BOTH mc:Choice
+    #    (wps:txbx) and mc:Fallback (v:textbox), verbatim in each.
+    insert_raw(
+        '<w:p ' + _WC_NS_ALL + '>'
+        '<w:r><w:t>QUAIL anchors the following text box.</w:t></w:r>'
+        '<w:r><mc:AlternateContent>'
+        '<mc:Choice Requires="wps">'
+        '<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="914400" cy="914400"/>'
+        '<wp:docPr id="2" name="TextBox1"/>'
+        '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        '<wps:wsp><wps:cNvSpPr txBox="1"/>'
+        '<wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>'
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>'
+        '<wps:txbx><w:txbxContent><w:p><w:r><w:t>RAVEN is the text box content.</w:t></w:r></w:p></w:txbxContent></wps:txbx>'
+        '<wps:bodyPr/></wps:wsp>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing>'
+        '</mc:Choice>'
+        '<mc:Fallback>'
+        '<w:pict>'
+        '<v:shapetype id="_x0000_t202" coordsize="21600,21600" path="m,l,21600r21600,l21600,xe"/>'
+        '<v:shape id="_x0000_s1027" type="#_x0000_t202" style="width:72pt;height:72pt">'
+        '<v:textbox><w:txbxContent><w:p><w:r><w:t>RAVEN is the text box content.</w:t></w:r></w:p></w:txbxContent></v:textbox>'
+        '</v:shape>'
+        '</w:pict>'
+        '</mc:Fallback>'
+        '</mc:AlternateContent></w:r>'
+        '</w:p>')
+
+    # 8. TAPIR -- footnote reference, endnote reference and a comment range,
+    #    all on one paragraph. The comment date is set explicitly (UTC-aware)
+    #    because python-docx would otherwise stamp the clock at build time.
+    tapir_p = d.add_paragraph(
+        "TAPIR carries a footnote, an endnote and a comment range.")
+    comment = d.add_comment(
+        runs=tapir_p.runs,
+        text="VULTURE flags this passage for review.",
+        author="WALRUS Reviewer",
+        initials="WR",
+    )
+    comment._comment_elm.date = datetime.datetime(
+        2019, 1, 2, 0, 0, 0, tzinfo=datetime.timezone.utc)
+    tapir_p._p.append(parse_xml('<w:r ' + _WC_W + '><w:footnoteReference w:id="1"/></w:r>'))
+    tapir_p._p.append(parse_xml('<w:r ' + _WC_W + '><w:endnoteReference w:id="1"/></w:r>'))
+
+    # 9. altChunk -- unread, disclosed (body-level element, not a paragraph).
+    insert_raw('<w:altChunk r:id="rIdAltChunk" ' + _WC_NS_ALL + '/>')
+
+    # 10. Embedded OLE object -- unread, disclosed.
+    insert_raw(
+        '<w:p ' + _WC_NS_ALL + '><w:r><w:object w:dxaOrig="1440" w:dyaOrig="1440">'
+        '<v:shape id="_x0000_i1025" type="#_x0000_t75" style="width:15pt;height:15pt">'
+        '<v:imagedata r:id="rIdOleImg" o:title=""/>'
+        '</v:shape>'
+        '<o:OLEObject Type="Embed" ProgID="Package" ShapeID="_x0000_i1025" '
+        'DrawAspect="Icon" ObjectID="_1000000001" r:id="rIdOleObj"/>'
+        '</w:object></w:r></w:p>')
+
+    # 11. Chart -- unread, disclosed.
+    insert_raw(
+        '<w:p ' + _WC_NS_ALL + '>'
+        '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="1828800" cy="1828800"/>'
+        '<wp:docPr id="3" name="Chart1"/>'
+        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+        '<c:chart r:id="rIdChart"/>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>')
+
+    # 12. ALPACA -- last body paragraph, after the altChunk, the OLE object
+    #     and the chart.
+    d.add_paragraph(
+        "ALPACA is the last body paragraph, after the altChunk, the OLE "
+        "object and the chart.")
+
+    # 13. Two body pictures (D-50 part 9, stage 2a): one covers >= 25% of the
+    # page (6in x 8in on an 8.5in x 11in page, ~51%) and must be disclosed as
+    # unread; one is far below that (1in x 1in, ~1%) and must not be. Both
+    # are the SAME generated one-pixel PNG -- the disclosure test is about
+    # the PLACED size (wp:extent), not the stored pixel data. Placed after
+    # ALPACA so no position test above moves.
+    from docx.shared import Inches
+    from PIL import Image
+
+    pixel_buf = io.BytesIO()
+    Image.new("RGB", (1, 1), (0, 0, 0)).save(pixel_buf, format="PNG")
+    pixel_png = pixel_buf.getvalue()
+    d.add_picture(io.BytesIO(pixel_png), width=Inches(6), height=Inches(8))
+    d.add_picture(io.BytesIO(pixel_png), width=Inches(1), height=Inches(1))
+
+    # ---- headers / footers -------------------------------------------------
+    section = d.sections[0]
+    section.different_first_page_header_footer = True
+    section.header.paragraphs[0].text = "XERUS default header line."
+    section.first_page_header.paragraphs[0].text = "YAK first-page header line."
+    section.footer.paragraphs[0].text = "ZEBU default footer line one."
+    section.footer.add_paragraph("MNFV 000777")
+
+    d.core_properties.created = FIXED_TIMESTAMP
+    d.core_properties.modified = FIXED_TIMESTAMP
+    d.core_properties.author = "DocIQ fixtures"
+    d.core_properties.last_modified_by = "DocIQ fixtures"
+    d.core_properties.revision = 1
+
+    buf = io.BytesIO()
+    d.save(buf)
+    base = buf.getvalue()
+
+    # ---- rewrite the package: footnotes, endnotes, chart, OLE, altChunk ----
+    # Same technique as ``build_docx.py``: python-docx has no API for any of
+    # these parts, so they are added by hand, with their own Content_Types
+    # overrides/defaults and document.xml.rels relationships.
+    zin = zipfile.ZipFile(io.BytesIO(base))
+    names = zin.namelist()
+    ct = zin.read("[Content_Types].xml").decode("utf-8")
+    rels = zin.read("word/_rels/document.xml.rels").decode("utf-8")
+
+    pfx = "application/vnd.openxmlformats-officedocument.wordprocessingml."
+    add_ct = (
+        '<Override PartName="/word/footnotes.xml" ContentType="' + pfx + 'footnotes+xml"/>'
+        '<Override PartName="/word/endnotes.xml" ContentType="' + pfx + 'endnotes+xml"/>'
+        '<Override PartName="/word/charts/chart1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>'
+        '<Default Extension="bin" '
+        'ContentType="application/vnd.openxmlformats-officedocument.oleObject"/>'
+        '<Default Extension="emf" ContentType="image/x-emf"/>'
+        '<Default Extension="html" ContentType="text/html"/>'
+    )
+    assert "</Types>" in ct
+    ct = ct.replace("</Types>", add_ct + "</Types>")
+
+    rpfx = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+    add_rel = (
+        '<Relationship Id="rIdFootnotes" Type="' + rpfx + 'footnotes" Target="footnotes.xml"/>'
+        '<Relationship Id="rIdEndnotes" Type="' + rpfx + 'endnotes" Target="endnotes.xml"/>'
+        '<Relationship Id="rIdChart" Type="' + rpfx + 'chart" Target="charts/chart1.xml"/>'
+        '<Relationship Id="rIdOleObj" Type="' + rpfx + 'oleObject" Target="embeddings/oleObject1.bin"/>'
+        '<Relationship Id="rIdOleImg" Type="' + rpfx + 'image" Target="media/image_ole.emf"/>'
+        '<Relationship Id="rIdAltChunk" Type="' + rpfx + 'aFChunk" Target="afchunk1.html"/>'
+    )
+    assert "</Relationships>" in rels
+    rels = rels.replace("</Relationships>", add_rel + "</Relationships>")
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for n in names:
+            if n == "[Content_Types].xml":
+                zout.writestr(n, ct)
+            elif n == "word/_rels/document.xml.rels":
+                zout.writestr(n, rels)
+            else:
+                zout.writestr(n, zin.read(n))
+        zout.writestr("word/footnotes.xml", _WC_FOOTNOTES_XML)
+        zout.writestr("word/endnotes.xml", _WC_ENDNOTES_XML)
+        zout.writestr("word/charts/chart1.xml", _WC_CHART_XML)
+        zout.writestr("word/embeddings/oleObject1.bin", _WC_OLE_BIN)
+        zout.writestr("word/media/image_ole.emf", _WC_OLE_IMG)
+        zout.writestr("word/afchunk1.html", _WC_ALTCHUNK_HTML)
+    zin.close()
+
+    _pin_ooxml(path)
+
+
 def xlsx(path: Path) -> None:
     import openpyxl
 
@@ -489,6 +791,7 @@ def _build_corpus(src: Path) -> Path:
     mixed_content_pdf(src / "15_mixed_content_page.pdf")
     empty_page_pdf(src / "04_empty_page.pdf")
     docx(src / "05_letter.docx")
+    word_constructs_docx(src / "16_word_constructs.docx")
     xlsx(src / "06_register.xlsx")
     csv_file(src / "07_ncr_log.csv")
     txt_file(src / "08_daily_log.txt")
