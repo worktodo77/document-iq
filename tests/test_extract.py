@@ -40,6 +40,207 @@ def test_mixed_pdf_routes_page_by_page():
     assert got.pages[0].ocr_conf is None and got.pages[2].ocr_conf is None
 
 
+# ---------------------------------------------------------------------------
+# A-24 (D-48): a page that is BOTH native text and image, not mixed PAGES.
+# ``test_mixed_pdf_routes_page_by_page`` above never touches this case -- it
+# interleaves a native page, a scanned page and a native page, so every page
+# still answers only one question. These assert the page whose native text
+# layer AND embedded image live on the SAME page.
+# ---------------------------------------------------------------------------
+
+
+def test_image_text_never_moves_a_text_layer_line_out_of_the_bates_zone():
+    """A MIXED page's image text must not push the page's own text out of the
+    Bates zone, however many image lines there are.
+
+    Measured before this placement existed: image text APPENDED after the text
+    layer moved a text-layer zone line out of the zone in 13,081 of 15,000
+    randomized layouts. Derived over randomized layouts -- header counts, blank
+    runs, leading whitespace, the stamp at the head, middle, end, or above a
+    page-number line -- rather than three hand-picked pages, because
+    normalization removes and collapses lines, and a hand-picked page would not
+    find the layout where that shifts the head boundary.
+    """
+    import random
+
+    from dociq.identify.bates import BatesZone
+    from dociq.ingest.pagemodel import normalize
+
+    zone = BatesZone()
+
+    def zone_lines(text):
+        return {ln for _, ln in zone.slice_lines(normalize(text))}
+
+    rng = random.Random(20260910)
+    for _ in range(300):
+        lines = []
+        for i in range(rng.randint(0, 5)):
+            lines.append(" " * rng.randint(0, 3) + f"HEADER {i}")
+            if rng.random() < 0.3:
+                lines.append("")
+        for i in range(rng.randint(0, 16)):
+            lines.append(f"body {i}")
+            if rng.random() < 0.2:
+                lines.extend([""] * rng.randint(1, 3))
+        where = rng.choice(["last", "above-page-number", "head", "middle"])
+        if where == "head" and lines:
+            lines.insert(rng.randint(0, min(2, len(lines))), "ABC-0001234")
+        elif where == "middle" and lines:
+            lines.insert(len(lines) // 2, "ABC-0001234")
+        elif where == "above-page-number":
+            lines.extend(["ABC-0001234", "Page 7 of 31"])
+        else:
+            lines.append("ABC-0001234")
+        native = "\n".join(lines)
+        before = zone_lines(native)
+        for k in range(1, 25):
+            image = "\n".join(f"chart region {j} 50,00%" for j in range(k))
+            after = zone_lines(ex._merge_image_text(native, image))
+            assert before <= after, (
+                f"{k} image line(s) moved text-layer line(s) {before - after!r} "
+                f"out of the Bates zone of {native!r}")
+
+
+def test_an_embedded_image_cannot_supply_a_stamp_in_place_of_the_pages_own():
+    """The consequence the placement exists to prevent, asserted directly.
+
+    With image text appended, eight image lines pushed the page's own footer
+    stamp out of the tail zone; a last image line carrying a different stamp (a
+    copy of another exhibit embedded in the page) was then the only stamp in the
+    zone, and it was returned as this page's locator. Measured before the fix:
+    the foreign stamp came back for every k from 8 to 24. A locator that points
+    at a different document is the failure criterion 4 forbids outright.
+
+    With the page's own stamp still in the zone, a foreign one beside it can
+    only make the zone ambiguous, and an ambiguous zone is refused, never
+    guessed.
+    """
+    from dociq.identify.bates import (BatesFormat, BatesZone,
+                                      _confirmed_token_re, _zone_stamp)
+    from dociq.ingest.pagemodel import normalize
+
+    zone = BatesZone()
+    token = _confirmed_token_re(BatesFormat(prefix="ABC", separator="-",
+                                            digit_widths=(7,), suffix=None,
+                                            suffix_sep=""))
+    native = "\n".join(["WEEKLY PROGRESS REPORT", "Report No.7 (01-Jan-2020 to 07-Jan-2020)",
+                        "narrative one", "narrative two", "ABC-0001234"])
+    for k in range(1, 25):
+        image = "\n".join([f"chart {j} 50,00% 1234" for j in range(k - 1)]
+                          + ["Embedded exhibit copy ABC-0009999"])
+        got = _zone_stamp(normalize(ex._merge_image_text(native, image)),
+                          zone, token)
+        assert got != "ABC-0009999", (
+            f"with {k} image line(s) the page's locator became the embedded "
+            "exhibit's stamp")
+
+
+def test_a_mixed_pages_image_lines_are_marked_and_kept_out_of_its_locator_text():
+    """D-49 at the extractor: the lines read from the embedded image are marked,
+    and the locator text is the page's text layer alone."""
+    got = _pages("15_mixed_content_page.pdf")
+    page = got.pages[0]
+    assert page.kind is PageKind.MIXED
+    assert page.image_line_span is not None, "a MIXED page must mark its image lines"
+    start, count = page.image_line_span
+    image_part = "\n".join(page.text.split("\n")[start:start + count])
+    assert "NOTICEOFDELAYNo14" in image_part
+    assert "NOTICEOFDELAYNo14" not in page.locator_text
+    assert "SYNTHETIC CONTRACTOR LTD MONTHLY REPORT LETTERHEAD" in page.locator_text
+
+    off = _pages("15_mixed_content_page.pdf", ex.ExtractOptions(ocr_enabled=False))
+    assert off.pages[0].image_line_span is None
+
+
+def test_a_page_that_is_both_text_and_image_reads_both():
+    """The point of the whole exercise: assert CONTENT, not shape.
+
+    Measured directly against ``tests/fixtures/generated/matter/
+    15_mixed_content_page.pdf``: the recovered words of one drawn line come back
+    fused, with no inter-word spaces -- "NOTICE OF DELAY No 14" reads back as
+    "NOTICEOFDELAYNo14" (the case of "No" preserved). The strings below are
+    asserted space-free to match what actually comes back.
+
+    **This is a FIXTURE artifact, not engine behaviour, and the distinction
+    matters enough to record.** The same fusing appears in the existing,
+    already-green ``02_scanned_instruction.pdf`` ("SITE INSTRUCTION 014" ->
+    "SITEINSTRUCTION014"), and the tempting conclusion is that the shipped OCR
+    path loses word boundaries. It does not. Both fixtures draw their text
+    through ``_image_page``, whose own docstring records the compromise: a
+    default PIL bitmap font, rendered per line into a small tile and scaled up
+    with LANCZOS "legible to OCR without shipping a TTF". That rendering is what
+    defeats word segmentation.
+
+    The counter-evidence is a real page. The same engine, through the same
+    ``_ocr_array``, reading a genuine scanned chart from the acceptance corpus
+    (``CER-1-462.pdf`` page 11) returns a chart title and its axis values with
+    every word correctly spaced. So an assertion here should never be
+    read as a statement about production documents, and this fixture must not
+    be used to measure OCR word accuracy.
+
+    Left as-is rather than "fixed" with a bundled font: the fixture's job is to
+    prove image-region text REACHES the record, and it does that. Changing the
+    rendering would move the fixture corpus hash for a property this test does
+    not test.
+    """
+    got = _pages("15_mixed_content_page.pdf")
+    assert len(got.pages) == 1
+    page = got.pages[0]
+
+    # 1. The mixed-content page's kind is PageKind.MIXED.
+    assert page.kind is PageKind.MIXED
+
+    # 2. The image's text actually reaches the page record.
+    assert "NOTICEOFDELAYNo14" in page.text, (
+        "the image region's OCR text never reached the page record: "
+        + repr(page.text))
+    assert "APPROVED12MARCH2019" in page.text, (
+        "the image region's OCR text never reached the page record: "
+        + repr(page.text))
+
+    # 3. The native text layer is still present on that page.
+    letterhead = "SYNTHETIC CONTRACTOR LTD MONTHLY REPORT LETTERHEAD"
+    assert "CONFIDENTIALITY LEGEND: FOR INTERNAL USE ONLY" in page.text
+    assert letterhead in page.text
+
+    # 4. The native text is NOT duplicated by the OCR-region merge.
+    assert page.text.count(letterhead) == 1, (
+        "the native letterhead was duplicated by the image-region merge: "
+        + repr(page.text))
+
+    # 5. A MIXED page must carry ocr_conf (the contract's own invariant).
+    assert page.ocr_conf is not None
+
+    # 6. A document note discloses the mixed handling.
+    assert any("mixed" in n for n in got.notes), (
+        "no document note discloses the mixed page/image handling: "
+        + repr(got.notes))
+
+
+def test_a_mixed_page_with_ocr_disabled_stays_native_and_discloses_the_unread_image():
+    """Disclosure instead of silence (§ B-3's rule, applied to A-24): with OCR
+    off the image region is never read, so the page must NOT become MIXED and
+    the gap must be named rather than swallowed."""
+    got = _pages("15_mixed_content_page.pdf", ex.ExtractOptions(ocr_enabled=False))
+    assert len(got.pages) == 1
+    page = got.pages[0]
+
+    # 7. The page does not become MIXED, and a note naming M_IMAGE_UNREAD
+    # is emitted.
+    assert page.kind is not PageKind.MIXED
+    assert "SYNTHETIC CONTRACTOR LTD MONTHLY REPORT LETTERHEAD" in page.text
+    assert "NOTICEOFDELAYNo14" not in page.text
+
+    joined = " ".join(got.notes)
+    assert ex.M_IMAGE_UNREAD in joined, (
+        "the unread image was not disclosed at all: " + repr(got.notes))
+
+    # 8. M_IMAGE_UNREAD is correctly classified in the marker vocabulary.
+    assert ex.has_evidence_marker(joined), (
+        "M_IMAGE_UNREAD note does not register as an evidence marker: "
+        + repr(got.notes))
+
+
 def test_empty_page_is_still_a_page():
     got = _pages("04_empty_page.pdf")
     assert [p.page_no for p in got.pages] == [1, 2, 3]

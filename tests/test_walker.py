@@ -28,6 +28,55 @@ def _fast(**kw) -> walker.WalkOptions:
     return walker.WalkOptions(**kw)
 
 
+def test_every_page_and_document_field_survives_the_resume_journal():
+    """A resumed run rebuilds each page from its journal one NAMED field at a
+    time (``walker._page_from_jsonable``). A field that function does not read is
+    silently dropped on resume, and the page comes back with the default.
+
+    Derived from ``dataclasses.fields`` rather than a list of names: every field
+    of both records is given a non-default value here, and the test refuses to
+    run if one is left at its default, so a field added tomorrow is covered the
+    day it is added. The case that prompted it is D-49's ``image_line_span``,
+    whose loss on resume would silently put a MIXED page's image lines back into
+    its Bates zone -- and no end-to-end resume test could notice, because they
+    all run with OCR off and none produces a MIXED page.
+    """
+    import dataclasses
+
+    from dociq.contracts import (Disposition, DocumentRecord, PageKind, PageRecord,
+                                 to_jsonable)
+
+    page = PageRecord(
+        page_no=1, text="letterhead\nNOTICE OF DELAY\nfooter", kind=PageKind.MIXED,
+        ocr_conf=0.9123, ocr_line_count=3, ocr_low_conf_lines=1,
+        bates="MNFV 000391", section="HSE STATISTICS",
+        section_tier=walker.RecognitionTier.OUTLINE, disposition=Disposition.DROP,
+        drop_rule="progress-report:hse-statistics", notes=("a page note",),
+        image_line_span=(1, 1))
+    page.validate()
+    doc = DocumentRecord(
+        doc_id="DIQ-000007", rel_path="a/b.pdf", filename="b.pdf", sha256="0" * 64,
+        size_bytes=123, ext=".pdf", pages=(page,),
+        status=ProcessingStatus.PARTIAL_OCR_FLAGGED, parent_doc_id="DIQ-000001",
+        container_order=2, detected_dates=("2024-07-16",), doc_type="MPR",
+        li_file_no="LI-00001", notes=("a document note",), error="an error")
+
+    for record in (page, doc):
+        for f in dataclasses.fields(record):
+            if f.default is not dataclasses.MISSING:
+                assert getattr(record, f.name) != f.default, (
+                    f"{type(record).__name__}.{f.name} is left at its default, so "
+                    "this test cannot tell whether the journal keeps it")
+
+    rebuilt = walker._doc_from_jsonable(json.loads(json.dumps(to_jsonable(doc))))
+    for f in dataclasses.fields(PageRecord):
+        assert getattr(rebuilt.pages[0], f.name) == getattr(page, f.name), (
+            f"PageRecord.{f.name} did not survive the resume journal")
+    for f in dataclasses.fields(DocumentRecord):
+        assert getattr(rebuilt, f.name) == getattr(doc, f.name), (
+            f"DocumentRecord.{f.name} did not survive the resume journal")
+
+
 def test_scan_is_in_contract_order_and_hashes_everything():
     entries = walker.scan(FIXTURES)
     assert entries == sorted(entries, key=lambda e: (e.rel_path, e.sha256))

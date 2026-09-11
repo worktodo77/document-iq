@@ -434,13 +434,31 @@ def zone_only(doc: DocumentRecord) -> DocumentRecord:
     original first three; the tail takes the last eight, which are the original
     last eight. ``tests/test_bates.py`` asserts it rather than asserting it here
     in prose.
+
+    **A MIXED page is cut from its locator text, and keeps its image lines
+    (D-49).** Stage 3 reads a page's zone from
+    :attr:`dociq.contracts.PageRecord.locator_text` -- the text layer alone -- so
+    that is what is cut. The image lines are carried along after the zone and the
+    span is re-pointed at them. Copying the span over unchanged, as this function
+    once did through ``evolve``, left it pointing into text the reduced page no
+    longer held: on a long page it could strip the page's own stamp out of the
+    reduced zone, and a bounds check cannot see that, because a stale span can
+    still fit inside the shorter text. The image lines stay on the record rather
+    than being dropped so the reduced page is still honestly MIXED; they cost at
+    most one line per image region.
     """
     z = B.BatesZone()
-    pages = tuple(
-        p.evolve(text="\n".join(line for _, line in z.slice_lines(p.text)))
-        for p in doc.pages
-    )
-    return replace(doc, pages=pages)
+    pages = []
+    for p in doc.pages:
+        zone_lines = [line for _, line in z.slice_lines(p.locator_text)]
+        if p.image_line_span is None:
+            pages.append(p.evolve(text="\n".join(zone_lines)))
+            continue
+        start, count = p.image_line_span
+        image_lines = p.text.split("\n")[start:start + count]
+        pages.append(p.evolve(text="\n".join(zone_lines + image_lines),
+                              image_line_span=(len(zone_lines), count)))
+    return replace(doc, pages=tuple(pages))
 
 
 def measure_accuracy(pairs: list[tuple[Path, str, list[str]]],

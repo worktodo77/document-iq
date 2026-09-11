@@ -34,7 +34,6 @@ from dociq.contracts import (
     ContractViolation,
     Disposition,
     DocumentRecord,
-    PageKind,
     RunConfig,
     canonical_json,
     content_hash,
@@ -126,7 +125,7 @@ def _sections_of(doc: DocumentRecord) -> list[dict[str, Any]]:
 
 
 def _document_entry(doc: DocumentRecord) -> dict[str, Any]:
-    ocr_pages = [p for p in doc.pages if p.kind is PageKind.OCR]
+    ocr_pages = [p for p in doc.pages if p.read_by_ocr]
     confs = [p.ocr_conf for p in ocr_pages if p.ocr_conf is not None]
     kinds: dict[str, int] = {}
     for p in doc.pages:
@@ -156,7 +155,7 @@ def _document_entry(doc: DocumentRecord) -> dict[str, Any]:
         # counted here so they leave the review list without leaving the record.
         "ocr_pages_without_usable_text": sum(
             1 for p in doc.pages
-            if p.kind is PageKind.OCR
+            if p.read_by_ocr
             and len(p.text.strip()) < OCR_REVIEW_MIN_CHARS
         ),
         "notes": list(doc.notes),

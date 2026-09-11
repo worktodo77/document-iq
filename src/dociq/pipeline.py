@@ -41,7 +41,6 @@ from dociq.contracts import (
     DocumentRecord,
     IdRegime,
     OmissionSnapshot,
-    PageKind,
     ProcessingStatus,
     ReconciliationRow,
     RunConfig,
@@ -1971,12 +1970,21 @@ def _bates_note(
 
 def ocr_page_count(result: RunResult) -> int:
     """Pages the OCR engine read. Used by the §10 restatement, which has to
-    separate OCR cost from extraction cost rather than quoting one number."""
+    separate OCR cost from extraction cost rather than quoting one number.
+
+    Counts ``PageKind.MIXED`` as well as ``PageKind.OCR`` (amendment A-24),
+    because the engine did read those pages. **That makes it an upper bound on
+    OCR cost, not an exact measure of it:** a MIXED page had only its image
+    regions read, which is cheaper than the whole-page pass an OCR page gets, so
+    quoting this as whole-page OCR work overstates it. Undercounting was the
+    worse error -- it made OCR exposure look smaller than it is -- so the bound
+    errs the other way and says so.
+    """
     return sum(
         1
         for d in result.documents
         for p in d.pages
-        if p.kind is PageKind.OCR
+        if p.read_by_ocr
     )
 
 

@@ -54,8 +54,10 @@ def _request(tmp_path, name="out", profile=None, index=None,
 # The one family the fixture corpus actually exercises. `_scratch`-free and
 # measured rather than assumed: a run over tests/fixtures recognizes exactly two
 # sections — "Blank page" (blank-page) and "Photograph / figure page"
-# (progress-photographs) — both by Tier 3, both offered. Approving this one is
-# what turns 0 dropped pages into 3.
+# (progress-photographs) — both by Tier 3, both offered. Approving this one
+# drops the pages pinned as `_PHOTOGRAPH_PAGES` in tests/test_codex_r2_findings.py.
+# That set is asserted; this comment used to state its size, "0 dropped pages
+# into 3", and went stale unnoticed when fixture 15 made it four (2026-09-10).
 FIXTURE_FAMILY = "progress-photographs"
 
 

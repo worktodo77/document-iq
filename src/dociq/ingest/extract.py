@@ -61,12 +61,12 @@ from ..contracts import (
     ProcessingStatus,
     needs_ocr_review,
 )
-from ..identify.bates import FOOTER_BLOCK_MAX_LINES
+from ..identify.bates import FOOTER_BLOCK_MAX_LINES, BatesZone
 from ..sections.model import SectionSpan
 from ..sections.resolve import resolve_sections
 from ..sections.tier1_outline import spans_from_outline
-from ..sections.tier3_pageclass import PageSignals
-from .pagemodel import M_OCR_BLANK, make_page, synthetic_pages
+from ..sections.tier3_pageclass import PageSignals, PHOTO_MIN_IMAGE_AREA_SHARE
+from .pagemodel import M_OCR_BLANK, make_page, normalize, synthetic_pages
 
 # Tier 1 (§3) — extracted page by page.
 TIER1_EXTENSIONS = {
@@ -170,6 +170,17 @@ M_SECTIONS = "section recognition failed for this document"
 M_EML_PARSE = "email envelope would not parse"
 M_ATTACH_SKIPPED = "attachment content was not brought in"
 
+# A-24. B-3 required a marker on every EXCEPTION path yielding less evidence.
+# The 2026-09-10 fidelity sweep found the larger set it did not cover: paths
+# that yield less evidence WITHOUT raising — a routing decision, a format the
+# extractor never opens, a cell whose value was not stored. Nothing throws, so
+# nothing was marked, and the document reported FULL.
+#
+# This is the vocabulary for that set. The rule it enforces is B-3's, widened
+# from "every exception path" to "every path that yields less evidence than the
+# document holds".
+M_IMAGE_UNREAD = "page image content was not read"
+
 FINAL_MARKERS: tuple[str, ...] = (
     M_EML_PARSE,
     M_ATTACH_SKIPPED,
@@ -192,6 +203,10 @@ FINAL_MARKERS: tuple[str, ...] = (
     # scan, every page is a dead engine — which is exactly what
     # :func:`ocr_yield` is for.
     M_OCR_BLANK,
+    # A-24. FINAL, not transient: the image is still there and the same bytes
+    # re-read the same way reach the same wall. What changes the answer is
+    # enabling OCR or installing the models — an operator action, not a retry.
+    M_IMAGE_UNREAD,
 )
 
 
@@ -224,6 +239,17 @@ def has_evidence_marker(text: str | None) -> bool:
     """
     return has_transient_marker(text) or has_final_marker(text)
 
+
+# A-24 bounds, named and disclosed like every other bound in this module. A page
+# can legitimately carry hundreds of small images (a chart built from sprites, a
+# scanned form with per-field stamps), and one OCR call per image would make a
+# single pathological page cost more than the document. A region below
+# _MIXED_MIN_REGION_PX on either side is smaller than a legible glyph at 200 dpi.
+# Neither bound is silent: whatever they skip sets the page's evidence marker,
+# because "we knew there was image content and did not read it" is the exact
+# condition this amendment exists to disclose.
+_MIXED_MAX_REGIONS = int(os.environ.get("DOCIQ_MIXED_MAX_REGIONS", "24"))
+_MIXED_MIN_REGION_PX = 8
 
 _XLSX_MAX_ROWS = int(os.environ.get("DOCIQ_XLSX_MAX_ROWS", "50000"))
 _CSV_MAX_ROWS = int(os.environ.get("DOCIQ_CSV_MAX_ROWS", "50000"))
@@ -437,20 +463,27 @@ def ocr_yield(documents) -> tuple[int, int]:
     re-labelled ``PHOTO`` before that. Counting kinds would therefore have
     counted zero attempts on precisely the run this exists to catch — measured,
     not reasoned: a dead-engine walk over the scanned fixture yielded one PHOTO
-    page and one EMPTY page and no ``PageKind.OCR`` at all. The three
+    page and one EMPTY page and no ``PageKind.OCR`` at all. The
     disclosures below survive both relabellings, which is why they are the
     thing counted:
 
     * :data:`~dociq.ingest.pagemodel.M_OCR_BLANK` — routed to OCR, recovered
       nothing;
     * :data:`M_OCR_PAGE` — could not even be rasterized or read;
-    * ``PageKind.OCR`` — recovered text, i.e. the attempts that worked.
+    * ``PageKind.OCR`` — recovered text, i.e. the attempts that worked;
+    * ``PageKind.MIXED`` — image regions beside a text layer that recovered
+      text (A-24). Also an attempt that worked, counted through
+      :attr:`~dociq.contracts.PageRecord.read_by_ocr` rather than by kind;
+    * :data:`M_IMAGE_UNREAD` on a PAGE — image regions that could not be read,
+      an attempt that failed. Without it, a dead engine over a production of
+      mixed pages attempts nothing, recovers nothing, and raises no alarm.
     """
     attempted = recovered = 0
     for doc in documents:
         for page in doc.pages:
-            worked = page.kind is PageKind.OCR and page.text.strip()
+            worked = page.read_by_ocr and page.text.strip()
             blank = any(n.startswith(M_OCR_BLANK) or n.startswith(M_OCR_PAGE)
+                        or n.startswith(M_IMAGE_UNREAD)
                         for n in page.notes)
             if not (worked or blank):
                 continue
@@ -687,6 +720,190 @@ def _ocr_pdf_pages(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
                     out[i] = _OcrPage(text=text, confs=tuple(confs))
                 except Exception:
                     out[i] = _OcrPage(failed=True)
+    return out
+
+
+def _pdf_image_rects(page) -> list[tuple[float, float, float, float]]:
+    """Every embedded raster image's box on one page, merged and in reading order.
+
+    Returns plain ``(x0, y0, x1, y1)`` tuples in PDF user space.
+
+    **Overlaps are unioned, and that is load-bearing rather than tidy.**
+    :func:`_page_image_share` records that overlapping images are deliberately
+    NOT de-overlapped there, because its number has to keep agreeing with a
+    published measurement. Here the consequence is different: two overlapping
+    images cropped separately hand the same glyphs to OCR twice, and the page
+    would carry the text twice. Merging first is what actually makes the
+    duplication A-24 exists to avoid impossible, rather than merely unlikely.
+
+    **The order is total.** Sorting on ``(y0, x0)`` alone leaves ties broken by
+    the order PyMuPDF enumerated the page's resources in, which is not a reading
+    order and is not promised to be stable — and an unstable order here would
+    reorder text inside a page between runs, which is a determinism defect in
+    the one product whose headline claim is byte-identical repeat runs. The full
+    box is in the key, so two distinct boxes can never tie.
+    """
+    try:
+        raw_rects = [page.get_image_bbox(info) for info in page.get_images(full=True)]
+    except Exception:
+        return []
+    boxes: list[tuple[float, float, float, float]] = []
+    for r in raw_rects:
+        if r is None or abs(r.get_area()) <= 0:
+            continue
+        boxes.append((min(r.x0, r.x1), min(r.y0, r.y1),
+                      max(r.x0, r.x1), max(r.y0, r.y1)))
+
+    # Union every pair that overlaps, repeatedly, until nothing else merges.
+    merged = True
+    while merged and len(boxes) > 1:
+        merged = False
+        out: list[tuple[float, float, float, float]] = []
+        for b in boxes:
+            for i, a in enumerate(out):
+                if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
+                    out[i] = (min(a[0], b[0]), min(a[1], b[1]),
+                              max(a[2], b[2]), max(a[3], b[3]))
+                    merged = True
+                    break
+            else:
+                out.append(b)
+        boxes = out
+
+    boxes.sort(key=lambda b: (b[1], b[0], b[3], b[2]))
+    return boxes
+
+
+def _merge_image_text(native: str, image: str) -> str:
+    """A MIXED page's text: the text layer's opening lines, then the image text,
+    then the rest of the text layer (amendment A-24).
+
+    **The position protects the page's locator; it is not a claim about reading
+    order.** The Bates zone reads a page's first ``head_lines`` lines and its
+    last ``tail_lines`` lines. Image text first shipped APPENDED after the text
+    layer, and that moved text-layer lines out of the zone. Measured before this
+    placement, over 15,000 randomized layouts after normalization: appending
+    pushed a text-layer zone line out in 13,081 of them. This placement: 0.
+
+    The consequence was not only a lost stamp but a WRONG one. From seven or
+    eight image lines up, a page's own footer stamp left the tail zone, and if
+    an image line carried a different stamp -- a copy of another exhibit
+    embedded in the page -- that foreign stamp was the only one left in the zone
+    and was returned as this page's locator. A locator that points at a
+    different document is the failure criterion 4 forbids outright.
+
+    Inserting after the opening lines keeps every text-layer line in the zone
+    exactly where the Bates search expects it, however many image lines there
+    are. That is now a backstop rather than the rule. D-49 keeps image lines out
+    of every Bates zone read altogether, through
+    :attr:`dociq.contracts.PageRecord.locator_text`, because when the text layer
+    carries NO stamp no placement can stop an embedded exhibit's stamp becoming
+    this page's locator. The placement still protects any reader of raw page
+    text.
+
+    The cost is stated rather than hidden: image text now reads after the
+    letterhead instead of at the end of the page. Neither is true reading order,
+    which would need line positions this extractor does not carry.
+    """
+    return _merge_image_lines(native, image)[0]
+
+
+def _merge_image_lines(native: str, image: str) -> tuple[str, tuple[int, int] | None]:
+    """:func:`_merge_image_text`, and WHERE the image lines landed (D-49).
+
+    One function computes both, because the position is only meaningful if it is
+    the position the text was actually built with. A second function that
+    recomputed the head on its own would be two readings of one decision, and
+    those drift. The span is ``(first line, line count)`` over the returned text,
+    which is already normalized, so :func:`make_page` accepts it.
+    """
+    image_lines = [ln for ln in normalize(image).split("\n") if ln.strip()]
+    if not image_lines:
+        return native, None
+    lines = normalize(native).split("\n") if native.strip() else []
+    head = min(BatesZone().head_lines, len(lines))
+    return ("\n".join(lines[:head] + image_lines + lines[head:]),
+            (head, len(image_lines)))
+
+
+def _ocr_pdf_regions(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
+    """OCR only the IMAGE REGIONS of the given 0-based page indices (A-24).
+
+    These are pages that already have a substantive text layer, so the
+    whole-page pass would re-read glyphs the page already carries correctly and
+    hand the caller two readings of one line to reconcile. Dedup between a
+    native line and its OCR is a similarity judgement — the OCR of a letterhead
+    is *nearly* the native text, never equal to it — and a hand-tuned threshold
+    is exactly the kind of bound this codebase is trying to stop shipping.
+
+    Reading only the area the text layer does not cover makes the duplication
+    impossible by construction instead of filtered afterwards.
+
+    **The page is rendered ONCE and sliced**, for the reason ``_band_tiles``
+    records: a per-region ``get_pixmap`` clip re-decodes the page's embedded
+    image every time, and on this corpus a page can be a 230 MB photograph.
+    """
+    import fitz  # pymupdf
+    import numpy as np
+
+    out: dict[int, _OcrPage] = {}
+    chunk_n = 16
+    pool = _ocr_page_pool()
+    scale = 200.0 / 72.0  # _page_array renders at 200 dpi; PDF user space is pt
+    with fitz.open(stream=raw, filetype="pdf") as doc:
+        idxs = [i for i in pages if 0 <= i < len(doc)]
+        for c0 in range(0, len(idxs), chunk_n):
+            crops: dict[int, list] = {}
+            skipped: dict[int, int] = {}
+            for i in idxs[c0:c0 + chunk_n]:
+                try:
+                    page = doc[i]
+                    rects = _pdf_image_rects(page)
+                    if not rects:
+                        continue
+                    dropped = max(0, len(rects) - _MIXED_MAX_REGIONS)
+                    arr = _page_array(page)
+                    h, w = arr.shape[:2]
+                    tiles = []
+                    for r in rects[:_MIXED_MAX_REGIONS]:
+                        x0 = max(0, min(w, int(round((r[0] - page.rect.x0) * scale))))
+                        y0 = max(0, min(h, int(round((r[1] - page.rect.y0) * scale))))
+                        x1 = max(0, min(w, int(round((r[2] - page.rect.x0) * scale))))
+                        y1 = max(0, min(h, int(round((r[3] - page.rect.y0) * scale))))
+                        if x1 - x0 < _MIXED_MIN_REGION_PX or y1 - y0 < _MIXED_MIN_REGION_PX:
+                            dropped += 1  # smaller than a legible glyph
+                            continue
+                        tiles.append(np.ascontiguousarray(arr[y0:y1, x0:x1]))
+                    if tiles or dropped:
+                        crops[i] = tiles
+                        skipped[i] = dropped
+                except Exception:
+                    out[i] = _OcrPage(failed=True)  # one bad page must not sink the doc
+            futs = {i: [pool.submit(_ocr_array, t) for t in tiles]
+                    for i, tiles in crops.items()}
+            for i, fs in futs.items():
+                texts: list[str] = []
+                confs: list[float] = []
+                failed = False
+                for f in fs:
+                    try:
+                        text, cs = f.result()
+                        if text.strip():
+                            texts.append(text)
+                        confs.extend(cs)
+                    except Exception:
+                        failed = True
+                # `failed` is set when ANY region of the page could not be read,
+                # even if other regions on the same page read fine. An earlier
+                # draft wrote `failed and not texts`, which reported success
+                # whenever anything at all came back — so a page with one
+                # unreadable region among several lost it silently under a
+                # clean status. That is precisely the defect class A-24 exists
+                # to close, reintroduced one layer down, and it is recorded
+                # rather than quietly corrected because the first draft of the
+                # fix made the same mistake as the code it was fixing.
+                out[i] = _OcrPage(text="\n".join(texts), confs=tuple(confs),
+                                  failed=failed or skipped.get(i, 0) > 0)
     return out
 
 
@@ -1297,6 +1514,53 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     elif need and not opt.ocr_enabled:
         notes.append(f"{len(need)} page(s) have no usable text layer; OCR disabled")
 
+    # --- A-24: the page that is BOTH ---------------------------------------
+    # The routing above asks one question — does this page have a text layer —
+    # so a page with an electronically applied letterhead over a photographed
+    # schedule table answers yes and its table is never read. Measured on the
+    # acceptance corpus before this existed: 3,573 pages, 20.15% of the
+    # production, 290 of 298 documents.
+    #
+    # The threshold is Tier 3's own PHOTO_MIN_IMAGE_AREA_SHARE, not a second
+    # bound invented here. Tier 3 already looks at these pages and calls them
+    # "Photograph / figure page — 60% of the page covered by an image". Two
+    # subsystems reading one page disagreed and the one that was right ran
+    # second; agreeing with it is the fix, and a separate constant would only
+    # let them drift apart again.
+    region_by_page: dict[int, _OcrPage] = {}
+    routed = set(need)
+    mixed: list[int] = []
+    try:
+        import fitz  # pymupdf
+
+        with fitz.open(stream=raw, filetype="pdf") as _geom:
+            for i in range(min(n, _geom.page_count)):
+                if i in routed:
+                    continue  # already going to OCR whole-page
+                share, has_image = _page_image_share(_geom[i])
+                if has_image and share >= PHOTO_MIN_IMAGE_AREA_SHARE:
+                    mixed.append(i)
+    except Exception as exc:
+        # Geometry is how this page class is FOUND. If it cannot be measured we
+        # do not know whether any page carries unread image content, and saying
+        # nothing is the failure mode this amendment exists to close.
+        notes.append(f"{M_IMAGE_UNREAD}: image geometry could not be measured "
+                     f"({sanitize_message(str(exc))})")
+    if mixed:
+        if not opt.ocr_enabled:
+            notes.append(f"{M_IMAGE_UNREAD}: {len(mixed)} page(s) carry an image "
+                         f"covering {PHOTO_MIN_IMAGE_AREA_SHARE:.0%} or more of "
+                         f"the page beside their text layer; OCR disabled")
+        elif not ocr_available():
+            notes.append(f"{M_IMAGE_UNREAD}: {len(mixed)} page(s) carry an image "
+                         f"beside their text layer and OCR is unavailable: "
+                         f"{ocr_models_present()[1]}")
+        else:
+            try:
+                region_by_page = _ocr_pdf_regions(raw, mixed)
+            except Exception as exc:
+                notes.append(f"{M_IMAGE_UNREAD}: {sanitize_message(str(exc))}")
+
     # --- D-25: the stamp gets its own recognition, where it can help --------
     # Only pages DocIQ actually OCR'd, and only those whose ordinary reading
     # produced nothing stamp-shaped anywhere in the Bates zone. The trigger is
@@ -1320,9 +1584,13 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     n_ocr_failed = 0
     n_ocr_blank = 0
     n_footer_recovered = 0
+    n_mixed = 0
+    n_region_failed = 0
+    n_region_blank = 0
     for i in range(n):  # strictly by index — never by OCR completion order
         text, kind, confs = native[i], PageKind.NATIVE, None
         page_notes: tuple[str, ...] = ()
+        image_span: tuple[int, int] | None = None
         got = ocr_by_page.get(i)
         if got is not None:
             if got.failed:
@@ -1350,13 +1618,49 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                     confs = (confs or []) + [c for t, c in zip(extra, extra_confs)
                                              if t in keep]
                     n_footer_recovered += 1
+        # --- A-24: merge the image regions this page's text layer did not
+        # account for. Placed after the text layer's opening lines, NOT appended
+        # after it: appending moved the page's own Bates stamp out of the zone
+        # and could leave a foreign stamp from the image as the only one there.
+        # The measurement is on :func:`_merge_image_text`.
+        region = region_by_page.get(i)
+        if region is not None:
+            if region.text.strip():
+                text, image_span = _merge_image_lines(text, region.text)
+                kind = PageKind.MIXED
+                confs = (confs or []) + list(region.confs)
+                n_mixed += 1
+            elif region.failed:
+                # We knew there was image content, tried to read it, and could
+                # not. That is an evidence gap and it says so on the page.
+                page_notes = page_notes + (M_IMAGE_UNREAD,)
+                n_region_failed += 1
+            else:
+                # Read, and there was no text in it. That is a COMPLETE answer,
+                # not a gap — a site photograph carries no words — so it gets a
+                # counted disclosure rather than an evidence marker. Marking it
+                # would flag every genuine photograph in the production as lost
+                # evidence, and a warning that fires on the normal case teaches
+                # an operator to stop reading warnings.
+                n_region_blank += 1
         if i == 0 and photo:
             # The block describes the whole file, so it rides on page 1. When
             # the page also yielded read text the page stays OCR/NATIVE and
             # keeps its confidences — PHOTO is for a page whose only content
             # IS the deterministic block.
             has_read_text = bool(text.strip())
-            text = (photo + "\n" + text) if has_read_text else photo
+            if has_read_text and image_span is not None:
+                # D-49: the block adds lines above the image lines, so their
+                # position moves down by exactly that many. Normalized first,
+                # because make_page refuses a span over text normalization could
+                # still change. Only on a MIXED page, so every other page 1
+                # keeps its bytes.
+                photo_line = normalize(photo)
+                text = photo_line + "\n" + text
+                image_span = (image_span[0] + len(photo_line.split("\n")),
+                              image_span[1])
+            else:
+                text = (photo + "\n" + text) if has_read_text else photo
             if not has_read_text:
                 kind, confs = PageKind.PHOTO, None
                 # The relabelling loses the fact that this page WAS routed to
@@ -1368,12 +1672,24 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                 if got is not None and not got.failed:
                     page_notes = page_notes + (M_OCR_BLANK,)
         pages.append(make_page(i + 1, text, kind, confidences=confs,
-                               conf_threshold=opt.conf_threshold, notes=page_notes))
+                               conf_threshold=opt.conf_threshold, notes=page_notes,
+                               image_line_span=image_span))
     if n_ocr_failed:
         notes.append(f"{n_ocr_failed} page(s) could not be OCR'd; kept as empty pages")
     if n_ocr_blank:
         notes.append(f"{n_ocr_blank} page(s) routed to OCR recovered no text "
                      "(blank page, or nothing the engine could read)")
+    if n_mixed:
+        notes.append(f"{n_mixed} page(s) carried image content beside their own "
+                     f"text layer; the image regions were read separately and "
+                     f"placed after the text layer's opening lines, and are never "
+                     f"read for Bates stamps (page kind 'mixed')")
+    if n_region_failed:
+        notes.append(f"{M_IMAGE_UNREAD}: {n_region_failed} page(s) carry image "
+                     f"content that could not be rasterized or read")
+    if n_region_blank:
+        notes.append(f"{n_region_blank} page(s) carried image content that was "
+                     f"read and contained no text")
     if n_footer_recovered:
         # Disclosed, like every other bound in this module: an operator can see
         # how much of the production's numbering came from the second pass

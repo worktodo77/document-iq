@@ -401,15 +401,24 @@ def test_contract_version_is_the_frozen_one_and_every_bump_is_written_up():
     """
     import pathlib
 
-    assert CONTRACT_VERSION == "2.2.0"
+    assert CONTRACT_VERSION == "2.3.0"
 
     src = pathlib.Path(__file__).parent.parent / "src" / "dociq" / "contracts.py"
     history = src.read_text(encoding="utf-8")
     major, minor, _patch = (int(part) for part in CONTRACT_VERSION.split("."))
+    # DERIVED from the current version, across every series — not a hardcoded
+    # 1.x range. The loop used to read `range(1, 10)` against "1.{m}.0" while
+    # `major` and `minor` were parsed and never used, so it enforced the 1.x
+    # series and nothing else: 2.1.0, 2.2.0 and 2.3.0 were covered only by the
+    # hand-written asserts below, and a bump to 2.4.0 with no write-up would
+    # have passed the very check whose docstring promises it cannot. That is
+    # this sprint's own finding — a rule stated in prose that nothing enforced —
+    # sitting inside the test written to prevent it (A-24).
+    expected: list[str] = [f"1.{m}.0" for m in range(1, 10)]
+    expected += [f"2.{m}.0" for m in range(0, minor + 1)] if major >= 2 else []
     undocumented = [
-        f"1.{m}.0"
-        for m in range(1, 10)
-        if f"\n1.{m}.0 — amendment" not in history
+        v for v in expected
+        if f"\n{v} — amendment" not in history
     ]
     assert not undocumented, (
         f"contract versions bumped with no amendment entry: {undocumented} — "
@@ -429,6 +438,9 @@ def test_contract_version_is_the_frozen_one_and_every_bump_is_written_up():
     assert "2.1.0 " + chr(0x2014) + " amendment A-22" in history, (
         "the amendment that binds an approval to the recognition configuration "
         "it was reviewed against is not written up")
+    assert "2.3.0 " + chr(0x2014) + " amendment A-24" in history, (
+        "the amendment adding PageKind.MIXED — the kind a page needed before "
+        "the router could admit a page is both — is not written up")
 
 
 # ---------------------------------------------------------------------------
@@ -820,7 +832,10 @@ def test_contract_imports_nothing_third_party():
 @pytest.mark.parametrize(
     "enum_cls,expected",
     [
-        (PageKind, {"native", "ocr", "empty", "photo", "synthetic"}),
+        # "mixed" added by A-24 (contract 2.3.0). ADDING a value is MINOR — no
+        # prior run's bytes change, because no prior run could produce it. It is
+        # listed here so that RENAMING it later is still caught.
+        (PageKind, {"native", "ocr", "mixed", "empty", "photo", "synthetic"}),
         (Disposition, {"keep", "drop"}),
         (ProcessingStatus, {"full", "partial-ocr-flagged", "unsupported", "failed"}),
         (IdRegime, {"master-index", "native"}),
@@ -852,8 +867,13 @@ def test_the_screen_and_the_log_cannot_disagree_about_which_pages_need_review():
     audit record — in a tool whose argument is that the log is the auditable
     account of the run.
 
-    Both now call :func:`needs_ocr_review`, so the disagreement is not fixed at
-    two call sites, it is unrepresentable.
+    Both now call :func:`needs_ocr_review`, so the two call sites cannot
+    disagree about the THRESHOLD. That is all this test proves: it exercises the
+    predicate, not the two call sites. It used to say the disagreement was
+    "unrepresentable", and amendment A-24 showed that was not true — the
+    screen's call site added a ``kind is PageKind.OCR`` condition the log never
+    had, so a MIXED page could be flagged in one and absent from the other. The
+    test below exercises both call sites, which is what makes the claim hold.
     """
     page = _ocr_page(0.8473)
     # The boundary that produced the 19: raw is below 85, rounded is not.
@@ -863,6 +883,124 @@ def test_the_screen_and_the_log_cannot_disagree_about_which_pages_need_review():
         "the predicate must decide on the percent it DISPLAYS, or a page is "
         "marked for review beside a rendered '85%'")
     assert needs_ocr_review(_ocr_page(0.844), 85) is True
+
+
+def test_the_screen_and_the_log_flag_the_same_pages_for_every_page_kind():
+    """The claim above, tested where it can actually break: at the two call
+    sites, not at the predicate they share.
+
+    Sprint 4 made the screen (:func:`dociq.gui.view_models._ocr_flags`) and the
+    log (:func:`dociq.emit.log._flagged_pages`) call one predicate, and pinned
+    the predicate. Nothing pinned the call sites, so a condition added at one of
+    them was invisible. The screen had exactly that — it filtered on
+    ``kind is PageKind.OCR`` before asking — which was harmless until A-24 added
+    ``PageKind.MIXED``, and then a low-confidence MIXED page was flagged in the
+    audit record and absent from the screen.
+
+    Derived over EVERY ``PageKind`` rather than a hand-picked pair, and each
+    page carries a confidence whenever the contract accepts one. The next kind
+    that may carry OCR'd text is covered the day it is added, without anyone
+    remembering this test exists.
+    """
+    from dociq.contracts import ContractViolation
+    from dociq.emit.log import _flagged_pages
+    from dociq.gui.view_models import _ocr_flags
+
+    def valid_page(n: int, kind: PageKind) -> PageRecord:
+        for kw in (dict(text="x" * 900 + "\nimage line", ocr_conf=0.70,
+                        ocr_line_count=40, image_line_span=(1, 1)),
+                   dict(text="x" * 900, ocr_conf=0.70, ocr_line_count=40),
+                   dict(text="x" * 900),
+                   dict(text="")):
+            try:
+                page = PageRecord(page_no=n, kind=kind, **kw)  # type: ignore[arg-type]
+                page.validate()
+            except ContractViolation:
+                continue
+            return page
+        raise AssertionError(f"no valid page of kind {kind.value} could be built")
+
+    pages = tuple(valid_page(n, kind) for n, kind in enumerate(PageKind, start=1))
+    result = RunResult(config=RunConfig(source_root="s", output_root="o"),
+                       documents=(doc(pages),))
+    threshold = result.config.ocr_conf_threshold_pct
+    with_conf = [p.kind.value for p in pages if p.ocr_conf is not None]
+
+    in_log = sum(len(_flagged_pages(d, threshold)) for d in result.documents)
+    # Not vacuous: every confidence-bearing page sits at 70% against an 80%
+    # threshold with plenty of text, so the log must flag every one of them. A
+    # comparison of 0 with 0 would pass while measuring nothing.
+    assert in_log == len(with_conf) and in_log > 0, (
+        f"the log flagged {in_log} page(s); kinds carrying a confidence: {with_conf}")
+
+    on_screen = _ocr_flags(result).count
+    assert on_screen == in_log, (
+        f"the screen flags {on_screen} page(s) for review and the log records "
+        f"{in_log}, over one page of every kind; kinds carrying a confidence: "
+        f"{with_conf}")
+
+
+def test_an_image_line_span_is_set_exactly_on_a_mixed_page():
+    """D-49, both directions. A MIXED page with no span would let its image text
+    back into every Bates zone read; a span on any other kind would claim image
+    lines the page never had. Neither may validate. The second half is derived
+    over every other ``PageKind``, so a kind added later is held to it too.
+    """
+    from dociq.contracts import ContractViolation
+
+    text = "letterhead\nNOTICE OF DELAY\nfooter"
+    mixed = PageRecord(page_no=1, text=text, kind=PageKind.MIXED, ocr_conf=0.9,
+                       ocr_line_count=1, image_line_span=(1, 1))
+    mixed.validate()
+    with pytest.raises(ContractViolation, match="image_line_span"):
+        mixed.evolve(image_line_span=None).validate()
+
+    for kind in PageKind:
+        if kind is PageKind.MIXED:
+            continue
+        for kw in (dict(text=text, ocr_conf=0.9, ocr_line_count=1),
+                   dict(text=text), dict(text="")):
+            base = PageRecord(page_no=1, kind=kind, **kw)  # type: ignore[arg-type]
+            try:
+                base.validate()
+            except ContractViolation:
+                continue
+            break
+        else:
+            raise AssertionError(f"no valid {kind.value} page could be built")
+        with pytest.raises(ContractViolation, match="image_line_span"):
+            base.evolve(image_line_span=(0, 1)).validate()
+
+
+def test_an_image_line_span_must_lie_inside_the_page_text():
+    """A span that points outside the page, or is not a (first, count) pair of
+    ints, would remove the wrong lines from the locator text."""
+    from dociq.contracts import ContractViolation
+
+    text = "letterhead\nNOTICE OF DELAY\nfooter"
+    for bad in ((-1, 1), (0, 0), (2, 2), (3, 1), (1,), (1, 1, 1), [1, 1]):
+        page = PageRecord(page_no=1, text=text, kind=PageKind.MIXED, ocr_conf=0.9,
+                          ocr_line_count=1, image_line_span=bad)  # type: ignore[arg-type]
+        with pytest.raises(ContractViolation, match="image_line_span"):
+            page.validate()
+
+
+def test_locator_text_is_the_page_text_less_exactly_its_image_lines():
+    """The locator reads the text layer and nothing else (D-49); for every kind
+    with no image lines it is the page text unchanged."""
+    lines = ["letterhead", "WEEKLY PROGRESS REPORT", "Exhibit copy MNFV 009999",
+             "narrative", "MNFV 000391"]
+    mixed = PageRecord(page_no=1, text="\n".join(lines), kind=PageKind.MIXED,
+                       ocr_conf=0.9, ocr_line_count=1, image_line_span=(2, 1))
+    mixed.validate()
+    assert mixed.locator_text.split("\n") == lines[:2] + lines[3:]
+    assert "MNFV 009999" not in mixed.locator_text
+
+    for kind in PageKind:
+        if kind is PageKind.MIXED:
+            continue
+        page = PageRecord(page_no=1, text="\n".join(lines), kind=kind)
+        assert page.locator_text == page.text
 
 
 def test_a_page_with_nothing_on_it_is_not_sent_for_review():

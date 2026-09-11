@@ -25,7 +25,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Iterable, Mapping, Sequence
 
-CONTRACT_VERSION = "2.2.0"
+CONTRACT_VERSION = "2.3.0"
 """Frozen 2026-07-30 at 1.0.0. Bumped only by the amendment procedure.
 
 1.1.0 — amendments A-01 and A-02, raised by Track C under the stop-the-line
@@ -248,6 +248,43 @@ means "not recorded" — every approval given before this field existed — and
 falls back to the named fields, so an old approval is neither silently widened
 nor silently voided.
 
+2.3.0 — amendment A-24, from Alex's ruling of 2026-09-10 after the extraction
+fidelity sweep. :class:`PageKind` gains ``MIXED``: a page whose text came from
+BOTH its own text layer and from OCR of image content on the same page.
+Additive with a safe default, so MINOR.
+
+Every previous kind describes a page whose text came from ONE place, and the
+routing that assigned them asked one question — does this page have a text
+layer of its own. A page with an electronically applied letterhead over a
+photographed schedule table answered yes, so its table was never read, and
+nothing in the record said so: the page reported ``NATIVE``, the document
+reported ``FULL``, and the page-accounting gate reconciled to zero discrepancy
+because the page WAS counted. Counted is not read.
+
+**Measured before the fix, on the acceptance corpus** (298 documents, 17,732
+pages): 3,573 pages — 20.15% of the production, and 97.0% of every page whose
+image covers a quarter or more of it — were never sent to OCR. 290 of 298
+documents contain at least one. The exhibit is `CER-1-462.pdf` page 11: three
+progress S-curve charts with plan, forecast and actual series, delivered to the
+analyst as the report's letterhead and its page-number line.
+
+The routing now asks whether the page carries image content the text layer does
+not account for, reusing ``PHOTO_MIN_IMAGE_AREA_SHARE`` rather than inventing a
+second bound — the same threshold Tier 3 already uses to call the same page a
+"Photograph / figure page". Two subsystems reading the same page disagreed, and
+the one that was right ran second.
+
+Also under 2.3.0, from Alex's ruling D-49 on 2026-09-10: :class:`PageRecord`
+gains ``image_line_span``, the position of a MIXED page's image lines, and the
+derived :attr:`PageRecord.locator_text`. Still additive with a safe default, and
+folded into this MINOR rather than bumped again because 2.3.0 had not left the
+branch. A-24's first draft let image text reach the Bates zone: measured, a
+page's own footer stamp left the zone once 8 image lines were appended after it,
+and a different stamp on an image line -- a copy of another exhibit -- was then
+returned as the page's locator. Placement fixed the eviction. Only knowing which
+lines came from an image keeps an embedded exhibit's stamp from ever becoming
+this page's locator, and D-49 rules that it never may.
+
 1.9.0 — amendment A-19, extended, from Codex review r2's finding B-2. :class:`OmissionSnapshot`
 gains ``matter_root`` and :func:`matter_key` is added.
 
@@ -281,6 +318,22 @@ class PageKind(str, enum.Enum):
 
     OCR = "ocr"
     """Rasterized and read by the local OCR engine."""
+
+    MIXED = "mixed"
+    """BOTH: the page has its own text layer AND carried image content that was
+    rasterized and read separately (amendment A-24).
+
+    The kind exists because the page model could not previously say this, and
+    the gap was not cosmetic. ``NATIVE`` and ``OCR`` describe a page whose text
+    came from one place, and the routing that assigned them asked one question
+    — does this page have a text layer — so a page with a letterhead over a
+    photographed table answered "yes" and its table was never read. Measured on
+    the acceptance corpus: 3,573 pages, 20.15% of the production.
+
+    A MIXED page carries ``ocr_conf``, because part of its text was OCR'd and
+    §4 Stage 2's threshold is measured over the text the page actually carries.
+    The confidence describes the OCR'd REGIONS only; the native layer has no
+    confidence and needs none."""
 
     EMPTY = "empty"
     """The page exists and carries no recoverable text. It is still a page:
@@ -509,25 +562,114 @@ class PageRecord:
     """Disclosed degradation markers for this page (truncation, undecodable
     region, OCR failure). Disclosure, never silence."""
 
+    image_line_span: tuple[int, int] | None = None
+    """Where this page's IMAGE text sits in :attr:`text`, as ``(first line, line
+    count)``, or ``None`` when none of the page's text was read from an embedded
+    image (amendment A-24, ruled by D-49).
+
+    Set exactly when :attr:`kind` is ``MIXED`` -- enforced by :meth:`validate` in
+    both directions -- because a MIXED page is precisely a page whose text layer
+    and whose image content were read separately and joined. It exists so the
+    join can be taken apart again: a Bates locator may come from the page's own
+    text layer only (D-49), never from a stamp inside an embedded image, which
+    may belong to a different document. :attr:`locator_text` is the page with
+    these lines removed, and it is what every Bates zone read uses.
+
+    The indices count the lines of :attr:`text`. They stay valid because
+    :func:`dociq.ingest.pagemodel.make_page` refuses a span over text that
+    normalization could still change, and no pipeline stage after extraction
+    edits a page's text. One tool does -- the Bates acceptance harness's
+    ``zone_only`` cuts every page down to its zone -- and it carries a MIXED
+    page's image lines along and re-points the span at them, rather than leaving
+    this one pointing into text the reduced page no longer holds (D-49)."""
+
     def evolve(self, **changes: object) -> "PageRecord":
         """Return a copy with fields replaced. The only sanctioned way for a
         later stage to enrich a page."""
         return replace(self, **changes)  # type: ignore[arg-type]
+
+    @property
+    def read_by_ocr(self) -> bool:
+        """True when some or all of this page's text was read by the OCR engine.
+
+        The ONE answer to "was this page OCR'd", added by amendment A-24. Every
+        consumer used to ask it separately, as ``kind is PageKind.OCR`` -- right
+        while each page's text came from one place, and silently wrong once
+        :attr:`PageKind.MIXED` existed. A MIXED page IS OCR'd, and each of those
+        call sites would have skipped it: the screen's review list would have
+        dropped a low-confidence MIXED page that the log still flagged, which is
+        the screen/log disagreement :func:`needs_ocr_review` was written to end.
+
+        Derived from ``kind``, never stored, so it cannot drift from it and is
+        never hashed. The next kind that carries OCR'd text is added HERE, once,
+        rather than rediscovered one call site at a time.
+        """
+        return self.kind in (PageKind.OCR, PageKind.MIXED)
+
+    @property
+    def locator_text(self) -> str:
+        """The text a Bates locator may be read from (D-49).
+
+        Equal to :attr:`text` for every page except a MIXED one, where the lines
+        read from embedded images (:attr:`image_line_span`) are removed. A stamp
+        inside an embedded image may belong to a different document -- a copy of
+        another exhibit reproduced on this page -- and no text can tell the
+        page's own burned-in stamp from a foreign one. Alex ruled that a page's
+        locator comes from its own text layer only; a stamp burned into the image
+        of a page that ALSO has a text layer is therefore missed, which is how
+        every such page behaved before A-24, and a miss is the failure direction
+        this product prefers over a wrong locator.
+
+        Derived, never stored, never hashed.
+        """
+        if self.image_line_span is None:
+            return self.text
+        start, count = self.image_line_span
+        lines = self.text.split("\n")
+        return "\n".join(lines[:start] + lines[start + count:])
 
     def validate(self) -> None:
         """Raise :class:`ContractViolation` if this record is internally
         inconsistent. Cheap; called at every stage boundary."""
         if self.page_no < 1:
             raise ContractViolation(f"page_no must be 1-based, got {self.page_no}")
-        if self.kind is PageKind.OCR:
+        # MIXED joins OCR here (A-24): part of its text was read by the engine,
+        # so it MUST carry a confidence for the same reason an OCR page must —
+        # otherwise the OCR'd half of the page is exempt from §4 Stage 2's
+        # threshold, which is the silence this amendment exists to remove.
+        if self.kind in (PageKind.OCR, PageKind.MIXED):
             if self.ocr_conf is None:
                 raise ContractViolation(
-                    f"page {self.page_no}: OCR page must carry ocr_conf"
+                    f"page {self.page_no}: {self.kind.value} page must carry ocr_conf"
                 )
         elif self.ocr_conf is not None:
             raise ContractViolation(
                 f"page {self.page_no}: ocr_conf set on non-OCR page ({self.kind.value})"
             )
+        # D-49: MIXED <=> image_line_span, both directions. A MIXED page with no
+        # span would let its image text back into every Bates zone read; a span
+        # on any other kind would claim image lines the page never had.
+        if (self.image_line_span is not None) != (self.kind is PageKind.MIXED):
+            raise ContractViolation(
+                f"page {self.page_no}: image_line_span must be set exactly when "
+                f"the page is mixed (kind {self.kind.value}, "
+                f"span {self.image_line_span!r})"
+            )
+        if self.image_line_span is not None:
+            span = self.image_line_span
+            if not (isinstance(span, tuple) and len(span) == 2
+                    and all(isinstance(v, int) for v in span)):
+                raise ContractViolation(
+                    f"page {self.page_no}: image_line_span must be a "
+                    f"(first line, line count) tuple of ints, got {span!r}"
+                )
+            start, count = span
+            n_lines = len(self.text.split("\n"))
+            if start < 0 or count < 1 or start + count > n_lines:
+                raise ContractViolation(
+                    f"page {self.page_no}: image_line_span {span!r} does not lie "
+                    f"inside the page's {n_lines} line(s)"
+                )
         if self.ocr_conf is not None and not (0.0 <= self.ocr_conf <= 1.0):
             raise ContractViolation(
                 f"page {self.page_no}: ocr_conf {self.ocr_conf} outside [0,1]"
@@ -944,12 +1086,23 @@ def recognition_fingerprint(
     half of Codex A-R2-1's lesson. The fingerprint decides; the named fields
     explain.
 
+    **The leading version is part of what is hashed, and it moves when what
+    recognition READS moves.** v2 is amendment A-24: a MIXED page's image text
+    became part of the text section recognition reads, so the same tokens,
+    template and OCR setting can place a page in a different family -- out of
+    the photograph class, or into a class such as a contents page. None of the
+    arguments below changed, so without the version an approval given against v1
+    recognition would match and be applied, silently, to a different set of
+    pages. With it, that approval is refused and the operator reviews it again.
+    This is the one input that is a property of the code rather than of the run,
+    which is why it is a version and not an argument.
+
     Stable across spellings that do not change behavior: tokens are
     canonicalized, and the parts are joined by a separator none of them can
     contain, so `("A","B|C")` and `("A|B","C")` cannot collide.
     """
     parts = (
-        "v1",
+        "v2",
         ",".join(canonical_tokens(project_tokens)),
         template_id or "",
         template_version or "",

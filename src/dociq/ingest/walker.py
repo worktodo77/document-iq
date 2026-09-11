@@ -672,7 +672,15 @@ def _page_from_jsonable(d: dict) -> PageRecord:
         section_tier=(
             RecognitionTier(d["section_tier"]) if d.get("section_tier") else None
         ),
-        drop_rule=d["drop_rule"], notes=tuple(d["notes"]))
+        drop_rule=d["drop_rule"], notes=tuple(d["notes"]),
+        # D-49. `.get` for the same reason as `section_tier` above: a journal
+        # written before the field has no key. Rebuilt as a TUPLE, because the
+        # journal stores it as a list and a list never equals the tuple the page
+        # was built with. A MIXED page that came back without it would put its
+        # image lines back into the Bates zone; the contract refuses that record,
+        # which is the loud failure a missing key has to reach.
+        image_line_span=(tuple(d["image_line_span"])
+                         if d.get("image_line_span") is not None else None))
 
 
 def _doc_from_jsonable(d: dict) -> DocumentRecord:
@@ -1438,7 +1446,7 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
                         1 for r in recs if r.status is ProcessingStatus.FAILED)
                     n_pages += sum(len(r.pages) for r in recs)
                     n_ocr_pages += sum(1 for r in recs for p in r.pages
-                                       if p.kind is PageKind.OCR)
+                                       if p.read_by_ocr)
                     done_n += 1
                 # Watchdog on EXECUTION time only. A future still waiting for a
                 # worker is merely queued, not stuck — ageing those out
@@ -1539,7 +1547,7 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
     # deliverable is a defect, not a rounding difference.
     n_pages = sum(len(d.pages) for d in documents)
     n_ocr_pages = sum(1 for d in documents for p in d.pages
-                      if p.kind is PageKind.OCR)
+                      if p.read_by_ocr)
     # The run-level OCR alarm. Computed HERE, over the final corpus, because
     # this is the only scale at which "every attempt recovered nothing" is
     # visible: per-document notes say "N page(s) routed to OCR recovered no

@@ -64,9 +64,13 @@ from .verify import manifest as mf
 REDUCED_FAMILY = "progress-photographs"
 """The family the self-test corpus actually exercises.
 
-Measured rather than chosen: approving it turns 0 dropped pages into 3 on this
-fixture set. A family the corpus does not contain would make every check below
-vacuous while still reporting PASS."""
+Measured rather than chosen: approving it drops pages on this fixture set, and
+the check below prints how many. A family the corpus does not contain would make
+every check below vacuous while still reporting PASS.
+
+This docstring used to state the count -- "0 dropped pages into 3" -- which
+nothing checked, and it went stale the day fixture 15 added a fourth photograph
+page (2026-09-10). The number that matters is the one the check prints."""
 
 MARKER_FRAGMENT = "===== PAGE"
 
@@ -82,6 +86,11 @@ _EXPECTED = {
     "09_notice.eml": (1, {PageKind.SYNTHETIC}),
     "14_transmittal.eml": (1, {PageKind.SYNTHETIC}),
     "14_transmittal.eml/attached_report.pdf": (2, {PageKind.NATIVE}),
+    # A-24: a page that is BOTH a text layer and an image read separately.
+    # Listed so the diagnostic a colleague runs on their install proves the
+    # routing, the way D-46 made it prove reduction -- a fixture the
+    # selftest extracts but never checks is a feature it cannot vouch for.
+    "15_mixed_content_page.pdf": (1, {PageKind.MIXED}),
 }
 
 
@@ -304,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         gapless = all([p.page_no for p in d.pages] == list(range(1, d.pages_in + 1))
                       for d in result.documents)
         chk.expect(gapless, "page numbering is gapless 1..N in every document")
-        ocr_pages = [p for _, p in pages if p.kind is PageKind.OCR]
+        ocr_pages = [p for _, p in pages if p.read_by_ocr]
         chk.expect(all(p.ocr_conf is not None and p.ocr_line_count > 0
                        for p in ocr_pages),
                    "every OCR page carries a confidence and a line count",

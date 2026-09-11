@@ -1666,3 +1666,69 @@ separator (0x1f) rather than a printable one: with `|` or `,`, a template id of
 `a|b` with version `c` and an id of `a` with version `b|c` produce one
 fingerprint for two different reviews. That collision is tested against both
 printable separators.
+
+## A-24 — a page can be both a text layer and an unread image, and the page model could not say so
+
+**Raised by:** Alex's rulings of 2026-09-10 — D-48 (the page kind) and D-49 (where
+a MIXED page's Bates locator may come from) — after the extraction fidelity sweep.
+**Status:** RAISED, NOT APPLIED. Every part below is built and committed on
+`build/sprint-5`, and each is held by a test that was watched failing before its
+part landed (the gate-by-gate record, with the full suite and selftest over the
+finished tree, is in the decision register under D-49). Flipped to APPLIED, with
+its commit, in the commit after the one that lands it, as A-22 and A-23 were.
+Written before the flip so the file a reviewer is sent to is never behind the
+registry, which is the failure this register's own test exists to catch.
+
+`PageKind` gains `MIXED`; `PageRecord` gains `image_line_span` and the derived
+`read_by_ocr` and `locator_text`. Additive with safe defaults, so
+`CONTRACT_VERSION` moves 2.2.0 → **2.3.0**, once: D-49's field is folded in because
+2.3.0 had not left the branch.
+
+### The case the contract could not express
+
+Every earlier kind describes a page whose text came from ONE place, and the
+routing that assigned them asked one question — does this page have a text layer.
+A page with an electronically applied letterhead over a photographed schedule
+answered yes, and its schedule was never read. Measured on the acceptance corpus
+by a delegated scan whose page total matches the committed artifact exactly:
+**3,573 of 17,732 pages, in 290 of 298 documents**. The page reported `NATIVE`, the
+document reported `FULL`, and page accounting reconciled to zero discrepancy,
+because the page was counted. Counted is not read.
+
+### What it touches, enumerated
+
+* **Routing** reads image geometry against Tier 3's own
+  `PHOTO_MIN_IMAGE_AREA_SHARE`, not a second bound, and OCRs only the image
+  regions, so a text layer is never read twice.
+* **Placement.** Image text sits after the text layer's opening lines. Appended
+  after the text layer, it pushed a page's own footer stamp out of the Bates zone,
+  and from eight image lines up it left a stamp from an embedded exhibit as the
+  only one in the zone, which was then returned as the page's locator.
+* **Locators (D-49).** Every Bates zone read — `detect_candidates`, `_zone_stamp`
+  and `_zone_near_miss` in `identify/bates.py`, and `zone_only` in the acceptance
+  harness — reads `locator_text`, the page without its image lines. A parse-tree
+  test refuses any `.text` read in `identify/bates.py`; `zone_only`, which has to
+  read `.text` to carry the image lines along, is held by a behavioural test.
+* **"Was this page OCR'd"** is asked once, through `read_by_ocr`, by the screen's
+  review list, the log's OCR counts, `ocr_page_count`, `ocr_yield`, the walker's
+  counts and the selftest. The screen had filtered on `kind is PageKind.OCR`
+  before the shared review predicate, so a low-confidence MIXED page was flagged
+  in the log and absent from the screen.
+* **Resume.** `walker._page_from_jsonable` rebuilds a page one named field at a
+  time and now reads `image_line_span`, held by a round-trip test derived from
+  every field of `PageRecord` and `DocumentRecord`.
+* **Recognition.** A MIXED page's image text is part of the text section
+  recognition reads, so the same tokens, template and OCR setting can place a page
+  in a different family than before A-24 — out of the photograph class, and into
+  classes such as a contents page or a schedule table. `recognition_fingerprint`'s
+  format version moved v1 → v2, so an approval given against the old recognition
+  is refused rather than silently applied to a different set of pages.
+
+### Bounds, disclosed
+
+At most `DOCIQ_MIXED_MAX_REGIONS` (24) image regions are read per page, and a
+region under 8 pixels on either side is not read. Whatever either bound skips sets
+the page's `M_IMAGE_UNREAD` marker. A region that is read and holds no text is
+counted in a document note rather than marked: a site photograph has no words,
+and a warning that fires on the normal case teaches an operator to stop reading
+warnings.

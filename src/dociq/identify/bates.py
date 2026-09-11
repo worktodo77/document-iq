@@ -416,7 +416,10 @@ def detect_candidates(
     for doc in sorted(documents, key=document_sort_key):
         key = document_sort_key(doc)
         for page in doc.pages:
-            for line_index, line in z.slice_lines(page.text):
+            # D-49: a page's Bates zone is its text layer. On a MIXED page the
+            # lines read from an embedded image may carry another document's
+            # stamp; locator_text leaves them out, so they cannot propose one.
+            for line_index, line in z.slice_lines(page.locator_text):
                 parsed = _parse_line(line)
                 if parsed is None:
                     continue
@@ -1148,9 +1151,18 @@ def apply_bates_reported(
         pages: list[PageRecord] = []
         changed = False
         for page in doc.pages:
-            stamp = _zone_stamp(page.text, z, token_re)
+            # D-49: read the text layer only. On a MIXED page an embedded image
+            # may carry a different document's stamp, and a zone that saw both
+            # would refuse the page's own stamp as ambiguous -- or, where the page
+            # has no stamp of its own, apply the foreign one.
+            stamp = _zone_stamp(page.locator_text, z, token_re)
+            # Near-miss repair corrects OCR RECOGNITION errors, so it stays gated
+            # on kind OCR on purpose -- deliberately not PageRecord.read_by_ocr. A
+            # MIXED page's own stamp lives in its text layer, which has no
+            # recognition errors to repair; on a MIXED page, repair could only
+            # ever act on image text.
             if stamp is None and near_re is not None and page.kind is PageKind.OCR:
-                got = _zone_near_miss(page.text, z, fmt, near_re)
+                got = _zone_near_miss(page.locator_text, z, fmt, near_re)
                 if got is not None:
                     read, rule = got
                     stamp = fmt.prefix + read[len(read) - _tail_len(fmt, read):]

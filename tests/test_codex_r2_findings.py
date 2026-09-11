@@ -56,8 +56,26 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+_PHOTOGRAPH_PAGES = frozenset({
+    ("generated/matter/02_scanned_instruction.pdf", 1),
+    ("generated/matter/02_scanned_instruction.pdf", 2),
+    ("generated/matter/03_mixed_transmittal.pdf", 2),
+    ("generated/matter/15_mixed_content_page.pdf", 1),
+})
+"""Every page an approved ``progress-photographs`` omission drops from this
+corpus, with OCR off as :func:`_real_run_drops` runs it. Measured 2026-09-10 by
+running that exact configuration, not chosen.
+
+These tests used to assert the COUNT, 3. It went to 4 the day fixture 15 was
+added -- A-24's mixed-content page, whose 96 characters of text layer sit beside
+an image a third of the page tall, which Tier 3 calls a photograph page. A count
+also stays the same when one drop is swapped for another; a scoping test that
+cannot see that is checking shape, not content. The set does not stay the same.
+"""
+
+
 def _approval(project_tokens: tuple[str, ...] = ()) -> ApprovedOmission:
-    """The one family this corpus exercises: approving it drops 3 pages."""
+    """The one family this corpus exercises; the pages it drops are ``_PHOTOGRAPH_PAGES``."""
     return ApprovedOmission(
         family_id="progress-photographs", approved_by="abachowski",
         approved_at="2026-08-19T12:00:00Z", matter="fixtures",
@@ -69,7 +87,14 @@ def _approval(project_tokens: tuple[str, ...] = ()) -> ApprovedOmission:
 
 
 def _real_run(approval: ApprovedOmission):
-    """A real pipeline run. Returns (dropped, effective config)."""
+    """A real pipeline run. Returns (dropped page COUNT, effective config)."""
+    dropped, config = _real_run_drops(approval)
+    return len(dropped), config
+
+
+def _real_run_drops(approval: ApprovedOmission):
+    """A real pipeline run. Returns (the dropped pages as ``(rel_path, page_no)``,
+    effective config). The set, not the count, is what a scoping test compares."""
     out = pathlib.Path(tempfile.mkdtemp(prefix="r2-"))
     try:
         config = RunConfig(source_root=str(FIXTURES), output_root=str(out),
@@ -78,8 +103,10 @@ def _real_run(approval: ApprovedOmission):
             walk=walker.WalkOptions(ocr_enabled=False, resume=False),
             template=PROGRESS_REPORT, approvals=(approval,),
             matter_name="fixtures"))
-        pages = [p for d in outcome.result.documents for p in d.pages]
-        dropped = sum(1 for p in pages if p.disposition is not Disposition.KEEP)
+        dropped = frozenset(
+            (d.rel_path, p.page_no)
+            for d in outcome.result.documents for p in d.pages
+            if p.disposition is not Disposition.KEEP)
         return dropped, outcome.result.config
     finally:
         shutil.rmtree(out, ignore_errors=True)
@@ -127,11 +154,11 @@ def test_b_r2_1_applied_and_refused_scopes_do_not_share_a_run_identity():
     while the code that persists the approval into the hashed configuration was
     not, so the defect lived in the gap between them.
     """
-    applied_drops, applied_config = _real_run(_approval(()))
-    refused_drops, refused_config = _real_run(_approval(("MV32",)))
+    applied_drops, applied_config = _real_run_drops(_approval(()))
+    refused_drops, refused_config = _real_run_drops(_approval(("MV32",)))
 
-    assert applied_drops == 3, applied_drops
-    assert refused_drops == 0, refused_drops
+    assert applied_drops == _PHOTOGRAPH_PAGES, sorted(applied_drops)
+    assert refused_drops == frozenset(), sorted(refused_drops)
     assert applied_config.omissions[0].project_tokens == ()
     assert refused_config.omissions[0].project_tokens == ("MV32",)
     assert run_identity(applied_config) != run_identity(refused_config), (
@@ -316,6 +343,53 @@ def test_an_approval_whose_fingerprint_differs_is_refused():
     assert any("recognition configuration" in w for w in out.warnings), out.warnings
 
 
+def test_an_approval_given_against_pre_a24_recognition_is_refused():
+    """A-24 changed what recognition READS -- a MIXED page's image text joined the
+    text Tier 3 classifies -- without changing any argument to
+    ``recognition_fingerprint``. So the fingerprint's format version moved,
+    v1 -> v2, and an approval carrying a v1 fingerprint is refused rather than
+    applied to pages it was never reviewed against.
+
+    The v1 value is rebuilt here from the v1 recipe, independently of the
+    function under test. A test that asked the function for "the old value" would
+    pass whatever the function did.
+    """
+    import hashlib
+
+    from dociq.contracts import (  # noqa: PLC0415
+        RecognitionTier,
+        canonical_tokens,
+        recognition_fingerprint,
+    )
+    from dociq.sections.apply import apply_sections  # noqa: PLC0415
+    from dociq.sections.model import SectionSpan  # noqa: PLC0415
+    from dociq.sections.normalize import family_key  # noqa: PLC0415
+    from tests.test_codex_r1_findings import _document  # noqa: PLC0415
+
+    v1_parts = ("v1", ",".join(canonical_tokens(())), PROGRESS_REPORT.template_id,
+                PROGRESS_REPORT.version, "ocr")
+    reviewed_before_a24 = hashlib.sha256(
+        "\x1f".join(v1_parts).encode("utf-8")).hexdigest()[:32]
+    run_now = recognition_fingerprint(
+        project_tokens=(), template_id=PROGRESS_REPORT.template_id,
+        template_version=PROGRESS_REPORT.version, ocr_ran=True)
+    assert reviewed_before_a24 != run_now, (
+        "the fingerprint did not move when A-24 changed what recognition reads")
+
+    label = "TABLE OF CONTENTS"
+    span = SectionSpan(label, family_key(label, ()), RecognitionTier.OUTLINE,
+                       1, 1, "the outline")
+    approval = dataclasses.replace(
+        _approval(()), family_id="table-of-contents",
+        recognition=reviewed_before_a24)
+    out = apply_sections(
+        _document(), (span,), template=PROGRESS_REPORT, approvals=(approval,),
+        matter_root=approval.matter_root, project_tokens=(), recognition=run_now)
+    assert out.drops == (), (
+        "an approval given against pre-A-24 recognition dropped pages")
+    assert any("recognition configuration" in w for w in out.warnings), out.warnings
+
+
 def test_a_matching_fingerprint_still_drops():
     """And the fix must remain a scope check rather than an off switch."""
     from dociq.contracts import (  # noqa: PLC0415
@@ -356,12 +430,12 @@ def test_the_recognition_fingerprint_survives_to_the_persisted_snapshot():
         template_version=PROGRESS_REPORT.version, ocr_ran=False)
     approval = dataclasses.replace(_approval(()), recognition=fp)
 
-    dropped, config = _real_run(approval)
+    dropped, config = _real_run_drops(approval)
     assert config.omissions[0].recognition == fp, (
         "the run persisted an empty recognition — the field is on the contract "
         "and the amendment claims it, exactly as project_tokens was when it "
         "shipped unpopulated")
-    assert dropped == 3, "a matching fingerprint must still apply the approval"
+    assert dropped == _PHOTOGRAPH_PAGES, "a matching fingerprint must still apply the approval"
 
 
 def test_a_stale_fingerprint_is_persisted_and_moves_the_identity():
@@ -378,11 +452,11 @@ def test_a_stale_fingerprint_is_persisted_and_moves_the_identity():
         template_version=PROGRESS_REPORT.version, ocr_ran=True)
     assert matching != stale
 
-    applied_drops, applied_cfg = _real_run(
+    applied_drops, applied_cfg = _real_run_drops(
         dataclasses.replace(_approval(()), recognition=matching))
-    refused_drops, refused_cfg = _real_run(
+    refused_drops, refused_cfg = _real_run_drops(
         dataclasses.replace(_approval(()), recognition=stale))
 
-    assert applied_drops == 3 and refused_drops == 0
+    assert applied_drops == _PHOTOGRAPH_PAGES and refused_drops == frozenset()
     assert applied_cfg.omissions[0].recognition != refused_cfg.omissions[0].recognition
     assert run_identity(applied_cfg) != run_identity(refused_cfg)

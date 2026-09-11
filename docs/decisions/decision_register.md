@@ -120,6 +120,399 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-49 — a MIXED page's Bates locator comes from its text layer only (2026-09-10)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-49 | Where a MIXED page's Bates locator may come from | **The text layer only.** Image text on a MIXED page never contributes to that page's Bates zone: not to the stamp applied, not to format detection, not to the matter-prefix census, not to near-miss repair. A stamp burned into the image of a page that also has a text layer is missed, which is how every such page behaved before A-24, and a miss is the direction this product already prefers over a wrong locator. Ruled by Alex over two alternatives: take the text-layer stamp first and fall back to one read from image text, flagged for review (recovers burned-in stamps, but an embedded exhibit can still supply the number, disclosed rather than prevented); and treat image text like any OCR'd text (no further work, and a stampless page that embeds a stamped exhibit takes that exhibit's number as its own locator, with no warning). | 2026-09-10 |
+
+**Status: built and committed on `build/sprint-5`** — see "Built, and what each
+gate showed" at the end of this section. The line that stood here read "ruled, not
+yet built", which was true when it was written.
+
+### Why it had to be asked: what A-24's first draft did to the Bates zone
+
+The zone is a page's first 3 lines and its last 8 (`BatesZone.head_lines`;
+`tail_lines` = `_TAIL_LINES_BASE` 4 + `FOOTER_BLOCK_MAX_LINES` 4). The OCR text
+inside one image region is joined with spaces, so each region adds exactly one
+line. A-24's first draft APPENDED those lines after the text layer. Measured
+against `_zone_stamp`, the function `apply_bates` uses:
+
+| case | measured |
+|---|---|
+| eviction | a text-layer footer stamp leaves the zone at exactly 8 image lines, at 7 if a page-number line follows it; never when the stamp is in the first 3 lines |
+| eviction, plus a different stamp on the last image line | **the foreign stamp is returned as the page's locator**, from 8 image lines up (every k from 8 to 24) |
+| refusal | one image line carrying a different stamp beside the page's own gives `None`; a prefix-less 6-digit format meeting a chart axis (`120000 140000`) gives `None`; ordinary chart text with commas has no effect |
+| the text layer carries NO stamp, an image does | before A-24 `None`; after A-24 **the image's stamp**, whichever placement is used |
+
+The second row is the failure criterion 4 forbids outright — a locator that
+points at a different document — and it was a defect in A-24's first draft, not
+a latent one.
+
+**Placement fixes eviction; it cannot fix the last row.** Placing image text
+after the text layer's opening lines keeps every text-layer zone line in the
+zone however many image lines there are. Over 15,000 randomized layouts after
+normalization — header counts, blank runs, leading whitespace, the stamp at the
+head, middle, end or above a page-number line — appending lost a text-layer zone
+line in **13,081**; the new placement in **0**. But when the text layer carries
+no stamp, placement is irrelevant: the image's stamp is the only one in the zone
+either way, and whether it is the page's own production stamp burned into a scan
+or a copy of another exhibit embedded in the page, no text can tell. Hence the
+question.
+
+**Exposure on the acceptance corpora is zero either way, and that did not decide
+it.** Petrobras carries no Bates stamps at all (D-13), and MNFV is fully scanned,
+so its pages are OCR'd whole and never become MIXED. "The corpus doesn't exercise
+it" selects nothing; the failure that would arrive first on a stamped,
+electronically produced matter is the silent wrong locator.
+
+### What the ruling requires
+
+* **The page record marks which of its lines came from images** — a field folded
+  into A-24, so contract 2.3.0 is not bumped a second time.
+* **Every read of a page's Bates zone reads the text layer.** `identify/bates.py`
+  reads `page.text` in exactly three places — `detect_candidates` (which
+  `propose_format` and `matter_prefixes` both call), and `_zone_stamp` and
+  `_zone_near_miss` inside `apply_bates_reported`. Every other zone function in
+  `src/` is handed text from OCR image tiles, or from pages that are never MIXED.
+
+  **Corrected the same day: that enumeration searched `src/` only, and was
+  incomplete.** A wider sweep found a fourth reader outside it:
+  `tools/bates_acceptance.py:zone_only`, the criterion-4 acceptance harness, which
+  cuts every page down to its zone with `evolve(text=...)` and copies every other
+  field unchanged. It is the only code in the repository that rewrites a page's
+  text after the page is built. On a MIXED page it would have left
+  `image_line_span` pointing into text the reduced page no longer holds, and a
+  bounds check cannot see that, because a stale span can still fit inside the
+  shorter text. Folded into the D-49 build: the harness cuts the locator text and
+  re-points the span at the image lines it carries.
+* **The field survives resume.** `walker._page_from_jsonable` rebuilds a page one
+  named field at a time; a field not read there is dropped on every resumed run,
+  which would silently put image lines back into the zone.
+* **Near-miss repair stays OCR-only on purpose**, and would have under any
+  ruling: a MIXED page's own stamp lives in its text layer, which has no
+  recognition errors to repair, so repair there could only ever act on image
+  text.
+
+### Found on the way
+
+**The screen and the log disagreed about MIXED pages.** `needs_ocr_review` keys
+on `ocr_conf`, not on kind, so it already handled MIXED, and the log calls it
+directly. The screen's call site first filtered on `kind is PageKind.OCR` — a
+second, private definition of "reviewable". Sprint 4's test for the original
+99-versus-80 disagreement said the disagreement was now "unrepresentable", but it
+exercised only the shared predicate, never the two call sites, so nothing could
+see the filter. A new test runs one page of every `PageKind` through both real
+call sites. **Watched RED by full node id before the fix:** "the screen flags 1
+page(s) for review and the log records 2 … kinds carrying a confidence: ['ocr',
+'mixed']".
+
+The fix: one derived property, `PageRecord.read_by_ocr`, which every consumer
+that asked "was this page OCR'd" separately now asks — the screen's review list,
+the log's OCR counts, `ocr_page_count` for §10, `ocr_yield`'s dead-engine alarm,
+the walker's progress counts and the selftest's OCR invariant. The screen's filter
+is deleted rather than extended, because the predicate already rejects every page
+without a confidence. `ocr_page_count` becomes an upper bound on OCR cost rather
+than an exact measure, and its docstring says so: a MIXED page had only its image
+regions read.
+
+**Found, recorded, not fixed here:** the `[PHOTO]` block is prepended to page 1 of
+a photo PDF, which can push a text-layer header stamp out of the head zone. It
+predates A-24 and is the same class of defect. It is not folded into this package;
+it needs its own measurement.
+
+### Built, and what each gate showed (2026-09-10)
+
+**Status, superseding the line at the top of this section: built and committed on
+`build/sprint-5`.** Each part landed as its own validated patch,
+and each gate below had to land on its stated side before the next part ran; a
+test that passed when it should have failed stopped the sequence.
+
+| part | gate | observed |
+|---|---|---|
+| A — the field, `locator_text`, extraction, the tests | 5 new tests must pass | 5 passed |
+| | 4 must fail, for the stated reason | 4 failed: the parse-tree guard named `bates.py` lines 419, 1151 and 1153; the resume round trip returned `image_line_span` as `None` for `(1, 1)` |
+| | contracts, pagemodel and extract test files stay green | 175 passed |
+| B — the three Bates reads, the walker rebuild | those 4 must pass | 4 passed |
+| C1 — the acceptance-harness test, before its fix | must fail | failed: the zone cut produced no candidate where the full page produced `MNFV 000391` |
+| C2 — `zone_only` cuts the locator text | must pass | passed |
+| fingerprint 1 — Codex-r2 tests pin dropped pages; a v1-refusal test | r2 tests pass; the refusal test must fail | passed; failed with one fingerprint on both sides (`dad507bf…`) under v1 |
+| fingerprint 2 — format version v1 → v2 | the refusal test must pass | passed |
+| regression | every touched test file | 277 passed across `test_bates`, `test_walker`, `test_codex_r2_findings`, `test_amendments`, `test_contracts` |
+
+**One gap in that evidence, recorded rather than smoothed over.** Under part A the
+two behavioural Bates tests were reported failing, but their failure messages were
+cut off by an output limit. Their passing after part B — which changed nothing but
+the three Bates reads and the walker line — is what shows they failed for the
+Bates reason. That was inferred, not observed.
+
+Over the finished tree, before a final scrub of quoted corpus text, the full suite
+gave 1,544 passed and 1 skipped (`test_seam_population.py:144`, the RunRequest
+GUI-to-pipeline seam). The scrub then replaced quoted corpus text in `contracts.py`,
+this register and two tests' synthetic strings. The four test modules it touched
+were re-run after it (279 passed), and `test_contracts.py` once more after one
+string the scrub had missed was replaced (89 passed). The selftest over the final
+tree: passed, 76 checks (75 at the start of Sprint 5), 26 pages across 18 documents, outputs byte-identical over 8 runs.
+
+### Also found and fixed in the build
+
+**The recognition fingerprint could not see A-24.** `recognition_fingerprint`
+hashes project tokens, template id and version, and whether OCR ran. A-24 changed
+the text section recognition reads — a MIXED page's image text is now part of it,
+and the S-curve exhibit went from 131 characters to 2,094, past Tier 3's
+300-character limit for a photograph page — without changing any of those inputs.
+An approval given against the old recognition would have matched and been applied,
+silently, to a different set of pages. Leaving the photograph class is the safe
+direction; but a photographed contents page or schedule inside a MIXED page can now
+land in a family it never did. The function's own docstring says a new recognition
+input "joins the arguments here and is enforced the same day". This one is a
+property of the code rather than of a run, so the format version moved v1 → v2 and
+an approval carrying a v1 fingerprint is refused. No persisted approval exists to
+invalidate — no person has yet driven the product (D-46) — so the cost today is nil.
+The refusal test rebuilds the v1 value from the v1 recipe rather than asking the
+function under test for it.
+
+**Three Codex-r2 tests asserted a count that the new fixture changed.** An approved
+`progress-photographs` omission dropped 4 fixture pages, not 3. Measured by running
+those tests' own configuration, the fourth is fixture 15's page: 96 characters of
+text layer beside an image a third of the page tall, OCR off, which Tier 3 calls a
+photograph page. Not an A-24 regression — that page is a photograph page under
+either routing; the corpus grew. The tests now assert WHICH four pages drop,
+because a count also survives one drop being swapped for another.
+
+**A-24 had a registry entry and no prose.** `test_amendments` caught it: the file a
+reviewer is sent to must never lag the registry, which is how A-14, A-16 and A-17
+each shipped. Written, and marked RAISED, NOT APPLIED until the flip.
+
+**Recorded, not fixed:** fixture 15's image reads "NOTICE OF DELAY No 14 / APPROVED
+12 MARCH 2019", and its page is still classified as a photograph page — 96
+characters with OCR off, 134 with its image read — because Tier 3's photograph
+class is a length test: under 300 characters beside a quarter-page image. That is
+Tier 3's rule, unchanged by A-24, and it means an approved photograph omission can
+drop a page whose image carries a notice. It belongs to the taxonomy work, not this
+package.
+
+**Recorded, not fixed — what A-24's disclosure actually reaches.** `M_IMAGE_UNREAD`
+reaches a published `processing_log.json` only as a document note. The evidence-lost
+count it feeds (`documents_evidence_lost`) is written into a log only when a run is
+refused: on a published run `pipeline.run` builds the log before the accounting gate
+computes that count, so `run.accounting_gate` is absent. Page notes reach no
+deliverable, and the screen, the summary PDF and the index show none of it. That is
+the sweep's confirmed disclosure-channel finding, `evidence-tally-never-emitted`; it
+predates A-24 and is not fixed here. Checked against the code rather than assumed:
+the publication path calls `build_log` before `accounting.check`, and only `_abort`
+passes a report.
+
+**Recorded, not fixed — two unmarked notes beside A-24's.** In `_extract_pdf` the
+notes for a scanned page with OCR disabled or unavailable are plain strings with no
+marker, so accounting cannot count them, while the image-region notes A-24 adds do.
+With OCR off, a MIXED page's unread image is counted as lost evidence and a fully
+scanned page's unread text is not. A-24's rule — every path that yields less
+evidence carries a marker — is therefore true of every path A-24 adds and not yet of
+these two. Nothing gates publication on the count and the count reaches no published
+log, so they go with the Word package rather than force another full suite before
+this commit.
+
+**Recorded, not unified — the run summary's review rule.** `emit/summary.py` builds
+its OCR review list with its own inline rule, the rounded confidence against the
+threshold, instead of `needs_ocr_review`. It skips the exclusion that keeps near-blank
+pages off the list, so it can list pages the screen and the log leave off. Left that
+way on purpose: the confirmed finding `dense-page-collapse-filed-as-nothing-to-review`
+says that same exclusion also hides a dense scanned page whose recognition collapsed,
+because the engine drops low-scoring regions before lines are counted and
+`OCR_REVIEW_MIN_LINES` cannot fire. The summary's flagged-page total still counts such
+a page, though its printed list stops at eight. Unifying first would erase that last
+counter-signal, so the two are decided together.
+
+## D-48 — the page that is BOTH, and the rule that only covered exceptions (2026-09-10)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-48 | How the record says a page is both native text and an unread image | **Add `PageKind.MIXED`, contract 2.3.0 (amendment A-24).** Ruled by Alex over three alternatives: a per-page `text_sources` field (larger contract change, two fields describing overlapping things until `PageKind` retires), keeping `kind=NATIVE` and appending OCR inline (the page then reports NATIVE when part of its text was OCR'd, and `ocr_conf` has nowhere honest to live), and routing the whole page to OCR as `kind=OCR` (a page 90% native text labelled OCR, inflating the reported OCR exposure). The alternatives all make the page record assert something false about where its text came from, and provenance being checkable is the product. | 2026-09-10 |
+
+### What was measured, before anything was changed
+
+The 2026-09-09 audit reported that a PDF page with a native header over 40
+characters plus a text-bearing image does not get routed to OCR, from a
+synthetic reproduction. It was reproduced independently and then taken to the
+real corpus, because a synthetic case establishes that a defect exists and says
+nothing at all about whether it matters.
+
+**Provenance of the corpus figures, stated plainly.** The full-corpus scan below
+was run by a delegated agent, not by hand. Two independent checks corroborate
+it: its page total (17,732) matches the committed
+`sections_2026-08-17.json` artifact exactly, which is what establishes it read
+the same corpus whole; and the exhibit page was re-extracted directly, before
+and after the fix, with the output pasted below. The per-page 3,573 tally
+itself has **not** been re-derived independently — it is a delegated
+measurement with a corroborated denominator, which is stronger than a
+projection and weaker than a hand-checked count. Treat it as the former.
+
+**On the acceptance corpus** (`Desktop\Petrobras\Petrobras\Project FIles`, 298
+documents, 17,732 pages — the page count matches
+`docs/verification/artifacts/sections_2026-08-17.json` exactly, so it is the
+same corpus, whole, with zero read errors):
+
+| measured | |
+|---|---|
+| pages whose image covers ≥25% of the page | 3,683 |
+| of those, routed to OCR | 110 |
+| **never sent to OCR, nothing said** | **3,573 — 20.15% of the production** |
+| documents containing at least one such page | **290 of 298 (97.3%)** |
+
+**The exhibit.** `CER-1-462.pdf` page 11, a weekly progress report. Image share
+60%. What the shipped extractor delivered: the report's letterhead block and its
+page-number line, 131 characters. (The text itself is not quoted: the corpus is
+client data, and D-12 permits summary figures only.)
+
+What is actually on the page: three progress S-curve charts, each with plan,
+forecast and actual series. On a delay claim those curves **are** the evidence.
+
+Status `FULL`. Document notes `NONE`. And the Stage-6 page-accounting gate —
+the gate whose job is Principle 1 — reconciled to **zero discrepancy**, because
+the page *was* counted. **Counted is not read**, and the two had never been
+distinguished.
+
+### The boundary, measured rather than restated
+
+Sweeping header length one character at a time: routed at 39 stripped
+characters, not routed at 40. The condition is `len(page.extract_text().strip())
+>= _NATIVE_TEXT_FLOOR`, per page. The reviewers' "more than 40 characters" is
+off by one, in the reassuring direction.
+
+Two further facts neither review stated:
+
+* It is not a "header". It is the page's whole text layer, whatever produced it
+  — letterhead, footer, Bates stamp, page number, or their sum.
+* **Whitespace counts.** `.strip()` removes only the ends. Two glyphs spaced
+  across a page measure 40 characters and suppress OCR for that page forever.
+  Measured: five fully scanned pages carrying `CONFIDENTIAL - SUBJECT TO
+  PROTECTIVE ORDER` (42 chars) plus a Bates number route to OCR **not at all**;
+  shorten the legend to `CONFIDENTIAL` (24 chars) and all five route and the
+  body is recovered. **Applying a protective-order stamp to a production
+  silently blinds the extractor to it.**
+
+### Two subsystems, one page, opposite answers
+
+**Before this amendment**, `_page_image_share()` had exactly one caller:
+`pdf_spans`, which `extract()` invokes *after* `_dispatch` has already finished
+extracting. So the function that measures "is there a substantive image here"
+ran on the same bytes, in the same call tree, and its answer arrived after the
+routing decision was irrevocable. (Line numbers are deliberately not quoted:
+this amendment moves them, and a register entry that pins a line is wrong by
+its next commit. The claim is about call ORDER, which is the part that mattered.)
+
+A-24 adds the second caller — the routing decision itself — which is the whole
+fix.
+
+On the exhibit page it returns 60%, correctly, and Tier 3 uses it to label that
+page **"Photograph / figure page — 60% of the page covered by an image"**. The
+recognizer knew exactly what the page was. The extractor, looking at the same
+page, saw `130 >= 40` and declined to read it.
+
+The fix therefore reuses `PHOTO_MIN_IMAGE_AREA_SHARE` (0.25) rather than
+introducing a second bound. A separate constant would only let the two drift
+apart again.
+
+### Why the suite never caught it, and why that generalizes
+
+`test_mixed_pdf_routes_page_by_page` has existed since Sprint 1, is green, and
+always will be. Its fixture, `03_mixed_transmittal.pdf`, measured:
+
+| page | native chars | images |
+|---|---|---|
+| 1 | 63 | **0** |
+| 2 | 0 | 1 |
+| 3 | 46 | **0** |
+
+Mixed **pages within a file** — never mixed **content within a page**. The
+fixture builder's own docstring calls it "the audit's untested case".
+
+The same assumption is written into `PageKind`'s docstring ("§3 requires mixed
+native/scanned PDFs to be handled page-by-page"), the fixture, the test name and
+the routing line. **Four places agree with each other and all four encode the
+same wrong model.** No review round caught it because it is not a slip; it is a
+definition.
+
+**The class, stated at the confidence it was actually established.** A survey of
+the seven extraction-side test files reported that roughly seven in ten tests
+assert only the SHAPE of extractor output — page counts, enum kinds, note
+presence, a structural prefix — and never that source content survived. **That
+ratio is NOT quoted here as measured.** Its denominator (258) reproduces
+neither the 230 test functions in those files nor the 403 cases pytest collects
+from them, so the figure has no denominator anyone can check and is recorded
+only as the lead that prompted the check.
+
+What IS verified, by reading the three tests directly:
+
+| test | what it asserts | what it never asserts |
+|---|---|---|
+| `test_mixed_pdf_routes_page_by_page` | the three pages' `PageKind` values and `ocr_conf` None-ness | that any page's text is correct |
+| `test_docx_is_one_synthetic_page_with_the_approximation_disclosed` | one page, kind SYNTHETIC, a note containing "no page boundaries" | any content, or its order |
+| `test_xlsx_is_one_page_per_worksheet` | two pages, and that page 0 starts `[sheet: Register]` | that any cell VALUE reached the output |
+
+Each is green, each is well named, and none can fail when the content is gone.
+That is the class, and it is how 1,529 green tests coexisted with silent
+content loss. **Re-deriving the proportion honestly is outstanding work**, not a
+number this entry is entitled to.
+
+Recorded because it cost something: the ratio came from a cheap-tier survey and
+went into a draft of this entry before its denominator was checked. The rule it
+broke is this register's own — state the denominator with every figure — and
+the check that caught it was counting the tests independently rather than
+relaying the number.
+
+### The rule that only covered exceptions
+
+Codex review #1's B-3 required that **every exception path yielding less
+evidence carries a marker**, and built the vocabulary for it —
+`TRANSIENT_MARKERS`, `FINAL_MARKERS`, `has_evidence_marker()`, counted by
+`verify/accounting`.
+
+Every defect this sweep found is a path that yields less evidence **without
+raising**: a routing decision, a format part the extractor never opens, a cell
+whose value was not stored. Nothing throws, so nothing was marked, so the
+document reported `FULL`.
+
+A-24 widens B-3 from *every exception path* to **every path that yields less
+evidence than the document holds**, and adds `M_IMAGE_UNREAD` as the first
+member of that set. The machinery is reused, not reinvented.
+
+### What shipped
+
+* `PageKind.MIXED`; `PageRecord.validate()` and `make_page()` require a
+  confidence on it, for the same reason an OCR page needs one — otherwise the
+  OCR'd half of the page is exempt from §4 Stage 2's threshold, which is the
+  same silence one layer down.
+* Image-aware routing at `_extract_pdf`, on Tier 3's own threshold.
+* `_ocr_pdf_regions()` reads **only the image regions**, never the whole page.
+  A MIXED page already has a text layer better than any OCR of the same glyphs,
+  so a whole-page pass would produce two readings of one line and force a
+  similarity judgement to reconcile them — the OCR of a letterhead is *nearly*
+  the native text and never equal to it. Reading only what the text layer does
+  not cover makes duplication **impossible by construction** rather than
+  filtered by a tuned threshold.
+* The page is rendered **once and sliced**, for the reason `_band_tiles`
+  records: a per-region `get_pixmap` clip re-decodes the page's embedded image
+  every time, and on this corpus a page can be a 230 MB photograph. An earlier
+  build did that and its acceptance run was killed at over an hour and a half.
+* Disclosure on every branch: OCR disabled, OCR unavailable, geometry
+  unmeasurable, regions unreadable, and regions read that contained no text —
+  the last counted rather than marked, because "we read the image and it has no
+  words" is a complete answer about a site photograph, and a warning that fires
+  on the normal case teaches an operator to stop reading warnings.
+
+**Verified on the exhibit page after the fix:** kind `MIXED`, `ocr_conf`
+0.7781, 131 characters → **2,094**, all three S-curve titles and their plan /
+forecast / actual series present, the letterhead present exactly once, and the
+document now reports `PARTIAL_OCR_FLAGGED` rather than `FULL` because 0.778 is
+below the 0.85 review threshold. It goes to a person, which is the point.
+
+**Consequence to carry:** documents will move from `FULL` to
+`PARTIAL_OCR_FLAGGED` in numbers. The OCR review-flag count Sprint 4 tuned from
+99 to 11 is measured against the old routing and **will change**. It has not
+been re-measured yet; do not quote 11 as current.
+
 ## Sprint-5 kickoff — D-46, and the selftest finally proves the feature (2026-08-19)
 
 | # | Decision | Ruling | Date |

@@ -30,6 +30,113 @@ def stamped(prefix="MNFV", start=391, count=4, sep=" ", width=6):
     return document("production/vol1.pdf", pages)
 
 
+def test_a_stamp_read_from_an_embedded_image_is_never_a_candidate():
+    """D-49. A MIXED page's image lines are not part of its Bates zone, for
+    detection as much as for application: an embedded exhibit's stamp must not
+    even PROPOSE a format, or the operator is asked to confirm a format read off
+    a different document."""
+    from dociq.contracts import PageKind
+
+    mixed = page(1, "Body text for page 1.\nMNFV 000391", kind=PageKind.MIXED,
+                 ocr_conf=0.9, ocr_line_count=1, image_line_span=(1, 1))
+    mixed.validate()
+    assert detect_candidates((document("production/vol1.pdf", (mixed,)),)) == ()
+
+
+def test_a_mixed_pages_own_stamp_is_applied_beside_a_different_one_in_its_image():
+    """D-49's consequence, as the positive case. The page's own stamp sits in its
+    text layer; a copy of another exhibit embedded in the page carries a
+    different one. Reading only the text layer, the zone holds ONE stamp -- the
+    page's own -- so it is applied rather than refused as ambiguous, and it is
+    never replaced by the foreign one."""
+    from dociq.contracts import PageKind
+
+    fmt = propose_format((stamped(),)).format
+    mixed = page(1, "Body text for page 1.\nExhibit copy MNFV 009999\nMNFV 000391",
+                 kind=PageKind.MIXED, ocr_conf=0.9, ocr_line_count=1,
+                 image_line_span=(1, 1))
+    mixed.validate()
+    out = apply_bates((document("production/vol1.pdf", (mixed,)),),
+                      BatesDecision(DecisionStatus.CONFIRMED, fmt))
+    assert out[0].pages[0].bates == "MNFV 000391"
+
+
+def test_no_bates_zone_read_uses_raw_page_text():
+    """The zone reads switched to ``locator_text`` stay switched.
+
+    Pinned by the parse tree rather than by memory. ``identify/bates.py`` read
+    ``page.text`` in exactly three places before D-49, and a fourth added later
+    would put image lines back into a zone with every behavioural test still
+    green, because none of them build a MIXED page unless they set out to.
+    """
+    import ast
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1] / "src" / "dociq"
+           / "identify" / "bates.py")
+    reads = [f"line {node.lineno}"
+             for node in ast.walk(ast.parse(src.read_text(encoding="utf-8")))
+             if isinstance(node, ast.Attribute) and node.attr == "text"]
+    assert not reads, (
+        "identify/bates.py reads `.text` at " + ", ".join(reads)
+        + "; a page's Bates zone must be read from `locator_text` (D-49)")
+
+
+def test_the_acceptance_harness_zone_cut_keeps_a_mixed_pages_image_lines_out_of_its_zone():
+    """``tools/bates_acceptance.zone_only`` must be lossless for what Stage 3
+    reads on a MIXED page too.
+
+    The harness cuts every page down to its Bates zone so one streaming pass can
+    measure criterion 4. It is the only code in the repository that rewrites a
+    page's text after the page is built, and it copied every other field over
+    unchanged -- including ``image_line_span``, which then pointed into text the
+    reduced page no longer held.
+
+    This page is built so a carried-over span does visible harm: eight image
+    lines sit after the head, the page's own stamp is its last text-layer line,
+    and the zone cut keeps eleven lines. A span of (3, 8) carried over onto those
+    eleven lines would remove every tail line, the stamp among them, while still
+    fitting inside the text -- so a bounds check passes it, and only behaviour
+    can catch it. Pinned here behaviourally rather than by the parse-tree guard
+    on ``identify/bates.py``, because this function has to read ``.text`` to
+    carry the image lines along.
+    """
+    import pathlib
+    import sys
+
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
+    import bates_acceptance as BA
+
+    from dociq.contracts import PageKind
+    from dociq.identify.bates import matter_prefixes
+
+    head = ["WEEKLY PROGRESS REPORT", "Report No.7 (01-Jan-2020 to 07-Jan-2020)", "page header"]
+    image = [f"Embedded exhibit copy MNFV 00{9990 + i}" for i in range(8)]
+    rest = [f"narrative line {i}" for i in range(16)] + ["MNFV 000391"]
+    mixed = page(1, "\n".join(head + image + rest), kind=PageKind.MIXED,
+                 ocr_conf=0.9, ocr_line_count=8,
+                 image_line_span=(len(head), len(image)))
+    mixed.validate()
+    doc = document("production/vol1.pdf", (mixed,))
+    reduced = BA.zone_only(doc)
+    for p in reduced.pages:
+        p.validate()
+        assert p.kind is PageKind.MIXED, "the reduced page must stay honestly MIXED"
+
+    def load_bearing(cands):
+        return [(c.sort_key, c.page_no, c.raw, c.format_key, c.number,
+                 c.digit_width) for c in cands]
+
+    fmt = propose_format((stamped(),)).format
+    decision = BatesDecision(DecisionStatus.CONFIRMED, fmt)
+    assert load_bearing(detect_candidates((reduced,))) == \
+        load_bearing(detect_candidates((doc,)))
+    assert matter_prefixes((reduced,)) == matter_prefixes((doc,))
+    assert apply_bates((doc,), decision)[0].pages[0].bates == "MNFV 000391"
+    assert apply_bates((reduced,), decision)[0].pages[0].bates == "MNFV 000391", (
+        "the harness's zone cut lost the page's own stamp")
+
+
 def test_unstamped_matter_proposes_nothing_and_flags_nothing():
     docs = corpus(3)
     assert propose_format(docs) is None

@@ -519,8 +519,11 @@ def _profiled_run(tmp_path, name, profiles):
         write_workbook=False, write_summary_pdf=False, write_package=False))
 
 
-# The one template family the fixture corpus exercises: three pages of it, all
-# placed by Tier 3, all offered. Approving it turns 0 dropped pages into 3.
+# The one template family the fixture corpus exercises: all of its pages placed
+# by Tier 3, all offered. Which pages approving it drops is asserted once, as
+# `_PHOTOGRAPH_PAGES` in tests/test_codex_r2_findings.py; this comment used to
+# state the count, "three pages", and went stale unnoticed when fixture 15 made
+# it four (2026-09-10).
 FIXTURE_FAMILY = "progress-photographs"
 
 

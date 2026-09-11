@@ -86,6 +86,7 @@ def make_page(
     confidences: list[float] | None = None,
     conf_threshold: float = 0.85,
     notes: tuple[str, ...] = (),
+    image_line_span: tuple[int, int] | None = None,
 ) -> PageRecord:
     """Build one validated page record.
 
@@ -95,23 +96,48 @@ def make_page(
     only kind the contract permits to have no ``ocr_conf`` — so deriving it
     here is what keeps an OCR page that recovered nothing from becoming an
     unvalidatable record.
+
+    ``image_line_span`` (D-49) marks where a MIXED page's image lines sit in
+    ``text``, and it is only accepted over text that is ALREADY normalized. A
+    span counted over text that normalization then changes -- a blank run
+    collapsed, a leading blank line stripped -- would point at the wrong lines,
+    and nothing downstream could tell; so it is refused rather than silently
+    shifted. It is dropped only when the page's text normalizes away entirely,
+    because an EMPTY page has no image lines. A span on any other non-MIXED
+    kind is passed through, so the contract refuses it loudly.
     """
     clean = normalize(text)
     extra: tuple[str, ...] = ()
 
-    if kind is PageKind.OCR:
+    if kind in (PageKind.OCR, PageKind.MIXED):
+        # MIXED joins OCR here rather than falling to the native branch because
+        # part of its text WAS read by the engine, and §4 Stage 2's threshold is
+        # measured over the text a page actually carries. A MIXED page that
+        # reported no confidence would be a page whose OCR'd half is exempt from
+        # the confidence gate — the same silence, one layer down (A-24).
         conf, n_lines, n_low = ocr_stats(confidences or [], conf_threshold)
         if not clean:
             # Routed to OCR, recovered nothing. Disclosure, never silence.
+            # MIXED cannot normally land here — it is only assigned to a page
+            # that already had a native text layer — but a page whose entire
+            # text normalizes away is EMPTY whatever route produced it.
             extra = (M_OCR_BLANK,)
             record_kind, record_conf = PageKind.EMPTY, None
         else:
-            record_kind, record_conf = PageKind.OCR, conf
+            record_kind, record_conf = kind, conf
     else:
         n_lines = n_low = 0
         record_conf = None
         record_kind = kind if clean else PageKind.EMPTY
 
+    if image_line_span is not None and clean != text:
+        from ..contracts import ContractViolation
+
+        raise ContractViolation(
+            f"page {page_no}: image_line_span {image_line_span!r} was counted over "
+            "text that normalization changes, so it would point at the wrong lines"
+        )
+    span = None if record_kind is PageKind.EMPTY else image_line_span
     page = PageRecord(
         page_no=page_no,
         text=clean,
@@ -120,6 +146,7 @@ def make_page(
         ocr_line_count=n_lines,
         ocr_low_conf_lines=n_low,
         notes=notes + extra,
+        image_line_span=span,
     )
     page.validate()
     return page

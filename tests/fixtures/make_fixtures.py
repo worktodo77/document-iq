@@ -171,6 +171,55 @@ def mixed_pdf(path: Path) -> None:
     c.save()
 
 
+def mixed_content_pdf(path: Path) -> None:
+    """ONE page carrying BOTH a native text layer and a >=25% image (A-24).
+
+    ``mixed_pdf`` above is mixed PAGES within a file -- native page, scanned
+    page, native page -- and never exercises the case A-24 actually amended: a
+    single page whose native text layer clears ``_NATIVE_TEXT_FLOOR`` (40
+    characters) sits BESIDE an embedded image covering
+    ``PHOTO_MIN_IMAGE_AREA_SHARE`` (0.25) or more of the page. That page's
+    image region is OCR'd separately and the result is appended after the
+    native text, and the page's kind becomes ``PageKind.MIXED``.
+
+    The text is drawn with ``c.drawString`` exactly like ``_text_page``; the
+    image is built with the same PIL approach as ``_image_page`` -- large,
+    high-contrast, plain glyphs, so the fixture exercises the OCR route rather
+    than benchmarks the engine. Both live on ONE page (no ``c.showPage()``
+    between them), and the image is sized and placed so it never overlaps the
+    text drawn above it.
+    """
+    from reportlab.lib.utils import ImageReader
+    from PIL import Image, ImageDraw
+
+    c = _pdf_canvas(path)
+
+    # Native text layer: a confidentiality legend plus a report letterhead,
+    # comfortably over the 40-character routing floor.
+    y = 760
+    for line in ["CONFIDENTIALITY LEGEND: FOR INTERNAL USE ONLY",
+                 "SYNTHETIC CONTRACTOR LTD MONTHLY REPORT LETTERHEAD"]:
+        c.drawString(60, y, line)
+        y -= 18
+
+    # Embedded image, same construction as _image_page: large tiles resized up
+    # for OCR legibility. Placed low on the page (y 40..340) so it never
+    # overlaps the text drawn above (y ~706..760), and sized 530 x 300 pt --
+    # 159,000 sq pt of a 612 x 792 pt letter page, i.e. ~32.8%, comfortably
+    # over PHOTO_MIN_IMAGE_AREA_SHARE (0.25).
+    img = Image.new("L", (1240, 700), 255)
+    d = ImageDraw.Draw(img)
+    yy = 80
+    for line in ["NOTICE OF DELAY No 14", "APPROVED 12 MARCH 2019"]:
+        tile = Image.new("L", (620, 40), 255)
+        ImageDraw.Draw(tile).text((4, 8), line, fill=0)
+        img.paste(tile.resize((1116, 72), Image.LANCZOS), (60, yy))
+        yy += 120
+    c.drawImage(ImageReader(img), 40, 40, width=530, height=300)
+    c.showPage()
+    c.save()
+
+
 def empty_page_pdf(path: Path) -> None:
     """Page 2 is genuinely blank: no text layer and no image, so neither route
     recovers anything. It must still be page 2 of 3."""
@@ -437,6 +486,7 @@ def _build_corpus(src: Path) -> Path:
     native_pdf(src / "01_native_report.pdf")
     scanned_pdf(src / "02_scanned_instruction.pdf")
     mixed_pdf(src / "03_mixed_transmittal.pdf")
+    mixed_content_pdf(src / "15_mixed_content_page.pdf")
     empty_page_pdf(src / "04_empty_page.pdf")
     docx(src / "05_letter.docx")
     xlsx(src / "06_register.xlsx")

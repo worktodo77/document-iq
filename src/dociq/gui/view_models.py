@@ -20,7 +20,6 @@ from dociq.contracts import (
     Disposition,
     IdRegime,
     needs_ocr_review,
-    PageKind,
     ProcessingStatus,
     RunResult,
 )
@@ -135,9 +134,16 @@ def _ocr_flags(result: RunResult) -> FlagGroup:
         # The SAME predicate the log uses. This compared the raw float while
         # the log compared the rounded percent, so the screen said 99 and the
         # audit record said 80 for the same run.
+        #
+        # It also filtered on ``kind is PageKind.OCR`` BEFORE asking the
+        # predicate -- a second, private definition of "reviewable" that the log
+        # never had. Harmless while every OCR'd page was kind OCR; wrong once
+        # A-24 added MIXED, because the log flags a low-confidence MIXED page and
+        # this list would not. The predicate already returns False for any page
+        # without an ``ocr_conf``, so the filter contributed nothing but that
+        # disagreement. One predicate means the call site adds no conditions.
         low = [p for p in doc.pages
-               if p.kind is PageKind.OCR
-               and needs_ocr_review(p, result.config.ocr_conf_threshold_pct)]
+               if needs_ocr_review(p, result.config.ocr_conf_threshold_pct)]
         if not low:
             continue
         total += len(low)

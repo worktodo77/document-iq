@@ -278,3 +278,15 @@ title = "an approval is scoped to recognition inputs one at a time, and the next
 raised_by = "Alex's ruling 2026-08-19, after the Codex B-1 sibling hunt"
 wired_in = { "src/dociq/contracts.py" = ["recognition_fingerprint", "OmissionSnapshot", "CONTRACT_VERSION"], "src/dociq/sections/model.py" = ["ApprovedOmission"], "src/dociq/sections/apply.py" = ["apply_sections"], "src/dociq/adapter.py" = ["set_omission"], "src/dociq/pipeline.py" = ["run"] }
 tests = ["tests/test_codex_r2_findings.py", "tests/test_contracts.py", "tests/test_import_graph.py"]
+
+# A-24 is "raised" while its wiring is still settling, and flips to "applied" in
+# the commit after the one that lands it, as A-22 and A-23 did. Raised entries
+# are not held to `wired_in` by the checker, so the list below is the wiring
+# known today and is re-verified at the flip -- the Bates zone and the
+# read_by_ocr consumers were both still under measurement when this was added.
+[amendment.A-24]
+status = "raised"
+title = "a page can be both a text layer and an unread image, and the page model could not say so"
+raised_by = "Alex's ruling 2026-09-10 (D-48), after the extraction fidelity sweep"
+wired_in = { "src/dociq/contracts.py" = ["PageKind", "PageRecord", "needs_ocr_review", "recognition_fingerprint", "CONTRACT_VERSION"], "src/dociq/ingest/pagemodel.py" = ["make_page"], "src/dociq/ingest/extract.py" = ["M_IMAGE_UNREAD", "_pdf_image_rects", "_ocr_pdf_regions", "_merge_image_text", "_merge_image_lines", "_extract_pdf", "ocr_yield"], "src/dociq/identify/bates.py" = ["detect_candidates", "apply_bates_reported"], "src/dociq/ingest/walker.py" = ["_page_from_jsonable"], "src/dociq/gui/view_models.py" = ["_ocr_flags"], "src/dociq/emit/log.py" = ["_document_entry"], "src/dociq/pipeline.py" = ["ocr_page_count"] }
+tests = ["tests/test_contracts.py", "tests/test_extract.py", "tests/test_bates.py", "tests/test_walker.py", "tests/test_codex_r2_findings.py"]
