@@ -1,11 +1,12 @@
 # Sprint-1 Contract Freeze — `src/dociq/contracts.py`
 
-> **HISTORICAL ORIGIN DOCUMENT — the version below is 1.0.0; the contract is now
-> 2.2.0.** Banner added 2026-09-10 per D-48 (G-07). This records what was frozen
+> **HISTORICAL ORIGIN DOCUMENT — the version below is 1.0.0, and the contract has
+> moved on.** Banner added 2026-09-10 per D-53 (G-07). This records what was frozen
 > on day one and why, which is worth keeping. It is *not* the current contract:
 > the profile-based identity prose here describes a system D-38 deleted, and
-> two later amendments (A-22 project-token scoping, A-23 recognition
-> fingerprint) are not reflected in it. The authoritative current value is
+> amendments made since it was written, among them A-22 project-token scoping,
+> A-23 recognition fingerprint and A-24 mixed pages, are not reflected in it.
+> The authoritative current value is
 > `CONTRACT_VERSION` in `src/dociq/contracts.py`; the amendments are in the
 > decision register and wired checks are in `tools/check_amendments.py`.
 

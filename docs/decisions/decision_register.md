@@ -120,6 +120,35 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-53 — Sprint 5's first increment: extraction fidelity and the review documents (ruled 2026-09-10, recorded 2026-09-11)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-53 | What Sprint 5 builds first, under D-46 | **Increment 1: fix extraction fidelity and commit the review documents.** Fix the three extraction defects the fidelity sweep confirmed (a PDF page that is both a text layer and an image, Word reading order, an Excel formula with no stored value) together with whatever the class sweep surfaces, each held by a regression test grounded in a source file; commit the three 2026-09-09 review documents so the scope work stops being untracked; add the project `CLAUDE.md` and current-scope index that G-01..G-03 flag. Alex's own drive of the packaged `.exe` stays the D-46 closer. Ruled by Alex over three alternatives: the fidelity fixes only, with no document commits and no governance work; starting the restructure (Increment 2: durable evidence collection, typed source locators and the returned-citation verifier), much larger and built on extractors that lose content; and standing down until he has driven the `.exe`. | 2026-09-10 |
+
+**Recorded late, and cited under a number it never had.** The ruling was made and acted on on
+2026-09-10: the review documents in `67054d0`, the entry point and banners in `58495f2`, and the PDF
+defect as A-24. No entry was written. The three banners committed in `58495f2`
+(`docs/architecture.md`, `docs/HANDOFF.md`, `docs/contracts/pagemodel_freeze.md`) cite it as
+"D-48", a number that went to the MIXED-page ruling later that day. They are corrected to D-53 in the
+commit that records this entry, together with four statements of the contract version that A-24 had
+made stale: two in `CLAUDE.md` and one in each of the freeze and architecture banners said 2.2.0.
+Each now points at `CONTRACT_VERSION` instead of carrying a copy.
+
+**What the increment grew into.** The Word defect became the Word fidelity package, which now also
+recovers embedded documents (D-50). The Excel defect became the spreadsheet package. A-24's measured
+runtime produced D-51, and D-52 follows the three.
+
+## D-52 — next after Word, spreadsheets and D-51: make losses visible on screen (2026-09-11)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-52 | What Sprint 5 takes on after the Word package, the spreadsheet package and D-51 | **The disclosure channel: make what a run could not read visible on the screen, the index and the summary.** Every silent-loss fix this sprint reports its losses only as document notes in `processing_log.json`: A-24's unread images, the Word extractor's unread parts, D-50's embedded objects that would not open, the spreadsheet notes, and D-51's skipped pages. The screen, the index and the summary still say FULL. Ruled by Alex over OCR review integrity (a confirmed high-severity finding, next in line), the email and other launch formats, and PowerPoint. | 2026-09-11 |
+
+**Status: ruled, not started.** Carried in from D-51's build: a page skipped by D-51's setting is
+counted under `M_IMAGE_UNREAD`, with its reason in the note's text. How the screen separates content
+not read by choice from content lost to a failure is this package's decision, not D-51's.
+
 ## D-51 — a run can skip reading the images on pages that have a text layer (2026-09-11)
 
 | # | Decision | Ruling | Date |
@@ -132,6 +161,14 @@ reading on, and nearly all of the added time is the OCR engine reading dense ima
 content ("Measured after the commit" under D-49). A real run extracts on 16 threads here
 and the last full run took 103 minutes, so the whole-corpus cost is not measured.
 
+**Clarified by Alex the same day: a run SKIPS those images unless the switch is turned on.** The
+ruling above, and the question it answered, said "a run option, on by default, that lets a quick
+first pass skip", which reads either way. The design pass read it as skipping by default and the
+question had meant reading by default. Asked directly, Alex chose skipping as the default over
+reading as the default (the recommended option). Accepted with it: a default run marks every PDF
+page that carries a large image as not read, and the selftest, the determinism probe and the
+acceptance tools must each turn reading on to keep exercising A-24.
+
 **Status: ruled, not yet built.** Found before building, and binding on the build:
 
 * The switch changes what section recognition reads, exactly as whether OCR ran does. It
@@ -139,7 +176,9 @@ and the last full run took 103 minutes, so the whole-corpus cost is not measured
   images read would apply, silently, to a run that skipped them (A-23's lesson).
 * It must be recorded in the run identity, so two runs that read different text cannot
   share one.
-* A page it skips carries `M_IMAGE_UNREAD`, the marker every other unread image carries.
+* A page it skips carries `M_IMAGE_UNREAD`, the marker every other unread image carries,
+  and must not count as a failed OCR attempt: `ocr_yield` counts every such page note as
+  one, so a default run would otherwise warn that the OCR engine is dead.
 * The screen's time estimate beside the primary action is `adapter.seconds_per_gb`, and
   its OCR-on rate is 6,182.4 s for the corpus, measured through `RealPipeline` before
   A-24 existed. For a run that reads images that figure now understates the wait. It

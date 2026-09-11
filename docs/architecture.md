@@ -1,11 +1,13 @@
 # DocIQ Architecture & Sprint Roadmap (v1)
 
 > **HISTORICAL — this is the day-one plan, not the built system.** Banner added
-> 2026-09-10 per D-48 (G-02). Everything below was drafted 2026-07-30 against
+> 2026-09-10 per D-53 (G-02). Everything below was drafted 2026-07-30 against
 > D-01..D-09, and its "awaiting approval, no build code until then" status has
-> been false since Sprint 1 opened. Five sprints have been built since; the
-> profile machinery it describes was **deleted** by D-38 and the contract has
-> moved 1.0.0 → 2.2.0. Read it to learn what was intended, never to learn what
+> been false since Sprint 1 opened. Sprints 1 to 4 were built and merged after it,
+> and Sprint 5 was under way when this banner was written; the profile machinery
+> it describes was **deleted** by D-38 and the contract has moved on from 1.0.0
+> (the live value is `CONTRACT_VERSION` in `src/dociq/contracts.py`). Read it to
+> learn what was intended, never to learn what
 > exists. For what exists: the decision register, then
 > `docs/reviews/scope_governance_architecture_audit_2026-09-09.md`.
 

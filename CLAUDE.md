@@ -31,8 +31,8 @@ specification, and it has been stale before.
 Sprint 2), `docs/architecture.md` (drafted 2026-07-30, header still says "no
 build code until then"), `docs/HANDOFF.md` (opens Sprint 3),
 `docs/requirements/requirements_v1.0.md` (superseded historical draft),
-`docs/contracts/pagemodel_freeze.md` (header still 1.0.0; current contract is
-2.2.0). These are kept as history. Fixing them is tracked as G-02/G-03/G-07.
+`docs/contracts/pagemodel_freeze.md` (header still 1.0.0). These are kept as
+history. Fixing them is tracked as G-02/G-03/G-07.
 
 ## Running things
 
@@ -106,5 +106,8 @@ Committing a document does not make it a ruling. Review artifacts under
 Any change touching a persisted locator, source identity, transformation or
 verification label needs a migration decision and a behaviour test.
 
-`CONTRACT_VERSION` is in `src/dociq/contracts.py`, currently **2.2.0**. It is
-semver over the page/run contract; a removal is a MAJOR.
+`CONTRACT_VERSION` in `src/dociq/contracts.py` is the current value; read it there
+rather than trusting a copy (it was 2.3.0 on 2026-09-11). It is semver over the
+page/run contract; a removal is a MAJOR. A MINOR that has not left the branch may
+absorb a later change rather than bump again; the contract's own version history
+records each time it did.

@@ -1,7 +1,7 @@
 # Fresh-session kickoff prompt — DocIQ Sprint 3
 
 > **HISTORICAL — this kickoff opened Sprint 3 and is two sprints out of date.**
-> Banner added 2026-09-10 per D-48 (G-02). Its commit pointers, sprint number
+> Banner added 2026-09-10 per D-53 (G-02). Its commit pointers, sprint number
 > and open-item list are all superseded. Do not paste it into a new session.
 > The current entry point is `CLAUDE.md` at the repository root.
 
