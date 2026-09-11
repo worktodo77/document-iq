@@ -1671,13 +1671,9 @@ printable separators.
 
 **Raised by:** Alex's rulings of 2026-09-10 — D-48 (the page kind) and D-49 (where
 a MIXED page's Bates locator may come from) — after the extraction fidelity sweep.
-**Status:** RAISED, NOT APPLIED. Every part below is built and committed on
-`build/sprint-5`, and each is held by a test that was watched failing before its
-part landed (the gate-by-gate record, with the full suite and selftest over the
-finished tree, is in the decision register under D-49). Flipped to APPLIED, with
-its commit, in the commit after the one that lands it, as A-22 and A-23 were.
-Written before the flip so the file a reviewer is sent to is never behind the
-registry, which is the failure this register's own test exists to catch.
+**Status:** APPLIED in `ed6f119`. Each part is held by a test that was watched
+failing before its part landed; the gate-by-gate record is in the decision
+register under D-49.
 
 `PageKind` gains `MIXED`; `PageRecord` gains `image_line_span` and the derived
 `read_by_ocr` and `locator_text`. Additive with safe defaults, so
