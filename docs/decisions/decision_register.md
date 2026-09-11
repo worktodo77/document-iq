@@ -120,6 +120,49 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-51 — a run can skip reading the images on pages that have a text layer (2026-09-11)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-51 | What to do about A-24's runtime cost before Alex drives the packaged build | **Add a switch that skips reading images on text pages.** A run option, on by default, lets a quick first pass skip A-24's image-region OCR, and every page it skips is disclosed as unread. Ruled by Alex over three alternatives: measuring a real full-corpus run first (recommended; several hours of idle machine time before anything changes), accepting the cost as built, and working on speed before the Word package continues. Accepted with the ruling: the switch changes what a run's identity records, so it needs a contract amendment. | 2026-09-11 |
+
+**What the ruling was made on.** Timed with nothing else running on every 25th corpus PDF
+(12 documents, 645 pages, 144 MIXED), extraction took 3.44 times as long with image
+reading on, and nearly all of the added time is the OCR engine reading dense image
+content ("Measured after the commit" under D-49). A real run extracts on 16 threads here
+and the last full run took 103 minutes, so the whole-corpus cost is not measured.
+
+**Status: ruled, not yet built.** Found before building, and binding on the build:
+
+* The switch changes what section recognition reads, exactly as whether OCR ran does. It
+  must reach `recognition_fingerprint` beside `ocr_ran`, or an approval reviewed with
+  images read would apply, silently, to a run that skipped them (A-23's lesson).
+* It must be recorded in the run identity, so two runs that read different text cannot
+  share one.
+* A page it skips carries `M_IMAGE_UNREAD`, the marker every other unread image carries.
+* The screen's time estimate beside the primary action is `adapter.seconds_per_gb`, and
+  its OCR-on rate is 6,182.4 s for the corpus, measured through `RealPipeline` before
+  A-24 existed. For a run that reads images that figure now understates the wait. It
+  still describes a run that skips them, which is the work it timed; for a run that reads
+  them, the adapter's documented "no estimate" applies until such a run is measured.
+
+## D-50 — documents embedded in a Word file are recovered as child documents (2026-09-11)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-50 | What happens to documents embedded inside a Word file | **Recover them as child documents**, the way email attachments and archive members already are: each extracted as its own document and linked to the Word file it came from, through the walker's existing `ZipExpansion` route. Ruled by Alex over disclosing them only for now, and over recovering only the Office files (stored as ordinary parts) while disclosing the OLE-wrapped PDFs and packages. Accepted with the ruling: document counts, the index and run identity change for every Word file that embeds a document. | 2026-09-11 |
+
+**What the ruling was made on** (acceptance corpus, counts only; each counter was
+validated on a file with known answers before the corpus was opened). 289 embedded
+objects inside 49 of the 53 `.docx` files, every one stored inside the file rather than
+linked: 138 Excel workbooks, 86 PDFs under four Acrobat ProgIDs, 48 Word documents, 13
+`Package` objects and 4 PowerPoint files. 190 are stored as ordinary Office parts
+(`.xlsx`, `.xlsm`, `.docx`, `.ppt`, `.pptx`); the other 99, the PDFs and packages, are
+OLE compound files that must be unwrapped. Today not one of the 289 is read, and nothing
+in a run says they exist. The extraction sweep had rated this medium and unverified.
+
+**Status: ruled, not yet built.** It is built in the Word fidelity package.
+
 ## D-49 — a MIXED page's Bates locator comes from its text layer only (2026-09-10)
 
 | # | Decision | Ruling | Date |
@@ -323,6 +366,26 @@ because the engine drops low-scoring regions before lines are counted and
 `OCR_REVIEW_MIN_LINES` cannot fire. The summary's flagged-page total still counts such
 a page, though its printed list stops at eight. Unifying first would erase that last
 counter-signal, so the two are decided together.
+
+**Measured after the commit — what reading image regions costs.** Timed with nothing else
+running, on every 25th corpus PDF in path order (12 documents, 645 pages, 144 of them
+MIXED), each document once per configuration with the order alternated document by
+document: extraction took 420.7 s with image-aware routing off and 1,449.1 s with it on,
+3.44 times as long. The added 1,028.5 s is 7.14 s per MIXED page. A profile of one sample
+document (`CER-1-212.pdf`, 4 MIXED pages) puts nearly all of it inside the OCR engine
+reading 19 image regions, about 1,000 text boxes. The D-25 footer re-read never runs on a
+MIXED page: it selects only pages OCR'd whole. The cost is the content being read, not a
+wasted pass.
+
+That is serial extraction time, not a run's wall clock. The walker extracts on
+`min(16, cores - 2)` threads, 16 on the 24-core machine measured, and the last from-scratch
+OCR-on run of the whole corpus took 103.0 minutes under contention (§10, measured
+2026-08-02). Scaling the sample's added seconds per page to 17,732 pages gives about 7.9
+hours of serial extraction: a projection, which a one-in-25 sample does not establish and
+which parallel extraction reduces by an amount not measured. Two consequences follow, and
+neither is measured yet: a full run now takes longer than 103 minutes by an unknown factor,
+and more documents may cross the 3,600 s per-file limit. That limit is already
+load-dependent, and a document crossing it is re-read serially, not lost.
 
 ## D-48 — the page that is BOTH, and the rule that only covered exceptions (2026-09-10)
 
