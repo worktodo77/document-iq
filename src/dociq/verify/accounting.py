@@ -54,7 +54,8 @@ class AccountingReport:
 
     documents_evidence_lost: int = 0
     """Documents carrying a FINAL evidence gap — content named in the record
-    whose bytes are not in the corpus and will not be recovered by re-reading."""
+    that was not read and will not be recovered by re-reading (its bytes may
+    still be in the file: a chartsheet's chart, rows past a row cap)."""
 
     @property
     def ok(self) -> bool:
@@ -74,7 +75,8 @@ class AccountingReport:
                          "disclosed, retryable evidence gap")
         if self.documents_evidence_lost:
             parts.append(f"{self.documents_evidence_lost} document(s) name "
-                         "content whose bytes are NOT in the corpus")
+                         "content that was NOT read and will not be recovered "
+                         "by re-reading")
         return "EVIDENCE GAPS — " + "; ".join(parts) if parts else ""
 
     def render(self) -> str:

@@ -43,11 +43,15 @@ from dociq.ingest.pagemodel import normalize
 from .conftest import FIXTURES
 
 UNREAD = ex.M_XLSX_SHEET_UNREAD
+PART_UNREAD = "spreadsheet part could not be read"
+"""The transient marker's phrase, spelled out: a test that read it from the
+module would pass against a module that never defined it."""
 PAGE_NOTE_XLSX = "XLSX has no page boundaries; one synthetic page per worksheet"
 PAGE_NOTE_XLS = "XLS has no page boundaries; one synthetic page per worksheet"
 FORMULA_NOTE_ONE = ("1 cell(s): a formula cell had no stored value; the formula is "
                     "shown in the cell's place instead of the missing value")
-CHART1_NOTE = f"chartsheet 'Chart1': its chart was not read ({UNREAD})"
+CHART1_NOTE = (f"chartsheet 'Chart1': its chart, and any print header or footer on it, "
+               f"were not read ({UNREAD})")
 CAP_LINE = "[not read: the row cap was reached before this sheet]"
 
 REGISTER_PAGE = (
@@ -173,6 +177,52 @@ def _set_header_footer(sheet_xml: str, header_footer_xml: str) -> str:
                   sheet_xml, flags=re.S)
 
 
+def _is(ref: str | None, text: str) -> str:
+    """An inline-string ``<c>``, with ``r=`` only when ``ref`` is given."""
+    r = f' r="{ref}"' if ref else ""
+    return f'<c{r} t="inlineStr"><is><t>{text}</t></is></c>'
+
+
+def _rows_xlsx(sheet_data: str, dimension: str | None, *, name: str = "Order",
+               head: str = "") -> bytes:
+    """A one-sheet ``.xlsx`` whose ``sheetData`` is exactly ``sheet_data``
+    (raw XML, rows and cells in whatever order and form it says), declaring
+    ``dimension`` -- or none at all when it is ``None``. ``head`` is raw XML
+    put before ``sheetData`` (``sheetFormatPr``, ``cols``)."""
+    def build(wb):
+        ws = wb.active
+        ws.title = name
+        ws["A1"] = "PLACEHOLDER"
+
+    def sheet(xml: str) -> str:
+        xml = re.sub(r"<sheetFormatPr[^>]*/>", "", xml)
+        xml = re.sub(r"<sheetData>.*?</sheetData>|<sheetData/>",
+                     lambda _m: head + f"<sheetData>{sheet_data}</sheetData>", xml, flags=re.S)
+        dim = "" if dimension is None else f'<dimension ref="{dimension}"/>'
+        return re.sub(r'<dimension ref="[^"]*"/>', lambda _m: dim, xml)
+
+    return _patch(_xlsx(build), {"xl/worksheets/sheet1.xml": sheet})
+
+
+def _once_in_pool(fn, nth: int = 1, when=lambda *a, **k: True):
+    """``fn``, raising MemoryError on its ``nth`` qualifying call made on an
+    extraction-POOL thread -- never on the walker's serial retry: a failure
+    that load caused and a second read clears."""
+    import threading
+
+    state = {"calls": 0}
+
+    def wrapper(*args, **kwargs):
+        if (threading.current_thread().name.startswith("dociq-doc")
+                and when(*args, **kwargs)):
+            state["calls"] += 1
+            if state["calls"] == nth:
+                raise MemoryError("simulated memory pressure inside the pool")
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # E1: formulas with no stored value
 # ---------------------------------------------------------------------------
@@ -217,6 +267,22 @@ def test_e1_formula_with_no_stored_value_shows_the_formula():
     _assert_doc(_extract("idiom.xlsx", raw),
                 ["[sheet: Idiom]\nALDER\t\tBIRCH\nCEDAR\nDOGWOOD\t=A3"],
                 [FORMULA_NOTE_ONE, PAGE_NOTE_XLSX])
+
+    # Review r2 (unverified B): the raw-cell lookup behind the stored empty
+    # string must line up with openpyxl's rows and columns on a SPARSE sheet:
+    # a column after a gap (E4), a row with no r= after a numbered one, a cell
+    # with no r= after a numbered one, a row after a gap in row numbers. A
+    # reader that ignored r= shows the formula and a false marked note.
+    empty = '<c{ref} t="str"><f>IF(1,"","")</f><v/></c>'
+    sparse = ('<row r="1">' + _is("A1", "LBLONE") + "</row>"
+              '<row r="4">' + _is("A4", "LBLFOUR") + empty.format(ref=' r="E4"') + "</row>"
+              "<row>" + empty.format(ref="") + _is(None, "RLESSWORD") + "</row>"
+              '<row r="7">' + _is("B7", "AFTERGAPWORD") + empty.format(ref="")
+              + _is("E7", "EASTWORD") + "</row>")
+    _assert_doc(_extract("sparse.xlsx", _rows_xlsx(sparse, "A1:E7", name="Sparse")),
+                ["[sheet: Sparse]\nLBLONE\n[blank rows 2-3]\nLBLFOUR\n\tRLESSWORD\n"
+                 "[blank row 6]\n\tAFTERGAPWORD\t\t\tEASTWORD"],
+                [PAGE_NOTE_XLSX])
 
 
 def test_e1_note_is_true_for_what_each_cell_shows():
@@ -330,16 +396,66 @@ def test_e2_xlsx_duration_reads_as_hours_like_xls():
                     [PAGE_NOTE_XLSX])
 
 
+def _shift_cells():
+    """Time-only formats holding a serial of 1 or more (review r2, A8): a
+    weekly total past 24 hours under ``h:mm``, and a real timestamp whose
+    format hides its date. ``(value, xlsx format, xls format index)``."""
+    return [(1.25, "h:mm", 20), (2.5, "hh:mm:ss", 164), (1.75, "h:mm AM/PM", 18),
+            (3.5, "mm:ss", 45), (45489.25, "h:mm", 20), (0.75, "h:mm", 20)]
+
+
+def _shift_xls(datemode: int) -> bytes:
+    return make_fixtures.xls_bytes([{
+        "name": "Shifts",
+        "cells": [(0, 0, "SHIFTLOG", 0)] + [
+            (0, c, value, idx) for c, (value, _f, idx) in enumerate(_shift_cells(), start=1)],
+    }], formats={164: "hh:mm:ss"}, datemode=datemode)
+
+
+def _shift_xlsx(epoch) -> bytes:
+    def build(wb):
+        if epoch is not None:
+            wb.epoch = epoch
+        ws = wb.active
+        ws.title = "Shifts"
+        ws["A1"] = "SHIFTLOG"
+        for c, (value, fmt, _idx) in enumerate(_shift_cells(), start=2):
+            ws.cell(1, c, value).number_format = fmt
+    return _xlsx(build)
+
+
 def test_e2_time_and_duration_cells_add_no_detected_date(tmp_path):
     """Review A1's harm: the invented 1899/1900 dates reached
     ``DocumentRecord.detected_dates`` -- the index and the screen's document
-    date. Through the real walk, each workbook's only date is its real one."""
+    date. Through the real walk, each workbook's only date is its real one.
+
+    Sibling (review r2, A8): a time-only format (``h:mm``, ``hh:mm:ss``,
+    ``h:mm AM/PM``, ``mm:ss``) holding a serial of 1 or more showed an
+    invented 1900/1904 date in both formats. The format shows no date, so
+    none is rendered: the number reads as stored, with an unmarked note --
+    in both formats and both date systems -- and a time under 1 stays a
+    time."""
+    from openpyxl.utils.datetime import MAC_EPOCH
+
+    page = "[sheet: Shifts]\nSHIFTLOG\t1.25\t2.5\t1.75\t3.5\t45489.25\t18:00:00"
+    note = ("5 cell(s) formatted as a time with no date held a value of a day or "
+            "more; the number is shown as stored")
+    for name, raw in (("shift.xls", _shift_xls(0)), ("shift1904.xls", _shift_xls(1))):
+        _assert_doc(_extract(name, raw), [page], [note, PAGE_NOTE_XLS])
+    for epoch in (None, MAC_EPOCH):
+        _assert_doc(_extract("shift.xlsx", _shift_xlsx(epoch)), [page], [note, PAGE_NOTE_XLSX])
+    assert not ex.has_evidence_marker(note)
+
     dates = _detected_dates(tmp_path, {
         "clocks.xls": _clock_xls(), "clocks1904.xls": _clock_xls_1904(),
-        "clocks.xlsx": _clock_xlsx()})
+        "clocks.xlsx": _clock_xlsx(), "shift.xls": _shift_xls(0),
+        "shift1904.xls": _shift_xls(1), "shift.xlsx": _shift_xlsx(None),
+        "shift1904.xlsx": _shift_xlsx(MAC_EPOCH)})
     assert dates == {"clocks.xls": ("2024-07-16",),
                      "clocks1904.xls": ("2024-07-16",),
-                     "clocks.xlsx": ("2024-07-16",)}, dates
+                     "clocks.xlsx": ("2024-07-16",),
+                     "shift.xls": (), "shift1904.xls": (),
+                     "shift.xlsx": (), "shift1904.xlsx": ()}, dates
 
 
 def test_e2_date_formatted_number_that_is_no_date_shows_the_number():
@@ -352,17 +468,19 @@ def test_e2_date_formatted_number_that_is_no_date_shows_the_number():
     raw = make_fixtures.xls_bytes([
         {"name": "Costs",
          "cells": [(0, 0, "COSTROW", 0), (0, 1, 3000000.0, 14), (0, 2, -5.0, 14),
-                   (0, 3, float("nan"), 14), (0, 4, 2958465.0, 14)]},
+                   (0, 3, float("nan"), 14), (0, 4, 2958465.0, 14),
+                   (0, 5, -0.5, 14)]},   # a negative FRACTION: never a 1899 date
         {"name": "Other", "cells": [(0, 0, "THIRDSHEET", 0)]},
     ])
-    note = ("3 cell(s) formatted as a date held a number that is no date in "
-            "Excel's calendar (negative, past 9999-12-31, or not a number); the "
-            "number is shown as stored")
+    xls_note = ("4 cell(s) formatted as a date or time held a number that is no date "
+                "in Excel's calendar (negative, past 9999-12-31, or not a number); the "
+                "number is shown as stored")
     _assert_doc(_extract("costs.xls", raw),
-                ["[sheet: Costs]\nCOSTROW\t3000000\t-5\tnan\t9999-12-31",
+                ["[sheet: Costs]\nCOSTROW\t3000000\t-5\tnan\t9999-12-31\t-0.5",
                  "[sheet: Other]\nTHIRDSHEET"],
-                [note, PAGE_NOTE_XLS])
-    assert not ex.has_evidence_marker(note)
+                [xls_note, PAGE_NOTE_XLS])
+    assert not ex.has_evidence_marker(xls_note)
+    note = xls_note.replace("4 cell(s)", "3 cell(s)")
 
     def build(wb):
         ws = wb.active
@@ -501,11 +619,30 @@ def test_e5_a_date_a_cell_wraps_is_still_detected(tmp_path):
             "Plain 2019-02-11")
     assert _texts(_extract("letters.xlsx", _xlsx(build))) == [page]
     assert _texts(_extract("letters.xls", xls)) == [page]
+
+    # Review r2 (A3): the decision follows the READER that wrote the page,
+    # never the file's name. A workbook delivered under another name and
+    # recovered by content sniffing keeps its wrapped dates; a Word file
+    # named .xlsx gains no date from a pilcrow typed in its text.
+    import docx
+
+    word = docx.Document()
+    word.add_paragraph("Agreed 9 May ¶ 2022 GANNETWORD")
+    buf = io.BytesIO()
+    word.save(buf)
+    wrapped = ("2024-07-16", "2025-03-01", "2019-02-11")
     dates = _detected_dates(tmp_path, {
-        "letters.xlsx": _xlsx(build), "letters.xls": xls,
-        "memo.txt": "letter of March ¶ 12, 2020\n".encode("utf-8")})
-    assert dates == {"letters.xlsx": ("2024-07-16", "2025-03-01", "2019-02-11"),
-                     "letters.xls": ("2024-07-16", "2025-03-01", "2019-02-11"),
+        "letters.xlsx": _xlsx(build), "letters.xls": xls, "letters.xlsm": _xlsx(build),
+        "sheet_named.pdf": _xlsx(build), "sheet_named.docx": _xlsx(build),
+        "legacy_named.msg": xls, "word.docx": buf.getvalue(),
+        "word_named.xlsx": buf.getvalue(),
+        # Typed text that copies a spreadsheet reader's page note is still
+        # typed text: the reader is read from the page's notes, not its text.
+        "memo.txt": (f"{PAGE_NOTE_XLSX}\nletter of March ¶ 12, 2020\n").encode("utf-8")})
+    assert dates == {"letters.xlsx": wrapped, "letters.xls": wrapped,
+                     "letters.xlsm": wrapped, "sheet_named.pdf": wrapped,
+                     "sheet_named.docx": wrapped, "legacy_named.msg": wrapped,
+                     "word.docx": (), "word_named.xlsx": (),
                      "memo.txt": ()}, dates
 
 
@@ -526,7 +663,8 @@ def _ledger_and_plot(wb, rows: int = 2):
     plot.add_chart(chart)
 
 
-PLOT_NOTE = f"chartsheet 'Plot': its chart was not read ({UNREAD})"
+PLOT_NOTE = (f"chartsheet 'Plot': its chart, and any print header or footer on it, "
+             f"were not read ({UNREAD})")
 
 
 def test_e6_chartsheet_gets_its_own_page_in_tab_order():
@@ -813,7 +951,10 @@ def test_e11_threaded_comments_are_credited_to_named_people():
         f'id="{guid}"><text>MAGPIE</text></threadedComment>'
         f'<threadedComment ref="A1" dT="2026-01-02T00:00:00.00" personId="{{P2}}" '
         f'id="{{00000000-0000-4000-8000-000000000002}}" parentId="{guid}">'
-        '<text>NUTHATCH</text></threadedComment></ThreadedComments>')
+        '<text>NUTHATCH</text></threadedComment>'
+        f'<threadedComment ref="A1" dT="2026-01-03T00:00:00.00" personId="{{P9}}" '
+        f'id="{{00000000-0000-4000-8000-000000000003}}" parentId="{guid}">'
+        '<text>WAXWING</text></threadedComment></ThreadedComments>')
     persons = (f'<personList xmlns="{tc_ns}">'
                '<person displayName="NIGHTJAR" id="{P1}" userId="N" providerId="None"/>'
                '<person displayName="ORIOLE" id="{P2}" userId="O" providerId="None"/>'
@@ -824,16 +965,35 @@ def test_e11_threaded_comments_are_credited_to_named_people():
     person_rel = ('<Relationship Id="rIdP" Type="http://schemas.microsoft.com/office/'
                   '2017/10/relationships/person" Target="persons/person.xml"/>'
                   '</Relationships>')
-    raw = _patch(_xlsx(build), {
+    parts = {
         "xl/worksheets/_rels/sheet1.xml.rels": lambda t: t.replace("</Relationships>", rel),
         "xl/_rels/workbook.xml.rels": lambda t: t.replace("</Relationships>", person_rel),
         "xl/threadedComments/threadedComment1.xml": lambda t: thread,
         "xl/persons/person.xml": lambda t: persons,
-    })
-    _assert_doc(_extract("threads.xlsx", raw),
+    }
+    lines = ("[sheet: Ledger]\nALDER\nREEDROW\n[comment on A1 by NIGHTJAR] MAGPIE\n"
+             "[comment on A1 by ORIOLE] NUTHATCH\n"
+             # A person the file names nobody for is credited to the id itself
+             # (review r2 mutant R08: an empty author passed every test).
+             "[comment on A1 by {P9}] WAXWING\n"
+             "[comment on A2 by CRAKE] BITTERN")
+    _assert_doc(_extract("threads.xlsx", _patch(_xlsx(build), parts)), [lines],
+                [PAGE_NOTE_XLSX])
+
+    # Review r2 (C): the persons part missing is disclosed only where a
+    # threaded comment is credited to an id because of it -- never on a
+    # workbook that has no threaded comment at all.
+    missing = dict(parts, **{"xl/persons/person.xml": lambda t: None})
+    ids_only = lines.replace("by NIGHTJAR", "by {P1}").replace("by ORIOLE", "by {P2}")
+    _assert_doc(_extract("threads.xlsx", _patch(_xlsx(build), missing)), [ids_only],
+                ["the workbook's persons part is missing from the file; 3 threaded "
+                 "comment(s) are credited to person ids, not names "
+                 f"({UNREAD})", PAGE_NOTE_XLSX])
+    no_threads = {"xl/_rels/workbook.xml.rels": parts["xl/_rels/workbook.xml.rels"]}
+    _assert_doc(_extract("nothreads.xlsx", _patch(_xlsx(build), no_threads)),
                 ["[sheet: Ledger]\nALDER\nREEDROW\n"
-                 "[comment on A1 by NIGHTJAR] MAGPIE\n"
-                 "[comment on A1 by ORIOLE] NUTHATCH\n"
+                 "[comment on A1 by tc={00000000-0000-4000-8000-000000000001}] "
+                 "[Threaded comment] ¶  ¶ Comment: ¶     MAGPIE ¶ Replies: ¶     NUTHATCH\n"
                  "[comment on A2 by CRAKE] BITTERN"],
                 [PAGE_NOTE_XLSX])
 
@@ -994,7 +1154,7 @@ def test_hidden_rows_columns_and_sheets_are_read_and_disclosed():
     pages = ["[sheet: Shown]\nGOLDCREST\t\tHIDDENCOLWORD\nHIDDENROWWORD",
              "[sheet: Tucked]\nTUCKEDWORD", "[sheet: Buried]\nBURIEDWORD"]
     notes = ["sheet 'Shown' marks 1 row(s) and 1 column(s) hidden; hidden cells "
-             "are read like any other",
+             "are not skipped for being hidden",
              "sheet 'Tucked' is hidden in the workbook; it was read like any other sheet",
              "sheet 'Buried' is very hidden in the workbook; it was read like any "
              "other sheet"]
@@ -1008,6 +1168,26 @@ def test_hidden_rows_columns_and_sheets_are_read_and_disclosed():
     ])
     _assert_doc(_extract("hidden.xls", raw), pages, notes + [PAGE_NOTE_XLS])
     assert not any(ex.has_evidence_marker(n) for n in notes)
+
+    # Review r2 (C, and mutant R04): the other ways a sheet hides cells -- a
+    # hidden column RANGE (B:D is three columns), a row of height 0, a column
+    # of width 0, rows hidden by default -- are counted in both formats.
+    head = ('<sheetFormatPr defaultRowHeight="15" zeroHeight="1"/>'
+            '<cols><col min="2" max="4" width="9" hidden="1"/>'
+            '<col min="6" max="6" width="0" customWidth="1"/></cols>')
+    rows = ('<row r="1">' + _is("A1", "FIRSTSEEN") + _is("F1", "NARROWWORD") + "</row>"
+            '<row r="2" ht="0" customHeight="1">' + _is("A2", "FLATROWWORD") + "</row>")
+    folded = ["[sheet: Folded]\nFIRSTSEEN\t\t\t\t\tNARROWWORD\nFLATROWWORD"]
+    folded_note = ("sheet 'Folded' marks 1 row(s) and 4 column(s) hidden, and hides every "
+                   "other row by default; hidden cells are not skipped for being hidden")
+    _assert_doc(_extract("folded.xlsx", _rows_xlsx(rows, "A1:F2", name="Folded", head=head)),
+                folded, [folded_note, PAGE_NOTE_XLSX])
+    raw = make_fixtures.xls_bytes([
+        {"name": "Folded", "hidden_cols": [1, 2, 3, 5], "zero_height_rows": [1],
+         "rows_hidden_by_default": True,
+         "cells": [(0, 0, "FIRSTSEEN", 0), (0, 5, "NARROWWORD", 0),
+                   (1, 0, "FLATROWWORD", 0)]}])
+    _assert_doc(_extract("folded.xls", raw), folded, [folded_note, PAGE_NOTE_XLS])
 
 
 # ---------------------------------------------------------------------------
@@ -1054,21 +1234,29 @@ def test_sheet_extras_read_failure_is_a_marked_note(monkeypatch):
     monkeypatch.setattr(ET, "fromstring", failing_fromstring)
     monkeypatch.setattr(ET, "iterparse", failing_iterparse)
     doc = _pages("18_workbook_constructs.xlsx")
-    extras_note = ("its print header/footer, hyperlinks and hidden rows and columns "
-                   f"could not be read: MemoryError ({UNREAD})")
+    extras_note = ("its print header/footer, hyperlinks, hidden rows and columns and "
+                   "true extent could not be read (MemoryError), so a cell or row written "
+                   f"out of order may be missing with no note of its own ({PART_UNREAD})")
+    raw_note = ("sheet 'Register': its own cell XML could not be read (MemoryError), so a "
+                "formula whose stored result is empty may be shown as its formula and "
+                "counted as having no stored value, a date-formatted number that is no "
+                "date may show as #VALUE!, and a time-only cell may show the number "
+                f"openpyxl converted rather than the one stored ({PART_UNREAD})")
     _assert_doc(doc,
                 ["[sheet: Register]\nRef\tAmount\tNote\n\t10\t15%\n\t20\t15.00%\n"
                  "HOLLY ¶ IVY\t=SUM(B2:B3)\t\tTAB STOP\n[blank rows 5-6]\nJUNIPER\nKESTREL\n"
                  "[comment on B2 by NIGHTJAR] MAGPIE",
                  "[chartsheet: Chart1]", "[sheet: Later]\nQUETZAL"],
-                [f"sheet 'Register': {extras_note}",
-                 "sheet 'Register': its own cell XML could not be read (MemoryError), "
-                 "so a formula whose stored result is empty may be reported as having "
-                 f"no stored value ({UNREAD})",
-                 CHART1_NOTE,
+                [f"sheet 'Register': {extras_note}", raw_note, CHART1_NOTE,
                  f"sheet 'Later': {extras_note}",
                  FORMULA_NOTE_ONE, PAGE_NOTE_XLSX])
-    assert all(ex.has_evidence_marker(n) for n in doc.notes[:4]), doc.notes
+    # A read that raised is TRANSIENT (review-fix round 2): the walker's serial
+    # retry re-reads it, and only a failure the file itself makes permanent
+    # is final.
+    for read_failure in (doc.notes[0], doc.notes[1], doc.notes[3]):
+        assert ex.has_transient_marker(read_failure), read_failure
+        assert not ex.has_final_marker(read_failure), read_failure
+    assert ex.has_final_marker(CHART1_NOTE) and not ex.has_transient_marker(CHART1_NOTE)
 
 
 def test_formula_and_sheet_list_read_failures_are_marked_notes(monkeypatch):
@@ -1087,10 +1275,10 @@ def test_formula_and_sheet_list_read_failures_are_marked_notes(monkeypatch):
     monkeypatch.setattr(openpyxl, "load_workbook", no_formula_reading)
     doc = _pages("18_workbook_constructs.xlsx")
     formula_note = ("the workbook's formulas could not be read (MemoryError); a formula "
-                    "cell with no stored value shows blank, so 'a formula cell had no "
-                    "stored value' cannot be ruled out")
+                    "cell with no stored value shows blank and is not counted "
+                    f"({PART_UNREAD})")
     assert list(doc.notes) == [formula_note, CHART1_NOTE, PAGE_NOTE_XLSX], doc.notes
-    assert ex.has_evidence_marker(formula_note)
+    assert ex.has_transient_marker(formula_note) and not ex.has_final_marker(formula_note)
     assert "HOLLY ¶ IVY\t\t\tTAB STOP" in doc.pages[0].text.split("\n"), doc.pages[0].text
     monkeypatch.setattr(openpyxl, "load_workbook", real_load)
 
@@ -1104,13 +1292,713 @@ def test_formula_and_sheet_list_read_failures_are_marked_notes(monkeypatch):
     monkeypatch.setattr(ET, "fromstring", no_sheet_list)
     doc = _pages("18_workbook_constructs.xlsx")
     list_note = ("the workbook's own sheet list could not be read (MemoryError); tabs "
-                 "follow openpyxl's list, and no sheet's print header/footer, "
-                 f"hyperlinks or comments were read ({UNREAD})")
-    first_lines = [p.text.split("\n")[0] for p in doc.pages]
-    assert first_lines == ["[sheet: Register]", "[chartsheet: Chart1]", "[sheet: Later]"], (
-        first_lines)
-    assert list(doc.notes) == [list_note, CHART1_NOTE, FORMULA_NOTE_ONE, PAGE_NOTE_XLSX], (
-        doc.notes)
+                 "follow openpyxl's list, which leaves out a sheet that names no part "
+                 f"or a part openpyxl does not find in the file ({PART_UNREAD})")
+    # Review-fix round 2 (A5): the fallback still knows each worksheet's part,
+    # so the header, links, comments and raw cells all read.
+    _assert_doc(doc, [REGISTER_PAGE, "[chartsheet: Chart1]", "[sheet: Later]\nQUETZAL"],
+                [list_note, CHART1_NOTE, FORMULA_NOTE_ONE, PAGE_NOTE_XLSX])
+    assert ex.has_transient_marker(list_note) and not ex.has_final_marker(list_note)
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 2 (D-55): what the second review found, and its class
+# ---------------------------------------------------------------------------
+
+
+def _walk_one(tmp_path, files: dict[str, bytes], workers: int = 2):
+    """A real ``walker.run`` over exactly ``files``: ``(documents by
+    filename, the run's load-dependent notes)``."""
+    src = tmp_path / "src"
+    src.mkdir()
+    for name, data in files.items():
+        (src / name).write_bytes(data)
+    notes = walker.RunNotes()
+    config = RunConfig(source_root=str(src), output_root=str(tmp_path / "out"),
+                       ocr_engine_version=ex.ocr_engine_version())
+    result = walker.run(config, walker.WalkOptions(workers=workers, ocr_enabled=False,
+                                                   resume=False), notes)
+    return {d.filename: d for d in result.documents}, list(notes.load_dependent)
+
+
+_FIXTURE18_PAGES = [REGISTER_PAGE, "[chartsheet: Chart1]", "[sheet: Later]\nQUETZAL"]
+
+
+@pytest.mark.parametrize("site", [
+    "sheet extras stream", "comments part", "formula reading", "sheet list",
+    "raw cell stream", "xls number formats"])
+def test_a_read_failure_a_second_read_clears_is_retried_by_the_walker(
+        tmp_path, monkeypatch, site):
+    """Review r2 (A1): a MemoryError that a second read clears was labeled
+    FINAL, so the walker never retried it and the run recorded the loss --
+    header, comment, formula or duration gone -- as a property of the file.
+    Every read that raised is TRANSIENT now: raised ONCE on a pool thread
+    (never on the serial retry), the retry re-reads the file alone and the
+    record the run keeps is the whole one."""
+    import xlrd
+
+    raw18 = (FIXTURES / "18_workbook_constructs.xlsx").read_bytes()
+    if site == "sheet extras stream":
+        monkeypatch.setattr(ex, "_xlsx_iter_rows", _once_in_pool(ex._xlsx_iter_rows, 1))
+    elif site == "raw cell stream":
+        monkeypatch.setattr(ex, "_xlsx_iter_rows", _once_in_pool(ex._xlsx_iter_rows, 2))
+    elif site == "comments part":
+        monkeypatch.setattr(ex, "_xlsx_legacy_comments",
+                            _once_in_pool(ex._xlsx_legacy_comments))
+    elif site == "formula reading":
+        monkeypatch.setattr(openpyxl, "load_workbook", _once_in_pool(
+            openpyxl.load_workbook, when=lambda *a, **k: k.get("data_only") is False))
+    elif site == "sheet list":
+        monkeypatch.setattr(ex, "_xlsx_sheet_order", _once_in_pool(ex._xlsx_sheet_order))
+    else:
+        monkeypatch.setattr(xlrd, "open_workbook", _once_in_pool(
+            xlrd.open_workbook, when=lambda *a, **k: k.get("formatting_info")))
+
+    if site == "xls number formats":
+        docs, load_notes = _walk_one(tmp_path, {"clocks.xls": _clock_xls()})
+        doc = docs["clocks.xls"]
+        _assert_doc(doc, ["[sheet: Clocks]\nGEARWHEEL\t08:24:00\t36:00:00\t00:00:00\t18:00:00"
+                          "\t1470:00:00\t2024-07-16 12:00:00"], [PAGE_NOTE_XLS])
+    else:
+        docs, load_notes = _walk_one(tmp_path, {"18_workbook_constructs.xlsx": raw18})
+        doc = docs["18_workbook_constructs.xlsx"]
+        _assert_doc(doc, _FIXTURE18_PAGES, [CHART1_NOTE, FORMULA_NOTE_ONE, PAGE_NOTE_XLSX])
+    assert len(load_notes) == 1 and "RESOLVED" in load_notes[0], load_notes
+
+
+def _threads_workbook(parts_edit=None) -> bytes:
+    """A workbook with a legacy comment, a threaded comment, a hyperlink and
+    a print header: every per-sheet read the extras make."""
+    guid = "{00000000-0000-4000-8000-000000000001}"
+
+    def build(wb):
+        ws = wb.active
+        ws.title = "Ledger"
+        ws["A1"], ws["A2"] = "ALDER", "REEDROW"
+        ws["A1"].comment = openpyxl.comments.Comment("placeholder", "tc=" + guid)
+        ws["A2"].comment = openpyxl.comments.Comment("BITTERN", "CRAKE")
+        ws["A2"].hyperlink = "https://example.invalid/REEDLINK"
+        ws.oddHeader.center.text = "HERONHEAD"
+
+    tc_ns = "http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"
+    parts = {
+        "xl/worksheets/_rels/sheet1.xml.rels": lambda t: t.replace(
+            "</Relationships>",
+            '<Relationship Id="rIdTC" Type="http://schemas.microsoft.com/office/'
+            '2017/10/relationships/threadedComment" '
+            'Target="../threadedComments/threadedComment1.xml"/></Relationships>'),
+        "xl/_rels/workbook.xml.rels": lambda t: t.replace(
+            "</Relationships>",
+            '<Relationship Id="rIdP" Type="http://schemas.microsoft.com/office/'
+            '2017/10/relationships/person" Target="persons/person.xml"/></Relationships>'),
+        "xl/threadedComments/threadedComment1.xml": lambda t: (
+            f'<ThreadedComments xmlns="{tc_ns}"><threadedComment ref="A1" '
+            f'personId="{{P1}}" id="{guid}"><text>MAGPIE</text></threadedComment>'
+            "</ThreadedComments>"),
+        "xl/persons/person.xml": lambda t: (
+            f'<personList xmlns="{tc_ns}"><person displayName="NIGHTJAR" id="{{P1}}" '
+            'userId="N" providerId="None"/></personList>'),
+    }
+    parts.update(parts_edit or {})
+    return _patch(_xlsx(build), parts)
+
+
+THREADS_PAGE = ("[sheet: Ledger]\nHERONHEAD\nALDER\nREEDROW <https://example.invalid/REEDLINK>\n"
+                "[comment on A1 by NIGHTJAR] MAGPIE\n[comment on A2 by CRAKE] BITTERN")
+
+
+def test_every_read_that_raised_is_a_transient_note_saying_what_it_cost(monkeypatch):
+    """Review r2 (A1), the class: EACH exception path inside the spreadsheet
+    readers -- relationships, threaded comments, legacy comments, persons,
+    the rows part-way through, the formula rows part-way through, a legacy
+    workbook's tab records and a sheet's own records -- is one TRANSIENT note
+    that says what the failure cost, never FINAL, and the rest still reads."""
+    raw = _threads_workbook()
+    _assert_doc(_extract("threads.xlsx", raw), [THREADS_PAGE], [PAGE_NOTE_XLSX])
+
+    def failing(fn, when=lambda *a, **k: True):
+        def wrapper(*args, **kwargs):
+            if when(*args, **kwargs):
+                raise MemoryError()
+            return fn(*args, **kwargs)
+        return wrapper
+
+    def check(expected_page, expected_note, name="threads.xlsx", data=raw, page_note=PAGE_NOTE_XLSX):
+        doc = _extract(name, data)
+        _assert_doc(doc, [expected_page], [expected_note, page_note])
+        assert ex.has_transient_marker(expected_note), expected_note
+        assert not ex.has_final_marker(expected_note), expected_note
+
+    with monkeypatch.context() as m:
+        m.setattr(ex, "_xlsx_rels", failing(ex._xlsx_rels, lambda z, part: "worksheets" in part))
+        check("[sheet: Ledger]\nHERONHEAD\nALDER\nREEDROW",
+              "sheet 'Ledger': its relationships, so its hyperlinks and comments, could "
+              f"not be read (MemoryError) ({PART_UNREAD})")
+    with monkeypatch.context() as m:
+        m.setattr(ex, "_xlsx_threaded_comments", failing(ex._xlsx_threaded_comments))
+        check("[sheet: Ledger]\nHERONHEAD\nALDER\nREEDROW <https://example.invalid/REEDLINK>\n"
+              "[comment on A1 by tc={00000000-0000-4000-8000-000000000001}] placeholder\n"
+              "[comment on A2 by CRAKE] BITTERN",
+              f"sheet 'Ledger': its threaded comments could not be read (MemoryError) "
+              f"({PART_UNREAD})")
+    with monkeypatch.context() as m:
+        m.setattr(ex, "_xlsx_legacy_comments", failing(ex._xlsx_legacy_comments))
+        check("[sheet: Ledger]\nHERONHEAD\nALDER\nREEDROW <https://example.invalid/REEDLINK>\n"
+              "[comment on A1 by NIGHTJAR] MAGPIE",
+              f"sheet 'Ledger': its comments could not be read (MemoryError) ({PART_UNREAD})")
+    with monkeypatch.context() as m:
+        m.setattr(ex, "_xlsx_persons", failing(ex._xlsx_persons))
+        check(THREADS_PAGE.replace("by NIGHTJAR", "by {P1}"),
+              "the workbook's persons part could not be read (MemoryError); 1 threaded "
+              f"comment(s) are credited to person ids, not names ({PART_UNREAD})")
+
+    # What the FILE makes permanent stays FINAL: a relationship naming a
+    # comments or threaded-comments part the package does not hold.
+    for missing, page, note in (
+            ("xl/threadedComments/threadedComment1.xml",
+             "[sheet: Ledger]\nHERONHEAD\nALDER\nREEDROW <https://example.invalid/REEDLINK>\n"
+             "[comment on A1 by tc={00000000-0000-4000-8000-000000000001}] placeholder\n"
+             "[comment on A2 by CRAKE] BITTERN",
+             "sheet 'Ledger': its threaded comments part is missing from the file; its "
+             f"threaded comments were not read ({UNREAD})"),
+            (next(n for n in _part_names(raw) if re.match(r"xl/comments/comment\d+\.xml$", n)),
+             "[sheet: Ledger]\nHERONHEAD\nALDER\nREEDROW <https://example.invalid/REEDLINK>\n"
+             "[comment on A1 by NIGHTJAR] MAGPIE",
+             "sheet 'Ledger': its comments part is missing from the file; its comments were "
+             f"not read ({UNREAD})")):
+        doc = _extract("threads.xlsx", _patch(raw, {missing: lambda t: None}))
+        _assert_doc(doc, [page], [note, PAGE_NOTE_XLSX])
+        assert ex.has_final_marker(note) and not ex.has_transient_marker(note), note
+
+    # openpyxl's own row reading failing part-way: rows before it are kept.
+    from openpyxl.worksheet import _reader
+
+    real_parse_row = _reader.WorkSheetParser.parse_row
+
+    def parse_row_failing_at_two(self, row):
+        if row.get("r") == "2":
+            raise MemoryError()
+        return real_parse_row(self, row)
+
+    with monkeypatch.context() as m:
+        m.setattr(_reader.WorkSheetParser, "parse_row", parse_row_failing_at_two)
+        check("[sheet: Ledger]\nHERONHEAD\nALDER\n[comment on A1 by NIGHTJAR] MAGPIE\n"
+              "[comment on A2 by CRAKE] BITTERN",
+              "sheet 'Ledger': its rows from row 2 on could not be read (MemoryError), so "
+              f"they are not on its page ({PART_UNREAD})")
+
+    def build_formulas(wb):
+        ws = wb.active
+        ws.title = "Sums"
+        ws["A1"], ws["A2"], ws["A3"] = "=1+1", "LABELROW", "=2+2"
+
+    real_formula_parse_row = _reader.WorkSheetParser.parse_row
+
+    def formula_rows_failing_at_three(self, row):
+        if not self.data_only and row.get("r") == "3":
+            raise MemoryError()
+        return real_formula_parse_row(self, row)
+
+    with monkeypatch.context() as m:
+        m.setattr(_reader.WorkSheetParser, "parse_row", formula_rows_failing_at_three)
+        doc = _extract("sums.xlsx", _xlsx(build_formulas))
+        formula_note = ("sheet 'Sums': its formulas from row 3 on could not be read "
+                        "(MemoryError), so a formula cell there with no stored value "
+                        f"shows blank and is not counted ({PART_UNREAD})")
+        _assert_doc(doc, ["[sheet: Sums]\n=1+1\nLABELROW"],
+                    [formula_note, FORMULA_NOTE_ONE, PAGE_NOTE_XLSX])
+        assert ex.has_transient_marker(formula_note) and not ex.has_final_marker(formula_note)
+
+    xls = make_fixtures.xls_bytes([
+        {"name": "Legacy", "cells": [(0, 0, "WOODLARK", 0)], "header": "&CHEADWORD"},
+        {"name": "Plot", "kind": "chart"}])
+    with monkeypatch.context() as m:
+        m.setattr(ex, "_xls_sheet_records", failing(ex._xls_sheet_records))
+        doc = _extract("tabs.xls", xls)
+        records_note = ("sheet 'Legacy': its print header/footer and dialog flag could not "
+                        f"be read (MemoryError) ({PART_UNREAD})")
+        _assert_doc(doc, ["[sheet: Legacy]\nWOODLARK", "[chartsheet: Plot]"],
+                    [records_note, PLOT_NOTE, PAGE_NOTE_XLS])
+        assert ex.has_transient_marker(records_note)
+    with monkeypatch.context() as m:
+        m.setattr(ex, "_xls_stream", failing(ex._xls_stream))
+        doc = _extract("tabs.xls", xls)
+        tabs_note = ("the workbook's own tab records could not be read (MemoryError); a "
+                     "tab that is not a worksheet is named by its position, and no sheet's "
+                     f"print header/footer or dialog flag was read ({PART_UNREAD})")
+        _assert_doc(doc, ["[sheet: Legacy]\nWOODLARK",
+                          "[sheet: tab 2]\n[not read: a sheet of an unrecognized kind]"],
+                    [tabs_note, "sheet 'tab 2': a sheet of an unrecognized kind; its content "
+                     f"was not read ({UNREAD})", PAGE_NOTE_XLS])
+        assert ex.has_transient_marker(tabs_note) and not ex.has_final_marker(tabs_note)
+
+
+def test_a_cell_or_row_written_out_of_order_is_read_or_named():
+    """Review r2 (A2): round 1's ``reset_dimensions()`` made openpyxl size
+    each row by its LAST-written cell, so a cell written before a later
+    column (C1, then A1) vanished with status FULL. Both readings are now
+    given the sheet's real width, measured by the extras stream -- with a
+    correct, a stale or no ``<dimension>``.
+
+    Siblings (review r2, C): a row numbered at or below one written before
+    it, and a second row with the same number, are skipped by openpyxl; the
+    blank-row marker then claimed such a row was blank. It is named in a
+    marked note and no marker covers it. A cell written twice in one row
+    keeps only its later value, also named."""
+    order = ('<row r="1">' + _is("C1", "ZEBRAWORD") + _is("A1", "ANTWORD") + "</row>"
+             '<row r="2">' + _is("A2", "BEEWORD") + _is("B2", "COWWORD") + "</row>"
+             '<row r="3">' + _is("D3", "DEERWORD") + _is("A3", "ELKWORD") + "</row>")
+    expected = ["[sheet: Order]\nANTWORD\t\tZEBRAWORD\nBEEWORD\tCOWWORD\nELKWORD\t\t\tDEERWORD"]
+    for dimension in ("A1:D3", "A1", None):
+        _assert_doc(_extract("order.xlsx", _rows_xlsx(order, dimension)), expected,
+                    [PAGE_NOTE_XLSX])
+
+    rows = ('<row r="3">' + _is("A3", "THIRDROWWORD") + "</row>"
+            '<row r="1">' + _is("A1", "FIRSTROWWORD") + "</row>"
+            '<row r="5">' + _is("A5", "FIFTHROWWORD") + "</row>"
+            '<row r="5">' + _is("A5", "TWINROWWORD") + "</row>"
+            '<row r="6">' + _is("A6", "OLDCELLWORD") + _is("A6", "NEWCELLWORD") + "</row>")
+    skipped = (f"sheet 'Order': 2 row(s) numbered at or below a row written before them "
+               f"(row(s) 1, 5) were skipped by the reader; their content was not read "
+               f"({UNREAD})")
+    rewritten = ("sheet 'Order': 1 cell(s) were written a second time in the same row "
+                 "and column, and only the later value of each is read; the earlier "
+                 f"value was not read ({UNREAD})")
+    _assert_doc(_extract("rows.xlsx", _rows_xlsx(rows, "A1:A6")),
+                ["[sheet: Order]\n[blank row 2]\nTHIRDROWWORD\n[blank row 4]\nFIFTHROWWORD\n"
+                 "NEWCELLWORD"],
+                [skipped, rewritten, PAGE_NOTE_XLSX])
+    assert ex.has_final_marker(skipped) and ex.has_final_marker(rewritten)
+
+
+def _twin_parts_xlsx() -> bytes:
+    """The ``.xlsx`` half of the ``.xls`` parity pair: a legacy comment, an
+    external link with a location, a file link, an internal link, a range
+    link, a link on a row past the last cell, and odd, even and first-page
+    headers and footers in all three sections."""
+    from openpyxl.worksheet.hyperlink import Hyperlink
+
+    def build(wb):
+        ws = wb.active
+        ws.title = "Ledger"
+        ws["A1"], ws["B1"] = "GANNETROW", 7
+        ws["B1"].comment = openpyxl.comments.Comment("PELICANNOTE", "CURLEW")
+        ws["A2"] = "SHAGROW"
+        ws["A2"].hyperlink = Hyperlink(ref="A2", target="https://example.invalid/CORMORANT",
+                                       location="page=5")
+        ws["A3"] = "TERNROW"
+        ws["A3"].hyperlink = "annex\\BOOBYFILE.pdf"
+        ws["A4"] = "SKUAROW"
+        ws["A4"].hyperlink = Hyperlink(ref="A4", location="'Ledger'!A1")
+        ws["A5"] = "PETRELROW"
+        ws["A5"].hyperlink = "https://example.invalid/RANGELINK"
+        ws["A6"] = "FULMARROW"
+        ws["A6"].hyperlink = "https://example.invalid/PASTROW"
+        ws.oddHeader.left.text = "LEFTHEADWORD"
+        ws.oddHeader.center.text = "HERONHEAD"
+        ws.oddHeader.right.text = "QXZ 000321"
+        ws.oddFooter.center.text = "EGRETFOOT"
+        ws.evenHeader.center.text = "EVENHEADWORD"
+        ws.evenFooter.center.text = "EVENFOOTWORD"
+        ws.firstHeader.center.text = "FIRSTHEADWORD"
+        ws.firstFooter.left.text = "FIRSTFOOTWORD"
+
+    def sheet(xml: str) -> str:
+        xml = re.sub(r'<hyperlink ([^>]*)ref="A5"', r'<hyperlink \1ref="A5:B6"', xml)
+        # The link on A6 moves to C8: a row the part holds no cell for.
+        xml = re.sub(r'<hyperlink ([^>]*)ref="A6"', r'<hyperlink \1ref="C8"', xml)
+        return re.sub(r'<c r="A6"[^>]*>.*?</c>', "", xml)
+
+    return _patch(_xlsx(build), {"xl/worksheets/sheet1.xml": sheet})
+
+
+TWIN_PAGE = ("[sheet: Ledger]\nLEFTHEADWORD\nHERONHEAD\nQXZ 000321\nEVENHEADWORD\n"
+             "FIRSTHEADWORD\nGANNETROW\t7\nSHAGROW <https://example.invalid/CORMORANT#page=5>\n"
+             "TERNROW <annex\\BOOBYFILE.pdf>\nSKUAROW\nPETRELROW <https://example.invalid/RANGELINK>\n"
+             "[blank rows 6-7]\n\t\t<https://example.invalid/PASTROW>\n"
+             "[comment on B1 by CURLEW] PELICANNOTE\nEGRETFOOT\nEVENFOOTWORD\nFIRSTFOOTWORD")
+
+
+def test_xls_comments_links_and_print_header_footer_read_as_xlsx_renders_them():
+    """Review r2 (A4, a round-1 item never closed): ``.xls`` cell comments,
+    hyperlinks and the print header and footer were dropped with status FULL
+    and no note, although xlrd hands over the comment and link maps and the
+    HEADER/FOOTER records sit in each sheet's own substream. The ``.xls``
+    reads exactly as its ``.xlsx`` twin -- the record layout checked against
+    a workbook real Excel 2016 saved both ways (scratchpad
+    ``excel_fix2/probe_real_parity.py``)."""
+    _assert_doc(_extract("twin.xlsx", _twin_parts_xlsx()), [TWIN_PAGE], [PAGE_NOTE_XLSX])
+    raw = make_fixtures.xls_bytes([{
+        "name": "Ledger",
+        "cells": [(0, 0, "GANNETROW", 0), (0, 1, 7.0, 0), (1, 0, "SHAGROW", 0),
+                  (2, 0, "TERNROW", 0), (3, 0, "SKUAROW", 0), (4, 0, "PETRELROW", 0)],
+        "header": "&LLEFTHEADWORD&CHERONHEAD&RQXZ 000321",
+        "footer": "&CEGRETFOOT",
+        "even_first": ("&CEVENHEADWORD", "&CEVENFOOTWORD", "&CFIRSTHEADWORD",
+                       "&LFIRSTFOOTWORD"),
+        "notes": [(0, 1, "CURLEW", "PELICANNOTE")],
+        "links": [(1, 1, 0, 0, "url", "https://example.invalid/CORMORANT", "page=5"),
+                  (2, 2, 0, 0, "file", "annex\\BOOBYFILE.pdf", None),
+                  (3, 3, 0, 0, "internal", None, "'Ledger'!A1"),
+                  (4, 5, 0, 1, "url", "https://example.invalid/RANGELINK", None),
+                  (7, 7, 2, 2, "url", "https://example.invalid/PASTROW", None)],
+    }])
+    _assert_doc(_extract("twin.xls", raw), [TWIN_PAGE], [PAGE_NOTE_XLS])
+
+
+def test_each_format_discloses_the_siblings_the_other_already_did():
+    """The parity table's gaps, both ways. ``.xls``: a dialog sheet (a
+    worksheet substream Excel flags in its WSBOOL record) read as an empty
+    page with no note; a NOTE record whose text records are missing, a link
+    of a kind xlrd does not recognize, and a cell record written twice for
+    one cell all vanished without a word. Cell records out of order, a stale
+    DIMENSIONS record and two tabs of one name read as they should.
+    ``.xlsx``: an Excel 4.0 macro sheet reads as the worksheet it is, and a
+    sheet of a kind no reader knows is disclosed."""
+    rewritten = ("sheet 'Ledger': 1 cell(s) were written a second time in the same row "
+                 "and column, and only the later value of each is read; the earlier value "
+                 f"was not read ({UNREAD})")
+    raw = make_fixtures.xls_bytes([
+        {"name": "Ledger", "dimensions": (0, 1, 0, 1), "dialog": False,
+         "cells": [(2, 0, "THIRDROWWORD", 0), (0, 2, "EASTCELLWORD", 0),
+                   (0, 0, "OLDCELLWORD", 0), (0, 0, "WOODLARK", 0), (1, 0, "YELLOWROW", 0)],
+         "notes_without_text": [(0, 0, "CURLEW", "LOSTNOTE")],
+         "links": [(1, 1, 0, 0, "unknown", None, None)]},
+        {"name": "Dialog1", "dialog": True, "cells": [(0, 0, "CAPTIONWORD", 0)]},
+        {"name": "Ledger", "cells": [(0, 0, "TWINTABWORD", 0)]},
+        {"name": "Module1", "kind": "vbmodule"},
+    ])
+    _assert_doc(_extract("dialog.xls", raw),
+                ["[sheet: Ledger]\nWOODLARK\t\tEASTCELLWORD\nYELLOWROW\nTHIRDROWWORD",
+                 "[sheet: Dialog1]\n[not read: a dialog sheet]",
+                 "[sheet: Ledger]\nTWINTABWORD",
+                 "[sheet: Module1]\n[not read: a Visual Basic module sheet]"],
+                [f"sheet 'Ledger': 1 comment(s) whose text records are missing or "
+                 f"malformed were not read ({UNREAD})",
+                 f"sheet 'Ledger': 1 hyperlink(s) of a kind this reader does not "
+                 f"recognize were not read ({UNREAD})",
+                 rewritten,
+                 f"sheet 'Dialog1': a dialog sheet; its content was not read ({UNREAD})",
+                 f"sheet 'Module1': a Visual Basic module sheet; its content was not read "
+                 f"({UNREAD})",
+                 PAGE_NOTE_XLS])
+
+    macro_type = "http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet"
+    odd_type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oddsheet"
+    raw = _patch(_xlsx(_three_sheets), {
+        "xl/_rels/workbook.xml.rels": lambda t: re.sub(
+            r'Type="[^"]*" Target="/xl/worksheets/sheet3.xml"',
+            f'Type="{odd_type}" Target="/xl/worksheets/sheet3.xml"', re.sub(
+                r'Type="[^"]*" Target="/xl/worksheets/sheet2.xml"',
+                f'Type="{macro_type}" Target="/xl/worksheets/sheet2.xml"', t))})
+    _assert_doc(_extract("kinds.xlsm", raw),
+                ["[sheet: First]\nLAPWING", "[sheet: Gone]\nGONEWORD",
+                 "[sheet: Last]\n[not read: a sheet of a kind this reader does not recognize]"],
+                [f"sheet 'Last': a sheet of a kind this reader does not recognize; its "
+                 f"content was not read ({UNREAD})", PAGE_NOTE_XLSX])
+
+
+def _tally_xlsx(rels_edit=None) -> bytes:
+    """A stored empty-string formula (B1), a number no date can hold under a
+    date format (C1), and a formula with no stored value (D1)."""
+    def build(wb):
+        ws = wb.active
+        ws.title = "Tally"
+        ws["A1"], ws["B1"], ws["C1"], ws["D1"], ws["A2"] = (
+            "OSPREYROW", "PLACEHOLDERB", 3000000, "PLACEHOLDERD", "PLOVERROW")
+        ws["C1"].number_format = "yyyy-mm-dd"
+
+    def cells(xml: str) -> str:
+        xml = re.sub(r'<c r="B1"[^>]*>.*?</c>',
+                     '<c r="B1" t="str"><f>IF(A1="OSPREYROW","",A1)</f><v></v></c>', xml)
+        return re.sub(r'<c r="D1"[^>]*>.*?</c>', '<c r="D1"><f>1+1</f></c>', xml)
+
+    edits = {"xl/worksheets/sheet1.xml": cells}
+    edits.update(rels_edit or {})
+    return _patch(_xlsx(build), edits)
+
+
+TALLY_PAGE = "[sheet: Tally]\nOSPREYROW\t\t3000000\t=1+1\nPLOVERROW"
+NOT_A_DATE_ONE = ("1 cell(s) formatted as a date or time held a number that is no date in "
+                  "Excel's calendar (negative, past 9999-12-31, or not a number); the "
+                  "number is shown as stored")
+
+
+def test_the_sheet_list_fallback_still_reads_stored_values(monkeypatch):
+    """Review r2 (A5): when the workbook's own sheet list could not be read,
+    every sheet's part was forgotten, so the raw-cell lookup could not see a
+    stored empty string (a false FINAL 'no stored value' note) or a stored
+    number openpyxl turned into ``#VALUE!`` (shown with nothing said). The
+    fallback now takes each part from openpyxl's own path; the page and the
+    notes are the intact package's, plus one transient note.
+
+    Siblings (review r2, C): a package with no ``_rels/.rels`` (openpyxl
+    finds the workbook through ``[Content_Types].xml``, and so does this),
+    and one whose package relationship names the workbook in another CASE
+    (OPC part names compare case-insensitively) need no fallback at all. A
+    SHEET relationship in another case is a part openpyxl will not open: the
+    note says exactly that, where it said the part was missing."""
+    intact = [FORMULA_NOTE_ONE, NOT_A_DATE_ONE, PAGE_NOTE_XLSX]
+    with pytest.warns(UserWarning, match="outside the limits for dates"):
+        _assert_doc(_extract("tally.xlsx", _tally_xlsx()), [TALLY_PAGE], intact)
+    with pytest.warns(UserWarning, match="outside the limits for dates"):
+        _assert_doc(_extract("tally.xlsx", _tally_xlsx({"_rels/.rels": lambda t: None})),
+                    [TALLY_PAGE], intact)
+    with pytest.warns(UserWarning, match="outside the limits for dates"):
+        _assert_doc(_extract("tally.xlsx", _tally_xlsx({
+            "_rels/.rels": lambda t: t.replace("xl/workbook.xml", "xl/Workbook.xml")})),
+                    [TALLY_PAGE], intact)
+    _assert_doc(_extract("tally.xlsx", _tally_xlsx({
+        "xl/_rels/workbook.xml.rels": lambda t: t.replace(
+            "/xl/worksheets/sheet1.xml", "/xl/worksheets/Sheet1.xml")})),
+                ["[sheet: Tally]\n[not read: openpyxl could not open it]"],
+                [f"sheet 'Tally': openpyxl could not open it; its content was not read "
+                 f"({UNREAD})", PAGE_NOTE_XLSX])
+
+    real_fromstring = ET.fromstring
+
+    def no_sheet_list(data, *args, **kwargs):
+        if b"<sheets>" in (data if isinstance(data, bytes) else data.encode()):
+            raise MemoryError()
+        return real_fromstring(data, *args, **kwargs)
+
+    monkeypatch.setattr(ET, "fromstring", no_sheet_list)
+    list_note = ("the workbook's own sheet list could not be read (MemoryError); tabs "
+                 "follow openpyxl's list, which leaves out a sheet that names no part "
+                 f"or a part openpyxl does not find in the file ({PART_UNREAD})")
+    with pytest.warns(UserWarning, match="outside the limits for dates"):
+        _assert_doc(_extract("tally.xlsx", _tally_xlsx()), [TALLY_PAGE],
+                    [list_note] + intact)
+
+
+def test_xls_formats_unread_never_render_a_date_the_formats_cannot_vouch_for(tmp_path):
+    """Review r2 (A6): when xlrd's formatting-aware open fails (here a
+    PALETTE record whose color count disagrees with its size) and the plain
+    open succeeds, formats are unknown -- and a duration read as an invented
+    1900 date that reached detected dates, under an unmarked note. With no
+    format to vouch for it, every date/time cell reads as the number stored,
+    and the note is marked transient and counts them."""
+    import struct
+
+    palette = [(0x0092, struct.pack("<H", 56) + b"\0" * (4 * 55))]
+    raw = make_fixtures.xls_bytes([{"name": "Clocks", "cells": [
+        (0, 0, "SHIFTXLS", 0), (0, 1, 1.5, 46), (0, 2, 0.15, 9), (0, 3, 45489.0, 14),
+        (0, 4, 0.5, 20)]}], globals_extra=palette)
+    note = ("the workbook's number formats could not be read (XLRDError); 3 cell(s) "
+            "formatted as a date, time or duration are shown as the number stored, a "
+            "percentage format is not applied, and hidden rows and columns are not "
+            f"counted ({PART_UNREAD})")
+    doc = _extract("clocks.xls", raw)
+    _assert_doc(doc, ["[sheet: Clocks]\nSHIFTXLS\t1.5\t0.15\t45489\t0.5"], [note, PAGE_NOTE_XLS])
+    assert ex.has_transient_marker(note) and not ex.has_final_marker(note)
+    assert walker._dated(doc.pages) == ((), ()), walker._dated(doc.pages)
+
+
+def test_hidden_notes_say_read_only_for_what_was_read(monkeypatch):
+    """Review r2 (A7): the unmarked hidden-sheet note said "it was read like
+    any other sheet" for a hidden chartsheet, a hidden sheet whose part is
+    missing, hidden tabs behind the row cap and a hidden ``.xls`` macro
+    sheet -- beside the marked note saying each was NOT read. It says the
+    sheet was read only when it was; the hidden-cells note says hidden cells
+    are not skipped, which stays true when the cap cuts a hidden row."""
+    def build(wb):
+        _ledger_and_plot(wb)
+        wb["Plot"].sheet_state = "hidden"
+        wb.create_sheet("Gone")["A1"] = "GONEWORD"
+        wb["Gone"].sheet_state = "hidden"
+
+    raw = _patch(_xlsx(build), {"xl/worksheets/sheet2.xml": lambda t: None})
+    _assert_doc(_extract("hidden.xlsx", raw),
+                ["[sheet: Ledger]\nHERONHEAD\nROW1\nROW2", "[chartsheet: Plot]",
+                 "[sheet: Gone]\n[not read: its part is missing from the file]"],
+                ["sheet 'Plot' is hidden in the workbook", PLOT_NOTE,
+                 "sheet 'Gone' is hidden in the workbook",
+                 f"sheet 'Gone': its part is missing from the file; its content was not "
+                 f"read ({UNREAD})", PAGE_NOTE_XLSX])
+
+    monkeypatch.setattr(ex, "_XLSX_MAX_ROWS", 2)
+
+    def capped(wb):
+        ws = wb.active
+        ws.title = "Rows"
+        for i in range(1, 6):
+            ws[f"A{i}"] = f"RWORD{i}"
+        ws.row_dimensions[5].hidden = True
+        wb.create_sheet("HidA")["A1"] = "HIDAWORD"
+        wb["HidA"].sheet_state = "hidden"
+        wb.create_sheet("VeryB")["A1"] = "VERYBWORD"
+        wb["VeryB"].sheet_state = "veryHidden"
+
+    truncation = ("workbook truncated at 2 rows while reading 'Rows'; the rest of that "
+                  "sheet, and the 2 sheet(s) never opened ('HidA', 'VeryB'), were not read "
+                  f"({UNREAD})")
+    _assert_doc(_extract("capped.xlsx", _xlsx(capped)),
+                ["[sheet: Rows]\nRWORD1\nRWORD2\n[... workbook truncated at 2 rows]",
+                 f"[sheet: HidA]\n{CAP_LINE}", f"[sheet: VeryB]\n{CAP_LINE}"],
+                ["sheet 'Rows' marks 1 row(s) and 0 column(s) hidden; hidden cells are not "
+                 "skipped for being hidden",
+                 "sheet 'HidA' is hidden in the workbook",
+                 "sheet 'VeryB' is very hidden in the workbook", truncation, PAGE_NOTE_XLSX])
+
+    xls = make_fixtures.xls_bytes([
+        {"name": "Ledger", "cells": [(r, 0, f"ROW{r + 1}", 0) for r in range(3)]},
+        {"name": "Macro1", "kind": "macro", "visibility": 1},
+        {"name": "Tucked", "visibility": 1, "cells": [(0, 0, "TUCKEDWORD", 0)]},
+    ])
+    _assert_doc(_extract("capped.xls", xls),
+                ["[sheet: Ledger]\nROW1\nROW2\n[... workbook truncated at 2 rows]",
+                 f"[sheet: Macro1]\n{CAP_LINE}", f"[sheet: Tucked]\n{CAP_LINE}"],
+                ["sheet 'Macro1' is hidden in the workbook",
+                 "sheet 'Tucked' is hidden in the workbook",
+                 "workbook truncated at 2 rows while reading 'Ledger'; the rest of that "
+                 "sheet, and the 2 sheet(s) never opened ('Macro1', 'Tucked'), were not "
+                 f"read ({UNREAD})", PAGE_NOTE_XLS])
+    monkeypatch.setattr(ex, "_XLSX_MAX_ROWS", 50000)
+    _assert_doc(_extract("macro.xls", xls),
+                ["[sheet: Ledger]\nROW1\nROW2\nROW3",
+                 "[sheet: Macro1]\n[not read: an Excel 4.0 macro sheet]",
+                 "[sheet: Tucked]\nTUCKEDWORD"],
+                ["sheet 'Macro1' is hidden in the workbook",
+                 f"sheet 'Macro1': an Excel 4.0 macro sheet; its content was not read ({UNREAD})",
+                 "sheet 'Tucked' is hidden in the workbook; it was read like any other sheet",
+                 PAGE_NOTE_XLS])
+
+
+def test_the_streamed_sheet_read_holds_memory_flat():
+    """Review r2 (A9): review round 1's B1 fix streams the worksheet part and
+    clears each element, so memory holds one row whatever the sheet's size
+    (the whole-part parse peaked at 2.3 GB). No test held it: a reader that
+    never cleared passed every gate while its peak grew about 300 times.
+    Traced peak around the extras stream (which now also measures the sheet's
+    extent) and the raw-cell stream read to its last row stays under a small
+    absolute bound on a sheet of 25,000 rows."""
+    import tracemalloc
+
+    rows = "".join(f'<row r="{r}"><c r="A{r}"><v>{r}</v></c>'
+                   f'<c r="B{r}" t="inlineStr"><is><t>ROWTEXT{r}</t></is></c></row>'
+                   for r in range(1, 25_001))
+    sheet = (f'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+             f"<sheetData>{rows}</sheetData><headerFooter><oddHeader>&amp;CBIGHEADWORD"
+             f"</oddHeader></headerFooter></worksheet>").encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("xl/worksheets/sheet1.xml", sheet)
+    with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as z:
+        ex._xlsx_sheet_extras(z, "xl/worksheets/sheet1.xml", {})  # warm-up
+        raw_cells = ex._XlsxRawCells(z, "xl/worksheets/sheet1.xml")
+        tracemalloc.start()
+        try:
+            extras = ex._xlsx_sheet_extras(z, "xl/worksheets/sheet1.xml", {})
+            last = raw_cells.get(25_000, 1)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+            raw_cells.close()
+    assert extras.header_lines == ["BIGHEADWORD"] and extras.max_col == 2, extras
+    assert last is not None and last.v_text == "25000", last
+    assert peak < 5 * 1024 * 1024, f"peak traced memory {peak / 1e6:.1f} MB on 25,000 rows"
+
+
+def test_xlsx_and_xls_render_booleans_whole_numbers_and_elapsed_time_alike():
+    """Review r2 (C) and the format-rendering table: ``.xlsx`` printed a
+    boolean ``True``/``False`` where ``.xls`` prints Excel's ``TRUE``/``FALSE``
+    (E3 is exact); a whole number a writer stored as ``10.0`` read ``10.0``
+    in ``.xlsx`` and ``10`` in ``.xls`` (E15); and an elapsed-seconds format
+    (``[s]``) read as a duration in ``.xlsx`` and a bare number in ``.xls``."""
+    def build(wb):
+        ws = wb.active
+        ws.title = "Flags"
+        ws["A1"], ws["B1"], ws["C1"], ws["D1"] = True, False, "PLACEHOLDERC", 1.5
+        ws["D1"].number_format = "[s]"
+        ws["E1"], ws["F1"], ws["G1"] = "=1=1", "PLACEHOLDERF", "PLACEHOLDERG"
+        ws["H1"], ws["I1"] = 15, 0.1525
+        ws["H1"].number_format = "0\\%"
+        ws["I1"].number_format = "0.0?%"
+
+    def cells(xml: str) -> str:
+        xml = re.sub(r'<c r="C1"[^>]*>.*?</c>', '<c r="C1"><v>10.0</v></c>', xml)
+        xml = re.sub(r'<c r="F1"[^>]*>.*?</c>', '<c r="F1" t="e"><v>#N/A</v></c>', xml)
+        # A STORED #VALUE! error is the error, never a number recovered for it.
+        xml = re.sub(r'<c r="G1"[^>]*>.*?</c>', '<c r="G1" t="e"><v>#VALUE!</v></c>', xml)
+        return re.sub(r'<c r="E1"[^>]*>.*?</c>', '<c r="E1" t="b"><f>1=1</f><v>1</v></c>', xml)
+
+    page = "[sheet: Flags]\nTRUE\tFALSE\t10\t36:00:00\tTRUE\t#N/A\t#VALUE!\t15\t15.25%"
+    _assert_doc(_extract("flags.xlsx", _patch(_xlsx(build), {"xl/worksheets/sheet1.xml": cells})),
+                [page], [PAGE_NOTE_XLSX])
+    raw = make_fixtures.xls_bytes([{"name": "Flags", "cells": [
+        (0, 0, True, 0), (0, 1, False, 0), (0, 2, 10.0, 0), (0, 3, 1.5, 164), (0, 4, True, 0),
+        (0, 5, make_fixtures.XlsError(0x2A), 0), (0, 6, make_fixtures.XlsError(0x0F), 0),
+        (0, 7, 15.0, 165), (0, 8, 0.1525, 166)]}],
+        formats={164: "[s]", 165: "0\\%", 166: "0.0?%"})
+    _assert_doc(_extract("flags.xls", raw), [page], [PAGE_NOTE_XLS])
+
+
+def test_a_cell_openpyxl_cannot_parse_stops_only_its_own_sheet():
+    """The format table's NaN row: a ``<v>NaN</v>`` (no Excel writes one)
+    makes openpyxl's row reader raise part-way through a sheet, and the whole
+    workbook FAILED. The rows before it, and every other sheet, still read;
+    the rest of that sheet is a transient note."""
+    def build(wb):
+        ws = wb.active
+        ws.title = "Odd"
+        ws["A1"], ws["A2"], ws["A3"] = "BEFOREWORD", 0.5, "AFTERWORD"
+        wb.create_sheet("Next")["A1"] = "NEXTWORD"
+
+    raw = _patch(_xlsx(build), {"xl/worksheets/sheet1.xml": lambda t: t.replace(
+        "<v>0.5</v>", "<v>NaN</v>")})
+    note = ("sheet 'Odd': its rows from row 2 on could not be read (ValueError), so "
+            f"they are not on its page ({PART_UNREAD})")
+    _assert_doc(_extract("odd.xlsx", raw), ["[sheet: Odd]\nBEFOREWORD", "[sheet: Next]\nNEXTWORD"],
+                [note, PAGE_NOTE_XLSX])
+
+
+def test_extras_failure_part_way_keeps_nothing_the_note_calls_unread(monkeypatch):
+    """Review r2 (C, mutant R06): a failure raised part-way through the
+    extras stream -- after the hyperlinks were read -- must not keep the
+    half-read links, header or hidden counts while the note says they could
+    not be read."""
+    real = ex._xlsx_iter_rows
+
+    def failing_after_hyperlinks(z, part):
+        for row_no, el in real(z, part):
+            yield row_no, el
+            if ex._local(el.tag) == "hyperlinks":
+                raise MemoryError()
+
+    raw = _threads_workbook()
+    calls = {"n": 0}
+
+    def first_call_fails(z, part):
+        calls["n"] += 1
+        return failing_after_hyperlinks(z, part) if calls["n"] == 1 else real(z, part)
+
+    monkeypatch.setattr(ex, "_xlsx_iter_rows", first_call_fails)
+    note = ("sheet 'Ledger': its print header/footer, hyperlinks, hidden rows and columns "
+            "and true extent could not be read (MemoryError), so a cell or row written out "
+            f"of order may be missing with no note of its own ({PART_UNREAD})")
+    _assert_doc(_extract("threads.xlsx", raw),
+                ["[sheet: Ledger]\nALDER\nREEDROW\n[comment on A1 by NIGHTJAR] MAGPIE\n"
+                 "[comment on A2 by CRAKE] BITTERN"],
+                [note, PAGE_NOTE_XLSX])
+
+
+def test_the_accounting_line_does_not_say_the_bytes_are_missing():
+    """Review r2 (C, round 1's C2 still open): a chartsheet's chart or rows past
+    the row cap are FINAL gaps whose bytes ARE in the file; the accounting
+    line said they were "NOT in the corpus"."""
+    from dociq.contracts import DocumentRecord, PageKind, PageRecord, RunResult
+    from dociq.verify import accounting
+
+    lost = DocumentRecord(
+        doc_id="", rel_path="book.xlsx", filename="book.xlsx", sha256="3" * 64,
+        size_bytes=1, ext=".xlsx", status=ProcessingStatus.FULL,
+        pages=(PageRecord(page_no=1, text="[chartsheet: Chart1]", kind=PageKind.SYNTHETIC),),
+        notes=(CHART1_NOTE,))
+    report = accounting.check(RunResult(config=RunConfig(source_root="s", output_root="o"),
+                                        documents=(lost,)))
+    assert report.evidence_line == (
+        "EVIDENCE GAPS — 1 document(s) name content that was NOT read and will not be "
+        "recovered by re-reading"), report.evidence_line
 
 
 # ---------------------------------------------------------------------------

@@ -632,8 +632,10 @@ def _resume_identity(config: RunConfig) -> str:
     different XLSX/CSV/ZIP caps satisfied it and was replayed under a run whose
     manifest then honestly hashed the *new* settings. The documents were not
     produced under the configuration the deliverable claims. Neither "OCR
-    disabled" nor a successfully truncated spreadsheet is a degradation, so
-    nothing else in the resume path stopped those records either.
+    disabled" nor a spreadsheet truncated at its row cap is a RETRYABLE
+    degradation (the truncation is a final evidence gap, which the resume path
+    replays as recorded), so nothing else in the resume path stopped those
+    records either.
 
     Deriving it from :func:`~dociq.contracts.to_jsonable` with
     ``for_identity=True`` makes the resume key and the manifest's identity the
@@ -808,22 +810,22 @@ class _ResumeWriter:
 # ---------------------------------------------------------------------------
 
 
-def _dated(pages: tuple[PageRecord, ...],
-           ext: str = "") -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _dated(pages: tuple[PageRecord, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """``(detected_dates, notes)`` — dates in first-appearance order, capped.
 
     Detection reads :func:`dociq.ingest.extract.date_detection_text`, not the
     page text itself: a spreadsheet cell's own line break is written as a
     pilcrow (E5), which would otherwise hide a date the cell wrapped. The
     undoing happens here, where the text is handed to detection, because the
-    page text must keep the pilcrow and only the record's extension says the
-    pilcrow was a cell's break and not a character of the document.
+    page text must keep the pilcrow. Whether a pilcrow was a cell's break is
+    decided by the reader that wrote the page (its page note), never by the
+    record's extension: a misnamed file is recovered by another reader.
     """
     seen: list[str] = []
     known: set[str] = set()
     capped = False
     for p in pages:
-        for iso in detect_dates(ex.date_detection_text(ext, p.text)):
+        for iso in detect_dates(ex.date_detection_text(p)):
             if iso not in known:
                 known.add(iso)
                 seen.append(iso)
@@ -867,7 +869,7 @@ def _record(entry: FileEntry, filename: str, ext: str, size: int, sha: str,
             got: ex.ExtractedDoc, *, parent: str | None = None,
             order: int | None = None, rel_path: str | None = None,
             config: RunConfig | None = None) -> DocumentRecord:
-    dates, date_notes = _dated(got.pages, ext)
+    dates, date_notes = _dated(got.pages)
     # Every DocumentRecord in the run is built here, which makes this the one
     # place that has to scrub absolute paths out of hashed content.
     notes = tuple(ex.sanitize_message(n) for n in got.notes + date_notes)

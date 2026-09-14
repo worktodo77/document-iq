@@ -340,7 +340,8 @@ _XLS_SUBSTREAM_TYPE = {"worksheet": (0, 0x0010), "macro": (1, 0x0040),
 
 
 def xls_bytes(sheets, *, datemode: int = 0,
-              formats: dict[int, str] | None = None) -> bytes:
+              formats: dict[int, str] | None = None,
+              globals_extra: list[tuple[int, bytes]] | None = None) -> bytes:
     """A BIFF8 workbook inside a hand-built OLE2 compound file, since no
     ``.xls`` writer is installed anywhere on this machine.
 
@@ -356,13 +357,31 @@ def xls_bytes(sheets, *, datemode: int = 0,
       built-in (0 General, 9 ``0%``, 14 a date, 20 ``h:mm``, 46
       ``[h]:mm:ss``) or a custom one declared in ``formats``.
     * ``hidden_rows`` / ``hidden_cols`` -- ROW / COLINFO records flagged
-      hidden.
+      hidden; ``zero_height_rows`` -- ROW records of height 0, not flagged;
+      ``rows_hidden_by_default`` -- a DEFAULTROWHEIGHT record saying so.
     * ``dimensions`` -- an explicit ``(first_row, last_row + 1, first_col,
       last_col + 1)``; derived from the cells otherwise.
+    * ``header`` / ``footer`` -- HEADER / FOOTER record text, Excel's codes
+      and all; ``even_first`` -- ``(even header, even footer, first header,
+      first footer)`` for a HEADERFOOTER record, laid out as Excel 2016
+      writes it.
+    * ``dialog`` -- a WSBOOL record flagging the sheet a dialog sheet, as
+      Excel saves one.
+    * ``notes`` -- ``(row, col, author, text)`` cell comments, each an OBJ,
+      TXO (text and runs in CONTINUE records) and NOTE record, as Excel
+      writes them; ``notes_without_text`` -- the same, with no OBJ or TXO.
+    * ``links`` -- ``(first_row, last_row, first_col, last_col, kind, target,
+      location)`` HLINK records: ``kind`` is ``"url"``, ``"file"``,
+      ``"internal"`` (a location only) or ``"unknown"`` (a moniker class no
+      reader knows).
+
+    ``globals_extra`` -- raw ``(opcode, data)`` records appended to the
+    workbook globals after the XF records (e.g. a malformed PALETTE).
 
     One XF record per distinct format, in order of first use after XF 0
     (General). The stream is padded to at least the 4096-byte mini-stream
-    cutoff so no MiniFAT is needed.
+    cutoff so no MiniFAT is needed. A workbook using none of the optional
+    keys is byte-identical to what this writer produced before they existed.
     """
     import struct
 
@@ -375,6 +394,52 @@ def xls_bytes(sheets, *, datemode: int = 0,
         if all(ord(ch) < 256 for ch in s):
             return struct.pack(lenfmt + "B", len(s), 0) + s.encode("latin-1")
         return struct.pack(lenfmt + "B", len(s), 1) + s.encode("utf-16-le")
+
+    std_link = bytes.fromhex("D0C9EA79F9BACE118C8200AA004BA90B")
+    url_moniker = bytes.fromhex("E0C9EA79F9BACE118C8200AA004BA90B")
+    file_moniker = bytes.fromhex("0303000000000000C000000000000046")
+
+    def hlink(frow, lrow, fcol, lcol, kind, target, location) -> bytes:
+        head = struct.pack("<HHHH", frow, lrow, fcol, lcol) + std_link + b"\x02\x00\x00\x00"
+        body = b""
+        options = 0
+        if kind == "url":
+            options = 0x03
+            text = (target + "\0").encode("utf-16-le")
+            body = url_moniker + struct.pack("<I", len(text)) + text
+        elif kind == "file":
+            options = 0x01
+            short = target.encode("latin-1") + b"\0"
+            body = (file_moniker + struct.pack("<Hi", 0, len(short)) + short
+                    + b"\xff\xff\xad\xde" + b"\0" * 20 + struct.pack("<i", 0))
+        elif kind == "unknown":
+            options = 0x01
+            body = b"\x11" * 16
+        if location:
+            options |= 0x08
+            body += (struct.pack("<I", len(location) + 1)
+                     + (location + "\0").encode("utf-16-le"))
+        return rec(0x01B8, head + struct.pack("<i", options) + body)
+
+    def note_records(notes, with_text: bool, first_id: int) -> tuple[bytes, bytes]:
+        objects, note_recs = b"", b""
+        for n, (r, c, author, text) in enumerate(notes):
+            obj_id = first_id + n
+            if with_text:
+                objects += rec(0x005D, struct.pack("<HHHHH", 0x15, 0x12, 0x19, obj_id, 0x4011)
+                               + b"\0" * 12 + struct.pack("<HH", 0x0D, 0x16) + b"\0" * 22
+                               + struct.pack("<HH", 0, 0))
+                objects += rec(0x01B6, struct.pack("<HH6sHHH", 0x0212, 0, b"\0" * 6,
+                                                   len(text), 16, 0) + b"\0\0")
+                encoded = (b"\x00" + text.encode("latin-1")
+                           if all(ord(ch) < 256 for ch in text)
+                           else b"\x01" + text.encode("utf-16-le"))
+                objects += rec(0x003C, encoded)
+                objects += rec(0x003C, struct.pack("<HH4x", 0, 0)
+                               + struct.pack("<HH4x", len(text), 0))
+            note_recs += rec(0x001C, struct.pack("<HHHH", r, c, 0, obj_id)
+                             + xl_str(author, "<H") + b"\0")
+        return objects, note_recs
 
     xf_formats = [0]
     for sheet in sheets:
@@ -402,6 +467,8 @@ def xls_bytes(sheets, *, datemode: int = 0,
         head += rec(0x041E, struct.pack("<H", idx) + xl_str(fmt_str, "<H"))
     for fmt in xf_formats:
         head += rec(0x00E0, struct.pack("<HHHBBBBIiH", 0, fmt, 0, 0, 0, 0, 0, 0, 0, 0))
+    for opcode, data in globals_extra or ():
+        head += rec(opcode, data)
 
     def boundsheet(offset: int, sheet) -> bytes:
         sheet_type = _XLS_SUBSTREAM_TYPE[sheet.get("kind", "worksheet")][0]
@@ -417,6 +484,21 @@ def xls_bytes(sheets, *, datemode: int = 0,
         bof_type = _XLS_SUBSTREAM_TYPE[sheet.get("kind", "worksheet")][1]
         body = rec(0x0809, struct.pack("<HHHHII", 0x0600, bof_type, 0, 0, 0, 0))
         if sheet.get("kind", "worksheet") == "worksheet":
+            if sheet.get("rows_hidden_by_default"):
+                body += rec(0x0225, struct.pack("<HH", 0x0002, 255))
+            if "dialog" in sheet:
+                body += rec(0x0081, struct.pack("<BB", 0xD1 if sheet["dialog"] else 0xC1,
+                                                0x04))
+            if "header" in sheet:
+                body += rec(0x0014, xl_str(sheet["header"], "<H"))
+            if "footer" in sheet:
+                body += rec(0x0015, xl_str(sheet["footer"], "<H"))
+            if "even_first" in sheet:
+                strings = sheet["even_first"]
+                body += rec(0x089C, struct.pack("<HH8x", 0x089C, 0) + b"\0" * 16
+                            + struct.pack("<H", 0x333F)
+                            + struct.pack("<4H", *(len(s) for s in strings))
+                            + b"".join(xl_str(s, "<H") for s in strings if s))
             for colx in sheet.get("hidden_cols", ()):
                 body += rec(0x007D, struct.pack("<HHHHHH", colx, colx, 2962, 0,
                                                 0x0001, 0))
@@ -430,8 +512,16 @@ def xls_bytes(sheets, *, datemode: int = 0,
             for rowx in sheet.get("hidden_rows", ()):
                 body += rec(0x0208, struct.pack("<HHHHHHI", rowx, 0, 0, 255, 0,
                                                 0, 0x20))
+            for rowx in sheet.get("zero_height_rows", ()):
+                body += rec(0x0208, struct.pack("<HHHHHHI", rowx, 0, 0, 0, 0, 0, 0))
             for r, c, value, fmt in cells:
                 body += cell_record(r, c, value, fmt)
+            objects, notes = note_records(sheet.get("notes", ()), True, 1)
+            bare_objects, bare_notes = note_records(sheet.get("notes_without_text", ()),
+                                                    False, 100)
+            body += objects + bare_objects + notes + bare_notes
+            for link in sheet.get("links", ()):
+                body += hlink(*link)
         substreams.append(body + eof)
 
     offsets, pos = [], globals_len

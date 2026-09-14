@@ -139,6 +139,20 @@ M_PHOTO_PROBE = "image/EXIF probe failed"
 M_SLIDE_NOTES = "slide notes could not be read"
 M_EML_BODY = "email body could not be read"
 
+# Spreadsheet fidelity review-fix round 2 (D-55). A read INSIDE a spreadsheet
+# that raised: a sheet's own part streamed for its header, links and extent, its
+# relationships, comments, threaded comments or persons, its raw cell XML, the
+# second (formula) reading of the workbook, the workbook's own sheet list, a
+# sheet's rows part-way through, or a legacy workbook's formats or tab records.
+# TRANSIENT, like the slide-notes and email-body part reads above: the bytes
+# are held in memory, so the realistic cause of a failure that a second read
+# clears is load (a MemoryError while sixteen other documents are extracting),
+# and the walker's serial retry is exactly the test that tells it from a part
+# the file makes unreadable -- which the retry then records as UNCHANGED. What
+# the bytes themselves make permanent (a chartsheet, a dialog sheet, a missing
+# part, the row cap) is FINAL, under M_XLSX_SHEET_UNREAD below.
+M_XLSX_PART_UNREAD = "spreadsheet part could not be read"
+
 TRANSIENT_MARKERS: tuple[str, ...] = (
     M_OCR_PAGE,
     M_OCR_DOC,
@@ -151,6 +165,7 @@ TRANSIENT_MARKERS: tuple[str, ...] = (
     M_PHOTO_PROBE,
     M_SLIDE_NOTES,
     M_EML_BODY,
+    M_XLSX_PART_UNREAD,
 )
 
 # The second half of the vocabulary (Codex review #1, B-3).
@@ -183,10 +198,10 @@ M_ATTACH_SKIPPED = "attachment content was not brought in"
 M_IMAGE_UNREAD = "page image content was not read"
 
 # 2026-09-10 fidelity sweep, stage 2. Same rule, two more paths that yield
-# less evidence: a formula openpyxl never computed, and sheet content that was
-# never read -- a chartsheet, a dialog or macro tab, a sheet behind a row cap
-# or missing from the file, or a sheet's own header, links or comments whose
-# read failed.
+# less evidence: a formula openpyxl never computed, and sheet content the file
+# itself keeps from being read -- a chartsheet, a dialog or macro tab, a sheet
+# behind a row cap or missing from the file, a row written after a later row.
+# A READ that raised is not in this set: it is M_XLSX_PART_UNREAD, transient.
 M_XLSX_FORMULA_NO_VALUE = "a formula cell had no stored value"
 M_XLSX_SHEET_UNREAD = "sheet content was not read"
 
@@ -219,7 +234,8 @@ FINAL_MARKERS: tuple[str, ...] = (
     # Stage 2 additions, appended rather than interleaved so the Word
     # package's parallel branch (also appending to this block) merges
     # cleanly. Both are FINAL: the same bytes re-read the same way find the
-    # same missing formula result or the same unopened sheet.
+    # same missing formula result or the same unopened sheet. Neither is used
+    # for a read that raised (review-fix round 2): that is transient.
     M_XLSX_FORMULA_NO_VALUE,
     M_XLSX_SHEET_UNREAD,
 )
@@ -1750,31 +1766,45 @@ CELL_LINE_BREAK = " ¶ "
 Public because date detection has to undo exactly this, and only for pages a
 spreadsheet extractor wrote (:func:`date_detection_text`)."""
 
-SPREADSHEET_EXTENSIONS = frozenset({".xlsx", ".xlsm", ".xls"})
+XLSX_PAGE_NOTE = "XLSX has no page boundaries; one synthetic page per worksheet"
+XLS_PAGE_NOTE = "XLS has no page boundaries; one synthetic page per worksheet"
+_SPREADSHEET_PAGE_NOTES = frozenset({XLSX_PAGE_NOTE, XLS_PAGE_NOTE})
+"""The page note each spreadsheet extractor stamps on every page it writes --
+and only those extractors, so it names the READER that produced a page."""
 
 
-def date_detection_text(ext: str, text: str) -> str:
-    """The text date detection reads for one page of a document named ``ext``.
+def date_detection_text(page: PageRecord) -> str:
+    """The text date detection reads for one page.
 
     E5 writes a cell's own line break as :data:`CELL_LINE_BREAK` so a row stays
     on one line, and a date the cell wrapped (``16 July`` / ``2024``) then no
     longer matched, because the date patterns join a date's parts with
-    whitespace. On a spreadsheet page the symbol is known to be a cell's own
-    break, so turning it back into a newline hands detection exactly the text
-    it read before E5, and the emitted page text is untouched. Every other
-    document keeps its text as it is: there a pilcrow is only a character, and
-    reading it as whitespace would join text that was never one cell.
+    whitespace. On a page a spreadsheet extractor wrote, the symbol is known
+    to be a cell's own break, so turning it back into a newline hands
+    detection exactly the text it read before E5, and the emitted page text is
+    untouched. Every other page keeps its text as it is: there a pilcrow is
+    only a character, and reading it as whitespace would join text that was
+    never one cell.
+
+    The decision follows the READER, never the file's name (review-fix round
+    2): a workbook delivered as ``.pdf`` and recovered by content sniffing is
+    still a spreadsheet page, and a Word file named ``.xlsx`` is not. The
+    reader is read from the page's own notes, which the extractor writes and
+    the document's text cannot reach, so a typed pilcrow cannot pass for one.
     """
-    if (ext or "").lower() in SPREADSHEET_EXTENSIONS:
-        return text.replace(CELL_LINE_BREAK, "\n")
-    return text
+    if any(note in _SPREADSHEET_PAGE_NOTES for note in page.notes):
+        return page.text.replace(CELL_LINE_BREAK, "\n")
+    return page.text
 
 
 def _xlsx_cell(v) -> str:
     """One cell → text. Dates render ISO so the date extractor anchors them;
-    a duration renders as hours (:func:`_duration_text`), never as a date."""
+    a duration renders as hours (:func:`_duration_text`), never as a date; a
+    boolean reads ``TRUE``/``FALSE`` as Excel shows it, in both formats."""
     if v is None:
         return ""
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
     if isinstance(v, datetime.datetime):
         # Drop a midnight time component so a pure date reads as 'YYYY-MM-DD'.
         return (v.date().isoformat() if v.time() == datetime.time(0, 0)
@@ -1783,6 +1813,10 @@ def _xlsx_cell(v) -> str:
         return v.isoformat()
     if isinstance(v, datetime.timedelta):
         return _duration_text(v)
+    if isinstance(v, float):
+        # E15 in both formats: a whole number a writer stored as ``10.0``
+        # reads ``10``, as the same cell does in ``.xls``.
+        return _xl_number_text(v)
     return str(v)
 
 
@@ -1817,41 +1851,104 @@ def _xl_is_duration_format(fmt: str | None) -> bool:
     return bool(fmt) and _XL_DURATION_FORMAT.search(fmt.split(";")[0]) is not None
 
 
-def _xls_serial_text(value: float, datemode: int, fmt: str | None) -> tuple[str, bool]:
-    """E2 for one ``.xls`` date-formatted cell: ``(text, is_date_or_time)``.
+def _fmt_codes(section: str) -> str:
+    """A format section's CODES, lower-cased: quoted literals, ``[...]``
+    codes (locale, color, elapsed-time), an escaped character and the
+    character after ``_`` or ``*`` removed, and so are ``AM/PM`` and ``A/P``,
+    whose letters are not date or time codes."""
+    out: list[str] = []
+    in_quotes = skip = False
+    depth = 0
+    for ch in section:
+        if skip:
+            skip = False
+        elif in_quotes:
+            in_quotes = ch != '"'
+        elif ch == '"':
+            in_quotes = True
+        elif ch in "\\_*":
+            skip = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(ch.lower())
+    return "".join(out).replace("am/pm", "").replace("a/p", "")
+
+
+def _fmt_shows_a_date(fmt: str | None) -> bool:
+    """True when a date/time format's first section shows a calendar DATE:
+    a year (``y``, or the era codes ``e``, ``g``, ``b``), a day (``d``), or
+    an ``m`` that is a month. ``mmm`` and longer are always months; ``m`` or
+    ``mm`` right after an hour code or right before a second code are
+    minutes, as Excel reads them. ``False`` for a time-only format (``h:mm``,
+    ``mm:ss``, ``h:mm AM/PM``) -- and for no format at all, which vouches for
+    nothing."""
+    if not fmt:
+        return False
+    codes = _fmt_codes(_fmt_first_section(fmt))
+    if any(ch in codes for ch in "ydegb"):
+        return True
+    runs = [(m.group(0)[0], len(m.group(0)), m.start())
+            for m in re.finditer(r"([a-z])\1*", codes)]
+    for i, (letter, length, _pos) in enumerate(runs):
+        if letter != "m":
+            continue
+        if length >= 3:
+            return True
+        after_hour = i > 0 and runs[i - 1][0] == "h"
+        before_second = i + 1 < len(runs) and runs[i + 1][0] == "s"
+        if not (after_hour or before_second):
+            return True
+    return False
+
+
+def _xls_serial_text(value: float, datemode: int, fmt: str | None) -> tuple[str, str | None]:
+    """E2 for one ``.xls`` date-formatted cell: ``(text, what to disclose)``.
 
     xlrd types a cell as a date from its FORMAT alone, so a time of day, a
     duration and a number that is no date at all all arrive here. The rules
-    are openpyxl's for the same serial in ``.xlsx``, so both formats agree:
+    are the ``.xlsx`` reader's for the same serial, so both formats agree, and
+    no rule renders a date the format does not vouch for:
 
     * a duration format (``[h]:mm:ss`` and the like) reads as a duration;
     * a serial from 0 up to (not including) 1 is a time of day, never a date
       -- ``xldate_as_datetime`` would put it on the 1899-12-31 or 1904-01-01
       epoch, a date the file does not hold;
+    * a serial of 1 or more under a TIME-ONLY format (``h:mm``, a weekly
+      total past 24 hours) reads as the number stored, flagged
+      ``'time_day'``: the format shows no date, so a date would be invented,
+      and the clock time alone would drop the day count the file holds;
+    * no format at all (flagged ``'no_format'``) vouches for nothing either:
+      the number as stored;
     * a negative serial, one past 9999-12-31, NaN or infinity is not a date
-      in Excel's calendar: the number is returned as stored, and ``False``
-      tells the caller to disclose it.
+      in Excel's calendar: the number as stored, flagged ``'not_a_date'``.
     """
     import xlrd
 
     if not math.isfinite(value):
-        return _xl_number_text(value), False
+        return _xl_number_text(value), "not_a_date"
+    if fmt is None:
+        return _xl_number_text(value), "no_format"
     if _xl_is_duration_format(fmt):
         try:
-            return _duration_text(datetime.timedelta(days=value)), True
+            return _duration_text(datetime.timedelta(days=value)), None
         except OverflowError:
-            return _xl_number_text(value), False
+            return _xl_number_text(value), "not_a_date"
     if value < 0:
-        return _xl_number_text(value), False
+        return _xl_number_text(value), "not_a_date"
     if value < 1:
         since_midnight = datetime.timedelta(milliseconds=round(value * 86_400_000))
         if since_midnight.days == 0:
-            return _xlsx_cell((datetime.datetime.min + since_midnight).time()), True
+            return _xlsx_cell((datetime.datetime.min + since_midnight).time()), None
+    if not _fmt_shows_a_date(fmt):
+        return _xl_number_text(value), "time_day"
     try:
         dt = xlrd.xldate.xldate_as_datetime(value, datemode)
     except (OverflowError, ValueError):
-        return _xl_number_text(value), False
-    return _xlsx_cell(dt), True
+        return _xl_number_text(value), "not_a_date"
+    return _xlsx_cell(dt), None
 
 
 def _clean_cell_text(s: str) -> str:
@@ -1992,7 +2089,11 @@ def _header_footer_lines(raw: str) -> list[str]:
     fields ``&P &N &D &T &F &A &Z &G``. ``&&`` is a literal ``&``. Each of
     the left, center and right sections is its own line (and so is each line
     inside a section), so two sections never glue into one word and a
-    line-anchored reader such as the Bates parser sees each stamp on its own.
+    line-anchored reader such as the Bates parser parses each stamp as its
+    own line. Where a stamp lands relative to that parser's head and tail
+    zones is not promised here: a header's lines follow the page's
+    ``[sheet: <name>]`` label, so a three-section header puts its right
+    section on the page's fourth line.
 
     Hand-walked rather than one regex: a quoted font spec can contain a comma
     or a digit that would otherwise be mistaken for one of the other codes.
@@ -2048,6 +2149,27 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _zip_member(z, name: str | None) -> str | None:
+    """The package member a part name names, or ``None`` when the package
+    holds none. OPC compares part names case-insensitively, so a relationship
+    written ``Sheet2.xml`` names the member ``sheet2.xml``; an exact match
+    wins over a case-folded one."""
+    if not name:
+        return None
+    try:
+        z.getinfo(name)
+        return name
+    except KeyError:
+        pass
+    folded = getattr(z, "_dociq_members_folded", None)
+    if folded is None:
+        folded = {}
+        for member in z.namelist():
+            folded.setdefault(member.lower(), member)
+        z._dociq_members_folded = folded
+    return folded.get(name.lower())
+
+
 def _xlsx_rels(z, part: str) -> dict[str, tuple[str, str]]:
     """``{relationship Id: (Target, Type)}`` for one package part (``""`` for
     the package itself), read from its own ``_rels/<name>.rels`` sibling.
@@ -2058,11 +2180,10 @@ def _xlsx_rels(z, part: str) -> dict[str, tuple[str, str]]:
 
     rels_path = posixpath.join(posixpath.dirname(part), "_rels",
                                 posixpath.basename(part) + ".rels")
-    try:
-        data = z.read(rels_path)
-    except KeyError:
+    member = _zip_member(z, rels_path)
+    if member is None:
         return {}
-    root = ET.fromstring(data)
+    root = ET.fromstring(z.read(member))
     return {el.get("Id"): (el.get("Target", ""), el.get("Type", ""))
             for el in root}
 
@@ -2092,31 +2213,60 @@ _XLSX_SHEET_KINDS = {
     "xlIntlMacrosheet": "worksheet",
 }
 
+_XLSX_ROOT_KINDS = {"worksheet": "worksheet", "chartsheet": "chartsheet",
+                    "dialogsheet": "dialogsheet", "macrosheet": "worksheet"}
 
-def _xlsx_sheet_order(z) -> tuple[str, list[tuple[str, str | None, str, str]]]:
-    """``(workbook part, sheets)``: every sheet the workbook part lists, in
-    TAB ORDER, as ``(name, part path or None, kind, state)``.
+_XLSX_WORKBOOK_CONTENT_TYPES = (
+    "spreadsheetml.sheet.main+xml", "sheet.macroEnabled.main+xml",
+    "spreadsheetml.template.main+xml", "template.macroEnabled.main+xml",
+    "addin.macroEnabled.main+xml")
+
+
+def _xlsx_workbook_part(z) -> str:
+    """The workbook part's member name: from the package's ``_rels/.rels``,
+    or -- when that names none the package holds -- from
+    ``[Content_Types].xml``, the way openpyxl itself finds it."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        rels = _xlsx_rels(z, "")
+    except ET.ParseError:
+        rels = {}
+    member = next(
+        (m for m in (_zip_member(z, _xlsx_resolve_part("", target))
+                     for target, rel_type in rels.values()
+                     if rel_type.endswith("/officeDocument")) if m), None)
+    if member is None:
+        types = _zip_member(z, "[Content_Types].xml")
+        if types is not None:
+            for el in ET.fromstring(z.read(types)).iter():
+                if (_local(el.tag) == "Override"
+                        and el.get("ContentType", "").endswith(_XLSX_WORKBOOK_CONTENT_TYPES)):
+                    member = _zip_member(z, el.get("PartName", "").lstrip("/"))
+                    if member:
+                        break
+    if member is None:
+        raise ExtractionError("the package names no workbook part it holds")
+    return member
+
+
+def _xlsx_sheet_order(z, workbook_part: str) -> list[tuple[str, str | None, str, str]]:
+    """Every sheet the workbook part lists, in TAB ORDER, as ``(name, part
+    member or None, kind, state)``.
 
     Everything is resolved through relationships, never fixed part names:
-    the workbook part from the package's ``_rels/.rels``, each sheet's part
-    and KIND from the workbook part's own relationships (the relationship
-    Type, not the part's path). Read straight from the package because
-    openpyxl's read-only ``Workbook.worksheets`` silently omits chartsheets
-    (E6). ``kind`` is ``'worksheet'``, ``'chartsheet'``, ``'dialogsheet'`` or
-    ``'unknown'``; ``state`` is ``'visible'``, ``'hidden'`` or
-    ``'veryHidden'``; the part is ``None`` when the file does not hold it.
+    each sheet's part and KIND from the workbook part's own relationships (the
+    relationship Type, not the part's path). Read straight from the package
+    because openpyxl's read-only ``Workbook.worksheets`` silently omits
+    chartsheets (E6). ``kind`` is ``'worksheet'``, ``'chartsheet'``,
+    ``'dialogsheet'`` or ``'unknown'``; ``state`` is ``'visible'``,
+    ``'hidden'`` or ``'veryHidden'``; the part is ``None`` when the file does
+    not hold it.
     """
     import xml.etree.ElementTree as ET
 
-    workbook_part = next(
-        (_xlsx_resolve_part("", target)
-         for target, rel_type in _xlsx_rels(z, "").values()
-         if rel_type.endswith("/officeDocument")), None)
-    if workbook_part is None:
-        raise ExtractionError("the package names no workbook part")
     root = ET.fromstring(z.read(workbook_part))
     rels = _xlsx_rels(z, workbook_part)
-    names = set(z.namelist())
 
     out: list[tuple[str, str | None, str, str]] = []
     for el in root.iter():
@@ -2124,13 +2274,42 @@ def _xlsx_sheet_order(z) -> tuple[str, list[tuple[str, str | None, str, str]]]:
             continue
         rid = next((v for k, v in el.attrib.items() if k.endswith("}id")), None)
         target, rel_type = rels.get(rid, ("", ""))
-        part = _xlsx_resolve_part(workbook_part, target) if target else None
-        if part not in names:
-            part = None
+        part = _zip_member(z, _xlsx_resolve_part(workbook_part, target)) if target else None
         kind = (_XLSX_SHEET_KINDS.get(rel_type.rsplit("/", 1)[-1], "unknown")
                 if rel_type else "worksheet")
         out.append((el.get("name", ""), part, kind, el.get("state", "visible")))
-    return workbook_part, out
+    return out
+
+
+def _xlsx_part_kind(z, member: str) -> str:
+    """A sheet part's kind from its own root element, for the fallback that
+    has no relationship Type to read it from."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        with z.open(member) as fh:
+            for _event, el in ET.iterparse(fh, events=("start",)):
+                return _XLSX_ROOT_KINDS.get(_local(el.tag), "unknown")
+    except Exception:
+        pass
+    return "worksheet"
+
+
+def _xlsx_openpyxl_sheet_order(wb, z) -> list[tuple[str, str | None, str, str]]:
+    """The sheet list as openpyxl read it, for when the package's own cannot
+    be: in tab order, each worksheet's part from openpyxl's own path (so its
+    header, links, comments and raw cells are still read), and each kind from
+    the part's root element."""
+    out: list[tuple[str, str | None, str, str]] = []
+    for sheet in getattr(wb, "_sheets", ()):
+        state = getattr(sheet, "sheet_state", "visible")
+        if type(sheet).__name__ == "Chartsheet":
+            out.append((sheet.title, None, "chartsheet", state))
+            continue
+        member = _zip_member(z, getattr(sheet, "_worksheet_path", None))
+        kind = _xlsx_part_kind(z, member) if member else "worksheet"
+        out.append((sheet.title, member, kind, state))
+    return out
 
 
 @dataclass
@@ -2142,11 +2321,25 @@ class _XlsxSheetExtras:
     footer_lines: list[str] = field(default_factory=list)
     hyperlinks: dict[tuple[int, int], str] = field(default_factory=dict)
     comments: list[tuple[str, str, str]] = field(default_factory=list)
+    threaded: int = 0
     hidden_rows: int = 0
     hidden_cols: int = 0
+    rows_hidden_by_default: bool = False
+    extent_known: bool = False
+    max_col: int = 0
+    """The largest column any cell of the part is written in -- the sheet's
+    real width, whatever its ``<dimension>`` declares and whatever order its
+    cells are written in."""
+    skipped_rows: list[int] = field(default_factory=list)
+    """Rows numbered at or below a row written before them, which openpyxl
+    skips (bounded at the row cap; ``skipped_total`` counts them all)."""
+    skipped_total: int = 0
+    rewritten_cells: int = 0
+    """Cells written a second time in the same row and column of a row
+    openpyxl reads: only the later value is kept."""
     unread: list[str] = field(default_factory=list)
-    """What could not be read, one phrase per failed read, for the caller's
-    marked note -- a failure here is disclosed, never swallowed."""
+    """One marked note tail per read that failed or part that is missing, for
+    the caller to prefix with the sheet's name -- disclosed, never swallowed."""
 
 
 def _xlsx_iter_rows(z, part: str):
@@ -2200,15 +2393,25 @@ def _xlsx_cell_column(ref: str | None, previous: int) -> int:
     return previous + 1
 
 
+def _is_zero(size: str | None) -> bool:
+    """A row height or column width of exactly zero hides it, as Excel
+    reads it."""
+    try:
+        return float(size) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 _HEADER_TAGS = ("oddHeader", "evenHeader", "firstHeader")
 _FOOTER_TAGS = ("oddFooter", "evenFooter", "firstFooter")
 
 
 def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtras:
     """E11/E12/E13 for one worksheet part: print header/footer, EXTERNAL
-    hyperlink targets, cell comments (threaded and legacy), and how many rows
-    and columns the sheet marks hidden -- everything a read-only cell
-    iteration cannot see.
+    hyperlink targets, cell comments (threaded and legacy), how many rows and
+    columns the sheet hides -- and the sheet's real extent: its widest column,
+    and the rows openpyxl will skip because they are numbered at or below a
+    row written before them. Everything a read-only cell iteration cannot see.
 
     The worksheet part is STREAMED (:func:`_xlsx_iter_rows`), never parsed
     whole: header, footer and hyperlinks sit after ``sheetData``, and a tree
@@ -2221,14 +2424,36 @@ def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtra
     extras = _XlsxSheetExtras()
     header_texts: dict[str, str] = {}
     links: list[tuple[str | None, str | None, str | None]] = []
+    max_col = last_row = rewritten = skipped_total = 0
+    skipped: list[int] = []
     try:
         for row_no, el in _xlsx_iter_rows(z, part):
             name = _local(el.tag)
             if row_no is not None:
-                if el.get("hidden") in ("1", "true"):
+                read_by_openpyxl = row_no > last_row
+                if read_by_openpyxl:
+                    last_row = row_no
+                else:
+                    skipped_total += 1
+                    if len(skipped) < _XLSX_MAX_ROWS:
+                        skipped.append(row_no)
+                if el.get("hidden") in ("1", "true") or _is_zero(el.get("ht")):
                     extras.hidden_rows += 1
+                col = 0
+                seen: set[int] = set()
+                for c in el:
+                    if _local(c.tag) != "c":
+                        continue
+                    col = _xlsx_cell_column(c.get("r"), col)
+                    if col in seen and read_by_openpyxl:
+                        rewritten += 1
+                    seen.add(col)
+                    max_col = max(max_col, col)
+            elif name == "sheetFormatPr":
+                if el.get("zeroHeight") in ("1", "true"):
+                    extras.rows_hidden_by_default = True
             elif name == "col":
-                if el.get("hidden") in ("1", "true"):
+                if el.get("hidden") in ("1", "true") or _is_zero(el.get("width")):
                     try:
                         extras.hidden_cols += int(el.get("max")) - int(el.get("min")) + 1
                     except (TypeError, ValueError):
@@ -2239,10 +2464,19 @@ def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtra
                 links.append((el.get("ref"), el.get(f"{_XLSX_NS_R}id"),
                               el.get("location")))
     except Exception as exc:
-        extras.unread.append(f"its print header/footer, hyperlinks and hidden "
-                             f"rows and columns could not be read: {type(exc).__name__}")
+        extras.unread.append(
+            f"its print header/footer, hyperlinks, hidden rows and columns and "
+            f"true extent could not be read ({type(exc).__name__}), so a cell or row "
+            f"written out of order may be missing with no note of its own "
+            f"({M_XLSX_PART_UNREAD})")
         header_texts, links = {}, []
         extras.hidden_rows = extras.hidden_cols = 0
+        extras.rows_hidden_by_default = False
+    else:
+        extras.extent_known = True
+        extras.max_col = max_col
+        extras.skipped_rows, extras.skipped_total = skipped, skipped_total
+        extras.rewritten_cells = rewritten
 
     for tags, bucket in ((_HEADER_TAGS, extras.header_lines),
                          (_FOOTER_TAGS, extras.footer_lines)):
@@ -2256,7 +2490,7 @@ def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtra
     except Exception as exc:
         extras.unread.append(
             f"its relationships, so its hyperlinks and comments, could not be "
-            f"read: {type(exc).__name__}")
+            f"read ({type(exc).__name__}) ({M_XLSX_PART_UNREAD})")
         return extras
 
     for ref, rid, location in links:
@@ -2278,30 +2512,41 @@ def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtra
     for target, rel_type in rels.values():
         if not rel_type.endswith("/threadedComment"):
             continue
+        member = _zip_member(z, _xlsx_resolve_part(part, target))
+        if member is None:
+            extras.unread.append(f"its threaded comments part is missing from "
+                                 f"the file; its threaded comments were not read "
+                                 f"({M_XLSX_SHEET_UNREAD})")
+            continue
         try:
-            threaded.extend(_xlsx_threaded_comments(
-                z, _xlsx_resolve_part(part, target), persons))
+            threaded.extend(_xlsx_threaded_comments(z, member, persons))
         except Exception as exc:
-            extras.unread.append(f"its threaded comments could not be read: "
-                                 f"{type(exc).__name__}")
+            extras.unread.append(f"its threaded comments could not be read "
+                                 f"({type(exc).__name__}) ({M_XLSX_PART_UNREAD})")
             threaded = []
             break
     threaded_refs = {ref.upper() for ref, _a, _t in threaded}
+    extras.threaded = len(threaded)
 
     legacy: list[tuple[str, str, str]] = []
     for target, rel_type in rels.values():
         if not rel_type.endswith("/comments"):
             continue
+        member = _zip_member(z, _xlsx_resolve_part(part, target))
+        if member is None:
+            extras.unread.append(f"its comments part is missing from the file; "
+                                 f"its comments were not read ({M_XLSX_SHEET_UNREAD})")
+            continue
         try:
             legacy.extend(
-                c for c in _xlsx_legacy_comments(z, _xlsx_resolve_part(part, target))
+                c for c in _xlsx_legacy_comments(z, member)
                 # Excel writes a threaded comment twice: in its own part, and
                 # as a placeholder note (author 'tc={id}', a flattened
                 # transcript) for older readers. The thread is the evidence.
                 if c[0].upper() not in threaded_refs)
         except Exception as exc:
-            extras.unread.append(f"its comments could not be read: "
-                                 f"{type(exc).__name__}")
+            extras.unread.append(f"its comments could not be read "
+                                 f"({type(exc).__name__}) ({M_XLSX_PART_UNREAD})")
 
     def comment_order(item):
         try:
@@ -2372,20 +2617,26 @@ def _xlsx_threaded_comments(z, tpart: str, persons: dict[str, str]
     return out
 
 
-def _xlsx_persons(z, workbook_part: str) -> dict[str, str]:
-    """``{person id: display name}`` from the workbook's persons part(s), the
-    people threaded comments are credited to. Empty when there are none."""
+def _xlsx_persons(z, workbook_part: str) -> tuple[dict[str, str], bool]:
+    """``({person id: display name}, a persons part is missing)`` from the
+    workbook's persons part(s), the people threaded comments are credited to.
+    Empty, and ``False``, when the workbook names none."""
     import xml.etree.ElementTree as ET
 
     persons: dict[str, str] = {}
+    missing = False
     for target, rel_type in _xlsx_rels(z, workbook_part).values():
         if not rel_type.endswith("/person"):
             continue
-        root = ET.fromstring(z.read(_xlsx_resolve_part(workbook_part, target)))
+        member = _zip_member(z, _xlsx_resolve_part(workbook_part, target))
+        if member is None:
+            missing = True
+            continue
+        root = ET.fromstring(z.read(member))
         for el in root.iter():
             if _local(el.tag) == "person" and el.get("id"):
                 persons[el.get("id")] = el.get("displayName", "")
-    return persons
+    return persons, missing
 
 
 @dataclass(frozen=True, slots=True)
@@ -2403,7 +2654,8 @@ class _XlsxRawCells:
       ``=IF(x="","",x)``) and no ``<v>`` at all (no stored result) both reach
       openpyxl as ``None``;
     * a number under a date format that is no date in Excel's calendar, and a
-      stored ``#VALUE!`` error, both reach it as ``'#VALUE!'``.
+      stored ``#VALUE!`` error, both reach it as ``'#VALUE!'``;
+    * a number under a time-only format reaches it as a date and time.
 
     Streamed row by row in step with openpyxl's own rows, and not opened at
     all until the first cell that needs it, so an ordinary sheet pays
@@ -2458,12 +2710,26 @@ class _XlsxRawCells:
             return None
 
 
+def _xlsx_stored_number(raw: _XlsxRawCells, row_no: int, col_no: int) -> str | None:
+    """The number a cell's own ``<v>`` holds, as :func:`_xl_number_text`
+    renders it, or ``None`` when the raw cell cannot say."""
+    stored = raw.get(row_no, col_no)
+    if stored is not None and stored.t in (None, "n") and stored.v_text:
+        try:
+            return _xl_number_text(float(stored.v_text))
+        except ValueError:
+            return None
+    return None
+
+
 def _xlsx_cell_text(vcell, fcell, raw: _XlsxRawCells, row_no: int, col_no: int,
                     epoch: datetime.datetime) -> tuple[str, str | None]:
     """One value-workbook cell's text, and what it needs disclosed: ``None``,
     ``'formula'`` (a formula with no stored value, its formula shown, E1),
-    ``'placeholder'`` (the same, but no formula text to show) or
-    ``'not_a_date'`` (a date-formatted number that is no date).
+    ``'placeholder'`` (the same, but no formula text to show),
+    ``'not_a_date'`` (a date-formatted number that is no date) or
+    ``'time_day'`` (a value of a day or more under a time-only format, shown
+    as the number stored, never as a date the format does not show).
 
     ``fcell`` is the row-aligned cell from a SECOND, ``data_only=False``
     reading of the same workbook -- the only way to recover a formula
@@ -2486,30 +2752,84 @@ def _xlsx_cell_text(vcell, fcell, raw: _XlsxRawCells, row_no: int, col_no: int,
         # still a formula cell, just one with nothing to show in its place.
         return "[formula with no stored value]", "placeholder"
     if getattr(vcell, "data_type", None) == "e" and value == "#VALUE!":
-        stored = raw.get(row_no, col_no)
-        if stored is not None and stored.t in (None, "n") and stored.v_text:
-            try:
-                return _xl_number_text(float(stored.v_text)), "not_a_date"
-            except ValueError:
-                pass
+        number = _xlsx_stored_number(raw, row_no, col_no)
+        if number is not None:
+            return number, "not_a_date"
     if isinstance(value, datetime.datetime) and value < epoch:
         # A negative serial: openpyxl counts it back past the epoch into a
         # date Excel never shows. The number is what the file holds.
         serial = (value - epoch) / datetime.timedelta(days=1)
         return _xl_number_text(serial), "not_a_date"
-    return _xlsx_percent_or_plain(value, getattr(vcell, "number_format", None)), None
+    number_format = getattr(vcell, "number_format", None)
+    if isinstance(value, datetime.datetime) and not _fmt_shows_a_date(number_format):
+        # A serial of a day or more under a time-only format (openpyxl turns
+        # any date/time format's serial of 1 or more into a datetime). The
+        # format shows no date, so none is invented; the number is stored.
+        from openpyxl.utils.datetime import to_excel
+
+        number = _xlsx_stored_number(raw, row_no, col_no)
+        if number is None:
+            number = _xl_number_text(to_excel(value, epoch))
+        return number, "time_day"
+    return _xlsx_percent_or_plain(value, number_format), None
 
 
-def _xlsx_rows_with_links(row_pairs, link_width: dict[int, int]):
+def _xlsx_rows_with_links(row_pairs, link_width: dict[int, int], stopped: list):
     """``(row number, value cells, formula cells)`` for each row openpyxl
     yields, numbered from 1, then an empty row for each hyperlinked row past
-    the last of them, in order."""
+    the last of them, in order -- unless the rows ``stopped`` (a read that
+    raised part-way): a row that was never read must not print a link alone."""
     last = 0
     for row_no, (row_cells, formula_row) in enumerate(row_pairs, start=1):
         last = row_no
         yield row_no, row_cells, formula_row
+    if stopped:
+        return
     for row_no in sorted(r for r in link_width if r > last):
         yield row_no, (), ()
+
+
+def _guarded_rows(rows, failure: list):
+    """``rows``, stopping quietly where iterating them raises -- the failure
+    (exception name, rows yielded before it) is appended to ``failure`` for
+    the caller's marked note."""
+    count = 0
+    try:
+        for row in rows:
+            count += 1
+            yield row
+    except Exception as exc:
+        failure.append((type(exc).__name__, count))
+
+
+def _paired_rows(value_rows, formula_rows):
+    """Each value row with the formula row at the same position, or ``()``
+    once the formula rows have stopped. Driven by the VALUE rows: a formula
+    reading that outlives them must not print formulas for rows whose values
+    were never read."""
+    for row in value_rows:
+        yield row, next(formula_rows, ())
+
+
+def _blank_run_lines(start: int, end: int, skipped: list[int]) -> list[str]:
+    """E4's marker line(s) for blank rows ``start``..``end``, leaving out any
+    row openpyxl skipped (``skipped``, sorted): such a row holds content that
+    was not read, and a blank-row marker would claim it was blank."""
+    import bisect
+
+    lo = bisect.bisect_left(skipped, start)
+    hi = bisect.bisect_right(skipped, end)
+    if lo == hi:
+        return [_blank_run_marker(start, end)]
+    lines: list[str] = []
+    run_start = start
+    for row in sorted(set(skipped[lo:hi])):
+        if row > run_start:
+            lines.append(_blank_run_marker(run_start, row - 1))
+        run_start = row + 1
+    if run_start <= end:
+        lines.append(_blank_run_marker(run_start, end))
+    return lines
 
 
 def _formula_note(shown: int, placeholders: int) -> str:
@@ -2526,9 +2846,19 @@ def _formula_note(shown: int, placeholders: int) -> str:
 
 
 def _not_a_date_note(count: int) -> str:
-    return (f"{count} cell(s) formatted as a date held a number that is no date "
-            "in Excel's calendar (negative, past 9999-12-31, or not a number); "
+    return (f"{count} cell(s) formatted as a date or time held a number that is no "
+            "date in Excel's calendar (negative, past 9999-12-31, or not a number); "
             "the number is shown as stored")
+
+
+def _time_day_note(count: int) -> str:
+    return (f"{count} cell(s) formatted as a time with no date held a value of a "
+            "day or more; the number is shown as stored")
+
+
+def _no_format_note(count: int) -> str:
+    return (f"{count} cell(s) typed as a date carry no number format this reader "
+            "could find; the number is shown as stored")
 
 
 def _truncation_note(sheet: str | None, never_opened: list[str]) -> str:
@@ -2543,14 +2873,39 @@ def _truncation_note(sheet: str | None, never_opened: list[str]) -> str:
             f"{sheet!r}; {rest} ({M_XLSX_SHEET_UNREAD})")
 
 
-def _hidden_sheet_note(name: str, state: str) -> str:
+def _hidden_sheet_note(name: str, state: str, *, read: bool) -> str:
+    """Unmarked: being hidden costs nothing. Says the sheet was read only for
+    a sheet that was; an unread one carries its own marked note saying why."""
     how = "very hidden" if state == "veryHidden" else "hidden"
-    return f"sheet {name!r} is {how} in the workbook; it was read like any other sheet"
+    note = f"sheet {name!r} is {how} in the workbook"
+    return note + "; it was read like any other sheet" if read else note
 
 
-def _hidden_cells_note(name: str, rows: int, cols: int) -> str:
-    return (f"sheet {name!r} marks {rows} row(s) and {cols} column(s) hidden; "
-            "hidden cells are read like any other")
+def _hidden_cells_note(name: str, rows: int, cols: int, by_default: bool) -> str:
+    """Unmarked: hidden rows and columns are read, not skipped for being
+    hidden (a row cap that cuts one says so in its own marked note)."""
+    default = ", and hides every other row by default" if by_default else ""
+    return (f"sheet {name!r} marks {rows} row(s) and {cols} column(s) hidden"
+            f"{default}; hidden cells are not skipped for being hidden")
+
+
+def _chart_note(name: str) -> str:
+    return (f"chartsheet {name!r}: its chart, and any print header or footer on "
+            f"it, were not read ({M_XLSX_SHEET_UNREAD})")
+
+
+def _skipped_rows_note(name: str, rows: list[int], total: int) -> str:
+    shown = ", ".join(str(r) for r in rows[:10])
+    more = f" and {total - min(len(rows), 10)} more" if total > 10 else ""
+    return (f"sheet {name!r}: {total} row(s) numbered at or below a row written "
+            f"before them (row(s) {shown}{more}) were skipped by the reader; their "
+            f"content was not read ({M_XLSX_SHEET_UNREAD})")
+
+
+def _rewritten_cells_note(name: str, count: int) -> str:
+    return (f"sheet {name!r}: {count} cell(s) were written a second time in the "
+            f"same row and column, and only the later value of each is read; the "
+            f"earlier value was not read ({M_XLSX_SHEET_UNREAD})")
 
 
 def _unread_sheet_page(label: str, reason: str) -> str:
@@ -2577,9 +2932,13 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
     where the first has no stored value (E1). The per-sheet extras stream
     the sheet's own part (:func:`_xlsx_sheet_extras`), so memory is bounded
     by one row, not by the sheet. The row cap is global across the workbook
-    (E7). Both openpyxl readings reset the sheet's declared ``<dimension>``,
-    which a writer can leave stale: openpyxl would otherwise stop at it and
-    drop every row and column past it without a word.
+    (E7).
+
+    Both openpyxl readings are told the sheet's REAL width, measured by that
+    stream, never its declared ``<dimension>`` (a writer can leave it stale)
+    and never openpyxl's per-row guess (the last cell written, which drops a
+    cell written before a later column). A row openpyxl skips -- numbered at
+    or below a row written before it -- is named in a marked note.
     """
     try:
         import openpyxl
@@ -2600,10 +2959,13 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
     truncated = False
     truncated_sheet: str | None = None
     never_opened: list[str] = []
-    formula_shown = placeholders = not_a_date = 0
+    flags = {"formula": 0, "placeholder": 0, "not_a_date": 0, "time_day": 0}
+    threaded_total = 0
+    persons_gap: str | None = None
     epoch = getattr(wb, "epoch", datetime.datetime(1899, 12, 30))
 
     try:
+        z = zipfile.ZipFile(io.BytesIO(raw))
         try:
             wbf = openpyxl.load_workbook(
                 io.BytesIO(raw), read_only=True, data_only=False)
@@ -2611,55 +2973,64 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
             wbf = None
             notes.append(
                 f"the workbook's formulas could not be read ({type(exc).__name__}); "
-                f"a formula cell with no stored value shows blank, so "
-                f"'{M_XLSX_FORMULA_NO_VALUE}' cannot be ruled out")
+                f"a formula cell with no stored value shows blank and is not "
+                f"counted ({M_XLSX_PART_UNREAD})")
 
-        parts_known = True
         persons: dict[str, str] = {}
+        workbook_part: str | None = None
         try:
-            z = zipfile.ZipFile(io.BytesIO(raw))
-            workbook_part, sheet_order = _xlsx_sheet_order(z)
+            workbook_part = _xlsx_workbook_part(z)
+            sheet_order = _xlsx_sheet_order(z, workbook_part)
         except Exception as exc:
-            parts_known = False
-            sheet_order = [
-                (n, None, "chartsheet" if type(wb[n]).__name__ == "Chartsheet"
-                 else "worksheet", getattr(wb[n], "sheet_state", "visible"))
-                for n in wb.sheetnames]
+            sheet_order = _xlsx_openpyxl_sheet_order(wb, z)
             notes.append(
                 f"the workbook's own sheet list could not be read "
-                f"({type(exc).__name__}); tabs follow openpyxl's list, and no "
-                f"sheet's print header/footer, hyperlinks or comments were "
-                f"read ({M_XLSX_SHEET_UNREAD})")
-        else:
+                f"({type(exc).__name__}); tabs follow openpyxl's list, which "
+                f"leaves out a sheet that names no part or a part openpyxl does "
+                f"not find in the file ({M_XLSX_PART_UNREAD})")
+            if workbook_part is None:
+                persons_gap = (f"the workbook part was not found ({type(exc).__name__}), "
+                               f"so its persons part was not read; {{n}} threaded "
+                               f"comment(s) are credited to person ids, not names "
+                               f"({M_XLSX_PART_UNREAD})")
+        if workbook_part is not None:
             try:
-                persons = _xlsx_persons(z, workbook_part)
+                persons, persons_missing = _xlsx_persons(z, workbook_part)
+                if persons_missing:
+                    persons_gap = ("the workbook's persons part is missing from the "
+                                   "file; {n} threaded comment(s) are credited to "
+                                   f"person ids, not names ({M_XLSX_SHEET_UNREAD})")
             except Exception as exc:
-                notes.append(
-                    f"the workbook's persons part could not be read "
-                    f"({type(exc).__name__}); threaded comments are credited "
-                    f"to person ids, not names ({M_XLSX_SHEET_UNREAD})")
+                persons_gap = (f"the workbook's persons part could not be read "
+                               f"({type(exc).__name__}); {{n}} threaded comment(s) "
+                               f"are credited to person ids, not names "
+                               f"({M_XLSX_PART_UNREAD})")
 
-        ws_by_part = {getattr(w, "_worksheet_path", None): w for w in wb.worksheets}
-        wsf_by_part = ({getattr(w, "_worksheet_path", None): w for w in wbf.worksheets}
-                       if wbf is not None else {})
+        ws_by_part = {_zip_member(z, getattr(w, "_worksheet_path", None)): w
+                      for w in wb.worksheets}
+        wsf_by_part = ({_zip_member(z, getattr(w, "_worksheet_path", None)): w
+                        for w in wbf.worksheets} if wbf is not None else {})
+        ws_by_part.pop(None, None)
+        wsf_by_part.pop(None, None)
         tab_names = [n for n, *_ in sheet_order]
 
         for name, part, kind, state in sheet_order:
-            if state in ("hidden", "veryHidden"):
-                notes.append(_hidden_sheet_note(name, state))
+            hidden = state in ("hidden", "veryHidden")
             label = f"[chartsheet: {name}]" if kind == "chartsheet" else f"[sheet: {name}]"
             if truncated:
                 # E7: the cap already bit a previous sheet; this one, of
                 # whatever kind, was never opened at all.
+                if hidden:
+                    notes.append(_hidden_sheet_note(name, state, read=False))
                 blocks.append(_unread_sheet_page(label, _CAP_REASON))
                 never_opened.append(name)
                 continue
 
             if kind == "chartsheet":
+                if hidden:
+                    notes.append(_hidden_sheet_note(name, state, read=False))
                 blocks.append(label)
-                notes.append(
-                    f"chartsheet {name!r}: its chart was not read "
-                    f"({M_XLSX_SHEET_UNREAD})")
+                notes.append(_chart_note(name))
                 continue
 
             ws = wsf = None
@@ -2668,11 +3039,11 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                 reason = "a dialog sheet"
             elif kind != "worksheet":
                 reason = "a sheet of a kind this reader does not recognize"
-            elif parts_known and part is None:
+            elif part is None:
                 reason = "its part is missing from the file"
             else:
-                ws = ws_by_part.get(part) if part else None
-                wsf = wsf_by_part.get(part) if part else None
+                ws = ws_by_part.get(part)
+                wsf = wsf_by_part.get(part)
                 if ws is None and tab_names.count(name) == 1:
                     # Only a unique name may stand in for the part: openpyxl
                     # returns the FIRST sheet of a duplicated name.
@@ -2684,29 +3055,41 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                 if ws is None or not hasattr(ws, "iter_rows"):
                     ws = None
                     reason = "openpyxl could not open it"
+            if hidden:
+                notes.append(_hidden_sheet_note(name, state, read=reason is None))
             if reason:
                 blocks.append(_unread_sheet_page(label, reason))
                 notes.append(f"sheet {name!r}: {reason}; its content was not "
                              f"read ({M_XLSX_SHEET_UNREAD})")
                 continue
 
-            for handle in (ws, wsf):
-                if handle is not None and hasattr(handle, "reset_dimensions"):
-                    handle.reset_dimensions()
-
-            extras = (_xlsx_sheet_extras(z, part, persons) if part
-                      else _XlsxSheetExtras())
+            extras = _xlsx_sheet_extras(z, part, persons)
             for what in extras.unread:
-                notes.append(f"sheet {name!r}: {what} ({M_XLSX_SHEET_UNREAD})")
-            if extras.hidden_rows or extras.hidden_cols:
+                notes.append(f"sheet {name!r}: {what}")
+            if extras.hidden_rows or extras.hidden_cols or extras.rows_hidden_by_default:
                 notes.append(_hidden_cells_note(name, extras.hidden_rows,
-                                                extras.hidden_cols))
+                                                extras.hidden_cols,
+                                                extras.rows_hidden_by_default))
+            threaded_total += extras.threaded
             raw_cells = _XlsxRawCells(z, part)
             links = extras.hyperlinks
             parts = [f"[sheet: {name}]", *extras.header_lines]
 
-            row_pairs = (zip(ws.iter_rows(), wsf.iter_rows()) if wsf is not None
-                         else ((row, ()) for row in ws.iter_rows()))
+            # The sheet's real width (review-fix round 2): reset_dimensions
+            # alone makes openpyxl size each row by its LAST-written cell, which
+            # drops a cell written before a later column; the declared
+            # dimension alone drops everything past a stale one.
+            max_col = extras.max_col if extras.extent_known and extras.max_col else None
+            for handle in (ws, wsf):
+                if handle is not None and hasattr(handle, "reset_dimensions"):
+                    handle.reset_dimensions()
+            value_failure: list[tuple[str, int]] = []
+            formula_failure: list[tuple[str, int]] = []
+            value_rows = _guarded_rows(ws.iter_rows(max_col=max_col), value_failure)
+            formula_rows = (_guarded_rows(wsf.iter_rows(max_col=max_col), formula_failure)
+                            if wsf is not None else iter(()))
+            row_pairs = _paired_rows(value_rows, formula_rows)
+            skipped = sorted(extras.skipped_rows)
             # A hyperlink can sit on a cell the part holds no <c> for (a
             # merged range's other cells, as openpyxl writes them), or on a
             # row past the last one it holds. openpyxl yields no cell there,
@@ -2718,7 +3101,8 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
             pending_end: int | None = None
             sheet_truncated_here = False
             previous_row = 0
-            for row_no, row_cells, formula_row in _xlsx_rows_with_links(row_pairs, link_width):
+            for row_no, row_cells, formula_row in _xlsx_rows_with_links(
+                    row_pairs, link_width, value_failure):
                 if row_no > previous_row + 1:
                     # Rows openpyxl never yielded, between two that carry
                     # something: blank, like any other.
@@ -2761,23 +3145,42 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                     sheet_truncated_here = True
                     break
                 if pending_start is not None:
-                    parts.append(_blank_run_marker(pending_start, pending_end))
+                    parts.extend(_blank_run_lines(pending_start, pending_end, skipped))
                     pending_start = pending_end = None
                 parts.append("\t".join(cells_text))
                 rows_emitted += 1
-                formula_shown += row_flags.count("formula")
-                placeholders += row_flags.count("placeholder")
-                not_a_date += row_flags.count("not_a_date")
+                for flag in row_flags:
+                    flags[flag] += 1
             # Trailing blank rows (E4): any still-pending run is discarded,
             # never flushed — it produces nothing.
             raw_cells.close()
 
+            if value_failure:
+                exc_name, count = value_failure[0]
+                notes.append(
+                    f"sheet {name!r}: its rows from row {count + 1} on could not be "
+                    f"read ({exc_name}), so they are not on its page "
+                    f"({M_XLSX_PART_UNREAD})")
+            if formula_failure:
+                exc_name, count = formula_failure[0]
+                notes.append(
+                    f"sheet {name!r}: its formulas from row {count + 1} on could not "
+                    f"be read ({exc_name}), so a formula cell there with no stored "
+                    f"value shows blank and is not counted ({M_XLSX_PART_UNREAD})")
             if raw_cells.failed:
                 notes.append(
                     f"sheet {name!r}: its own cell XML could not be read "
                     f"({raw_cells.failed}), so a formula whose stored result is "
-                    f"empty may be reported as having no stored value "
-                    f"({M_XLSX_SHEET_UNREAD})")
+                    f"empty may be shown as its formula and counted as having no "
+                    f"stored value, a date-formatted number that is no date may "
+                    f"show as #VALUE!, and a time-only cell may show the number "
+                    f"openpyxl converted rather than the one stored "
+                    f"({M_XLSX_PART_UNREAD})")
+            if extras.skipped_total:
+                notes.append(_skipped_rows_note(name, extras.skipped_rows,
+                                                extras.skipped_total))
+            if extras.rewritten_cells:
+                notes.append(_rewritten_cells_note(name, extras.rewritten_cells))
             if sheet_truncated_here:
                 parts.append(f"[... workbook truncated at {_XLSX_MAX_ROWS} rows]")
                 truncated = True
@@ -2797,20 +3200,25 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                 except Exception:
                     pass
 
-    if formula_shown or placeholders:
-        notes.append(_formula_note(formula_shown, placeholders))
-    if not_a_date:
-        notes.append(_not_a_date_note(not_a_date))
+    if flags["formula"] or flags["placeholder"]:
+        notes.append(_formula_note(flags["formula"], flags["placeholder"]))
+    if flags["not_a_date"]:
+        notes.append(_not_a_date_note(flags["not_a_date"]))
+    if flags["time_day"]:
+        notes.append(_time_day_note(flags["time_day"]))
+    if threaded_total and persons_gap:
+        notes.append(persons_gap.format(n=threaded_total))
     if truncated:
         notes.append(_truncation_note(truncated_sheet, never_opened))
-    notes.append("XLSX has no page boundaries; one synthetic page per worksheet")
-    return synthetic_pages(blocks, notes=(notes[-1],)), notes
+    notes.append(XLSX_PAGE_NOTE)
+    return synthetic_pages(blocks, notes=(XLSX_PAGE_NOTE,)), notes
 
 
-def _xls_cell_text(cell, book, fmt_of) -> tuple[str, bool]:
+def _xls_cell_text(cell, book, fmt_of) -> tuple[str, str | None]:
     """One legacy ``.xls`` cell, rendered by its own TYPE and number format
-    (E2, E3, E10, E15): ``(text, is a date-formatted number that is no
-    date)``. ``fmt_of(cell)`` is the cell's number-format string, or ``None``.
+    (E2, E3, E10, E15): ``(text, what to disclose)``, the flag as
+    :func:`_xls_serial_text` gives it. ``fmt_of(cell)`` is the cell's
+    number-format string, or ``None``.
 
     ``row_values()`` coerces every type through a bare Python value, which is
     exactly how a date became a serial, a boolean/error became a raw code,
@@ -2820,108 +3228,301 @@ def _xls_cell_text(cell, book, fmt_of) -> tuple[str, bool]:
     ctype = cell.ctype
     value = cell.value
     if ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
-        return "", False
+        return "", None
     if ctype == xlrd.XL_CELL_TEXT:
-        return str(value), False
+        return str(value), None
     if ctype == xlrd.XL_CELL_DATE:
-        text, is_date = _xls_serial_text(value, book.datemode, fmt_of(cell))
-        return text, not is_date
+        return _xls_serial_text(value, book.datemode, fmt_of(cell))
     if ctype == xlrd.XL_CELL_BOOLEAN:
-        return ("TRUE" if value else "FALSE"), False
+        return ("TRUE" if value else "FALSE"), None
     if ctype == xlrd.XL_CELL_ERROR:
-        return xlrd.error_text_from_code.get(value, f"[error code {value}]"), False
+        return xlrd.error_text_from_code.get(value, f"[error code {value}]"), None
     if ctype == xlrd.XL_CELL_NUMBER:
-        pct = _percent_text(value, fmt_of(cell))
-        return (pct if pct is not None else _xl_number_text(value)), False
-    return str(value), False
+        fmt = fmt_of(cell)
+        if _xl_is_duration_format(fmt) and math.isfinite(value):
+            # xlrd types a bare elapsed-time format ([s], [h]) as a number;
+            # openpyxl reads the same format as a duration, and so does this.
+            try:
+                return _duration_text(datetime.timedelta(days=value)), None
+            except OverflowError:
+                return _xl_number_text(value), None
+        pct = _percent_text(value, fmt)
+        return (pct if pct is not None else _xl_number_text(value)), None
+    return str(value), None
 
 
 _XLS_TAB_KINDS = {0: "worksheet", 1: "an Excel 4.0 macro sheet", 2: "chartsheet",
                   6: "a Visual Basic module sheet"}
+_XLS_BOF = (0x0809, 0x0409, 0x0209, 0x0009)
 
 
-def _xls_tabs(raw: bytes, book) -> list[tuple[str, str, int, object]]:
-    """``(name, kind, visibility, sheet or None)`` for every tab, in TAB ORDER.
+def _xls_stream(raw: bytes):
+    """``(buffer, start, length)`` of the workbook's own BIFF record stream:
+    the compound file's ``Workbook`` (or BIFF5 ``Book``) stream, or the whole
+    file for a BIFF2-4 worksheet saved on its own."""
+    from xlrd import compdoc
+
+    if raw[:8] != compdoc.SIGNATURE:
+        return raw, 0, len(raw)
+    cd = compdoc.CompDoc(raw, logfile=io.StringIO())
+    for qname in ("Workbook", "Book"):
+        mem, base, length = cd.locate_named_stream(qname)
+        if mem:
+            return mem, base, length
+    raise ExtractionError("the compound file holds no workbook stream")
+
+
+def _xls_tabs(raw: bytes, book):
+    """``(tabs, stream, problem)``: every tab in TAB ORDER as ``(name, kind,
+    visibility, sheet or None, substream offset or None)``; the record stream
+    (:func:`_xls_stream`) or ``None``; and a marked note when the workbook's
+    own tab records could not be read, else ``None``.
 
     xlrd reads worksheets only: a chart, macro-sheet or module tab is counted
     (``-1`` in its tab map) and its name thrown away, so the page ordinals of
-    every later sheet would shift without a word. The names come from the
-    workbook stream's own BOUNDSHEET records; if those cannot be read, a tab
-    is named by its position rather than dropped.
+    every later sheet would shift without a word. The names -- and each
+    sheet's own substream, where its print header and footer and its dialog
+    flag live -- come from the stream's BOUNDSHEET records. If those cannot
+    be read, a tab is named by its position rather than dropped.
     """
     import struct
 
-    tab_map = list(getattr(book, "_all_sheets_map", []) or range(book.nsheets))
-    records: list[tuple[str, int, int]] = []
-    if all(snum >= 0 for snum in tab_map):
-        return [(s.name, "worksheet", getattr(s, "visibility", 0), s)
-                for s in (book.sheet_by_index(snum) for snum in tab_map)]
-    try:
-        from xlrd import compdoc
-        from xlrd.biffh import unpack_string, unpack_unicode
+    from xlrd.biffh import unpack_string, unpack_unicode
 
-        if raw[:8] == compdoc.SIGNATURE:
-            cd = compdoc.CompDoc(raw, logfile=io.StringIO())
-            for qname in ("Workbook", "Book"):
-                mem, base, length = cd.locate_named_stream(qname)
-                if mem:
-                    break
-        else:
-            mem, base, length = raw, 0, len(raw)
+    tab_map = list(getattr(book, "_all_sheets_map", []) or range(book.nsheets))
+    records: list[tuple[str, int, int, int]] = []
+    stream = None
+    problem: str | None = None
+    try:
+        stream = _xls_stream(raw)
+        mem, base, length = stream
         pos, end = base, base + length
         while pos + 4 <= end:
             opcode, size = struct.unpack_from("<HH", mem, pos)
             data = mem[pos + 4:pos + 4 + size]
             pos += 4 + size
             if opcode == 0x0085 and size >= 8:
+                offset = struct.unpack_from("<i", data, 0)[0]
                 visibility, sheet_type = data[4], data[5]
                 name = (unpack_unicode(data, 6, lenlen=1) if book.biff_version >= 80
                         else unpack_string(data, 6, book.encoding, lenlen=1))
-                records.append((name, sheet_type, visibility))
+                records.append((name, sheet_type, visibility, base + offset))
             elif opcode == 0x000A:
                 break
-    except Exception:
+        if not records and book.biff_version < 50 and len(tab_map) == 1:
+            # A BIFF2-4 worksheet file is one sheet and no tab records.
+            sheet = book.sheet_by_index(0)
+            records = [(sheet.name, 0, 0, base)]
+        if len(records) != len(tab_map):
+            problem = (f"the workbook's own tab records ({len(records)}) do not match "
+                       f"its {len(tab_map)} tab(s); a tab that is not a worksheet is "
+                       f"named by its position, and no sheet's print header/footer "
+                       f"or dialog flag was read ({M_XLSX_SHEET_UNREAD})")
+            records = []
+    except Exception as exc:
+        stream = None
         records = []
-    if len(records) != len(tab_map):
-        records = []
+        problem = (f"the workbook's own tab records could not be read "
+                   f"({type(exc).__name__}); a tab that is not a worksheet is named "
+                   f"by its position, and no sheet's print header/footer or dialog "
+                   f"flag was read ({M_XLSX_PART_UNREAD})")
 
-    tabs: list[tuple[str, str, int, object]] = []
+    tabs: list[tuple[str, str, int, object, int | None]] = []
     for pos_no, snum in enumerate(tab_map):
+        record = records[pos_no] if records else None
+        offset = record[3] if record else None
         if snum is not None and snum >= 0:
             sheet = book.sheet_by_index(snum)
-            tabs.append((sheet.name, "worksheet", getattr(sheet, "visibility", 0), sheet))
+            tabs.append((sheet.name, "worksheet", getattr(sheet, "visibility", 0),
+                         sheet, offset))
         else:
-            name, sheet_type, visibility = (records[pos_no] if records
+            name, sheet_type, visibility = (record[:3] if record
                                             else (f"tab {pos_no + 1}", -1, 0))
             tabs.append((name, _XLS_TAB_KINDS.get(sheet_type, "a sheet of an unrecognized kind"),
-                         visibility, None))
-    return tabs
+                         visibility, None, offset))
+    return tabs, stream, problem
+
+
+@dataclass
+class _XlsSheetRecords:
+    """What one ``.xls`` worksheet's own substream holds that xlrd does not
+    read: its print header and footer (odd, even and first page) and whether
+    it is a dialog sheet -- and how many NOTE records it carries, to check
+    xlrd kept every comment."""
+
+    header_lines: list[str] = field(default_factory=list)
+    footer_lines: list[str] = field(default_factory=list)
+    dialog: bool = False
+    note_records: int = 0
+    rewritten_cells: int = 0
+    """Cell records written a second time for the same row and column: xlrd
+    keeps only the later one."""
+
+
+# BIFF5-8 records that hold ONE cell, its row and column their first four
+# bytes: NUMBER, LABEL, LABELSST, RK, BOOLERR, BLANK, RSTRING, and FORMULA in
+# its BIFF3, BIFF4 and BIFF5-8 forms. MULRK and MULBLANK hold a run of cells.
+_XLS_CELL_RECORDS = frozenset({0x0203, 0x0204, 0x00FD, 0x027E, 0x0205, 0x0201,
+                               0x00D6, 0x0006, 0x0206, 0x0406})
+_XLS_CELL_RUN_RECORDS = frozenset({0x00BD, 0x00BE})
+
+
+def _xls_header_string(data: bytes, book) -> str:
+    """A HEADER or FOOTER record's text; empty for an empty record."""
+    from xlrd.biffh import unpack_string, unpack_unicode
+
+    if not data:
+        return ""
+    if book.biff_version >= 80:
+        return unpack_unicode(data, 0, lenlen=2)
+    return unpack_string(data, 0, book.encoding or "cp1252", lenlen=1)
+
+
+def _xls_sheet_records(stream, offset: int, book) -> _XlsSheetRecords:
+    """E12 and the dialog flag for one ``.xls`` worksheet, from the records of
+    its own substream (the BOF at ``offset`` to its matching EOF; an embedded
+    chart's own records are skipped). Header and footer text goes through the
+    same code stripping as ``.xlsx`` (:func:`_header_footer_lines`), in the
+    same order: odd, even, first page, each distinct line once. A cell
+    written twice is counted with one bit per row and column (at most 32
+    bytes a row), never a record of the cells themselves."""
+    import struct
+
+    from xlrd.biffh import unpack_unicode_update_pos
+
+    mem, base, length = stream
+    end = base + length
+    out = _XlsSheetRecords()
+    headers = {"odd": "", "even": "", "first": ""}
+    footers = {"odd": "", "even": "", "first": ""}
+    seen: dict[int, bytearray] = {}
+
+    def written(row: int, col: int) -> None:
+        bits = seen.get(row)
+        if bits is None:
+            bits = seen[row] = bytearray(32)
+        byte, mask = divmod(col, 8)
+        if byte >= len(bits):
+            bits.extend(bytes(byte + 1 - len(bits)))
+        if bits[byte] & (1 << mask):
+            out.rewritten_cells += 1
+        bits[byte] |= 1 << mask
+
+    pos = offset
+    depth = 0
+    first = True
+    while pos + 4 <= end:
+        opcode, size = struct.unpack_from("<HH", mem, pos)
+        data = bytes(mem[pos + 4:pos + 4 + size])
+        pos += 4 + size
+        if first and opcode not in _XLS_BOF:
+            raise ExtractionError("a tab record points at no sheet substream")
+        first = False
+        if opcode in _XLS_BOF:
+            depth += 1
+            continue
+        if opcode == 0x000A:
+            depth -= 1
+            if depth <= 0:
+                break
+            continue
+        if depth != 1:
+            continue
+        if opcode == 0x0014:
+            headers["odd"] = _xls_header_string(data, book)
+        elif opcode == 0x0015:
+            footers["odd"] = _xls_header_string(data, book)
+        elif opcode == 0x089C and book.biff_version >= 80 and size >= 38:
+            # HEADERFOOTER: a 12-byte future-record header, a 16-byte view
+            # GUID, 2 bytes of flags, the four string lengths, then the even
+            # header, even footer, first header and first footer strings.
+            counts = struct.unpack_from("<4H", data, 30)
+            at = 38
+            texts = []
+            for count in counts:
+                if count:
+                    text, at = unpack_unicode_update_pos(data, at, lenlen=2)
+                else:
+                    text = ""
+                texts.append(text)
+            headers["even"], footers["even"], headers["first"], footers["first"] = texts
+        elif opcode == 0x0081 and size >= 1:
+            out.dialog = bool(data[0] & 0x10)
+        elif opcode == 0x001C and book.biff_version >= 80:
+            out.note_records += 1
+        elif book.biff_version >= 50 and opcode in _XLS_CELL_RECORDS and size >= 4:
+            written(*struct.unpack_from("<HH", data, 0))
+        elif book.biff_version >= 50 and opcode in _XLS_CELL_RUN_RECORDS and size >= 6:
+            row, first_col = struct.unpack_from("<HH", data, 0)
+            last_col = struct.unpack_from("<H", data, size - 2)[0]
+            for col in range(first_col, last_col + 1):
+                written(row, col)
+    for source, bucket in ((headers, out.header_lines), (footers, out.footer_lines)):
+        for which in ("odd", "even", "first"):
+            for line in _header_footer_lines(source[which]):
+                if line not in bucket:
+                    bucket.append(line)
+    return out
+
+
+def _xls_links(sheet, book) -> tuple[dict[tuple[int, int], str], int]:
+    """E13 for ``.xls``: ``({(row, col): target}, links not read)``, the same
+    rules as ``.xlsx``. An external link (a URL, a file, a UNC path) prints its
+    target, with its location after ``#``; a range link attaches to the
+    range's first cell only; an internal link adds nothing. A link of a kind
+    xlrd does not recognize is counted, for a marked note."""
+    links: dict[tuple[int, int], str] = {}
+    unread = 0
+    for link in getattr(sheet, "hyperlink_list", ()):
+        kind = getattr(link, "type", None)
+        if kind == "workbook":
+            continue  # internal (location-only) links add nothing
+        target = getattr(link, "url_or_path", None)
+        if isinstance(target, bytes):
+            # A file link's short path is in the writer's ANSI code page.
+            try:
+                target = target.decode("cp1252")
+            except UnicodeDecodeError:
+                target = target.decode("latin-1")
+        if kind not in ("url", "local file", "unc") or not target:
+            unread += 1
+            continue
+        mark = getattr(link, "textmark", None)
+        links.setdefault((link.frowx, link.fcolx), f"{target}#{mark}" if mark else target)
+    return links, unread
 
 
 def _extract_xls(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], list[str]]:
-    """Legacy .xls via xlrd — one synthetic page per TAB, same shape as XLSX.
+    """Legacy .xls via xlrd — one synthetic page per TAB, the same shape and
+    the same constructs as ``.xlsx``.
 
     Cells are read by their own type and number format (:func:`_xls_cell_text`,
     via ``sheet.row(r)``), never ``row_values()``; formats need
     ``formatting_info=True``, without which a duration cannot be told from a
-    date nor a percentage from a decimal. A chart, macro-sheet or module tab
-    keeps its page (:func:`_xls_tabs`). E4, E5 and E7 apply here the same way
-    they do to ``.xlsx``.
+    date nor a percentage from a decimal -- so when that open fails, a date
+    or time cell reads as the number stored, under a marked note. A chart,
+    macro-sheet or module tab keeps its page (:func:`_xls_tabs`), and so does
+    a dialog sheet. Comments (xlrd's note map), hyperlinks (its link list)
+    and the print header and footer (the sheet's own records,
+    :func:`_xls_sheet_records`) read exactly as ``.xlsx`` renders them. E4,
+    E5 and E7 apply here the same way.
     """
     try:
         import xlrd
     except ImportError as exc:  # pragma: no cover — declared
         raise ExtractionError("Legacy .xls support requires 'xlrd'.") from exc
+    from xlrd.formula import cellname
+
     notes: list[str] = []
+    formats_failed: str | None = None
     try:
         book = xlrd.open_workbook(file_contents=raw, formatting_info=True)
-    except Exception:
+    except Exception as first:
         try:
             book = xlrd.open_workbook(file_contents=raw)
         except Exception as exc:
             raise ExtractionError(f"Could not read legacy Excel workbook: {exc}") from exc
-        notes.append("XLS number formats could not be read: a duration of a day "
-                     "or more reads as a date, and a percentage as a decimal")
+        formats_failed = type(first).__name__
 
     def fmt_of(cell) -> str | None:
         try:
@@ -2934,43 +3535,81 @@ def _extract_xls(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     truncated = False
     truncated_sheet: str | None = None
     never_opened: list[str] = []
-    not_a_date = 0
+    flags = {"not_a_date": 0, "time_day": 0, "no_format": 0}
 
-    for name, kind, visibility, sheet in _xls_tabs(raw, book):
-        if visibility:
-            notes.append(_hidden_sheet_note(name, "veryHidden" if visibility == 2
-                                            else "hidden"))
+    tabs, stream, tab_problem = _xls_tabs(raw, book)
+    if tab_problem:
+        notes.append(tab_problem)
+
+    for name, kind, visibility, sheet, offset in tabs:
+        hidden = bool(visibility)
+        state = "veryHidden" if visibility == 2 else "hidden"
         label = f"[chartsheet: {name}]" if kind == "chartsheet" else f"[sheet: {name}]"
         if truncated:
+            if hidden:
+                notes.append(_hidden_sheet_note(name, state, read=False))
             blocks.append(_unread_sheet_page(label, _CAP_REASON))
             never_opened.append(name)
             continue
         if kind == "chartsheet":
+            if hidden:
+                notes.append(_hidden_sheet_note(name, state, read=False))
             blocks.append(label)
-            notes.append(f"chartsheet {name!r}: its chart was not read "
+            notes.append(_chart_note(name))
+            continue
+
+        records: _XlsSheetRecords | None = None
+        records_failed: str | None = None
+        if sheet is not None and offset is not None and stream is not None:
+            try:
+                records = _xls_sheet_records(stream, offset, book)
+            except Exception as exc:
+                records_failed = type(exc).__name__
+        reason = kind if sheet is None else (
+            "a dialog sheet" if records is not None and records.dialog else None)
+        if hidden:
+            notes.append(_hidden_sheet_note(name, state, read=reason is None))
+        if reason:
+            blocks.append(_unread_sheet_page(label, reason))
+            notes.append(f"sheet {name!r}: {reason}; its content was not read "
                          f"({M_XLSX_SHEET_UNREAD})")
             continue
-        if sheet is None:
-            blocks.append(_unread_sheet_page(label, kind))
-            notes.append(f"sheet {name!r}: {kind}; its content was not read "
-                         f"({M_XLSX_SHEET_UNREAD})")
-            continue
+        if records_failed:
+            notes.append(f"sheet {name!r}: its print header/footer and dialog flag "
+                         f"could not be read ({records_failed}) ({M_XLSX_PART_UNREAD})")
 
         hidden_rows = sum(1 for info in sheet.rowinfo_map.values()
-                          if getattr(info, "hidden", 0))
+                          if getattr(info, "hidden", 0) or getattr(info, "height", 1) == 0)
         hidden_cols = sum(1 for info in sheet.colinfo_map.values()
-                          if getattr(info, "hidden", 0))
-        if hidden_rows or hidden_cols:
-            notes.append(_hidden_cells_note(name, hidden_rows, hidden_cols))
+                          if getattr(info, "hidden", 0) or getattr(info, "width", 1) == 0)
+        by_default = bool(getattr(sheet, "default_row_hidden", 0))
+        if hidden_rows or hidden_cols or by_default:
+            notes.append(_hidden_cells_note(name, hidden_rows, hidden_cols, by_default))
 
-        parts = [f"[sheet: {name}]"]
+        links, links_unread = _xls_links(sheet, book)
+        link_width: dict[int, int] = {}
+        for link_row, link_col in links:
+            link_width[link_row] = max(link_width.get(link_row, 0), link_col + 1)
+        parts = [f"[sheet: {name}]", *(records.header_lines if records else ())]
         pending_start: int | None = None
         pending_end: int | None = None
         sheet_truncated_here = False
-        for r in range(sheet.nrows):
+        for r in range(max(sheet.nrows, max(link_width, default=-1) + 1)):
             row_no = r + 1
-            rendered = [_xls_cell_text(c, book, fmt_of) for c in sheet.row(r)]
-            if not any(text.strip() for text, _flag in rendered):
+            rendered = ([_xls_cell_text(c, book, fmt_of) for c in sheet.row(r)]
+                        if r < sheet.nrows else [])
+            texts: list[str] = []
+            blank = True
+            for colx in range(max(len(rendered), link_width.get(r, 0))):
+                text = rendered[colx][0] if colx < len(rendered) else ""
+                url = links.get((r, colx))
+                if url or text.strip():
+                    blank = False
+                text = _clean_cell_text(text)
+                if url:
+                    text = f"{text} <{url}>" if text else f"<{url}>"
+                texts.append(text)
+            if blank:
                 if pending_start is None:
                     pending_start = row_no
                 pending_end = row_no
@@ -2981,23 +3620,51 @@ def _extract_xls(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
             if pending_start is not None:
                 parts.append(_blank_run_marker(pending_start, pending_end))
                 pending_start = pending_end = None
-            parts.append("\t".join(_clean_cell_text(text) for text, _flag in rendered))
+            parts.append("\t".join(texts))
             rows_emitted += 1
-            not_a_date += sum(1 for _text, flag in rendered if flag)
+            for _text, flag in rendered:
+                if flag:
+                    flags[flag] += 1
         # Trailing blank rows (E4) are discarded unflushed, same as .xlsx.
 
         if sheet_truncated_here:
             parts.append(f"[... workbook truncated at {_XLSX_MAX_ROWS} rows]")
             truncated = True
             truncated_sheet = name
+        comments = sorted(sheet.cell_note_map.items())
+        for (rowx, colx), note in comments:
+            parts.append(f"[comment on {cellname(rowx, colx)} by "
+                         f"{_clean_cell_text(note.author or '')}] "
+                         f"{_clean_cell_text(note.text or '')}")
+        if records is not None and records.note_records > len(comments):
+            notes.append(f"sheet {name!r}: {records.note_records - len(comments)} "
+                         f"comment(s) whose text records are missing or malformed "
+                         f"were not read ({M_XLSX_SHEET_UNREAD})")
+        if links_unread:
+            notes.append(f"sheet {name!r}: {links_unread} hyperlink(s) of a kind this "
+                         f"reader does not recognize were not read "
+                         f"({M_XLSX_SHEET_UNREAD})")
+        if records is not None and records.rewritten_cells:
+            notes.append(_rewritten_cells_note(name, records.rewritten_cells))
+        parts.extend(records.footer_lines if records else ())
         blocks.append("\n".join(parts))
 
-    if not_a_date:
-        notes.append(_not_a_date_note(not_a_date))
+    if formats_failed:
+        notes.append(
+            f"the workbook's number formats could not be read ({formats_failed}); "
+            f"{flags['no_format']} cell(s) formatted as a date, time or duration are "
+            f"shown as the number stored, a percentage format is not applied, and "
+            f"hidden rows and columns are not counted ({M_XLSX_PART_UNREAD})")
+    elif flags["no_format"]:
+        notes.append(_no_format_note(flags["no_format"]))
+    if flags["not_a_date"]:
+        notes.append(_not_a_date_note(flags["not_a_date"]))
+    if flags["time_day"]:
+        notes.append(_time_day_note(flags["time_day"]))
     if truncated:
         notes.append(_truncation_note(truncated_sheet, never_opened))
-    notes.append("XLS has no page boundaries; one synthetic page per worksheet")
-    return synthetic_pages(blocks, notes=(notes[-1],)), notes
+    notes.append(XLS_PAGE_NOTE)
+    return synthetic_pages(blocks, notes=(XLS_PAGE_NOTE,)), notes
 
 
 def _extract_csv(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], list[str]]:
