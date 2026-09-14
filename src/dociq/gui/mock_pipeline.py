@@ -733,9 +733,11 @@ class MockPipeline:
 
         config: RunConfig = config_from(request)
         if request.master_index_path:
-            config = RunConfig(
-                source_root=config.source_root,
-                output_root=config.output_root,
+            # `replace`, not a rebuild. Rebuilding from two fields dropped every
+            # other field the request carried -- found by the RunRequest hop
+            # guard in tests/test_seam_population.py when A-25 added one.
+            config = replace(
+                config,
                 master_index=MasterIndexSnapshot(
                     filename=request.master_index_path.rsplit("\\", 1)[-1]
                     .rsplit("/", 1)[-1],

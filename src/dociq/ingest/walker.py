@@ -1316,6 +1316,9 @@ def run(config: RunConfig, opts: WalkOptions | None = None,
 
     opt = ex.ExtractOptions(conf_threshold=config.ocr_conf_threshold,
                             scratch_dir=scratch, ocr_enabled=opts.ocr_enabled,
+                            # A-25: from the config, which is hashed and keys
+                            # the resume journal -- never from WalkOptions.
+                            skip_images_on_text_pages=config.skip_images_on_text_pages,
                             project_tokens=config.project_tokens)
 
     replay = _load_resume(config) if opts.resume else {}

@@ -179,7 +179,8 @@ def test_the_manifest_claim_names_the_full_identity_it_covers(outcome):
     identity = data["claim_identity"]
     for named in ("master-index", "OCR confidence threshold",
                   "OCR engine", "Bates", "row caps", "ZIP", "per-file timeout",
-                  "retry", "recursed", "OCR model identity"):
+                  "retry", "recursed", "OCR model identity",
+                  "skip_images_on_text_pages"):
         assert named in identity, named
     assert "EXCLUDED" in identity and "workers" in identity
 
@@ -218,6 +219,19 @@ def test_the_processing_log_hashes_the_limits_and_reports_pool_width(outcome):
     )
     assert data["run"]["pool"]["workers"] == outcome.result.config.limits.workers
     assert data["run"]["pool"]["disk_headroom_x100"] > 0
+
+
+def test_the_processing_log_records_whether_images_on_text_pages_were_read(outcome):
+    """A-25. ``content.config`` is a hand-written list of keys, so a RunConfig
+    field is absent from the log until someone adds it, and the hash then covers
+    a setting the log a reader opens does not show. This run has OCR off, so it
+    read no image and records the skip whatever it was asked."""
+    data = json.loads(
+        outcome.layout.processing_log.read_text(encoding="utf-8")
+    )
+    recorded = data["content"]["config"]["skip_images_on_text_pages"]
+    assert recorded is outcome.result.config.skip_images_on_text_pages
+    assert recorded is True
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +383,27 @@ def test_the_resume_key_moves_with_every_identity_field_of_the_config():
     # output. A resume key stricter than the identity would be a different bug.
     wide = dataclasses.replace(base, limits=_limits(workers=1))
     assert walker._resume_identity(base) == walker._resume_identity(wide)
+
+
+def test_the_image_skip_setting_is_an_identity_input_not_an_exclusion():
+    """A-25 (D-51). A run that reads the images on its text pages and one that
+    skips them produce different text from one folder, so they must not share a
+    run identity, and one's journal must not replay into the other.
+
+    Named here as well as covered by the loop above, because that loop cannot
+    see an EXCLUSION: for a field in ``_IDENTITY_EXCLUDED`` it checks that the
+    resume key does NOT move, which is exactly what excluding this field would
+    make true.
+    """
+    from dociq.contracts import _IDENTITY_EXCLUDED
+
+    assert "skip_images_on_text_pages" in {f.name for f in dataclasses.fields(RunConfig)}
+    assert "skip_images_on_text_pages" not in _IDENTITY_EXCLUDED
+    reading = RunConfig(source_root="s", output_root="o", limits=_limits(),
+                        skip_images_on_text_pages=False)
+    skipping = dataclasses.replace(reading, skip_images_on_text_pages=True)
+    assert run_identity(reading) != run_identity(skipping)
+    assert walker._resume_identity(reading) != walker._resume_identity(skipping)
 
 
 def test_a_journal_written_under_different_limits_is_refused(tmp_path):

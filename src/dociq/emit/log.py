@@ -428,6 +428,12 @@ def build_log(
             "ocr_engine": config.ocr_engine,
             "ocr_engine_version": config.ocr_engine_version,
             "bates_pattern": config.bates_pattern,
+            # A-25 (D-51): whether the images on text pages were read. This
+            # section is a hand-written list, so a RunConfig field is absent
+            # from it until someone adds it -- and the run identity above hashes
+            # this one, so a log that did not show it would ask a reader to
+            # trust a hash over a setting they cannot see.
+            "skip_images_on_text_pages": config.skip_images_on_text_pages,
             # A-04 / Codex review #1 finding B-2. Serialized through the
             # contract's identity projection, which is the same projection the
             # run hash uses — so what the log shows and what the hash covers

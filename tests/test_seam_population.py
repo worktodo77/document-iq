@@ -117,6 +117,7 @@ UNPASSED: dict[tuple[str, str], str] = {
     ("TokenBasis", "ratio_refuted"): _NO_BASIS,
     ("FolderPreview", "by_extension"): _NO_FOLDER,
     ("FolderPreview", "estimated_minutes"): _NO_FOLDER,
+    ("FolderPreview", "estimated_minutes_reading_images"): _NO_FOLDER,
 }
 """Construction sites in ``adapter.py`` that may omit a field, and WHY.
 
@@ -205,6 +206,201 @@ def test_no_private_holding_attribute_stands_in_for_a_seam_field() -> None:
         f"Report the shape the seam needs and have it applied; do not hold the "
         f"value beside a screen that cannot see it."
     )
+
+
+# ---------------------------------------------------------------------------
+# The INBOUND record, hop by hop (A-25)
+# ---------------------------------------------------------------------------
+
+ROUTES: dict[str, str] = {
+    "source_root": "config_from -> RunConfig.source_root",
+    "output_root": "config_from -> RunConfig.output_root",
+    "master_index_path": "RealPipeline.run -> PipelineOptions.master_index_path",
+    "project_tokens": "RealPipeline.run -> RunConfig.project_tokens (D-39)",
+    "approvals": "RealPipeline.run -> PipelineOptions.approvals (D-34)",
+    "skip_images_on_text_pages": (
+        "config_from -> RunConfig -> pipeline.run's walk_config -> walker.run "
+        "-> ExtractOptions -> _extract_pdf; and the reviewed request -> "
+        "MainWindow._capture_approval -> set_omission's fingerprint (A-25)"),
+}
+"""Where every field of :class:`RunRequest` goes after the screen builds it.
+
+``RunRequest`` is INBOUND, so the population probes above skip it: "populated by
+RealPipeline" is not a property it can have. That left nothing checking the
+direction a request field is actually lost in. ``MockPipeline.run`` rebuilt the
+config from two fields whenever a master index was given, and every other field
+fell back to its default. A field with no route here fails, so the next one
+added to the request has to say where it goes; the hop tests below then carry
+the A-25 field through each hop with both of its values.
+"""
+
+
+def test_every_run_request_field_has_a_route() -> None:
+    fields = {f.name for f in dataclasses.fields(seam.RunRequest)}
+    assert fields == set(ROUTES), (
+        f"unrouted RunRequest field(s): {sorted(fields - set(ROUTES))}; routes "
+        f"for fields the request does not have: {sorted(set(ROUTES) - fields)}")
+
+
+class _Stop(Exception):
+    """Raised by a spy once it holds what it came for."""
+
+
+_BOTH = pytest.mark.parametrize("skip", [True, False], ids=["skip", "read"])
+
+
+@_BOTH
+def test_hop_setup_screen_to_request(app, skip) -> None:
+    from PySide6.QtWidgets import QCheckBox
+
+    from dociq.gui.screens import SetupScreen
+    from dociq.gui.theme import build_theme
+
+    screen = SetupScreen(build_theme())
+    boxes = screen.findChildren(QCheckBox)
+    assert len(boxes) == 1, "the setup screen has no image-skip switch"
+    boxes[0].setChecked(skip)
+    assert screen.request().skip_images_on_text_pages is skip
+
+
+@_BOTH
+def test_hop_real_pipeline_to_core_run(tmp_path, monkeypatch, skip) -> None:
+    from dociq import adapter
+
+    from .conftest import FIXTURES
+
+    seen = {}
+
+    def spy(config, options=None):
+        seen["config"] = config
+        raise _Stop
+
+    monkeypatch.setattr(adapter.core, "run", spy)
+    request = seam.RunRequest(str(FIXTURES), str(tmp_path / "out"),
+                              skip_images_on_text_pages=skip)
+    try:
+        adapter.RealPipeline(ocr_enabled=False).run(
+            request, lambda _e: None, lambda: False)
+    except _Stop:
+        pass
+    assert seen["config"].skip_images_on_text_pages is skip
+
+
+@_BOTH
+def test_hop_mock_pipeline_keeps_the_setting_beside_a_master_index(skip) -> None:
+    """``MockPipeline.run`` REBUILT the config from two fields when an index was
+    supplied, so the setting fell back to its default on exactly that path."""
+    from dociq.gui.mock_pipeline import MockPipeline
+
+    request = seam.RunRequest(r"D:\m", r"D:\m\out",
+                              master_index_path=r"D:\m\index.xlsx",
+                              skip_images_on_text_pages=skip)
+    outcome = MockPipeline().run(request, lambda _e: None, lambda: False)
+    assert outcome.result.config.master_index is not None
+    assert outcome.result.config.skip_images_on_text_pages is skip
+
+
+@_BOTH
+def test_hop_pipeline_run_to_the_walk(tmp_path, monkeypatch, skip) -> None:
+    """With OCR on the walk is handed the caller's value. With OCR off it is
+    handed SKIP whatever was asked, the way the OCR engine is stamped: a run
+    that reads no image cannot record that it read them."""
+    from dociq import pipeline as core
+    from dociq.contracts import RunConfig
+    from dociq.ingest import walker
+
+    from .conftest import FIXTURES
+
+    seen = []
+
+    def spy(config, opts=None, notes=None):
+        seen.append(config)
+        raise _Stop
+
+    monkeypatch.setattr(core.walker, "run", spy)
+    for ocr in (True, False):
+        try:
+            core.run(RunConfig(source_root=str(FIXTURES),
+                               output_root=str(tmp_path / f"out-{ocr}"),
+                               skip_images_on_text_pages=skip),
+                     core.PipelineOptions(
+                         walk=walker.WalkOptions(ocr_enabled=ocr, resume=False)))
+        except _Stop:
+            pass
+    assert [c.skip_images_on_text_pages for c in seen] == [skip, True]
+
+
+@_BOTH
+def test_hop_walker_to_the_extractor_options(tmp_path, monkeypatch, skip) -> None:
+    from dociq.contracts import RunConfig
+    from dociq.ingest import extract as ex
+    from dociq.ingest import walker
+
+    built = []
+    real = ex.ExtractOptions
+
+    class Spy(real):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            built.append(self)
+
+    monkeypatch.setattr(ex, "ExtractOptions", Spy)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_text("one line of text", encoding="utf-8")
+    walker.run(RunConfig(source_root=str(src), output_root=str(tmp_path / "out"),
+                         skip_images_on_text_pages=skip),
+               walker.WalkOptions(ocr_enabled=False, resume=False))
+    assert built, "the walk built no extractor options"
+    assert all(o.skip_images_on_text_pages is skip for o in built)
+
+
+@_BOTH
+def test_hop_extractor_options_to_the_page(skip) -> None:
+    from dociq.contracts import PageKind
+    from dociq.ingest import extract as ex
+
+    from .conftest import FIXTURES
+
+    path = FIXTURES / "15_mixed_content_page.pdf"
+    page = ex.extract(path.name, path.read_bytes(),
+                      ex.ExtractOptions(skip_images_on_text_pages=skip)).pages[0]
+    if skip:
+        assert page.kind is PageKind.NATIVE
+        assert ex.M_IMAGE_SKIPPED in page.notes
+    else:
+        assert page.kind is PageKind.MIXED
+        assert ex.M_IMAGE_SKIPPED not in page.notes
+
+
+@_BOTH
+def test_hop_reviewed_request_to_the_approval(app, skip) -> None:
+    """The approval records the setting of the run the operator REVIEWED, not
+    the box as it stands now: by the time a lever is engaged the box may already
+    be set for the next run, and an approval must carry the recognition it was
+    given against (A-23)."""
+    from PySide6.QtWidgets import QCheckBox
+
+    from dociq.gui.main_window import MainWindow
+    from dociq.gui.mock_pipeline import MockPipeline
+
+    seen = {}
+
+    class Capturing(MockPipeline):
+        def set_omission(self, family_id, engaged, matter, source_root="",
+                         project_tokens=(), *, skip_images_on_text_pages):
+            seen["skip"] = skip_images_on_text_pages
+            return None
+
+    window = MainWindow(Capturing())
+    try:
+        window._request = seam.RunRequest(
+            r"D:\matter-A", r"D:\matter-A\out", skip_images_on_text_pages=skip)
+        window.setup.findChildren(QCheckBox)[0].setChecked(not skip)
+        window._capture_approval("progress-photographs", True)
+        assert seen.get("skip") is skip
+    finally:
+        window.close()
 
 
 # ---------------------------------------------------------------------------

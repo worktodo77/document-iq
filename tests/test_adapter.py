@@ -147,23 +147,32 @@ def test_the_estimate_is_the_measured_rate_and_nothing_else():
     this is where the change has to be argued.
     """
     two_gb = 2_000_000_000
-    on = adapter._minutes_for(two_gb, {".pdf": two_gb}, ocr_enabled=True)
-    off = adapter._minutes_for(two_gb, {".pdf": two_gb}, ocr_enabled=False)
+    on = adapter._minutes_for(two_gb, {".pdf": two_gb}, ocr_enabled=True,
+                              skip_images_on_text_pages=True)
+    off = adapter._minutes_for(two_gb, {".pdf": two_gb}, ocr_enabled=False,
+                               skip_images_on_text_pages=True)
     assert on == round(2.0 * (6182.4 / 2.6) / 60) == 79
     assert off == round(2.0 * (3046.7 / 2.6) / 60) == 39
 
 
-def test_the_default_rate_is_the_ocr_on_one_because_the_default_run_is():
+def test_no_rate_is_applied_without_the_settings_of_the_run_it_describes():
     """The claim-accuracy defect this closes, stated as an assertion.
 
     ``MEASURED_SECONDS_PER_GB`` was derived from the OCR-DISABLED run while
     :class:`RealPipeline` constructs with ``ocr_enabled=True``, so the figure
     beside the primary action read ~51 min for a corpus whose one measured
     OCR-on run took 103. The rate and the run must be the same configuration.
+
+    **Repointed by A-25.** This asserted that the helper's DEFAULT was the OCR-on
+    rate. D-51 added a second setting the rate depends on, and a default for
+    either would hand a caller who did not think about it the estimate for some
+    other run -- the defect above, one setting over. Both are now required, so
+    the default this pinned no longer exists and the refusal is what is pinned.
     """
     two_gb = 2_000_000_000
-    assert adapter._minutes_for(two_gb, {".pdf": two_gb}) == \
-        adapter._minutes_for(two_gb, {".pdf": two_gb}, ocr_enabled=True)
+    for given in ({}, {"ocr_enabled": True}, {"skip_images_on_text_pages": True}):
+        with pytest.raises(TypeError):
+            adapter._minutes_for(two_gb, {".pdf": two_gb}, **given)
     assert adapter.seconds_per_gb(True) > adapter.seconds_per_gb(False)
     # ≈2.0×, independently consistent with the register's ≈2.0–2.3× figure for
     # OCR's share of extraction. Asserted as a band, not a literal: this is a
@@ -258,7 +267,8 @@ def test_the_basis_sentence_names_the_run_it_came_from():
 def test_no_estimate_rather_than_an_indefensible_one(total, sized, why):
     """Zero is the seam's documented "no estimate" and the screen then says
     nothing. Each case is a folder the one measured run does not describe."""
-    assert adapter._minutes_for(total, sized) == 0, why
+    assert adapter._minutes_for(total, sized, ocr_enabled=True,
+                                skip_images_on_text_pages=True) == 0, why
 
 
 def test_the_estimate_is_absent_for_the_fixture_corpus():
@@ -267,6 +277,54 @@ def test_the_estimate_is_absent_for_the_fixture_corpus():
     nothing about duration, which is better than "about 1 minute" from a rate
     measured on 2.6 GB."""
     assert adapter.RealPipeline().preview_folder(str(FIXTURES)).estimated_minutes == 0
+
+
+def test_no_estimate_for_a_run_that_reads_images_on_text_pages():
+    """A-25 (D-51). Both measured rates were timed before A-24 read a single
+    image on a text page, so they describe a run that SKIPS those images. On a
+    timed sample of 12 documents reading them made extraction 3.44 times as long,
+    and the whole-corpus cost is not measured -- so a run that reads them gets
+    the seam's documented "no estimate" rather than the old figure.
+
+    FAIL-BEFORE: the helper had no such setting and answered 79 for this folder
+    whatever the run was about to do.
+    """
+    two_gb = 2_000_000_000
+    sized = {".pdf": two_gb}
+    assert adapter._minutes_for(two_gb, sized, ocr_enabled=True,
+                                skip_images_on_text_pages=True) == 79
+    assert adapter._minutes_for(two_gb, sized, ocr_enabled=True,
+                                skip_images_on_text_pages=False) == 0
+    # With OCR off no image is read either way, so the OCR-off rate stands.
+    assert adapter._minutes_for(two_gb, sized, ocr_enabled=False,
+                                skip_images_on_text_pages=False) == 39
+    assert "skips them" in adapter.measured_basis(True)
+
+
+@pytest.mark.parametrize("ocr, expected", [(True, (40, 0)), (False, (20, 20))])
+def test_the_preview_carries_an_estimate_for_each_image_setting(
+    tmp_path, monkeypatch, ocr, expected
+):
+    """Through ``preview_folder`` itself, on a folder faked to 1 GB, for the
+    reason the OCR-setting test above gives: calling the helper directly passes
+    whether or not the preview is wired to it. The screen picks between the two
+    by its checkbox; the rule for each figure stays here."""
+    (tmp_path / "a.pdf").write_bytes(b"%PDF-1.4\n")
+    one_gb = 1_000_000_000
+    real_stat = Path.stat
+
+    def fake_stat(self, *a, **k):
+        st = real_stat(self, *a, **k)
+        if self.suffix.lower() == ".pdf":
+            class _S:
+                st_size = one_gb
+            return _S()
+        return st
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    preview = adapter.RealPipeline(ocr_enabled=ocr).preview_folder(str(tmp_path))
+    assert (preview.estimated_minutes,
+            preview.estimated_minutes_reading_images) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +530,8 @@ def approved(tmp_path):
     # refused, three pages stopped dropping, and the disagreement surfaced here.
     # A capture point and a run that derive the matter differently is the defect
     # itself, not a test detail.
-    approval = pipe.set_omission(FIXTURE_FAMILY, True, FIXTURES.name, str(FIXTURES))
+    approval = pipe.set_omission(FIXTURE_FAMILY, True, FIXTURES.name, str(FIXTURES),
+                                 skip_images_on_text_pages=True)
     assert approval is not None
     outcome, _ = _run(pipe, _request(tmp_path, "approved",
                                      approvals=(approval,)))

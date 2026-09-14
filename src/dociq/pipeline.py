@@ -1283,6 +1283,13 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         limits=walker.effective_limits(opts.walk, ocr_enabled=ocr_ran),
         ocr_engine=config.ocr_engine if ocr_ran else OCR_DISABLED,
         ocr_engine_version=config.ocr_engine_version if ocr_ran else "",
+        # A-25 (D-51). Stamped the way the engine is, as what the run DID: a run
+        # with OCR off reads no image on any page, so it records the skip
+        # whatever it was asked, and two runs that read the same text do not
+        # present two configurations. Set here and only here; the walk reads it
+        # from this config. A second source on `WalkOptions` is the shape the
+        # comment above had to unpick for OCR itself.
+        skip_images_on_text_pages=config.skip_images_on_text_pages or not ocr_ran,
         master_index=index.snapshot if index else config.master_index,
     )
 
@@ -1480,6 +1487,9 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 # A-R3-1). The effective value already existed; this just
                 # failed to use it.
                 ocr_ran=ocr_ran,
+                # A-25. The effective value stamped on walk_config, for the
+                # same reason: it is what the walk actually did.
+                skip_images_on_text_pages=walk_config.skip_images_on_text_pages,
             ),
             # The matter this run is FOR, so Stage 4 can refuse an approval
             # given on a different one. opts.matter_name is what the adapter

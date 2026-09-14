@@ -565,3 +565,44 @@ def test_a_working_engine_raises_no_alarm(_one_scan, tmp_path, monkeypatch):
                         lambda arr: ("SITE INSTRUCTION 44", [0.93]))
     result = _ocr_run(_one_scan, tmp_path, "alive")
     assert not any("dead OCR engine" in w for w in result.warnings)
+
+
+# --- A-25: a skipping run's journal is not a reading run's -------------------
+
+
+def test_a_journal_written_skipping_images_does_not_replay_into_a_reading_run(
+        tmp_path):
+    """The resume key is the run identity, so the setting has to live on
+    ``RunConfig`` for this to hold (D-51). Carried on ``WalkOptions`` instead,
+    the journal of a run that skipped the images satisfies a reading run's key
+    and replays the page NATIVE, unread, into a corpus whose configuration says
+    its images were read.
+    """
+    import dataclasses
+    import shutil
+
+    from dociq.contracts import PageKind
+
+    src = tmp_path / "src"
+    src.mkdir()
+    shutil.copyfile(FIXTURES / "15_mixed_content_page.pdf", src / "mixed.pdf")
+    out = tmp_path / "out"
+    skipping = RunConfig(source_root=str(src), output_root=str(out),
+                         ocr_engine_version=ex.ocr_engine_version(),
+                         skip_images_on_text_pages=True)
+    first = walker.run(skipping, walker.WalkOptions(ocr_enabled=True, resume=True))
+    assert first.documents[0].pages[0].kind is PageKind.NATIVE
+
+    # Re-arm the journal by hand, as the resume tests above do: a completed run
+    # discards it, and the case under test is a crash.
+    journal = walker._ResumeWriter(skipping, True)
+    journal.add(first.documents[0].rel_path, list(first.documents))
+    journal.close(discard=False, output_root=out)
+    assert walker._load_resume(skipping), "the fixture wrote no replayable journal"
+
+    reading = dataclasses.replace(skipping, skip_images_on_text_pages=False)
+    notes = walker.RunNotes()
+    second = walker.run(reading, walker.WalkOptions(ocr_enabled=True, resume=True),
+                        notes)
+    assert not any("RESUMED RUN" in n for n in notes.invocation), notes.invocation
+    assert second.documents[0].pages[0].kind is PageKind.MIXED

@@ -22,7 +22,11 @@ client matter:
 9. the run records its terminal status, outside the hashed content (finding
    B-1). Runs that do NOT complete are covered by
    ``tests/test_incomplete_runs.py``, which needs to force a preflight failure
-   and therefore cannot live in an end-to-end gate over a good corpus.
+   and therefore cannot live in an end-to-end gate over a good corpus;
+10. a run given no setting skips the images on pages that also carry a text
+    layer (A-25, D-51): fixture 15's page stays NATIVE with the skip note, and
+    the dead-engine alarm stays quiet. The main run opts in to the reading, so
+    item 1 still proves A-24's MIXED routing.
 
 Output is deliberately verbose about what passed. A gate whose green output is
 one word is a gate nobody can debug when it goes red.
@@ -257,8 +261,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         src = _fixture_root(work)
         out = work / "out"
+        # A-25 (D-51). A run skips the images on text pages unless told
+        # otherwise, and this is the run `_EXPECTED` checks fixture 15 against
+        # as MIXED -- A-24's reading, which the diagnostic a colleague runs must
+        # still prove on their install. So it opts in; the default is proved by
+        # its own run further down.
         cfg = RunConfig(source_root=str(src), output_root=str(out),
-                        ocr_engine_version=ex.ocr_engine_version())
+                        ocr_engine_version=ex.ocr_engine_version(),
+                        skip_images_on_text_pages=False)
         outcome = pipeline.run(cfg, pipeline.PipelineOptions(
             walk=walker.WalkOptions(resume=False),
             matter_name="DocIQ self-test corpus",
@@ -548,6 +558,9 @@ def main(argv: list[str] | None = None) -> int:
                 template_id=PROGRESS_REPORT.template_id,
                 template_version=PROGRESS_REPORT.version,
                 ocr_ran=False,
+                # A-25. With OCR off no image is read, so the fingerprint is
+                # the same either way; the default is what the run records.
+                skip_images_on_text_pages=True,
             ),
         )
         reduced = pipeline.run(
@@ -624,6 +637,43 @@ def main(argv: list[str] | None = None) -> int:
         chk.expect(not still_dropped,
                    "withdrawing the approval keeps every page",
                    f"{len(still_dropped)} page(s) still dropped")
+
+        print("\nA-25 — a run given no setting skips the images on text pages")
+        # D-51 as clarified: the images on pages that also carry a text layer
+        # stay unread unless the operator turns the reading on. Run over a
+        # folder holding ONLY fixture 15, with OCR on, so the alarm check below
+        # can fail: across the full corpus the scanned fixtures recover text,
+        # and the dead-engine alarm could never fire whatever `ocr_yield`
+        # counted.
+        skip_src = work / "skip-source"
+        skip_src.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src / "15_mixed_content_page.pdf",
+                        skip_src / "15_mixed_content_page.pdf")
+        skipping = pipeline.run(
+            RunConfig(source_root=str(skip_src),
+                      output_root=str(work / "out-skip"),
+                      ocr_engine_version=ex.ocr_engine_version()),
+            pipeline.PipelineOptions(
+                walk=walker.WalkOptions(resume=False),
+                matter_name="DocIQ self-test corpus",
+                stamp=OperatorStamp("selftest", "2026-07-30T00:00:00Z",
+                                    "selftest")))
+        chk.expect(skipping.result.config.skip_images_on_text_pages is True,
+                   "a run given no setting records that it skipped the images "
+                   "on text pages (A-25)")
+        skip_pages = [pg for d in skipping.result.documents for pg in d.pages]
+        chk.expect(len(skip_pages) == 1
+                   and skip_pages[0].kind is PageKind.NATIVE
+                   and ex.M_IMAGE_SKIPPED in skip_pages[0].notes,
+                   "fixture 15's page stays NATIVE and says its image was "
+                   "skipped by the run's setting",
+                   "; ".join(f"{pg.kind.value} {list(pg.notes)}"
+                             for pg in skip_pages))
+        chk.expect(not any("dead OCR engine" in w
+                           for w in skipping.result.warnings),
+                   "an image skipped by the run's setting raises no "
+                   "dead-engine alarm",
+                   f"{len(skipping.result.warnings)} warning(s)")
 
         print("\nPrinciple 5 — determinism (over the REAL emit layer)")
         det = determinism.prove(src, runs=args.runs, workdir=work / "det",

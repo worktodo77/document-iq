@@ -351,7 +351,7 @@ def test_b1_the_approval_records_the_tokens_the_waterfall_was_built_under(app):
 
     class Capturing(MockPipeline):
         def set_omission(self, family_id, engaged, matter, source_root="",
-                         project_tokens=()):
+                         project_tokens=(), *, skip_images_on_text_pages):
             seen["tokens"] = tuple(project_tokens)
             return None
 

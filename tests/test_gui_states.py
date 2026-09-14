@@ -252,6 +252,42 @@ def test_the_scope_and_the_time_sit_beside_the_action(window) -> None:
     assert f"about {preview.estimated_minutes} minutes" in scope
 
 
+def test_the_time_beside_the_action_follows_the_image_setting(window) -> None:
+    """A-25 (D-51). The estimate is the rate for a run that SKIPS pictures on
+    text pages, because that is the only run it timed. Untick the box and the
+    run is a different, unmeasured one, so the screen stops quoting a time for
+    it -- and quotes it again when the box is ticked back.
+
+    FAIL-BEFORE: the preview carried one figure, shown whatever the run would do.
+    """
+    from PySide6.QtWidgets import QCheckBox
+
+    from dociq.gui.pipeline import FolderPreview
+
+    window.setup.set_preview(FolderPreview(
+        file_count=12, total_bytes=1_000_000_000, by_extension=((".pdf", 12),),
+        estimated_minutes=40, estimated_minutes_reading_images=0))
+    boxes = window.setup.findChildren(QCheckBox)
+    assert len(boxes) == 1, "the setup screen has no image-skip switch"
+    box = boxes[0]
+    assert box.isChecked(), "a run skips pictures on text pages unless told otherwise"
+    assert "about 40 minutes" in window.setup._scope.text()
+    help_text = "\n".join(lab.text() for lab in window.setup.findChildren(QLabel))
+    for sentence in ("lists every page it skipped as not read",
+                     "Scanned pages with no typed text are still read.",
+                     "about 3.4 times as long",
+                     "Untick it for the full reading before relying on the results."):
+        assert sentence in help_text, sentence
+
+    box.setChecked(False)
+    assert "minutes" not in window.setup._scope.text()
+    assert window.setup.request().skip_images_on_text_pages is False
+
+    box.setChecked(True)
+    assert "about 40 minutes" in window.setup._scope.text()
+    assert window.setup.request().skip_images_on_text_pages is True
+
+
 def _no_horizontal_overflow(screen) -> bool:
     from PySide6.QtWidgets import QScrollArea
 

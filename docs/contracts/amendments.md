@@ -1728,3 +1728,72 @@ the page's `M_IMAGE_UNREAD` marker. A region that is read and holds no text is
 counted in a document note rather than marked: a site photograph has no words,
 and a warning that fires on the normal case teaches an operator to stop reading
 warnings.
+
+## A-25 — a run cannot say it chose not to read the images on its text pages
+
+**Raised by:** Alex's ruling D-51 of 2026-09-11, after A-24's measured runtime
+cost, and his clarification of its default the same day.
+**Status:** RAISED, NOT APPLIED. Built on `build/sprint-5-d51`, each part held by a
+test watched failing before its part landed. Flipped to APPLIED, with its commit,
+in the commit after the one that lands it, as A-22, A-23 and A-24 were.
+
+`RunConfig` gains `skip_images_on_text_pages`, defaulted from the new
+`SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT` to **skip**, and `recognition_fingerprint` gains
+it as a REQUIRED argument. `CONTRACT_VERSION` stays **2.3.0**: A-25 is folded into
+it, as D-49's field was, because 2.3.0 has not left the branch, and a 2.4.0 would
+record a contract nothing shipped.
+
+### The case the contract could not express
+
+A-24 reads the image regions of a page that also carries a text layer. On a timed
+sample of 12 corpus documents (645 pages, 144 MIXED) extraction took 3.44 times as
+long with that reading on, and the whole-corpus cost is not measured. D-51 rules a
+run option that skips the reading, and Alex's clarification makes skipping the
+default. Two runs over one folder, one reading those images and one skipping
+them, produce different text, and until this amendment nothing in the record that
+identifies a run could say which one it was.
+
+### What it touches, enumerated
+
+* **Identity and resume.** A hashed field, not in `_IDENTITY_EXCLUDED`. Adding it
+  moved the run identity of every run, including runs that never set it, so a
+  resume journal written before it is refused once. It lives on `RunConfig` and
+  not on `WalkOptions`, so a skipping run's journal cannot replay into a reading
+  run.
+* **The effective value.** `pipeline.run` stamps `skip or not ocr_ran` on the
+  walk's configuration, the way it stamps the OCR engine: a run with OCR off reads
+  no image and records the skip.
+* **Extraction.** `ExtractOptions` carries it, set by the walk from the config. A
+  skipped page stays NATIVE and carries `M_IMAGE_SKIPPED`, which begins with
+  `M_IMAGE_UNREAD`. The document note names every skipped page, because page notes
+  do not reach the processing log. It is a different sentence from "OCR disabled"
+  and from "OCR unavailable", because the three remedies differ.
+* **The dead-engine alarm.** `ocr_yield` counted every page note carrying
+  `M_IMAGE_UNREAD` as a failed OCR attempt. A skipped page was never attempted, so
+  it is excluded, and at the default the alarm would otherwise fire on any run
+  over letterhead-and-chart pages. A region that was tried and failed still counts.
+* **Accounting** still counts a skipped page's document under `M_IMAGE_UNREAD` as
+  evidence not in the corpus, with the reason in the note. No accounting category
+  is added: how the screen tells a choice from a failure is D-52's decision.
+* **Recognition.** A required fingerprint argument, normalized inside: images
+  count as read only when OCR ran and the run did not skip. The version stays v2,
+  which is reserved for what the code reads, but the added part moved every
+  fingerprint once, so every earlier approval is refused and reviewed again.
+  `set_omission` takes the setting of the run the operator reviewed, read off that
+  run's request.
+* **The seam and the screen.** `RunRequest` carries it and `config_from` copies
+  it. `MockPipeline.run` rebuilt the config from two fields when given a master
+  index and dropped it; it now uses `replace`. The setup screen has the switch,
+  ticked, beside the time. `FolderPreview` gains `estimated_minutes_reading_images`,
+  0 until a reading run is measured, and `_minutes_for` requires both settings.
+* **The record.** The processing log's `content.config` and the manifest's
+  identity note name the setting.
+* **Keeping A-24 exercised.** The selftest's main run and
+  `tools/bates_acceptance.py` opt in to reading. The selftest adds a default run
+  over fixture 15 that checks the skip.
+
+### Bounds, disclosed
+
+The time estimate describes a run that skips the images; a run that reads them
+gets none. The determinism probe and the packaged offline probe take the default,
+so both now exercise a run that skips the images, not A-24's reading.

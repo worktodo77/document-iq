@@ -443,6 +443,48 @@ def test_contract_version_is_the_frozen_one_and_every_bump_is_written_up():
         "the router could admit a page is both — is not written up")
 
 
+def test_the_image_skip_default_is_one_constant_that_every_layer_reads():
+    """A-25 (D-51). Whether a run reads the images on pages that also carry a
+    text layer has ONE default, and it is SKIP: Alex's clarification of D-51 is
+    that a run skips those images unless the switch is turned on.
+
+    Three records carry the setting with a default of their own -- the run
+    configuration, the extractor's options and the request the setup screen
+    builds. A literal typed into each is three defaults that agree today, and
+    the day one is flipped the screen, the recorded identity and the extraction
+    describe three different runs. So the value is asserted AND the source is
+    read: each default must be the named constant, not a literal equal to it.
+    """
+    import ast
+    import inspect
+
+    from dociq import contracts
+    from dociq.contracts import SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT
+    from dociq.gui import pipeline as seam
+    from dociq.ingest import extract as ex
+
+    assert SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT is True, (
+        "D-51 as clarified: a run skips images on text pages unless turned on")
+    for module, cls in ((contracts, contracts.RunConfig),
+                        (ex, ex.ExtractOptions),
+                        (seam, seam.RunRequest)):
+        spec = {f.name: f for f in dataclasses.fields(cls)}.get(
+            "skip_images_on_text_pages")
+        assert spec is not None, f"{cls.__name__} does not carry the setting"
+        assert spec.default is SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT
+        tree = ast.parse(inspect.getsource(module))
+        body = next(node for node in ast.walk(tree)
+                    if isinstance(node, ast.ClassDef) and node.name == cls.__name__)
+        declared = [node.value for node in body.body
+                    if isinstance(node, ast.AnnAssign)
+                    and isinstance(node.target, ast.Name)
+                    and node.target.id == "skip_images_on_text_pages"]
+        assert (len(declared) == 1 and isinstance(declared[0], ast.Name)
+                and declared[0].id == "SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT"), (
+            f"{cls.__name__}.skip_images_on_text_pages takes its default from "
+            "somewhere other than the one constant in dociq.contracts")
+
+
 # ---------------------------------------------------------------------------
 # Amendment A-19 (contract 1.8.0) — the input that decides which pages drop
 # ---------------------------------------------------------------------------

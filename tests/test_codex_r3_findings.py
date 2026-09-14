@@ -27,7 +27,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from dociq import pipeline as core  # noqa: E402
-from dociq.contracts import RunConfig, matter_key  # noqa: E402
+from dociq.contracts import (  # noqa: E402
+    RunConfig,
+    matter_key,
+    recognition_fingerprint,
+)
 from dociq.gui.main_window import MainWindow  # noqa: E402
 from dociq.gui.mock_pipeline import MockPipeline  # noqa: E402
 from dociq.sections.model import ApprovedOmission  # noqa: E402
@@ -53,6 +57,10 @@ def test_a_r3_1_the_documented_default_invocation_completes():
         outcome = core.run(
             RunConfig(source_root=str(FIXTURES), output_root=str(out)))
         assert outcome.result.documents, "the default run produced no documents"
+        # A-25 (D-51). The simplest call records the shipped default -- a run
+        # that skips the images on its text pages -- in the configuration it
+        # hashes, rather than leaving it to whatever a later layer assumes.
+        assert outcome.result.config.skip_images_on_text_pages is True
     finally:
         shutil.rmtree(out, ignore_errors=True)
 
@@ -68,6 +76,12 @@ def test_a_r3_1_the_default_path_also_completes_with_an_approval():
             matter_root=matter_key(str(FIXTURES)),
             template_id=PROGRESS_REPORT.template_id,
             template_version=PROGRESS_REPORT.version,
+            # A-25. Reviewed under the default run's own recognition, so the
+            # fingerprint is COMPARED rather than skipped as "not recorded".
+            recognition=recognition_fingerprint(
+                project_tokens=(), template_id=PROGRESS_REPORT.template_id,
+                template_version=PROGRESS_REPORT.version, ocr_ran=True,
+                skip_images_on_text_pages=True),
         )
         outcome = core.run(
             RunConfig(source_root=str(FIXTURES), output_root=str(out)),
@@ -76,6 +90,11 @@ def test_a_r3_1_the_default_path_also_completes_with_an_approval():
                                  matter_name="fixtures"),
         )
         assert outcome.result.documents
+        # An approval reviewed under the default applies to the default run,
+        # rather than being refused over a setting nobody changed.
+        assert not any("recognition configuration" in w
+                       for w in outcome.result.warnings), outcome.result.warnings
+        assert outcome.result.pages_dropped > 0
     finally:
         shutil.rmtree(out, ignore_errors=True)
 

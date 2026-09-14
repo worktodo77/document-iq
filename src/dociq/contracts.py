@@ -285,6 +285,19 @@ returned as the page's locator. Placement fixed the eviction. Only knowing which
 lines came from an image keeps an embedded exhibit's stamp from ever becoming
 this page's locator, and D-49 rules that it never may.
 
+Also under 2.3.0, amendment A-25, from Alex's ruling D-51 on 2026-09-11:
+:class:`RunConfig` gains ``skip_images_on_text_pages``, defaulted from
+:data:`SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT` to SKIP, and
+:func:`recognition_fingerprint` gains it as a required argument. A-24 made DocIQ
+read the images on pages that also carry a text layer, and on a timed sample of
+12 documents that made extraction 3.44 times as long; the switch lets a run skip
+the reading, and a run skips it unless told otherwise. Folded into 2.3.0 rather
+than bumped to 2.4.0, as D-49's field was, because 2.3.0 has not left the
+branch: no released build wrote an identity under it, and a 2.4.0 would record a
+contract nothing shipped. Additive with a default, and not free: the field is
+serialized, so the run identity of every run moves, including runs that never
+set it, and every approval fingerprint moves once.
+
 1.9.0 — amendment A-19, extended, from Codex review r2's finding B-2. :class:`OmissionSnapshot`
 gains ``matter_root`` and :func:`matter_key` is added.
 
@@ -1063,6 +1076,7 @@ def recognition_fingerprint(
     template_id: str | None = None,
     template_version: str | None = None,
     ocr_ran: bool = True,
+    skip_images_on_text_pages: bool,
 ) -> str:
     """Everything that decides which template family a page lands in.
 
@@ -1097,6 +1111,16 @@ def recognition_fingerprint(
     This is the one input that is a property of the code rather than of the run,
     which is why it is a version and not an argument.
 
+    **Whether the images on text pages were read is an argument, and a REQUIRED
+    one** (A-25, D-51). Skipping them changes the text recognition reads the way
+    turning OCR off does, and it has no default because a call site that never
+    thought about it would otherwise mint the fingerprint of some other run. It
+    is normalized here rather than at each call site: with OCR off no image is
+    read either way, so both values give one fingerprint. The version stays v2 —
+    it is reserved for what the CODE reads, and this is a property of the run —
+    but the added part still moved every fingerprint once, so an approval given
+    before A-25 is refused and reviewed again.
+
     Stable across spellings that do not change behavior: tokens are
     canonicalized, and the parts are joined by a separator none of them can
     contain, so `("A","B|C")` and `("A|B","C")` cannot collide.
@@ -1107,6 +1131,7 @@ def recognition_fingerprint(
         template_id or "",
         template_version or "",
         "ocr" if ocr_ran else "no-ocr",
+        "images" if ocr_ran and not skip_images_on_text_pages else "no-images",
     )
     joined = "\x1f".join(parts)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:32]
@@ -1139,6 +1164,23 @@ def canonical_tokens(tokens: Iterable[str]) -> tuple[str, ...]:
     """
     folded = {fold_label(t) for t in tokens}
     return tuple(sorted(f for f in folded if f))
+
+
+SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT = True
+"""Whether a run leaves unread the images on pages that also carry a text layer,
+when nobody said (amendment A-25, from D-51).
+
+**Skip, by Alex's clarification of D-51.** A-24 made DocIQ read those images, and
+on a timed sample of 12 documents (645 pages, 144 of them MIXED) extraction took
+3.44 times as long with the reading on; the whole-corpus cost is not measured. A
+run therefore takes a quick first pass unless the operator turns the reading on,
+and every page it leaves unread says so.
+
+**One constant, read by every record that declares a default.** :class:`RunConfig`,
+``dociq.ingest.extract.ExtractOptions`` and the GUI's ``RunRequest`` each take
+their default from here, and ``tests/test_contracts.py`` reads their source to
+hold them to it. Three literals would be three defaults that agree until the day
+one of them is flipped."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1237,6 +1279,21 @@ class RunConfig:
     run, and only one of them is a decision."""
 
     section_template_version: str | None = None
+
+    skip_images_on_text_pages: bool = SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT
+    """Whether this run left unread the images on pages that also carry a text
+    layer -- A-24's image-region OCR (amendment A-25, from D-51).
+
+    In the identity because it changes the text: one page is NATIVE with its chart
+    unread in one run and MIXED with the chart's words in the other, and
+    recognition can place it in a different family. It is a
+    :func:`recognition_fingerprint` input for the reason whether OCR ran is.
+
+    The pipeline records what the run DID, as it does for the OCR engine: a run
+    with OCR off reads no image either way, so it records ``True`` whatever it
+    was asked. Serialized like every other field, so adding it moved the run
+    identity of every run, including runs that never set it, and a resume
+    journal written before it is refused once."""
 
     def __post_init__(self) -> None:
         """Canonicalize the token list here, where no caller can skip it.

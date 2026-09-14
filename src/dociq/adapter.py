@@ -163,6 +163,10 @@ def seconds_per_gb(ocr_enabled: bool) -> float:
     the two rates time different work, and picking one for both settings is what
     made the shipped estimate ~2× low. The caller passes the setting the run will
     use, so the branch cannot drift from the run.
+
+    **Neither timed run read the images on pages that also carry a text layer**:
+    both predate A-24. Each rate is therefore the rate for a run that SKIPS them
+    (A-25), and :func:`_minutes_for` gives no figure for a run that reads them.
     """
     return SECONDS_PER_GB_OCR_ON if ocr_enabled else SECONDS_PER_GB_OCR_OFF
 
@@ -175,7 +179,9 @@ def measured_basis(ocr_enabled: bool) -> str:
             "from scratch through RealPipeline — 6,182.4 s for 2.6 GB "
             "(decision register, §10 measured again 2026-08-02). The machine was "
             "under load throughout, so this corroborates the ≈100-minute upper "
-            "bound rather than establishing an idle-machine rate."
+            "bound rather than establishing an idle-machine rate. No picture on "
+            "a page that also carries typed text was read in that run, so it "
+            "times a run that skips them."
         )
     return (
         "one measured run: the full MODEC/Petrobras corpus, OCR disabled, from "
@@ -220,17 +226,26 @@ the documented meaning of zero."""
 
 
 def _minutes_for(total_bytes: int, sized: dict[str, int], *,
-                 ocr_enabled: bool = True) -> int:
+                 ocr_enabled: bool, skip_images_on_text_pages: bool) -> int:
     """Wall clock for this folder under :func:`seconds_per_gb`, or 0.
 
-    ``ocr_enabled`` defaults to True because :class:`RealPipeline` does; a
-    default of False here would reintroduce the ~2×-low estimate for every
-    caller who did not think about it.
+    **Both settings are required.** ``ocr_enabled`` used to default to True
+    because :class:`RealPipeline` does, which guarded against the ~2×-low
+    estimate a default of False produced. The image setting (A-25) has the same
+    power over the answer, and a default for either hands a caller who did not
+    think about it the estimate for some other run.
+
+    **0 for a run that reads the images on text pages.** Both rates were timed
+    before A-24 read any, so they describe a run that skips them. On a timed
+    sample of 12 documents the reading made extraction 3.44 times as long, and
+    the whole-corpus cost is not measured, so there is no rate to scale.
 
     Zero is the seam's documented "no estimate", and it is returned for every
     folder neither rate was measured on. See :data:`SECONDS_PER_GB_OCR_ON` for
     what the rates do and do not cover.
     """
+    if ocr_enabled and not skip_images_on_text_pages:
+        return 0
     if total_bytes <= 0:
         return 0
     gigabytes = total_bytes / 1_000_000_000
@@ -632,7 +647,7 @@ class RealPipeline:
 
     def set_omission(
         self, family_id: str, engaged: bool, matter: str, source_root: str = "",
-        project_tokens: tuple[str, ...] = (),
+        project_tokens: tuple[str, ...] = (), *, skip_images_on_text_pages: bool,
     ) -> OmissionApproval | None:
         """Record or withdraw one expert-approved omission (D-34).
 
@@ -697,12 +712,15 @@ class RealPipeline:
             # The whole recognition configuration, not only the half we have
             # so far been bitten by. `ocr_ran` is this pipeline's own setting:
             # an approval reviewed on a run that read the scans is not an
-            # approval for a run that did not.
+            # approval for a run that did not. `skip_images_on_text_pages` is
+            # the REVIEWED run's, which the window reads off that run's request
+            # (A-25), for the same reason `project_tokens` is.
             recognition=recognition_fingerprint(
                 project_tokens=project_tokens,
                 template_id=self._template.template_id,
                 template_version=self._template.version,
                 ocr_ran=self._ocr_enabled,
+                skip_images_on_text_pages=skip_images_on_text_pages,
             ),
         )
 
@@ -872,9 +890,14 @@ class RealPipeline:
             by_extension=tuple(sorted(by_ext.items())),
             # The rate that matches THIS pipeline's OCR setting, read off the
             # instance rather than assumed — the estimate and the run are then
-            # the same configuration by construction.
+            # the same configuration by construction. One figure per image
+            # setting (A-25); the screen shows the one its checkbox describes.
             estimated_minutes=_minutes_for(total, sized,
-                                           ocr_enabled=self._ocr_enabled),
+                                           ocr_enabled=self._ocr_enabled,
+                                           skip_images_on_text_pages=True),
+            estimated_minutes_reading_images=_minutes_for(
+                total, sized, ocr_enabled=self._ocr_enabled,
+                skip_images_on_text_pages=False),
         )
 
     def run(

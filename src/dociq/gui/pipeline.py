@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
-from dociq.contracts import RunConfig, RunResult
+from dociq.contracts import SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT, RunConfig, RunResult
 from dociq.runstate import COMPLETED, RunTermination, TerminalStatus
 
 DIRECT_CONTEXT_TOKENS = 200_000
@@ -79,7 +79,19 @@ class FolderPreview:
     estimated_minutes: int = 0
     """Rough wall-clock estimate, shown beside the action so the operator knows
     what they are starting. Zero means "no estimate" and the screen says nothing
-    rather than inventing a number."""
+    rather than inventing a number.
+
+    **For a run that skips the images on text pages** (A-25). The rates it comes
+    from were timed before DocIQ read any, so that is the run they describe."""
+
+    estimated_minutes_reading_images: int = 0
+    """The same estimate for a run that READS the images on text pages (A-25).
+
+    Zero, "no estimate", until such a run is measured: on a timed sample of 12
+    documents the reading made extraction 3.44 times as long, and the
+    whole-corpus cost is not known. The setup screen shows whichever figure its
+    checkbox describes, so which rate belongs to which run stays the pipeline's
+    rule."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -639,6 +651,12 @@ class RunRequest:
     that remembered it privately would make two runs from one visible request
     produce different corpora. It is an input; it travels with the inputs."""
 
+    skip_images_on_text_pages: bool = SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT
+    """The setup screen's quick-pass switch (A-25, D-51): leave unread the
+    pictures on pages that also carry typed text. Ticked unless the operator
+    unticks it. :func:`config_from` copies it into the run configuration, so it
+    is hashed into the run identity rather than held by an adapter."""
+
 
 @dataclass(frozen=True, slots=True)
 class ProgressEvent:
@@ -715,9 +733,16 @@ class PipelineAPI(Protocol):
         ...
 
     def set_omission(
-        self, family_id: str, engaged: bool, matter: str, source_root: str
+        self, family_id: str, engaged: bool, matter: str, source_root: str,
+        project_tokens: tuple[str, ...] = (), *, skip_images_on_text_pages: bool,
     ) -> "OmissionApproval | None":
         """Engage or withdraw one omission, and CAPTURE THE APPROVER (D-34).
+
+        ``project_tokens`` and ``skip_images_on_text_pages`` are the settings of
+        the run the operator REVIEWED, read off that run's request and not off
+        the setup screen: each changes which pages a family reaches (A-22,
+        A-25), and the screen may already be set for the next run. The image
+        setting is required, as it is on the fingerprint it feeds.
 
         This is the moment D-34 is about. A template ships unengaged and can
         never drop a page; the instant a human ticks a row, DocIQ writes that
@@ -852,6 +877,7 @@ def config_from(request: RunRequest) -> RunConfig:
     return RunConfig(
         source_root=request.source_root,
         output_root=request.output_root,
+        skip_images_on_text_pages=request.skip_images_on_text_pages,
     )
 
 

@@ -244,9 +244,11 @@ def test_the_fingerprint_covers_the_sibling_the_named_fields_did_not():
     from dociq.contracts import recognition_fingerprint  # noqa: PLC0415
 
     on = recognition_fingerprint(project_tokens=("MV32",), template_id="t",
-                                 template_version="1", ocr_ran=True)
+                                 template_version="1", ocr_ran=True,
+                                 skip_images_on_text_pages=True)
     off = recognition_fingerprint(project_tokens=("MV32",), template_id="t",
-                                  template_version="1", ocr_ran=False)
+                                  template_version="1", ocr_ran=False,
+                                  skip_images_on_text_pages=True)
     assert on != off
 
 
@@ -256,9 +258,11 @@ def test_the_fingerprint_is_stable_across_spellings_that_do_not_change_behavior(
     from dociq.contracts import recognition_fingerprint  # noqa: PLC0415
 
     a = recognition_fingerprint(project_tokens=("MV32", "BOMESC"),
-                                template_id="t", template_version="1")
+                                template_id="t", template_version="1",
+                                skip_images_on_text_pages=True)
     b = recognition_fingerprint(project_tokens=(" bomesc ", "mv32", "MV32"),
-                                template_id="t", template_version="1")
+                                template_id="t", template_version="1",
+                                skip_images_on_text_pages=True)
     assert a == b
 
 
@@ -272,10 +276,13 @@ def test_the_fingerprint_parts_cannot_be_confused_with_each_other():
     # can, and this pair collides under ANY printable separator — `a|b` + `""`
     # and `a` + `"b"` both render as `a|b`. It passes only because the parts are
     # joined on a unit separator (0x1f) that a template id cannot carry.
-    assert (recognition_fingerprint(template_id="a|b", template_version="c")
-            != recognition_fingerprint(template_id="a", template_version="b|c"))
-    assert (recognition_fingerprint(template_id="a,b", template_version="c")
-            != recognition_fingerprint(template_id="a", template_version="b,c"))
+    def fp(**kw):
+        return recognition_fingerprint(skip_images_on_text_pages=True, **kw)
+
+    assert (fp(template_id="a|b", template_version="c")
+            != fp(template_id="a", template_version="b|c"))
+    assert (fp(template_id="a,b", template_version="c")
+            != fp(template_id="a", template_version="b,c"))
 
 
 def test_an_approval_with_no_fingerprint_is_neither_widened_nor_voided():
@@ -326,10 +333,12 @@ def test_an_approval_whose_fingerprint_differs_is_refused():
                        1, 1, "the outline")
     reviewed_with_ocr = recognition_fingerprint(
         project_tokens=(), template_id=PROGRESS_REPORT.template_id,
-        template_version=PROGRESS_REPORT.version, ocr_ran=True)
+        template_version=PROGRESS_REPORT.version, ocr_ran=True,
+        skip_images_on_text_pages=True)
     run_without_ocr = recognition_fingerprint(
         project_tokens=(), template_id=PROGRESS_REPORT.template_id,
-        template_version=PROGRESS_REPORT.version, ocr_ran=False)
+        template_version=PROGRESS_REPORT.version, ocr_ran=False,
+        skip_images_on_text_pages=True)
     assert reviewed_with_ocr != run_without_ocr
 
     approval = dataclasses.replace(
@@ -372,7 +381,8 @@ def test_an_approval_given_against_pre_a24_recognition_is_refused():
         "\x1f".join(v1_parts).encode("utf-8")).hexdigest()[:32]
     run_now = recognition_fingerprint(
         project_tokens=(), template_id=PROGRESS_REPORT.template_id,
-        template_version=PROGRESS_REPORT.version, ocr_ran=True)
+        template_version=PROGRESS_REPORT.version, ocr_ran=True,
+        skip_images_on_text_pages=False)
     assert reviewed_before_a24 != run_now, (
         "the fingerprint did not move when A-24 changed what recognition reads")
 
@@ -404,7 +414,8 @@ def test_a_matching_fingerprint_still_drops():
     label = "TABLE OF CONTENTS"
     fp = recognition_fingerprint(
         project_tokens=(), template_id=PROGRESS_REPORT.template_id,
-        template_version=PROGRESS_REPORT.version, ocr_ran=True)
+        template_version=PROGRESS_REPORT.version, ocr_ran=True,
+        skip_images_on_text_pages=True)
     approval = dataclasses.replace(
         _approval(()), family_id="table-of-contents", recognition=fp)
     span = SectionSpan(label, family_key(label, ()), RecognitionTier.OUTLINE,
@@ -427,7 +438,8 @@ def test_the_recognition_fingerprint_survives_to_the_persisted_snapshot():
 
     fp = recognition_fingerprint(
         project_tokens=(), template_id=PROGRESS_REPORT.template_id,
-        template_version=PROGRESS_REPORT.version, ocr_ran=False)
+        template_version=PROGRESS_REPORT.version, ocr_ran=False,
+        skip_images_on_text_pages=True)
     approval = dataclasses.replace(_approval(()), recognition=fp)
 
     dropped, config = _real_run_drops(approval)
@@ -446,10 +458,12 @@ def test_a_stale_fingerprint_is_persisted_and_moves_the_identity():
 
     matching = recognition_fingerprint(
         project_tokens=(), template_id=PROGRESS_REPORT.template_id,
-        template_version=PROGRESS_REPORT.version, ocr_ran=False)
+        template_version=PROGRESS_REPORT.version, ocr_ran=False,
+        skip_images_on_text_pages=True)
     stale = recognition_fingerprint(
         project_tokens=(), template_id=PROGRESS_REPORT.template_id,
-        template_version=PROGRESS_REPORT.version, ocr_ran=True)
+        template_version=PROGRESS_REPORT.version, ocr_ran=True,
+        skip_images_on_text_pages=True)
     assert matching != stale
 
     applied_drops, applied_cfg = _real_run_drops(
@@ -460,3 +474,83 @@ def test_a_stale_fingerprint_is_persisted_and_moves_the_identity():
     assert applied_drops == _PHOTOGRAPH_PAGES and refused_drops == frozenset()
     assert applied_cfg.omissions[0].recognition != refused_cfg.omissions[0].recognition
     assert run_identity(applied_cfg) != run_identity(refused_cfg)
+
+
+# --- A-25: whether the images on text pages were read (D-51) ----------------
+
+def test_the_fingerprint_covers_whether_images_on_text_pages_were_read():
+    """Skipping the images on a text page changes the text recognition reads
+    exactly as OCR does: a letterhead over a photographed chart is a photograph
+    page unread and can be something else read. So it is a fingerprint input.
+
+    Normalized the way the run stamps it: with OCR off no image is read either
+    way, so the setting cannot split one recognition into two reviews.
+    """
+    from dociq.contracts import recognition_fingerprint  # noqa: PLC0415
+
+    def fp(ocr_ran, skip):
+        return recognition_fingerprint(
+            project_tokens=(), template_id=PROGRESS_REPORT.template_id,
+            template_version=PROGRESS_REPORT.version, ocr_ran=ocr_ran,
+            skip_images_on_text_pages=skip)
+
+    assert fp(True, True) != fp(True, False)
+    assert fp(False, True) == fp(False, False)
+
+
+def test_a_fingerprint_that_does_not_say_whether_images_were_read_is_refused():
+    """Required, not defaulted. A default would let a call site that never
+    thought about the setting mint the fingerprint of some other run, and an
+    approval would then be refused -- or applied -- for a reason nobody chose."""
+    from dociq.contracts import recognition_fingerprint  # noqa: PLC0415
+
+    with pytest.raises(TypeError):
+        recognition_fingerprint(project_tokens=(), template_id="t",
+                                template_version="1", ocr_ran=True)
+
+
+def test_an_approval_reviewed_reading_images_is_refused_by_a_run_that_skipped_them():
+    """The capture point and Stage 4 together: ``set_omission`` stamps the
+    setting of the run the operator reviewed, and a run that skipped the images
+    refuses an approval given while they were read."""
+    from dociq import adapter  # noqa: PLC0415
+    from dociq.contracts import (  # noqa: PLC0415
+        RecognitionTier,
+        recognition_fingerprint,
+    )
+    from dociq.sections.apply import apply_sections  # noqa: PLC0415
+    from dociq.sections.model import SectionSpan  # noqa: PLC0415
+    from dociq.sections.normalize import family_key  # noqa: PLC0415
+    from tests.test_codex_r1_findings import _document  # noqa: PLC0415
+
+    def fp(skip):
+        return recognition_fingerprint(
+            project_tokens=(), template_id=PROGRESS_REPORT.template_id,
+            template_version=PROGRESS_REPORT.version, ocr_ran=True,
+            skip_images_on_text_pages=skip)
+
+    captured = adapter.RealPipeline().set_omission(
+        "progress-photographs", True, "fixtures", str(FIXTURES), (),
+        skip_images_on_text_pages=False)
+    assert captured.recognition == fp(False), (
+        "the approval did not record that the reviewed run read the images")
+
+    label = "TABLE OF CONTENTS"
+    span = SectionSpan(label, family_key(label, ()), RecognitionTier.OUTLINE,
+                       1, 1, "the outline")
+    approval = dataclasses.replace(
+        _approval(()), family_id="table-of-contents",
+        recognition=captured.recognition)
+
+    def stage4(run_skips):
+        return apply_sections(
+            _document(), (span,), template=PROGRESS_REPORT, approvals=(approval,),
+            matter_root=approval.matter_root, project_tokens=(),
+            recognition=fp(run_skips))
+
+    assert len(stage4(False).drops) == 1, "control: a reading run applies it"
+    refused = stage4(True)
+    assert refused.drops == (), (
+        "an approval reviewed with the images read dropped pages in a run that "
+        "skipped them")
+    assert any("recognition configuration" in w for w in refused.warnings), refused.warnings

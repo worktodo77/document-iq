@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from dociq.contracts import matter_key
+from dociq.contracts import SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT, matter_key
 from dociq.gui.pipeline import (
     BatesProposal,
     OmissionApproval,
@@ -420,9 +420,15 @@ class MainWindow(QMainWindow):
         # was REVIEWED under, not the one about to replace it.
         reviewed_under = tuple(
             self._request.project_tokens if self._request else ())
+        # The image setting the same way (A-25): the REVIEWED run's, off its
+        # request, not the setup checkbox, which may already be set for the
+        # next run.
+        reviewed_skip = (self._request.skip_images_on_text_pages
+                         if self._request else SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT)
         try:
             approval = capture(family_id, engaged, matter, source_root,
-                               reviewed_under)
+                               reviewed_under,
+                               skip_images_on_text_pages=reviewed_skip)
         except Exception as exc:
             print(f"[dociq] omission {family_id!r} was not recorded: {exc}")
             return

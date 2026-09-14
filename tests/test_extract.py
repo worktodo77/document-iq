@@ -18,6 +18,13 @@ def _pages(name: str, opt: ex.ExtractOptions | None = None):
     return ex.extract(path.name, path.read_bytes(), opt)
 
 
+def _reading() -> ex.ExtractOptions:
+    """A-24's image reading, opted into. The default skips it (A-25, D-51), so a
+    test ABOUT reading a mixed page's image says so rather than inheriting a
+    default that no longer reads one."""
+    return ex.ExtractOptions(skip_images_on_text_pages=False)
+
+
 def test_native_pdf_pages_are_native():
     got = _pages("01_native_report.pdf")
     assert [p.kind for p in got.pages] == [PageKind.NATIVE, PageKind.NATIVE]
@@ -138,7 +145,7 @@ def test_an_embedded_image_cannot_supply_a_stamp_in_place_of_the_pages_own():
 def test_a_mixed_pages_image_lines_are_marked_and_kept_out_of_its_locator_text():
     """D-49 at the extractor: the lines read from the embedded image are marked,
     and the locator text is the page's text layer alone."""
-    got = _pages("15_mixed_content_page.pdf")
+    got = _pages("15_mixed_content_page.pdf", _reading())
     page = got.pages[0]
     assert page.kind is PageKind.MIXED
     assert page.image_line_span is not None, "a MIXED page must mark its image lines"
@@ -183,7 +190,7 @@ def test_a_page_that_is_both_text_and_image_reads_both():
     rendering would move the fixture corpus hash for a property this test does
     not test.
     """
-    got = _pages("15_mixed_content_page.pdf")
+    got = _pages("15_mixed_content_page.pdf", _reading())
     assert len(got.pages) == 1
     page = got.pages[0]
 
@@ -239,6 +246,49 @@ def test_a_mixed_page_with_ocr_disabled_stays_native_and_discloses_the_unread_im
     assert ex.has_evidence_marker(joined), (
         "M_IMAGE_UNREAD note does not register as an evidence marker: "
         + repr(got.notes))
+
+
+# ---------------------------------------------------------------------------
+# A-25 (D-51): the run that leaves those images unread ON PURPOSE
+# ---------------------------------------------------------------------------
+
+
+def test_a_skipped_image_is_disclosed_apart_from_a_disabled_or_missing_engine(
+        monkeypatch):
+    """Three reasons a mixed page's image goes unread, and three remedies: untick
+    the quick-pass box, turn OCR on, install the models. One sentence for all
+    three would send the operator to the wrong one.
+
+    All three keep ``M_IMAGE_UNREAD``, because all three leave an image's words
+    out of the corpus. Only the skip marks the PAGE, which stays NATIVE -- nothing
+    on it was read by OCR -- and the document note names the page, because page
+    notes do not reach the processing log and the setup screen promises that
+    every page skipped is listed.
+    """
+    def unread(got):
+        return [n for n in got.notes if n.startswith(ex.M_IMAGE_UNREAD)]
+
+    skipped = _pages("15_mixed_content_page.pdf",
+                     ex.ExtractOptions(skip_images_on_text_pages=True))
+    disabled = _pages("15_mixed_content_page.pdf",
+                      ex.ExtractOptions(ocr_enabled=False,
+                                        skip_images_on_text_pages=False))
+    monkeypatch.setattr(ex, "ocr_available", lambda: False)
+    unavailable = _pages("15_mixed_content_page.pdf", _reading())
+
+    sentences = [unread(g) for g in (skipped, disabled, unavailable)]
+    assert all(len(s) == 1 for s in sentences), sentences
+    assert len({s[0] for s in sentences}) == 3, (
+        "a skipped image, OCR disabled and a missing engine read as one "
+        f"disclosure: {sentences}")
+    assert "page(s) 1" in sentences[0][0], sentences[0][0]
+
+    page = skipped.pages[0]
+    assert page.kind is PageKind.NATIVE
+    assert page.notes == (ex.M_IMAGE_SKIPPED,)
+    assert "NOTICEOFDELAYNo14" not in page.text
+    for other in (disabled, unavailable):
+        assert ex.M_IMAGE_SKIPPED not in other.pages[0].notes
 
 
 def test_empty_page_is_still_a_page():
@@ -794,6 +844,31 @@ def test_a_page_ocr_could_not_even_rasterize_counts_as_an_attempt():
     docs = (_doc_with([failed]),)
     assert ex.ocr_yield(docs) == (1, 0)
     assert ex.ocr_yield_warning(docs) is not None
+
+
+def test_a_page_skipped_on_purpose_is_not_a_failed_ocr_attempt():
+    """A-25 (D-51). ``ocr_yield`` counts a page note carrying ``M_IMAGE_UNREAD``
+    as an attempt that failed, and the dead-engine alarm fires when every attempt
+    failed. A skipped page carries that marker and was never attempted. Counted,
+    a run over a production of letterhead-and-chart pages -- the ordinary case,
+    at the default setting -- tells the operator the OCR engine is dead.
+
+    FAIL-BEFORE, the false alarm itself: ``(1, 0)`` and the warning.
+    """
+    from dociq.contracts import PageKind, PageRecord
+
+    got = _pages("15_mixed_content_page.pdf",
+                 ex.ExtractOptions(skip_images_on_text_pages=True))
+    assert ex.M_IMAGE_SKIPPED in got.pages[0].notes
+    docs = (_doc_with(got.pages),)
+    assert ex.ocr_yield(docs) == (0, 0)
+    assert ex.ocr_yield_warning(docs) is None
+
+    # A region that was TRIED and failed is still an attempt: what is excluded
+    # is the skip, not the marker.
+    failed = PageRecord(page_no=1, text="letterhead", kind=PageKind.NATIVE,
+                        notes=(ex.M_IMAGE_UNREAD,))
+    assert ex.ocr_yield((_doc_with([failed]),)) == (1, 0)
 
 
 def test_ocr_available_no_longer_claims_a_capability_it_never_checks():

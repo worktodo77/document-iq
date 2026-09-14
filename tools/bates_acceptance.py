@@ -384,7 +384,14 @@ def _document_from_pdf(path: Path, rel: str) -> DocumentRecord | None:
         return None
     try:
         pages, notes = ex._extract_pdf(
-            raw, ex.ExtractOptions(ocr_enabled=True, footer_reocr=FOOTER_REOCR))
+            raw, ex.ExtractOptions(ocr_enabled=True,
+                                   # The FULL reading, A-24's image regions and
+                                   # D-49's locators included. The default now
+                                   # skips the images on text pages (A-25), and a
+                                   # harness that took it would measure a
+                                   # different extractor from the one it names.
+                                   skip_images_on_text_pages=False,
+                                   footer_reocr=FOOTER_REOCR))
     except Exception as exc:
         print(f"    ! {rel}: {type(exc).__name__}: {exc}")
         return None

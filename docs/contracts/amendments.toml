@@ -289,3 +289,14 @@ title = "a page can be both a text layer and an unread image, and the page model
 raised_by = "Alex's rulings 2026-09-10 (D-48, D-49), after the extraction fidelity sweep"
 wired_in = { "src/dociq/contracts.py" = ["PageKind", "PageRecord", "needs_ocr_review", "recognition_fingerprint", "CONTRACT_VERSION"], "src/dociq/ingest/pagemodel.py" = ["make_page"], "src/dociq/ingest/extract.py" = ["M_IMAGE_UNREAD", "_pdf_image_rects", "_ocr_pdf_regions", "_merge_image_text", "_merge_image_lines", "_extract_pdf", "ocr_yield"], "src/dociq/identify/bates.py" = ["detect_candidates", "apply_bates_reported"], "src/dociq/ingest/walker.py" = ["_page_from_jsonable"], "src/dociq/gui/view_models.py" = ["_ocr_flags"], "src/dociq/emit/log.py" = ["_document_entry"], "src/dociq/pipeline.py" = ["ocr_page_count"] }
 tests = ["tests/test_contracts.py", "tests/test_extract.py", "tests/test_bates.py", "tests/test_walker.py", "tests/test_codex_r2_findings.py"]
+
+# A-25 is "raised" for exactly one commit and flipped in the next, as A-22, A-23
+# and A-24 were. Raised entries are not held to `wired_in` by the checker, so the
+# list below is re-verified at the flip. CONTRACT_VERSION stays 2.3.0: A-25 is
+# folded into the unreleased 2.3.0, as D-49's part of A-24 was.
+[amendment.A-25]
+status = "raised"
+title = "a run cannot say it chose not to read the images on its text pages"
+raised_by = "Alex's ruling 2026-09-11 (D-51), after A-24's measured runtime cost"
+wired_in = { "src/dociq/contracts.py" = ["SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT", "RunConfig", "recognition_fingerprint", "CONTRACT_VERSION"], "src/dociq/gui/pipeline.py" = ["RunRequest", "FolderPreview", "PipelineAPI", "config_from"], "src/dociq/gui/mock_pipeline.py" = ["MockPipeline"], "src/dociq/gui/main_window.py" = ["_capture_approval"], "src/dociq/gui/screens.py" = ["SetupScreen", "_render_scope"], "src/dociq/adapter.py" = ["_minutes_for", "seconds_per_gb", "measured_basis", "set_omission", "preview_folder"], "src/dociq/pipeline.py" = ["run"], "src/dociq/ingest/walker.py" = ["run"], "src/dociq/ingest/extract.py" = ["ExtractOptions", "M_IMAGE_SKIPPED", "_extract_pdf", "ocr_yield"], "src/dociq/emit/log.py" = ["build_log"], "src/dociq/verify/manifest.py" = ["IDENTITY_NOTE"], "src/dociq/selftest.py" = ["main"], "tools/bates_acceptance.py" = ["_document_from_pdf"] }
+tests = ["tests/test_contracts.py", "tests/test_extract.py", "tests/test_walker.py", "tests/test_run_identity.py", "tests/test_codex_r2_findings.py", "tests/test_codex_r3_findings.py", "tests/test_seam_population.py", "tests/test_adapter.py", "tests/test_gui_states.py"]

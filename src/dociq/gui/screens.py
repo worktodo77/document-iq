@@ -18,6 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -32,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from dociq.contracts import canonical_tokens
+from dociq.contracts import SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT, canonical_tokens
 from dociq.gui.pipeline import (
     FolderPreview,
     ProgressEvent,
@@ -296,6 +297,25 @@ class SetupScreen(QWidget):
 
         right = QVBoxLayout()
         right.setSpacing(UNIT // 2)
+        # A-25 (D-51). The quick-pass switch sits with the time because the time
+        # depends on it: the estimate describes a run that skips these pictures,
+        # and no run that reads them has been measured.
+        self._preview: FolderPreview | None = None
+        self._skip_images = QCheckBox(
+            "Quick first pass: skip pictures on pages that also have typed text")
+        self._skip_images.setFont(theme.body(9))
+        self._skip_images.setChecked(SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT)
+        self._skip_images.toggled.connect(lambda _on: self._render_scope())
+        right.addWidget(self._skip_images)
+        skip_help = _muted(
+            "When ticked, DocIQ does not read words inside pictures, charts or "
+            "pasted-in scans on pages that also carry typed text, and lists "
+            "every page it skipped as not read. Scanned pages with no typed text "
+            "are still read. On a timed sample of 12 documents, reading those "
+            "pictures made extraction about 3.4 times as long. Untick it for the "
+            "full reading before relying on the results.", theme, 8)
+        skip_help.setMaximumWidth(UNIT * 48)
+        right.addWidget(skip_help)
         self._scope = _muted("", theme, 9)
         self._scope.setAlignment(Qt.AlignmentFlag.AlignRight)
         right.addWidget(self._scope)
@@ -336,9 +356,25 @@ class SetupScreen(QWidget):
         self._source_hint.setText(
             f"{preview.file_count} files · {preview.total_bytes / 1e9:.1f} GB · {exts}"
         )
+        self._preview = preview
+        self._render_scope()
+
+    def _render_scope(self) -> None:
+        """The scope and the time beside the action, for the run the checkbox
+        describes (A-25).
+
+        The screen PICKS between the pipeline's two figures and computes neither:
+        which rate belongs to which run is the pipeline's rule. A run that reads
+        the pictures has no measured figure, so unticking the box removes the
+        time rather than keeping one that describes a different run."""
+        preview = self._preview
+        if preview is None:
+            return
         scope = f"{preview.file_count:,} documents"
-        if preview.estimated_minutes:
-            scope += f" · about {preview.estimated_minutes} minutes"
+        minutes = (preview.estimated_minutes if self._skip_images.isChecked()
+                   else preview.estimated_minutes_reading_images)
+        if minutes:
+            scope += f" · about {minutes} minutes"
         self._scope.setText(scope)
 
     def request(self) -> RunRequest:
@@ -347,6 +383,7 @@ class SetupScreen(QWidget):
             output_root=self._output.text(),
             master_index_path=self._index.text() or None,
             project_tokens=self.project_tokens(),
+            skip_images_on_text_pages=self._skip_images.isChecked(),
         )
 
     def begin_source(self, source: str) -> None:

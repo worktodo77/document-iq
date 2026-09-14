@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ..contracts import (
+    SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT,
     ExtractionError,
     PageKind,
     PageRecord,
@@ -181,6 +182,15 @@ M_ATTACH_SKIPPED = "attachment content was not brought in"
 # document holds".
 M_IMAGE_UNREAD = "page image content was not read"
 
+M_IMAGE_SKIPPED = f"{M_IMAGE_UNREAD}: skipped by this run's quick-pass setting"
+"""A-25 (D-51). The page note on a page whose image was left unread BY CHOICE.
+
+It keeps :data:`M_IMAGE_UNREAD` as its prefix, so every consumer of that marker
+still counts the page as evidence missing from the corpus, which it is. The one
+consumer that must tell the two apart is :func:`ocr_yield`: a skipped page was
+never attempted, and counting it as a failed attempt raises the dead-engine
+alarm on the default run over any production of letterhead-and-chart pages."""
+
 FINAL_MARKERS: tuple[str, ...] = (
     M_EML_PARSE,
     M_ATTACH_SKIPPED,
@@ -207,6 +217,12 @@ FINAL_MARKERS: tuple[str, ...] = (
     # re-read the same way reach the same wall. What changes the answer is
     # enabling OCR or installing the models — an operator action, not a retry.
     M_IMAGE_UNREAD,
+    # A-25. FINAL too, and listed on its own although `M_IMAGE_UNREAD` already
+    # matches it: a re-read under the same setting skips the same pages, and
+    # what changes the answer is the operator unticking the quick-pass box.
+    # Left unlisted, the class assertion in the extraction tests cannot tell a
+    # classified marker from a forgotten one -- which is how it was caught.
+    M_IMAGE_SKIPPED,
 )
 
 
@@ -321,6 +337,15 @@ class ExtractOptions:
 
     ocr_enabled: bool = True
     """Off only for tests that must exercise the native path in isolation."""
+
+    skip_images_on_text_pages: bool = SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT
+    """Leave unread the images on pages that also carry a text layer (A-25, D-51).
+
+    A-24's region OCR, skipped: such a page stays NATIVE, carries
+    :data:`M_IMAGE_SKIPPED`, and the document note names it. A page with no
+    usable text layer is still OCR'd whole. The walk sets it from ``RunConfig``
+    and never from ``WalkOptions``: one setting with two sources is how a resume
+    journal replays a page read under the other one."""
 
     project_tokens: tuple[str, ...] = ()
     """Matter-specific tokens stripped from a section label before a template
@@ -477,13 +502,19 @@ def ocr_yield(documents) -> tuple[int, int]:
     * :data:`M_IMAGE_UNREAD` on a PAGE — image regions that could not be read,
       an attempt that failed. Without it, a dead engine over a production of
       mixed pages attempts nothing, recovers nothing, and raises no alarm.
+
+    **Not** :data:`M_IMAGE_SKIPPED` (A-25), though it carries the same prefix. A
+    page the run's setting skipped was never sent to OCR, so it is no attempt at
+    all. Counted as a failed one, the default run over any production of
+    letterhead-and-chart pages would report a dead engine.
     """
     attempted = recovered = 0
     for doc in documents:
         for page in doc.pages:
             worked = page.read_by_ocr and page.text.strip()
             blank = any(n.startswith(M_OCR_BLANK) or n.startswith(M_OCR_PAGE)
-                        or n.startswith(M_IMAGE_UNREAD)
+                        or (n.startswith(M_IMAGE_UNREAD)
+                            and not n.startswith(M_IMAGE_SKIPPED))
                         for n in page.notes)
             if not (worked or blank):
                 continue
@@ -1546,11 +1577,26 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
         # nothing is the failure mode this amendment exists to close.
         notes.append(f"{M_IMAGE_UNREAD}: image geometry could not be measured "
                      f"({sanitize_message(str(exc))})")
+    skipped: frozenset[int] = frozenset()
     if mixed:
         if not opt.ocr_enabled:
             notes.append(f"{M_IMAGE_UNREAD}: {len(mixed)} page(s) carry an image "
                          f"covering {PHOTO_MIN_IMAGE_AREA_SHARE:.0%} or more of "
                          f"the page beside their text layer; OCR disabled")
+        elif opt.skip_images_on_text_pages:
+            # A-25 (D-51): a quick first pass leaves these images unread ON
+            # PURPOSE. After "OCR disabled", the wider reason, which keeps its
+            # own sentence; before the engine check, because a run that reads
+            # nothing needs no engine to say so. The pages are named here since
+            # page notes never reach the processing log, and the setup screen
+            # promises that every page skipped is listed.
+            skipped = frozenset(mixed)
+            notes.append(f"{M_IMAGE_UNREAD}: {len(mixed)} page(s) carry an image "
+                         f"covering {PHOTO_MIN_IMAGE_AREA_SHARE:.0%} or more of "
+                         f"the page beside their text layer, left unread because "
+                         f"this run skips images on pages that have a text "
+                         f"layer: page(s) "
+                         + ", ".join(str(i + 1) for i in mixed))
         elif not ocr_available():
             notes.append(f"{M_IMAGE_UNREAD}: {len(mixed)} page(s) carry an image "
                          f"beside their text layer and OCR is unavailable: "
@@ -1643,6 +1689,10 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                 # evidence, and a warning that fires on the normal case teaches
                 # an operator to stop reading warnings.
                 n_region_blank += 1
+        if i in skipped:
+            # A-25: the page stays NATIVE and says, on the page, why its image
+            # is not in the text.
+            page_notes = page_notes + (M_IMAGE_SKIPPED,)
         if i == 0 and photo:
             # The block describes the whole file, so it rides on page 1. When
             # the page also yielded read text the page stays OCR/NATIVE and
