@@ -120,6 +120,25 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-54 — the quick pass still reads a scan that carries a typed stamp (2026-09-14)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-54 | What D-51's quick pass does with a fully scanned page whose text layer is only a stamp | **Read it.** A page whose image content covers nearly the whole page is treated as a scan and read even when the run skips images on text pages; only images beside real typed content are skipped. The coverage threshold is proposed at 90% and must be stated in code, tested at its boundary, and its corpus exposure counted during the build. Ruled by Alex over two alternatives: keep skipping such pages and name stamped or endorsed scans in the setup screen's help text (no extra reading time), and counting on the acceptance corpus how many of the 3,573 MIXED pages are near-full-page images before deciding. | 2026-09-14 |
+
+**What the ruling was made on.** The adversarial review of D-51's build (`8e1b533` on
+`build/sprint-5-d51`) built a page holding a full-page scan plus a 52-character text-layer
+endorsement. With the default setting the page came out NATIVE, its text the endorsement alone, with
+the skip note; with reading on it came out MIXED with the scan's words. The cause is two thresholds
+working together: a text layer of 40 characters or more (`_NATIVE_TEXT_FLOOR`) keeps a page off
+whole-page OCR, and an image covering 25% or more makes it MIXED, which D-51 then skips. The same
+scan with no stamp, or a stamp under 40 characters, is OCR'd whole and read. So a stamp decided
+whether a page was read, the defect D-48 recorded for protective-order legends, returned under
+D-51's default and disclosed rather than silent. The finding was rated C and not independently
+re-verified; the mechanism was checked against the code before the question was put.
+
+**Status: ruled, not yet built.** It is built in D-51's review-fix round, before D-51 merges.
+
 ## D-53 — Sprint 5's first increment: extraction fidelity and the review documents (ruled 2026-09-10, recorded 2026-09-11)
 
 | # | Decision | Ruling | Date |
