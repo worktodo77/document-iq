@@ -120,6 +120,26 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-57 — the Word package follows D-55: fix and review until a round finds nothing serious (2026-09-14)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-57 | How the Word fidelity package ends, after the standing non-convergence rule tripped on it too | **The same as D-55.** Fix review round 2's six confirmed findings and build D-56 in the same round, then review again, alternating until a review round confirms no finding of A or B severity. Ruled by Alex (the recommended option) over two alternatives: fix the six and D-56 and close without a further review, recording the rest as known limitations; and merge the package as it stands with the six recorded as open defects for a later Word round. | 2026-09-14 |
+
+**What the ruling was made on.** Review round 1 on `be064ac` confirmed 2 A and 5 B findings, fixed in
+`5f6588f`. Review round 2 on `5f6588f` confirmed 0 A and 6 B, several of them new cases of round 1's
+classes: footnotes, endnotes, comments and settings still located by fixed part name rather than
+through the main part's relationships (round 1 found the main part hard-coded), so a validly built
+file loses their text silently; a VML watermark's text dropped with no note, and a Symbol-font `w:sym`
+deleted in place so the figures either side run together, both constructs silently lost (round 1
+found others); stored names of archive members and email attachments containing a colon or a DOS
+device stem replaced with no record of the original; python-docx's rejection message carrying a
+memory address into hashed output, so two runs of one file differ; and six disclosure notes the fix
+round added that no test holds. Context: the package reads every Word file in the corpus and the 289
+documents embedded in them.
+
+**Status: ruled, in progress.** Word's fix round 2 is next.
+
 ## D-56 — a Word file's tracked deletions are listed after its body (2026-09-14)
 
 | # | Decision | Ruling | Date |
@@ -196,6 +216,29 @@ what establishes it counted the same thing.
 
 The distribution is bimodal: 3,081 MIXED pages sit between 0.25 and 0.65, and 390 at 0.95 or
 above, so the result does not depend closely on where between 0.80 and 0.95 the line is drawn.
+**Remeasured the same day, after a change to how images are counted.** D-51's second review found
+that `_page_image_share` measured each image at its first placement only (an image drawn twice, a
+thumbnail plus a full-page copy, counted once at thumbnail size) and did not see inline images at all
+(a defect since `4092f76`, 2026-08-17). The fix counts every draw. The same validated census, run on
+that fix's own `extract.py`, first reproduced the figures above under the old count exactly, then gave
+under the new count: **3,574 MIXED pages (+1) and 433 pages at 0.90 or more, in 33 documents (+27
+pages, +2 documents)**; none dropped below either threshold, and the share changed on 737 pages in 153
+documents. The table above is the old count and is kept as the first measurement. The same
+fix makes D-49's claim that region OCR cannot duplicate a text layer true (it had not been, for text
+drawn over an image): the text layer's word boxes are masked out before recognition. Overlap of text
+layer with image regions on the corpus's MIXED pages: none on 2,403; under 10% on 706; 10% to under 50%
+on 59; 50% to under 90% on 27; 90% or more on 379, of which 375 are at image share 0.90 or more and
+almost all carry visible text, so the exposure is typed text over images rather than searchable scans.
+The time the mask adds is not measured. **Correction:** the ruling's evidence paragraph above says the
+review's page carried a 52-character endorsement; the fixture's stamp measures 53 characters.
+
+**The recognition fingerprint's version was not moved for the new count.** Tier 3 reads the image
+share, and the new count changes it on 737 corpus pages (one crosses the 25% line). The version is
+reserved for what the code reads, so this is the kind of change it records; it stays `v2` because `v2`
+itself was introduced on this unreleased branch (A-24) and no approval has been persisted under it
+(no person has driven the product, D-46), the precedent by which A-25 was folded into contract 2.3.0.
+Decided by the main session, not ruled by Alex.
+
 **Not measured:** the reading time those 406 pages add to a quick pass. Scaling A-24's timed
 7.14 s per MIXED page gives about 48 minutes of serial extraction, a projection from a
 12-document sample, reduced by parallel extraction by an unmeasured amount.
