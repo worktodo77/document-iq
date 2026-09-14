@@ -808,13 +808,22 @@ class _ResumeWriter:
 # ---------------------------------------------------------------------------
 
 
-def _dated(pages: tuple[PageRecord, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """``(detected_dates, notes)`` — dates in first-appearance order, capped."""
+def _dated(pages: tuple[PageRecord, ...],
+           ext: str = "") -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(detected_dates, notes)`` — dates in first-appearance order, capped.
+
+    Detection reads :func:`dociq.ingest.extract.date_detection_text`, not the
+    page text itself: a spreadsheet cell's own line break is written as a
+    pilcrow (E5), which would otherwise hide a date the cell wrapped. The
+    undoing happens here, where the text is handed to detection, because the
+    page text must keep the pilcrow and only the record's extension says the
+    pilcrow was a cell's break and not a character of the document.
+    """
     seen: list[str] = []
     known: set[str] = set()
     capped = False
     for p in pages:
-        for iso in detect_dates(p.text):
+        for iso in detect_dates(ex.date_detection_text(ext, p.text)):
             if iso not in known:
                 known.add(iso)
                 seen.append(iso)
@@ -858,7 +867,7 @@ def _record(entry: FileEntry, filename: str, ext: str, size: int, sha: str,
             got: ex.ExtractedDoc, *, parent: str | None = None,
             order: int | None = None, rel_path: str | None = None,
             config: RunConfig | None = None) -> DocumentRecord:
-    dates, date_notes = _dated(got.pages)
+    dates, date_notes = _dated(got.pages, ext)
     # Every DocumentRecord in the run is built here, which makes this the one
     # place that has to scrub absolute paths out of hashed content.
     notes = tuple(ex.sanitize_message(n) for n in got.notes + date_notes)
