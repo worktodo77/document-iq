@@ -120,6 +120,31 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-55 — the spreadsheet package keeps fixing and reviewing until a round finds nothing serious (2026-09-14)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-55 | How the spreadsheet fidelity package ends, after the standing non-convergence rule tripped | **Fix and hunt again.** Fix round 2's nine confirmed findings, then run a third full adversarial review, and keep alternating fix and review until a review round confirms no finding of A or B severity. Ruled by Alex over three alternatives: fix the nine and close the package without a third review, recording the rest as known limitations and measuring the embedded corpus workbooks after merge (recommended); fix only the two defects round 1's fixes introduced and record the other seven; and defer the spreadsheet branch until after D-52 while D-51 and the Word package merge. | 2026-09-14 |
+
+**What the ruling was made on.** The standing rule (two consecutive hunts on one subsystem each
+finding new siblings of one defect class: stop and bring a descope or defer decision) tripped on the
+spreadsheet extractor. The class: a cell's value, or a construct, lost or misrendered without a word.
+Review round 1 on `32a605f` confirmed 2 A and 8 B findings, all fixed in `5bbbd13`. Review round 2 on
+`5bbbd13` confirmed 0 A and 9 B. Two of the nine were introduced by round 1's fixes: `reset_dimensions`
+drops a cell written after a later column in its row, and wrapped-date detection keys on the file's
+extension rather than the reader that produced the page. The others are round-1 siblings not closed:
+time formats holding 24 hours or more render as invented 1900/1904 dates; `.xls` comments, hyperlinks
+and print headers are still dropped; read failures that a second read recovers are marked FINAL, so
+the walker never retries them; the sheet-list fallback path and the `.xls` formatting fallback each
+reintroduce an A1/A2 defect; hidden-sheet notes claim content was read that was not; and no test holds
+the streamed read's memory bound. Context that raised the stakes: spreadsheets have no top-level files
+in the acceptance corpus, but D-50 now recovers the 138 workbooks (132 `.xlsx`, 6 `.xlsm`) embedded in
+its Word files, and those reach this extractor. **Correction:** the question as put to Alex, and its
+recommended option, said 144 workbooks, adding the 6 `.xlsm` to 138 a second time. The figure is 138
+(D-50's census; the Word build spec counts 132 and 6).
+
+**Status: ruled, in progress.** Round 2's fix round is next.
+
 ## D-54 — the quick pass still reads a scan that carries a typed stamp (2026-09-14)
 
 | # | Decision | Ruling | Date |
