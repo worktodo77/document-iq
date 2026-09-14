@@ -22,6 +22,28 @@ FIXTURES = make_fixtures.build()
 import pytest  # noqa: E402
 
 
+def journal_groups(documents) -> dict[str, list]:
+    """Walked records grouped the way the resume journal keys them: by the
+    top-level SOURCE file each one came out of.
+
+    Tests that re-arm a journal by hand used ``d.parent_doc_id or d.rel_path``,
+    which is the source only one container level down. Before Doc IDs are
+    assigned, ``parent_doc_id`` is the parent's ``rel_path``, so a grandchild
+    (an email's attachment inside a Word file, D-50) names its parent, not the
+    file on disk, and was journaled under a source the next run never looks up.
+    Following the parent links to a record with no parent finds the source at
+    any depth.
+    """
+    by_rel = {d.rel_path: d for d in documents}
+    groups: dict[str, list] = {}
+    for d in documents:
+        top = d
+        while top.parent_doc_id and top.parent_doc_id in by_rel:
+            top = by_rel[top.parent_doc_id]
+        groups.setdefault(top.parent_doc_id or top.rel_path, []).append(d)
+    return groups
+
+
 @pytest.fixture(scope="session")
 def real_run(tmp_path_factory):
     """ONE real end-to-end run through :class:`dociq.adapter.RealPipeline`.

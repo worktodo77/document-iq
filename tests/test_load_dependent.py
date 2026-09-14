@@ -32,6 +32,8 @@ from dociq.contracts import ProcessingStatus, RunConfig, to_jsonable
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
 
+from .conftest import journal_groups
+
 
 def _corpus(tmp_path, n: int = 6):
     src = tmp_path / "src"
@@ -204,8 +206,8 @@ def test_a_resumed_run_and_a_fresh_run_have_the_same_hashed_warnings(tmp_path):
 
     # A completed run discards its journal; re-arm it by hand, as a crash would.
     w = walker._ResumeWriter(cfg, True)
-    for d in first.documents:
-        w.add(d.parent_doc_id or d.rel_path, [d])
+    for source, docs in journal_groups(first.documents).items():
+        w.add(source, docs)
     w.close(discard=False, output_root=tmp_path / "out")
 
     notes = walker.RunNotes()

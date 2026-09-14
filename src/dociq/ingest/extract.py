@@ -181,13 +181,13 @@ M_ATTACH_SKIPPED = "attachment content was not brought in"
 # document holds".
 M_IMAGE_UNREAD = "page image content was not read"
 
-# D-50 (the Word fidelity package). Two markers, not one folded into
+# The Word fidelity package. Two markers, not one folded into
 # M_IMAGE_UNREAD, because they answer different questions: one is "this
 # construct was never read at all" (altChunk, a chart, SmartArt, a large
 # picture), the other is "this text WAS read and then deliberately left out
 # of the default view" (a tracked deletion). Keeping them apart means the
-# still-open ruling on whether deleted text should ALSO be shown (D-50 part
-# 8, zero corpus exposure) can change without touching the vocabulary the
+# still-open ruling on whether deleted text should ALSO be shown (Word spec
+# part 8, zero corpus exposure) can change without touching the vocabulary the
 # unread-construct notes key off.
 M_WORD_UNREAD = "Word content was not read"
 M_WORD_TRACKED_DELETION = "tracked deletion(s) were not shown"
@@ -218,8 +218,9 @@ FINAL_MARKERS: tuple[str, ...] = (
     # re-read the same way reach the same wall. What changes the answer is
     # enabling OCR or installing the models — an operator action, not a retry.
     M_IMAGE_UNREAD,
-    # D-50: the same bytes hold the same unread construct and the same
-    # omitted deletion every time this file is re-read.
+    # The Word fidelity package: the same bytes hold the same unread
+    # construct and the same omitted deletion every time this file is
+    # re-read.
     M_WORD_UNREAD,
     M_WORD_TRACKED_DELETION,
 )
@@ -1516,8 +1517,9 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
 
     ocr_by_page: dict[int, _OcrPage] = {}
     need = [i for i, t in enumerate(native) if len(t.strip()) < _NATIVE_TEXT_FLOOR]
-    # D-49/D-50: a scanned page nobody read IS page image content that was
-    # not read, so both notes below carry M_IMAGE_UNREAD — the same marker
+    # D-49 / the Word fidelity package: a scanned page nobody read IS page
+    # image content that was not read, so both notes below carry
+    # M_IMAGE_UNREAD — the same marker
     # the geometry-based (A-24) notes further down already carry. Only the
     # PREFIX changes; "OCR disabled" and "OCR is unavailable" stay in the
     # text verbatim, because an existing test asserts the first substring.
@@ -1734,7 +1736,7 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
 
 
 ##############################################################################
-# DOCX — read at the XML level (D-50)
+# DOCX — read at the XML level (the Word fidelity package)
 ##############################################################################
 #
 # python-docx's own ``Paragraph.text`` and ``iter_inner_content`` walk the
@@ -1746,8 +1748,8 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
 # correctly — confirming the package really is a Word document, and OPC
 # relationship resolution (header/footer parts, external hyperlink targets)
 # — and every character that can reach the page text is read straight off
-# the part XML with lxml instead. What follows is the D-50 build spec,
-# parts 1-9, in one reader that serves the body, every table cell, every
+# the part XML with lxml instead. What follows is the Word spec, parts 1-9,
+# in one reader that serves the body, every table cell, every
 # text box, every header and footer, and every footnote, endnote and
 # comment — one walker, so a fix to how deleted text is skipped cannot be
 # made in only three of the four places that needed it.
@@ -1758,13 +1760,18 @@ _DOCX_NS = {
     "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     "dgm": "http://schemas.openxmlformats.org/drawingml/2006/diagram",
+    # Stage 2b (carried gap 1): the Office 2016+ chart, whose graphicData
+    # carries this namespace verbatim rather than a URI ending "/chart".
+    "cx": "http://schemas.microsoft.com/office/drawing/2014/chartex",
+    # Stage 2b (Word spec part 1, embedded documents): o:OLEObject.
+    "o": "urn:schemas-microsoft-com:office:office",
 }
 
 WORD_LAYOUT_NOTE = (
     "Word's page layout is not reproduced, including any rendered page "
     "breaks; this document is emitted as one synthetic page"
 )
-"""D-50 part 7: replaces the old ``"DOCX carries no page boundaries"`` claim,
+"""Word spec part 7: replaces the old ``"DOCX carries no page boundaries"`` claim,
 which was false for the 43-of-53-corpus files that DO carry a rendered page
 break — Word simply never re-lays out at extraction time to find out where
 one would fall. This wording holds for every DOCX rather than describing one
@@ -1820,7 +1827,7 @@ def _docx_rels(zf, part_name: str) -> dict[str, tuple[str, bool]]:
 
 
 class _DocxWalker:
-    """Reads one DOCX package's text-bearing parts (D-50 parts 1-9).
+    """Reads one DOCX package's text-bearing parts (Word spec parts 1-9).
 
     One instance per file, holding the state every part's walk needs:
     document.xml's own relationships (for hyperlinks), whether settings.xml
@@ -1837,7 +1844,7 @@ class _DocxWalker:
         self.even_and_odd = self._settings_have_even_odd()
         self.page_area_emu2: float | None = None
         self.counters = {"altchunk": 0, "chart": 0, "smartart": 0,
-                          "picture": 0, "tracked_del": 0}
+                          "picture": 0, "tracked_del": 0, "picture_unmeasured": 0}
         self._seen_header_parts: set[str] = set()
         self._seen_footer_parts: set[str] = set()
 
@@ -1849,10 +1856,10 @@ class _DocxWalker:
         root = etree.fromstring(self.zf.read("word/settings.xml"))
         return any(_local(el) == "evenAndOddHeaders" for el in root)
 
-    # -- D-50 part 2: one paragraph's inline text, plus any text boxes it
-    #    anchors (D-50 part 3), collected but not inlined ------------------
+    # -- Word spec part 2: one paragraph's inline text, plus any text boxes it
+    #    anchors (Word spec part 3), collected but not inlined ------------------
 
-    def _inline_text(self, p_el, part_rels: dict, in_body: bool
+    def _inline_text(self, p_el, part_rels: dict
                      ) -> tuple[str, list[list[str]]]:
         parts: list[str] = []
         boxes: list[list[str]] = []
@@ -1869,10 +1876,12 @@ class _DocxWalker:
                     continue
                 if name == "txbxContent":
                     # Walked as BLOCK content and returned to the caller to
-                    # emit right after this paragraph's own line (D-50 part
-                    # 3) — never inlined into the paragraph's own text.
-                    boxes.append(self._block_lines(list(child), part_rels,
-                                                    in_body=False))
+                    # emit right after this paragraph's own line (Word spec part
+                    # 3) — never inlined into the paragraph's own text. Its
+                    # own drawings/altChunks still count (stage 2b gap 2):
+                    # nothing about being inside a text box makes a chart or
+                    # a large picture read.
+                    boxes.append(self._block_lines(list(child), part_rels))
                     continue
                 if name == "AlternateContent":
                     # Read Choice only when present, never both: the text
@@ -1910,8 +1919,12 @@ class _DocxWalker:
                         parts.append(f" <{rel[0]}>")
                     continue
                 if name == "drawing":
-                    if in_body:
-                        self._note_drawing(child)
+                    # Stage 2b gap 2: counted wherever this walker reaches it
+                    # — body, header, footer, footnote, endnote, comment or
+                    # text box — not only the body. A chart or a large
+                    # picture in a footer is exactly as unread as one in the
+                    # body; the corpus does not confine either to the body.
+                    self._note_drawing(child)
                     walk(child)  # a text box's txbxContent can be nested here
                     continue
                 walk(child)  # w:r, w:ins, w:sdt, w:smartTag, w:pPr, ... — transparent
@@ -1919,28 +1932,104 @@ class _DocxWalker:
         walk(p_el)
         return "".join(parts), boxes
 
-    # -- D-50 part 9: chart / SmartArt / large-picture disclosure ----------
+    # -- Word spec part 9: chart / SmartArt / large-picture disclosure ----------
 
     def _note_drawing(self, drawing_el) -> None:
-        """Classify one BODY ``w:drawing`` for disclosure.
+        """Classify one ``w:drawing`` for disclosure, wherever it was found.
 
-        Only called for body drawings (the sole caller gates on
-        ``in_body``), so a header/footer logo is never counted — D-50 part 9
-        keeps those out on the corpus's own evidence that they are logos.
+        Stage 2b gap 2: this used to be called only for body drawings, on the
+        reasoning that a header/footer logo should not count — but that same
+        gate silently ate a chart or a large picture placed in a header,
+        footer, footnote, endnote, comment or text box, which is the corpus's
+        own evidence this pass exists to disclose. Every caller now reaches
+        this regardless of where the drawing lives.
         """
-        for gd in drawing_el.iter(f"{{{_DOCX_NS['a']}}}graphicData"):
+        for gd, extent_host in self._own_graphicdata(list(drawing_el)):
             uri = gd.get("uri", "")
-            if uri.endswith("/chart"):
+            # Stage 2b gap 1: a classic chart's graphicData URI ends "/chart";
+            # an Office 2016+ chartEx (waterfall, funnel, ...) uses this exact
+            # namespace instead and was previously invisible to this test.
+            if uri.endswith("/chart") or uri == _DOCX_NS["cx"]:
                 self.counters["chart"] += 1
             elif uri == _DOCX_NS["dgm"]:
                 self.counters["smartart"] += 1
             elif uri.endswith("/picture"):
-                self._note_picture(drawing_el)
+                self._note_picture(extent_host)
 
-    def _note_picture(self, drawing_el) -> None:
+    def _own_graphicdata(self, elements):
+        """Every ``a:graphicData`` that belongs to THIS drawing, paired with
+        the nearest ``wp:inline``/``wp:anchor`` ancestor that carries its
+        ``wp:extent`` — never one belonging to a NESTED ``w:drawing`` (a text
+        box's own contents), which the walk visits, and counts, on its own
+        through ``_block_lines`` -> ``_inline_text`` -> ``_note_drawing``
+        again.
+
+        Item 2's found defect: the old ``drawing_el.iter(graphicData)`` swept
+        every descendant graphicData unconditionally, so a chart or picture
+        placed inside a text box was seen HERE (via the outer drawing's own
+        sweep) and AGAIN when the walk separately reached the text box's own
+        nested ``<w:drawing>``. Stopping at a nested ``drawing`` tag is what
+        makes each real construct counted exactly once, at any nesting depth
+        (a text box inside a text box included, since each drawing gets its
+        own bounded call the moment the walk actually reaches it).
+
+        ``mc:AlternateContent`` is resolved to ``Choice`` only, matching
+        ``_inline_text``'s own rule — a chartEx graphic's picture Fallback
+        must never be counted as a second, unread picture.
+        """
+        for el in elements:
+            name = _local(el)
+            if name == "drawing":
+                continue  # a nested drawing is counted on its own
+            if name in ("inline", "anchor"):
+                yield from self._own_graphicdata_in(el, el)
+                continue
+            if name == "AlternateContent":
+                choice = next((c for c in el if _local(c) == "Choice"), None)
+                fallback = next((c for c in el if _local(c) == "Fallback"), None)
+                yield from self._own_graphicdata(
+                    list(choice if choice is not None
+                         else (fallback if fallback is not None else ())))
+                continue
+            yield from self._own_graphicdata(list(el))
+
+    def _own_graphicdata_in(self, elements, extent_host):
+        """Descend inside one ``wp:inline``/``wp:anchor`` for its OWN
+        ``a:graphicData`` (there is exactly one), still stopping at a nested
+        ``w:drawing`` and resolving ``AlternateContent`` to ``Choice`` only.
+        Split from :meth:`_own_graphicdata` only so ``extent_host`` — the
+        ``wp:inline``/``wp:anchor`` whose ``wp:extent`` measures THIS
+        graphic — is fixed once and threaded through, rather than
+        recomputed or lost across the AlternateContent recursion.
+        """
+        for el in elements:
+            name = _local(el)
+            if name == "drawing":
+                continue
+            if name == "AlternateContent":
+                choice = next((c for c in el if _local(c) == "Choice"), None)
+                fallback = next((c for c in el if _local(c) == "Fallback"), None)
+                yield from self._own_graphicdata_in(
+                    list(choice if choice is not None
+                         else (fallback if fallback is not None else ())),
+                    extent_host)
+                continue
+            if name == "graphicData" and el.tag == f"{{{_DOCX_NS['a']}}}graphicData":
+                yield el, extent_host
+                continue
+            yield from self._own_graphicdata_in(list(el), extent_host)
+
+    def _note_picture(self, extent_host) -> None:
         if not self.page_area_emu2:
-            return  # no pgSz on this file: the share cannot be measured
-        extent = next(drawing_el.iter(f"{{{_DOCX_NS['wp']}}}extent"), None)
+            # Stage 2b gap 3: the final section has no usable page size, so
+            # this picture's share of the page cannot be measured at all —
+            # counted rather than silently skipped, and disclosed separately
+            # from the ordinary "picture(s)" count, which DOES know the share
+            # and is confident about it.
+            self.counters["picture_unmeasured"] += 1
+            return
+        extent = (next(extent_host.iter(f"{{{_DOCX_NS['wp']}}}extent"), None)
+                  if extent_host is not None else None)
         if extent is None:
             return
         try:
@@ -1950,56 +2039,58 @@ class _DocxWalker:
         if cx > 0 and cy > 0 and (cx * cy) / self.page_area_emu2 >= PHOTO_MIN_IMAGE_AREA_SHARE:
             self.counters["picture"] += 1
 
-    # -- D-50 part 1 / part 4: the one block walker for body, cells, text
+    # -- Word spec part 1 / part 4: the one block walker for body, cells, text
     #    boxes, headers, footers, footnotes, endnotes and comments --------
 
-    def _block_lines(self, elements, part_rels: dict, *, in_body: bool) -> list[str]:
+    def _block_lines(self, elements, part_rels: dict) -> list[str]:
         lines: list[str] = []
         for el in elements:
             name = _local(el)
             if name == "p":
-                text, boxes = self._inline_text(el, part_rels, in_body)
+                text, boxes = self._inline_text(el, part_rels)
                 lines.append(text)
                 for box in boxes:
                     lines.extend(box)
             elif name == "tbl":
-                lines.extend(self._table_lines(el, part_rels, in_body))
+                lines.extend(self._table_lines(el, part_rels))
             elif name == "sdt":
                 content = next((c for c in el if _local(c) == "sdtContent"), None)
                 if content is not None:
-                    lines.extend(self._block_lines(list(content), part_rels,
-                                                    in_body=in_body))
+                    lines.extend(self._block_lines(list(content), part_rels))
             elif name == "customXml":
-                lines.extend(self._block_lines(list(el), part_rels, in_body=in_body))
-            elif name == "altChunk" and in_body:
+                lines.extend(self._block_lines(list(el), part_rels))
+            elif name == "altChunk":
+                # Stage 2b gap 2: counted wherever it is found, same as a
+                # drawing — an altChunk in a header/footer/footnote/endnote
+                # is exactly as unread as one in the body.
                 self.counters["altchunk"] += 1
             # w:sectPr and anything else (bookmarks, proofErr, ...): ignored.
         return lines
 
-    def _table_lines(self, tbl_el, part_rels: dict, in_body: bool) -> list[str]:
+    def _table_lines(self, tbl_el, part_rels: dict) -> list[str]:
         rows = []
         for tr in (c for c in tbl_el if _local(c) == "tr"):
-            cells = [self._cell_text(tc, part_rels, in_body)
+            cells = [self._cell_text(tc, part_rels)
                      for tc in tr if _local(tc) == "tc"]
-            rows.append("\t".join(cells))  # D-50 part 4: row = cells joined by tab
+            rows.append("\t".join(cells))  # Word spec part 4: row = cells joined by tab
         return rows
 
-    def _cell_text(self, tc_el, part_rels: dict, in_body: bool) -> str:
+    def _cell_text(self, tc_el, part_rels: dict) -> str:
         tc_pr = next((c for c in tc_el if _local(c) == "tcPr"), None)
         if tc_pr is not None:
             vmerge = next((c for c in tc_pr if _local(c) == "vMerge"), None)
             if vmerge is not None and vmerge.get(_wq("val")) != "restart":
-                # D-50 part 4: a vMerge continuation cell is empty, never a
+                # Word spec part 4: a vMerge continuation cell is empty, never a
                 # copy of the cell it continues — whatever its own paragraphs
                 # literally hold.
                 return ""
         content = [c for c in tc_el if _local(c) != "tcPr"]
-        # D-50 part 4: a cell's lines joined by newline; a nested table (the
+        # Word spec part 4: a cell's lines joined by newline; a nested table (the
         # FERRET case) is walked in order with the cell's own paragraphs by
         # the same block walker that reads the body.
-        return "\n".join(self._block_lines(content, part_rels, in_body=in_body))
+        return "\n".join(self._block_lines(content, part_rels))
 
-    # -- D-50 part 5: headers and footers -----------------------------------
+    # -- Word spec part 5: headers and footers -----------------------------------
 
     def _section_refs(self, sect_pr) -> tuple[list[str], list[str]]:
         """This section's header/footer PART NAMES, in priority order:
@@ -2043,9 +2134,9 @@ class _DocxWalker:
 
         root = etree.fromstring(self.zf.read(part_name))
         part_rels = _docx_rels(self.zf, part_name)
-        return self._block_lines(list(root), part_rels, in_body=False)
+        return self._block_lines(list(root), part_rels)
 
-    # -- D-50 part 6: footnotes, endnotes, comments -------------------------
+    # -- Word spec part 6: footnotes, endnotes, comments -------------------------
 
     def read_notes(self) -> list[str]:
         lines = self._read_note_part("word/footnotes.xml", "footnote")
@@ -2064,7 +2155,7 @@ class _DocxWalker:
         for note in (c for c in root if _local(c) == tag):
             if note.get(_wq("type")) not in (None, "normal"):
                 continue  # separator / continuationSeparator: not real notes
-            text = "\n".join(self._block_lines(list(note), part_rels, in_body=False))
+            text = "\n".join(self._block_lines(list(note), part_rels))
             out.append(f"[{tag} {note.get(_wq('id'))}] {text}")
         return out
 
@@ -2082,11 +2173,11 @@ class _DocxWalker:
             # review, not evidence the document asserts, and rendering it
             # would let a comment's timestamp masquerade as a page's own
             # first date.
-            text = "\n".join(self._block_lines(list(c), part_rels, in_body=False))
+            text = "\n".join(self._block_lines(list(c), part_rels))
             out.append(f"[comment by {c.get(_wq('author')) or ''}] {text}")
         return out
 
-    # -- D-50 part 9: the disclosure notes themselves -----------------------
+    # -- Word spec part 9: the disclosure notes themselves -----------------------
 
     def disclosure_notes(self) -> list[str]:
         c = self.counters
@@ -2101,6 +2192,16 @@ class _DocxWalker:
             notes.append(
                 f"{M_WORD_UNREAD}: {c['picture']} picture(s), each covering "
                 f"at least {PHOTO_MIN_IMAGE_AREA_SHARE:.0%} of the page")
+        if c["picture_unmeasured"]:
+            # Stage 2b gap 3: the PDF path's own wording when image geometry
+            # cannot be measured (M_IMAGE_UNREAD, "image geometry could not
+            # be measured") — this is the same fact for a DOCX: the final
+            # section carries no usable w:pgSz, so this picture's share of
+            # the page is unknown rather than known-and-small.
+            notes.append(
+                f"{M_IMAGE_UNREAD}: {c['picture_unmeasured']} picture(s) "
+                "could not be measured against the page — the final section "
+                "carries no usable page size")
         if c["tracked_del"]:
             notes.append(f"{M_WORD_TRACKED_DELETION}: {c['tracked_del']}")
         return notes
@@ -2115,14 +2216,15 @@ def _rq(local: str) -> str:
 
 
 def _extract_docx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], list[str]]:
-    """D-50: every character in the document's text-bearing parts reaches
-    the page text, or is named in a note carrying an evidence marker.
+    """The Word fidelity package: every character in the document's
+    text-bearing parts reaches the page text, or is named in a note carrying
+    an evidence marker.
 
     python-docx opens the package only to confirm it really is one --
     ``Document(...)`` raises the same way it always did on a corrupt or
     non-OOXML file. Everything that becomes page text comes from
     :class:`_DocxWalker` reading the part XML directly; see its docstring
-    and the D-50 build spec (parts 1-9) for why.
+    and the Word spec (parts 1-9) for why.
     """
     try:
         import docx  # python-docx
@@ -2143,7 +2245,7 @@ def _extract_docx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
             body_el = next(c for c in doc_root if _local(c) == "body")
             walker = _DocxWalker(zf)
 
-            # D-50 part 9: page area for the large-picture test, from the
+            # Word spec part 9: page area for the large-picture test, from the
             # BODY's own (i.e. final) sectPr — the section governing the
             # last page Word would have rendered. A section break's earlier
             # sectPr lives inside a paragraph's pPr and is not this one.
@@ -2159,7 +2261,7 @@ def _extract_docx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                     except (TypeError, ValueError):
                         pass  # unmeasurable: _note_picture disclaims rather than guesses
 
-            body_lines = walker._block_lines(list(body_el), walker.rels, in_body=True)
+            body_lines = walker._block_lines(list(body_el), walker.rels)
             header_lines, footer_lines = walker.read_headers_and_footers(body_el)
             note_lines = walker.read_notes()
     except ExtractionError:
@@ -2167,7 +2269,7 @@ def _extract_docx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
     except Exception as exc:
         raise ExtractionError(f"Could not read Word document: {exc}") from exc
 
-    # D-50 part 5: headers START the page text, footers END it, with no
+    # Word spec part 5: headers START the page text, footers END it, with no
     # label lines — the Bates head zone is 3 lines and a label could push a
     # stamp out of it. Notes (part 6) land after the body and before the
     # footer, per the same reasoning applied to where they appear at all.
@@ -2771,6 +2873,290 @@ def expand_zip(raw: bytes, depth: int = 0) -> ZipExpansion:
                 continue
             members.append(ZipMember(info.filename, blob, len(members)))
     return ZipExpansion(tuple(members), tuple(notes))
+
+
+# ---------------------------------------------------------------------------
+# D-50 (stage 2b): documents embedded in a Word file, as child members
+# ---------------------------------------------------------------------------
+
+
+def _ole_objects_in_order(xml_bytes: bytes) -> list[tuple[str | None, str, str]]:
+    """``(r:id or None, Type, ProgID)`` for every ``o:OLEObject`` in one
+    part's XML, in document order — ``root.iter()`` visits in document
+    order by construction, so no explicit sort is needed here."""
+    from lxml import etree
+
+    root = etree.fromstring(xml_bytes)
+    out: list[tuple[str | None, str, str]] = []
+    for el in root.iter(f"{{{_DOCX_NS['o']}}}OLEObject"):
+        out.append((el.get(_rq("id")), el.get("Type") or "Embed",
+                   el.get("ProgID") or ""))
+    return out
+
+
+def _parse_ole10_native(data: bytes) -> tuple[str, bytes]:
+    """Parse an ``\\x01Ole10Native`` stream (the "Package" object wrapper).
+
+    Layout: DWORD total size; WORD flags; label (NUL-terminated); stored
+    filename (NUL-terminated); 4 reserved bytes; DWORD temp-path length;
+    temp path; DWORD data length; data. Returns ``(filename, payload)``.
+
+    Every read is bounds-checked against ``len(data)`` — a malformed or
+    truncated stream raises :class:`ValueError`, which the caller turns into
+    a marked note rather than an exception escaping the expansion (this
+    function never raises anything else and never returns partial data)."""
+    import struct
+
+    pos = 0
+
+    def need(n: int) -> None:
+        if pos + n > len(data):
+            raise ValueError(
+                f"truncated Ole10Native stream: need {n} more byte(s) at "
+                f"offset {pos}, have {len(data) - pos}")
+
+    def read_u32() -> int:
+        nonlocal pos
+        need(4)
+        v = struct.unpack_from("<I", data, pos)[0]
+        pos += 4
+        return v
+
+    def read_cstr() -> str:
+        nonlocal pos
+        end = data.find(b"\x00", pos)
+        if end == -1:
+            raise ValueError(f"unterminated string starting at offset {pos}")
+        s = data[pos:end].decode("latin-1", errors="replace")
+        pos = end + 1
+        return s
+
+    read_u32()  # total size — declarative only; not cross-checked below
+    need(2)
+    pos += 2  # flags — unused
+    read_cstr()  # label — unused; the stored filename is what names the child
+    filename = read_cstr()
+    need(4)
+    pos += 4  # reserved
+    temp_len = read_u32()
+    need(temp_len)
+    pos += temp_len  # temp path — unused
+    data_len = read_u32()
+    need(data_len)
+    return filename, data[pos:pos + data_len]
+
+
+def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
+    """D-50: every document embedded in a Word file, as a child member.
+
+    Order: every ``o:OLEObject`` in ``word/document.xml``, in document
+    order, then in the header/footer/footnote/endnote parts, in part-name
+    order — each resolved through ITS OWN part's relationships, since a
+    header's ``r:id`` and the body's ``r:id`` are two different namespaces.
+    Then any part under ``word/embeddings/`` that no ``o:OLEObject``
+    referenced, in name order. Each part is unwrapped once, keyed by its
+    resolved part name — an object referenced twice (or picked up again by
+    the trailing embeddings sweep) is not read twice.
+
+    Unwrapped by what the bytes ARE, never by ``ProgID`` alone (a real
+    corpus's ProgID is informational, not load-bearing): a ZIP signature is
+    the Office file itself; an OLE compound file with a ``CONTENTS`` stream
+    beginning ``%PDF`` is an Acrobat object, the stream itself the child; an
+    OLE compound file carrying ``\\x01Ole10Native`` is a Package object,
+    parsed by :func:`_parse_ole10_native`; any other OLE compound file is a
+    legacy Office document stored as its own part (.doc/.xls/.ppt) and kept
+    as stored — the walker's own Tier-1/Tier-2 split takes it from there.
+    Anything else — a ``Type="Link"`` object, a relationship to a part not
+    in the package, or content that is neither a ZIP nor a compound file —
+    is not recovered, and is named in a marked note.
+    """
+    import zipfile
+
+    notes: list[str] = []
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except Exception as exc:
+        raise ExtractionError(f"Could not read Word package: {exc}") from exc
+
+    members: list[ZipMember] = []
+    seen_parts: set[str] = set()
+    total = 0
+    cap_bytes = _ZIP_MAX_MB * 1024 * 1024
+    truncated = False
+
+    def over_member_cap() -> bool:
+        nonlocal truncated
+        if len(members) >= _ZIP_MAX_MEMBERS:
+            if not truncated:
+                # Item 3: this used to carry no marker at all, so a run that
+                # hit the cap looked, to has_evidence_marker, identical to
+                # one that recovered everything — the exact silence this
+                # vocabulary exists to close.
+                notes.append(f"{M_ATTACH_SKIPPED}: embedded objects "
+                             f"truncated at {_ZIP_MAX_MEMBERS} members; "
+                             "later objects were not read")
+                truncated = True
+            return True
+        return False
+
+    def resolve_and_unwrap(owner_part: str, rid: str | None, obj_type: str) -> None:
+        nonlocal total, truncated
+        if obj_type == "Link":
+            notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
+                         f"'{owner_part}' is a link rather than a stored "
+                         "part; it is not recovered")
+            return
+        if rid is None:
+            notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
+                         f"'{owner_part}' has no relationship id; it is not "
+                         "recovered")
+            return
+        rels = _docx_rels(zf, owner_part)
+        target = rels.get(rid)
+        if target is None:
+            notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
+                         f"'{owner_part}' names relationship id {rid!r}, "
+                         "which does not exist; it is not recovered")
+            return
+        path, external = target
+        if external:
+            notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
+                         f"'{owner_part}' links to an external target "
+                         f"'{path}' rather than storing it; it is not "
+                         "recovered")
+            return
+        part_name = _docx_part_path(path)
+        if part_name in seen_parts:
+            return
+        seen_parts.add(part_name)
+        if part_name not in zf.namelist():
+            notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
+                         f"'{owner_part}' names part '{part_name}', which is "
+                         "not in the package; it is not recovered")
+            return
+        if over_member_cap():
+            return
+        try:
+            blob = zf.read(part_name)
+        except Exception as exc:
+            notes.append(f"{M_ZIP_MEMBER}: '{part_name}': {str(exc)[:120]}")
+            return
+        total += len(blob)
+        if total > cap_bytes:
+            if not truncated:
+                notes.append(f"{M_ATTACH_SKIPPED}: embedded objects "
+                             f"truncated at {_ZIP_MAX_MB} MB uncompressed; "
+                             f"'{part_name}' and later objects were not read")
+                truncated = True
+            return
+        _unwrap_embedding(part_name, blob, members, notes)
+
+    names = set(zf.namelist())
+    with zf:
+        if "word/document.xml" in names:
+            for rid, obj_type, _progid in _ole_objects_in_order(
+                    zf.read("word/document.xml")):
+                if truncated:
+                    break
+                resolve_and_unwrap("word/document.xml", rid, obj_type)
+
+        aux_parts = sorted(
+            n for n in names
+            if ((n.startswith("word/header") or n.startswith("word/footer"))
+                and n.endswith(".xml"))
+            or n in ("word/footnotes.xml", "word/endnotes.xml"))
+        for part in aux_parts:
+            if truncated:
+                break
+            for rid, obj_type, _progid in _ole_objects_in_order(zf.read(part)):
+                if truncated:
+                    break
+                resolve_and_unwrap(part, rid, obj_type)
+
+        for part_name in sorted(n for n in names
+                                if n.startswith("word/embeddings/")):
+            if truncated:
+                break
+            if part_name in seen_parts:
+                continue
+            seen_parts.add(part_name)
+            if over_member_cap():
+                break
+            try:
+                blob = zf.read(part_name)
+            except Exception as exc:
+                notes.append(f"{M_ZIP_MEMBER}: '{part_name}': {str(exc)[:120]}")
+                continue
+            total += len(blob)
+            if total > cap_bytes:
+                notes.append(f"{M_ATTACH_SKIPPED}: embedded objects "
+                             f"truncated at {_ZIP_MAX_MB} MB uncompressed; "
+                             f"'{part_name}' and later objects were not read")
+                break
+            _unwrap_embedding(part_name, blob, members, notes)
+
+    return ZipExpansion(tuple(members), tuple(notes))
+
+
+def _unwrap_embedding(part_name: str, blob: bytes, members: list[ZipMember],
+                      notes: list[str]) -> None:
+    """Append zero or one :class:`ZipMember` for ``blob`` to ``members`` —
+    see :func:`expand_docx_embeddings` for the unwrap rules this applies."""
+    stem = Path(part_name).stem
+    basename = Path(part_name).name
+    kind = sniff_kind(blob)
+    if kind == "zip":
+        members.append(ZipMember(basename, blob, len(members)))
+        return
+    if kind == "ole":
+        try:
+            import olefile
+        except ImportError as exc:  # pragma: no cover — declared dependency
+            notes.append(f"{M_ATTACH_SKIPPED}: '{part_name}' is a compound "
+                         f"file and 'olefile' is not installed ({exc}); it "
+                         "is not recovered")
+            return
+        try:
+            with olefile.OleFileIO(io.BytesIO(blob)) as ole:
+                stream_names = {"/".join(p) for p in ole.listdir()}
+                if "CONTENTS" in stream_names:
+                    contents = ole.openstream("CONTENTS").read()
+                    if contents[:4] == _MAGIC_PDF:
+                        members.append(ZipMember(f"{stem}.pdf", contents,
+                                                 len(members)))
+                        return
+                    # A CONTENTS stream that is not a PDF: not one of the two
+                    # unwrap shapes this pass knows, so it falls through to
+                    # the legacy-Office-as-stored branch below.
+                ole10_name = next(
+                    (s for s in stream_names if s.endswith("Ole10Native")), None)
+                if ole10_name is not None:
+                    raw10 = ole.openstream(ole10_name).read()
+                    try:
+                        filename, payload = _parse_ole10_native(raw10)
+                    except Exception as exc:
+                        notes.append(
+                            f"{M_ATTACH_SKIPPED}: '{part_name}' carries a "
+                            f"malformed Ole10Native stream ({exc}); it is "
+                            "not recovered")
+                        return
+                    child_name = Path(filename).name if filename else f"{stem}.bin"
+                    members.append(ZipMember(child_name, payload, len(members)))
+                    return
+        except Exception as exc:
+            notes.append(f"{M_ATTACH_SKIPPED}: '{part_name}' is a compound "
+                         f"file that could not be read ({exc}); it is not "
+                         "recovered")
+            return
+        # Neither a PDF-carrying CONTENTS nor an Ole10Native wrapper: a
+        # legacy Office document (.doc/.xls/.ppt) IS an OLE compound file in
+        # its own right, stored by Word as an ordinary part. Kept as stored;
+        # the walker's existing Tier-1/Tier-2 split decides what happens to
+        # it from its extension, exactly as any other container child.
+        members.append(ZipMember(basename, blob, len(members)))
+        return
+    notes.append(f"{M_ATTACH_SKIPPED}: '{part_name}' is neither a ZIP nor a "
+                 "compound file; it is not recovered")
 
 
 # ---------------------------------------------------------------------------

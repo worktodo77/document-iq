@@ -46,6 +46,10 @@ dependencies = [
     "python-pptx>=1.0.2,<2",
     # Email
     "extract-msg>=0.56.0,<1",
+    # OLE compound-file reader (D-50: Acrobat/Package objects embedded in
+    # Word files). Already an extract-msg transitive dependency; declared
+    # directly because dociq.ingest.extract imports it itself.
+    "olefile>=0.47,<1",
     # Deliverables
     "reportlab>=5.0.0,<6",     # run_summary.pdf
     "PyYAML>=6.0.3,<7",        # format profiles

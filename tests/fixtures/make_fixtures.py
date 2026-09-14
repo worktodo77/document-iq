@@ -95,6 +95,172 @@ def _pin_ooxml(path: Path) -> None:
             zout.writestr(info, data)
 
 
+def _write_compound_file(streams: dict) -> bytes:
+    """A minimal OLE2/CFB v3 container, standard library only, holding every
+    named stream in ``streams`` directly under Root Entry.
+
+    Follows ``scratchpad/build_xls.py``'s approach and its reason: every
+    stream's DECLARED size (what ``olefile.openstream().read()`` hands back)
+    is padded to at least 4096 bytes, the mini-stream cutoff, so a reader
+    always takes the ordinary FAT sector chain and the mini-FAT/mini-stream
+    machinery -- not implemented here -- is never reached. A stream already
+    at or past that size (the fixture's embedded PDF) is declared at its
+    real length, so nothing is appended after content a consumer reads by
+    its own prefix or declared-length fields (the ``%PDF`` sniff,
+    ``extract._parse_ole10_native``'s bounds-checked reads). The physical
+    storage for each stream is then padded once more, silently, up to a
+    whole number of 512-byte sectors -- CFB requires whole sectors, and that
+    padding is never read back because ``olefile`` stops at the DECLARED
+    size, not at the allocated one.
+
+    Multiple streams sit under Root Entry as a right-only sibling chain
+    (item *i*'s ``right`` is item *i + 1*, every ``left`` is empty) rather
+    than a balanced tree: a straight chain is still a legal binary search
+    tree, and ``olefile``'s directory walk (``child``, then ``left``, then
+    ``right`` -- the same order the CFB spec defines) reads it correctly
+    without this writer needing to implement red-black balancing for what is
+    at most a handful of streams.
+    """
+    import struct
+
+    SEC = 512
+    FREESECT, ENDOFCHAIN, FATSECT = -1, -2, -3
+
+    names = list(streams.keys())
+    sizes: list = []
+    padded: list = []
+    for name in names:
+        data = streams[name]
+        logical_len = max(4096, len(data))
+        data = data + b"\x00" * (logical_len - len(data))
+        if len(data) % SEC:
+            data = data + b"\x00" * (SEC - (len(data) % SEC))
+        sizes.append(logical_len)
+        padded.append(data)
+
+    dir_sectors = max(1, -(-(len(names) + 1) // 4))  # 4 x 128-byte entries/sector
+    stream_sector_counts = [len(p) // SEC for p in padded]
+    provisional = dir_sectors + sum(stream_sector_counts)
+    n_fat_sectors = 1
+    while -(-(provisional + n_fat_sectors) // 128) > n_fat_sectors:
+        n_fat_sectors += 1  # pragma: no cover — headroom for a larger fixture
+
+    fat_sector_idxs = list(range(n_fat_sectors))
+    dir_sector_idxs = list(range(n_fat_sectors, n_fat_sectors + dir_sectors))
+    cursor = n_fat_sectors + dir_sectors
+    stream_first_sids = []
+    for count in stream_sector_counts:
+        stream_first_sids.append(cursor if count else ENDOFCHAIN)
+        cursor += count
+    total_sectors = cursor
+
+    fat = [FREESECT] * (n_fat_sectors * 128)
+    for i in fat_sector_idxs:
+        fat[i] = FATSECT
+    for i, d in enumerate(dir_sector_idxs):
+        fat[d] = dir_sector_idxs[i + 1] if i + 1 < len(dir_sector_idxs) else ENDOFCHAIN
+    for count, first in zip(stream_sector_counts, stream_first_sids):
+        for i in range(count):
+            fat[first + i] = first + i + 1 if i + 1 < count else ENDOFCHAIN
+    fat_bytes = b"".join(struct.pack("<i", v) for v in fat)
+
+    def dir_entry(name, etype, left, right, child, first_sid, size):
+        name_utf16 = name.encode("utf-16-le") + b"\x00\x00" if name else b""
+        entry = (name_utf16.ljust(64, b"\x00")
+                 + struct.pack("<HBBiii", len(name_utf16) if name else 0,
+                              etype, 1, left, right, child)
+                 + b"\x00" * 16  # CLSID
+                 + b"\x00" * 4   # state bits
+                 + b"\x00" * 16  # creation + modified timestamps
+                 + struct.pack("<ii", first_sid, size)
+                 + b"\x00" * 4)  # high bytes of a v4 stream size; unused in v3
+        assert len(entry) == 128
+        return entry
+
+    entries = [dir_entry("Root Entry", 5, -1, -1, 1 if names else -1, ENDOFCHAIN, 0)]
+    for i, name in enumerate(names):
+        right = i + 2 if i + 1 < len(names) else -1
+        entries.append(dir_entry(name, 2, -1, right, -1,
+                                 stream_first_sids[i], sizes[i]))
+    while len(entries) % 4:
+        entries.append(b"\x00" * 128)
+    dir_bytes = b"".join(entries)
+    assert len(dir_bytes) == dir_sectors * SEC
+
+    header = bytearray(512)
+    struct.pack_into("<8s", header, 0, b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
+    struct.pack_into("<H", header, 24, 0x003E)      # minor version
+    struct.pack_into("<H", header, 26, 0x0003)      # major version (3 = 512-byte sectors)
+    struct.pack_into("<H", header, 28, 0xFFFE)      # byte order marker
+    struct.pack_into("<H", header, 30, 9)           # sector shift (2**9 = 512)
+    struct.pack_into("<H", header, 32, 6)           # mini sector shift (unused)
+    struct.pack_into("<I", header, 40, 0)           # # directory sectors (0 for v3)
+    struct.pack_into("<I", header, 44, n_fat_sectors)
+    struct.pack_into("<I", header, 48, dir_sector_idxs[0])
+    struct.pack_into("<I", header, 56, 4096)        # mini stream cutoff size
+    struct.pack_into("<i", header, 60, ENDOFCHAIN)  # first minifat sector
+    struct.pack_into("<I", header, 64, 0)           # # minifat sectors
+    struct.pack_into("<i", header, 68, ENDOFCHAIN)  # first DIFAT sector
+    struct.pack_into("<I", header, 72, 0)           # # DIFAT sectors
+    difat = [FREESECT] * 109
+    for i in fat_sector_idxs:
+        difat[i] = i
+    for i, v in enumerate(difat):
+        struct.pack_into("<i", header, 76 + i * 4, v)
+
+    file_bytes = bytes(header) + fat_bytes + dir_bytes + b"".join(padded)
+    assert len(file_bytes) == 512 + SEC * total_sectors
+    return file_bytes
+
+
+def _read_compound_file_or_raise(blob: bytes, expected_streams: list) -> None:
+    """The fixture builder's own check on :func:`_write_compound_file`'s
+    output: every stream it wrote must read back through ``olefile`` -- the
+    same library ``expand_docx_embeddings`` uses -- or the fixture would be
+    silently wrong from the moment it is built."""
+    import io as _io
+
+    import olefile
+
+    with olefile.OleFileIO(_io.BytesIO(blob)) as ole:
+        present = {"/".join(p) for p in ole.listdir()}
+        missing = [s for s in expected_streams if s not in present]
+        if missing:
+            raise AssertionError(
+                f"_write_compound_file wrote a compound file that olefile "
+                f"cannot read back: stream(s) {missing!r} missing; present: "
+                f"{sorted(present)!r}")
+
+
+def _ole10_native(filename: str, data: bytes, label: str | None = None,
+                  temp_path: str | None = None) -> bytes:
+    r"""Bytes of a well-formed ``\x01Ole10Native`` stream wrapping ``data`` --
+    the mirror of ``extract._parse_ole10_native``'s layout: DWORD total size
+    (declarative only, per that function's own comment); WORD flags; label
+    (NUL-terminated); stored filename (NUL-terminated); 4 reserved bytes;
+    DWORD temp-path length; temp path; DWORD data length; data.
+
+    ``label`` and ``filename`` default to the SAME string when ``label`` is
+    omitted, which made a real Package object's two-string layout
+    indistinguishable from a reader that only ever looks at one of them
+    (critic finding: mutants ``label_name`` and ``no_temp_advance`` both
+    passed every test against a degenerate wrapper). Callers exercising the
+    real shape pass a ``label`` distinct from ``filename`` and a non-empty
+    ``temp_path`` -- a genuine Package object's temp path is a full local
+    path, never empty, and its length DWORD counts the trailing NUL the
+    caller who advances past it must also account for."""
+    import struct
+
+    label_b = (label or filename).encode("latin-1") + b"\x00"
+    filename_b = filename.encode("latin-1") + b"\x00"
+    temp_path_b = (temp_path.encode("latin-1") + b"\x00") if temp_path else b""
+    body = (label_b + filename_b + b"\x00" * 4
+            + struct.pack("<I", len(temp_path_b)) + temp_path_b
+            + struct.pack("<I", len(data)) + data)
+    total_size = len(body) + 2  # + the flags WORD that precedes body
+    return struct.pack("<I", total_size) + struct.pack("<H", 0) + body
+
+
 def _pdf_canvas(path: Path):
     from reportlab.pdfgen import canvas
 
@@ -310,10 +476,11 @@ _WC_OLE_IMG = b"EMF-PLACEHOLDER-NOT-A-REAL-IMAGE"
 
 
 def word_constructs_docx(path: Path) -> None:
-    """D-50 fixture: one sentinel word per Word construct the extractor must
-    (or must not) surface. See ``docs/reviews`` / the D-50 build spec for the
-    full sentinel table. Built with python-docx's API where it has one and raw
-    injected OOXML where it does not (content controls, tracked changes,
+    """The Word fidelity package's fixture: one sentinel word per Word
+    construct the extractor must (or must not) surface. See ``docs/reviews``
+    / the Word spec for the full sentinel table. Built with python-docx's API
+    where it has one and raw injected OOXML where it does not (content
+    controls, tracked changes,
     fields, text box, footnotes, endnotes, altChunk, OLE object, chart,
     rendered page break) -- the same technique ``docx()`` above uses for
     determinism (``_pin_ooxml``) and the scratchpad ``build_docx.py`` showed
@@ -472,7 +639,7 @@ def word_constructs_docx(path: Path) -> None:
         "ALPACA is the last body paragraph, after the altChunk, the OLE "
         "object and the chart.")
 
-    # 13. Two body pictures (D-50 part 9, stage 2a): one covers >= 25% of the
+    # 13. Two body pictures (Word spec part 9, stage 2a): one covers >= 25% of the
     # page (6in x 8in on an 8.5in x 11in page, ~51%) and must be disclosed as
     # unread; one is far below that (1in x 1in, ~1%) and must not be. Both
     # are the SAME generated one-pixel PNG -- the disclosure test is about
@@ -557,6 +724,295 @@ def word_constructs_docx(path: Path) -> None:
     zin.close()
 
     _pin_ooxml(path)
+
+
+_WE_NS_ALL = (
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+    'xmlns:o="urn:schemas-microsoft-com:office:office"'
+)
+
+_WE_CT_BY_EXT = {
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "bin": "application/vnd.openxmlformats-officedocument.oleObject",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
+def _we_ole_object_xml(progid: str, rid: str) -> str:
+    # No v:shape/icon image, unlike word_constructs_docx's OLE object --
+    # _ole_objects_in_order only looks for <o:OLEObject> itself, and the icon
+    # is not part of what D-50 recovers.
+    return ('<w:p ' + _WE_NS_ALL + '><w:r><w:object w:dxaOrig="1440" w:dyaOrig="1440">'
+            '<o:OLEObject Type="Embed" ProgID="' + progid + '" r:id="' + rid + '"/>'
+            '</w:object></w:r></w:p>')
+
+
+def _we_rewrite_with_embeds(base_docx_bytes: bytes, path: Path,
+                            embeds: list) -> None:
+    """Save a python-docx-produced package to ``path``, adding one Content
+    Types Default and one relationship per ``(rid, part_name, part_bytes)``
+    in ``embeds`` and writing each part. Shared by :func:`word_embeddings_docx`
+    and its inner-document helper so the two rewrites cannot drift apart."""
+    zin = zipfile.ZipFile(io.BytesIO(base_docx_bytes))
+    names = zin.namelist()
+    ct = zin.read("[Content_Types].xml").decode("utf-8")
+    rels = zin.read("word/_rels/document.xml.rels").decode("utf-8")
+
+    exts = sorted({part_name.rsplit(".", 1)[-1] for _, part_name, _ in embeds})
+    add_ct = "".join(
+        f'<Default Extension="{ext}" ContentType="{_WE_CT_BY_EXT[ext]}"/>'
+        for ext in exts)
+    assert "</Types>" in ct
+    ct = ct.replace("</Types>", add_ct + "</Types>")
+
+    rpfx = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+    add_rel = "".join(
+        f'<Relationship Id="{rid}" Type="{rpfx}oleObject" '
+        f'Target="{part_name[len("word/"):]}"/>'
+        for rid, part_name, _ in embeds)
+    assert "</Relationships>" in rels
+    rels = rels.replace("</Relationships>", add_rel + "</Relationships>")
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for n in names:
+            if n == "[Content_Types].xml":
+                zout.writestr(n, ct)
+            elif n == "word/_rels/document.xml.rels":
+                zout.writestr(n, rels)
+            else:
+                zout.writestr(n, zin.read(n))
+        for _, part_name, part_bytes in embeds:
+            zout.writestr(part_name, part_bytes)
+    zin.close()
+    _pin_ooxml(path)
+
+
+def _we_docx_core_properties(d) -> None:
+    d.core_properties.created = FIXED_TIMESTAMP
+    d.core_properties.modified = FIXED_TIMESTAMP
+    d.core_properties.author = "DocIQ fixtures"
+    d.core_properties.last_modified_by = "DocIQ fixtures"
+    d.core_properties.revision = 1
+
+
+def _we_xlsx_bytes(path: Path, cell_text: str) -> bytes:
+    """One-cell .xlsx, deterministic, written to ``path`` and read back (the
+    same round trip every other OOXML fixture part goes through)."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    wb.active.title = "Sheet1"
+    wb.active["A1"] = cell_text
+    wb.properties.created = FIXED_TIMESTAMP
+    wb.properties.modified = FIXED_TIMESTAMP
+    wb.properties.creator = "DocIQ fixtures"
+    wb.properties.lastModifiedBy = "DocIQ fixtures"
+    wb.save(str(path))
+    _pin_ooxml(path)
+    data = path.read_bytes()
+    path.unlink()
+    return data
+
+
+def _we_inner_docx_bytes(path: Path, sentence: str, *, progid: str,
+                         part_name: str, part_bytes: bytes) -> bytes:
+    """Object 4's inner .docx: one sentence paragraph plus one embedded
+    object of its own (D-50's nesting case -- a container inside a
+    container), referenced by a real ``<o:OLEObject>`` exactly as the outer
+    fixture references its own five objects. Critic finding: without this,
+    the inner .xlsx sat under ``word/embeddings/`` with a relationship but no
+    ``<o:OLEObject>`` pointing at it, so it was only ever reachable through
+    the unreferenced-part sweep -- never through the nested-embed path this
+    object exists to exercise."""
+    import docx as _docx
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import qn
+
+    d = _docx.Document()
+    d.add_paragraph(sentence)
+    sect_pr = d.element.body.find(qn("w:sectPr"))
+    sect_pr.addprevious(parse_xml(_we_ole_object_xml(progid, "rIdEmbed1")))
+    _we_docx_core_properties(d)
+    buf = io.BytesIO()
+    d.save(buf)
+    _we_rewrite_with_embeds(buf.getvalue(), path,
+                            [("rIdEmbed1", part_name, part_bytes)])
+    data = path.read_bytes()
+    path.unlink()
+    return data
+
+
+def word_embeddings_docx(path: Path) -> None:
+    """D-50 fixture: a Word file embedding one of each shape
+    ``expand_docx_embeddings`` must unwrap, in document order, one sentence
+    paragraph between each (Word spec section 3). Never client text
+    (D-12) -- every sentinel is an invented animal name.
+
+    1. BISON-WORKBOOK -- an .xlsx stored as an ordinary Office part
+       (``word/embeddings/Microsoft_Excel_Worksheet1.xlsx``).
+    2. CONDOR-PDF -- an Acrobat object: an OLE compound file whose CONTENTS
+       stream is a one-page PDF. The page carries a large off-page filler
+       string (D-12 invented, never rendered) purely so the PDF's own bytes
+       clear the compound-file writer's 4096-byte mini-stream cutoff on
+       their own -- the alternative, letting ``_write_compound_file`` pad a
+       short CONTENTS stream, would silently append NUL bytes after the
+       PDF's own ``%%EOF``.
+    3. EGRET-EMAIL / DUGONG-ATTACHMENT -- a Package object: an OLE compound
+       file whose ``\\x01Ole10Native`` stream wraps an .eml with one
+       attachment.
+    4. FALCON-INNER / GECKO-NESTED -- a .docx that itself embeds an .xlsx.
+    5. an object whose part is neither a ZIP nor a compound file -- not
+       recovered; named in a marked note only.
+
+    python-docx has no API for ``<o:OLEObject>`` or for injecting an
+    arbitrary part, so the saved package is rewritten by hand afterwards --
+    the same technique ``word_constructs_docx`` uses for its own OLE/chart/
+    altChunk parts.
+    """
+    import base64
+
+    import docx as _docx
+
+    xlsx_bytes = _we_xlsx_bytes(path.with_name(path.stem + "_e1.xlsx"),
+                                "BISON-WORKBOOK")
+
+    from reportlab.pdfgen import canvas
+
+    pdf_buf = io.BytesIO()
+    # pageCompression=0: see the docstring above -- this PDF's real bytes
+    # must clear 4096 on their own.
+    c = canvas.Canvas(pdf_buf, invariant=1, pageCompression=0)
+    c.setTitle("DocIQ synthetic fixture")
+    c.setAuthor("DocIQ fixture generator")
+    c.setSubject("synthetic")
+    c.setProducer("DocIQ fixtures")
+    c.drawString(60, 760, "CONDOR-PDF is the embedded Acrobat object's only page.")
+    filler = "FILLER-BYTES-TO-CLEAR-THE-MINI-STREAM-CUTOFF " * 120
+    c.drawString(-5000, -5000, filler)  # off-page: inflates bytes, not a sentinel
+    c.showPage()
+    c.save()
+    pdf_bytes = pdf_buf.getvalue()
+    assert len(pdf_bytes) >= 4096, (
+        f"the embedded PDF must clear the mini-stream cutoff unassisted; "
+        f"got {len(pdf_bytes)} bytes")
+    # A real 86-of-86 corpus Acrobat object also carries \x01CompObj,
+    # \x01Ole and \x03ObjInfo alongside CONTENTS (word_brief_stage2b.md's
+    # corpus table). Their bytes are never parsed by anything -- olefile
+    # sorts \x01CompObj first in listdir(), so a reader that unwraps
+    # whichever stream comes first, or the only stream present, fails as
+    # soon as these exist (critic finding: mutant first_stream).
+    acrobat_bytes = _write_compound_file({
+        "CONTENTS": pdf_bytes,
+        "\x01CompObj": b"INVENTED-COMPOBJ-STREAM-BYTES-ACROBAT-OBJECT",
+        "\x01Ole": b"INVENTED-OLE-STREAM-BYTES-ACROBAT-OBJECT",
+        "\x03ObjInfo": b"INVENTED-OBJINFO-STREAM-BYTES-ACROBAT-OBJECT",
+    })
+    _read_compound_file_or_raise(
+        acrobat_bytes, ["CONTENTS", "\x01CompObj", "\x01Ole", "\x03ObjInfo"])
+
+    attachment_b64 = base64.b64encode(
+        b"DUGONG-ATTACHMENT is the email's only attachment.").decode("ascii")
+    eml_bytes = "\r\n".join([
+        "From: engineer@example.com",
+        "To: contractor@example.com",
+        "Subject: EGRET-EMAIL, wrapped as a Package object",
+        "Date: Fri, 19 Jul 2024 09:00:00 +0000",
+        "Message-ID: <fixture-0017-package@example.com>",
+        "MIME-Version: 1.0",
+        'Content-Type: multipart/mixed; boundary="dociq-fixture-17-boundary"',
+        "",
+        "--dociq-fixture-17-boundary",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        "EGRET-EMAIL is the body of the Package object's wrapped message.",
+        "",
+        "--dociq-fixture-17-boundary",
+        'Content-Type: text/plain; name="attached.txt"',
+        "Content-Transfer-Encoding: base64",
+        'Content-Disposition: attachment; filename="attached.txt"',
+        "",
+        attachment_b64,
+        "",
+        "--dociq-fixture-17-boundary--",
+        "",
+    ]).encode("utf-8")
+    # A degenerate wrapper -- label == stored filename == "notice.eml", no
+    # directory, empty temp path -- cannot tell apart a reader that names the
+    # child by the label, skips the basename step, or never advances past
+    # the temp path (critic finding: mutants label_name and
+    # no_temp_advance). The stored filename is an invented full Windows path
+    # so Path(...).name is what recovers the bare "notice.eml" child name;
+    # the label is a distinct human caption, never used to name anything;
+    # the temp path is a distinct invented path a reader must skip over. A
+    # real 13-of-13 corpus Package object also carries \x01CompObj and
+    # \x03ObjInfo alongside \x01Ole10Native (word_brief_stage2b.md's corpus
+    # table) -- see the Acrobat object above for why they are needed.
+    package_bytes = _write_compound_file({
+        "\x01Ole10Native": _ole10_native(
+            r"C:\Users\DocIQFixtures\Correspondence\notice.eml", eml_bytes,
+            label="Notice to contractor",
+            temp_path=r"C:\Users\DocIQFixtures\Temp\~notice0017.tmp"),
+        "\x01CompObj": b"INVENTED-COMPOBJ-STREAM-BYTES-PACKAGE-OBJECT",
+        "\x03ObjInfo": b"INVENTED-OBJINFO-STREAM-BYTES-PACKAGE-OBJECT",
+    })
+    _read_compound_file_or_raise(
+        package_bytes, ["\x01Ole10Native", "\x01CompObj", "\x03ObjInfo"])
+
+    inner_xlsx_bytes = _we_xlsx_bytes(path.with_name(path.stem + "_e4_inner.xlsx"),
+                                      "GECKO-NESTED")
+    inner_docx_bytes = _we_inner_docx_bytes(
+        path.with_name(path.stem + "_e4_inner.docx"),
+        "FALCON-INNER is the inner Word document's only paragraph.",
+        progid="Excel.Sheet.12",
+        part_name="word/embeddings/Microsoft_Excel_Worksheet1.xlsx",
+        part_bytes=inner_xlsx_bytes)
+
+    unreadable_bytes = (
+        b"WORD-EMBED-FIXTURE-OBJECT-5-IS-NEITHER-A-ZIP-NOR-A-COMPOUND-FILE")
+
+    objects = [
+        ("Excel.Sheet.12",
+         "word/embeddings/Microsoft_Excel_Worksheet1.xlsx", xlsx_bytes),
+        ("AcroExch.Document.DC", "word/embeddings/oleObject2.bin", acrobat_bytes),
+        ("Package", "word/embeddings/oleObject3.bin", package_bytes),
+        ("Word.Document.12",
+         "word/embeddings/Microsoft_Word_Document1.docx", inner_docx_bytes),
+        ("DocIQFixture.Unreadable.1", "word/embeddings/oleObject5.bin",
+         unreadable_bytes),
+    ]
+    sentences = [
+        "This sentence opens the fixture, before the workbook object.",
+        "This sentence separates the workbook object from the PDF object.",
+        "This sentence separates the PDF object from the email object.",
+        "This sentence separates the email object from the inner Word document.",
+        "This sentence separates the inner Word document from the unreadable "
+        "object.",
+        "This sentence closes the fixture, after the unreadable object.",
+    ]
+
+    d = _docx.Document()
+    body = d.element.body
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import qn
+
+    sect_pr = body.find(qn('w:sectPr'))
+
+    def insert_raw(xml: str) -> None:
+        sect_pr.addprevious(parse_xml(xml))
+
+    embeds = []
+    d.add_paragraph(sentences[0])
+    for i, (progid, part_name, part_bytes) in enumerate(objects, start=1):
+        rid = f"rIdEmbed{i}"
+        insert_raw(_we_ole_object_xml(progid, rid))
+        embeds.append((rid, part_name, part_bytes))
+        d.add_paragraph(sentences[i])
+
+    _we_docx_core_properties(d)
+    buf = io.BytesIO()
+    d.save(buf)
+    _we_rewrite_with_embeds(buf.getvalue(), path, embeds)
 
 
 def xlsx(path: Path) -> None:
@@ -792,6 +1248,7 @@ def _build_corpus(src: Path) -> Path:
     empty_page_pdf(src / "04_empty_page.pdf")
     docx(src / "05_letter.docx")
     word_constructs_docx(src / "16_word_constructs.docx")
+    word_embeddings_docx(src / "17_word_embeddings.docx")
     xlsx(src / "06_register.xlsx")
     csv_file(src / "07_ncr_log.csv")
     txt_file(src / "08_daily_log.txt")

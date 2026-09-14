@@ -11,7 +11,7 @@ from dociq.contracts import ProcessingStatus, RunConfig, document_sort_key
 from dociq.ingest import extract as ex
 from dociq.ingest import walker
 
-from .conftest import FIXTURES
+from .conftest import FIXTURES, journal_groups
 
 
 def _cfg(tmp_path) -> RunConfig:
@@ -191,11 +191,8 @@ def test_resume_replays_the_previous_run_instead_of_re_extracting(tmp_path):
     first = walker.run(cfg, walker.WalkOptions(ocr_enabled=False, resume=True))
     # A completed run discards its journal, so re-arm it by hand — the case
     # under test is a crash, and a crashed run leaves the journal behind.
-    by_source: dict[str, list] = {}
-    for d in first.documents:
-        by_source.setdefault(d.parent_doc_id or d.rel_path, []).append(d)
     w = walker._ResumeWriter(cfg, True)
-    for source, docs in by_source.items():
+    for source, docs in journal_groups(first.documents).items():
         w.add(source, docs)
     w.close(discard=False, output_root=tmp_path / "out")
 
@@ -231,11 +228,8 @@ def test_resume_re_extracts_a_file_that_changed_since_the_crash(tmp_path):
 
     # Re-arm the journal by hand, as if the run had crashed mid-way (a
     # completed run discards it) — same technique as the sibling test above.
-    by_source: dict[str, list] = {}
-    for d in first.documents:
-        by_source.setdefault(d.parent_doc_id or d.rel_path, []).append(d)
     w = walker._ResumeWriter(cfg, True)
-    for source, docs in by_source.items():
+    for source, docs in journal_groups(first.documents).items():
         w.add(source, docs)
     w.close(discard=False, output_root=out)
 
@@ -565,3 +559,41 @@ def test_a_working_engine_raises_no_alarm(_one_scan, tmp_path, monkeypatch):
                         lambda arr: ("SITE INSTRUCTION 44", [0.93]))
     result = _ocr_run(_one_scan, tmp_path, "alive")
     assert not any("dead OCR engine" in w for w in result.warnings)
+
+
+def test_archive_members_keep_their_folders_in_rel_path(tmp_path):
+    """A ZIP member's folders are part of where it came from, and two members
+    with one name in two folders are two different files.
+
+    The Word package's stage 2b added name sanitizing where every child's
+    ``rel_path`` is built, and its first draft kept only a name's LAST path
+    component for every container kind: ``folder/a.txt`` became ``a.txt``,
+    the same name in a second folder became ``a__2.txt``, and the fixture
+    corpus's ``11_production.zip/inner.zip/07_ncr_log.csv`` lost its
+    ``inner.zip/``. No test saw it. Unsafe parts of a name are still made
+    safe; the separators between safe parts are kept.
+    """
+    import io
+    import zipfile
+
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as zf:
+        zf.writestr("b.txt", b"TAPIR-IN-INNER-ZIP")
+    src = tmp_path / "src"
+    src.mkdir()
+    with zipfile.ZipFile(src / "arch.zip", "w") as zf:
+        zf.writestr("folder/a.txt", b"LEMUR-IN-FOLDER")
+        zf.writestr("other/a.txt", b"VOLE-IN-OTHER")
+        zf.writestr("inner.zip", inner.getvalue())
+        zf.writestr("../escape.txt", b"NEWT-TRAVERSAL")
+    cfg = RunConfig(source_root=str(src), output_root=str(tmp_path / "out"),
+                    ocr_engine_version=ex.ocr_engine_version())
+    r = walker.run(cfg, walker.WalkOptions(ocr_enabled=False, resume=False))
+    by_text = {d.pages[0].text.strip(): d.rel_path for d in r.documents
+               if d.parent_doc_id == "arch.zip" and d.pages}
+    assert by_text.get("LEMUR-IN-FOLDER") == "arch.zip/folder/a.txt", by_text
+    assert by_text.get("VOLE-IN-OTHER") == "arch.zip/other/a.txt", by_text
+    assert by_text.get("TAPIR-IN-INNER-ZIP") == "arch.zip/inner.zip/b.txt", by_text
+    escaped = by_text.get("NEWT-TRAVERSAL")
+    assert escaped is not None and escaped.startswith("arch.zip/"), by_text
+    assert ".." not in escaped.split("/"), escaped

@@ -30,6 +30,7 @@ import stat
 import threading
 import time
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as fwait
 from dataclasses import dataclass, field
@@ -893,32 +894,234 @@ def _extract_one(entry: FileEntry, config: RunConfig,
         return _extract_archive(entry, raw, config, opt)
     if entry.ext in (".eml", ".email", ".msg"):
         return _extract_message(entry, raw, config, opt)
+    if entry.ext == ".docx":
+        return _extract_word(entry, raw, config, opt)
     got = ex.extract(entry.path.name, raw, opt)
     return [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
                     entry.sha256, got, config=config)]
 
 
+# ---------------------------------------------------------------------------
+# Container children — item 4: an untrusted stored name, made safe and unique
+# ---------------------------------------------------------------------------
+
+_WINDOWS_RESERVED_STEMS = {
+    "con", "prn", "aux", "nul",
+    "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+    "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+}
+"""Windows device names — reserved whatever the extension (``CON.txt`` is as
+reserved as bare ``CON``), case-insensitively."""
+
+_CONTAINER_EXTS = {".msg", ".eml", ".email", ".docx"}
+"""Extensions whose OWN attachments/embeddings this walker recurses into
+(item 1 / D-50). ``.zip`` is deliberately absent:
+:func:`~dociq.ingest.extract.expand_zip` already flattens a zip-inside-a-zip
+on its own, so recursing into a zip member here would be the same
+flattening done twice, by two different mechanisms, and liable to drift."""
+
+
+def _literal_ext(name: str) -> str:
+    """A filename's suffix by plain string search — never
+    ``pathlib.Path(...).suffix``, which parses a leading ``C:`` as a Windows
+    drive component and would misread exactly the untrusted names
+    :func:`_sanitize_child_name` exists to see safely."""
+    dot = name.rfind(".")
+    return name[dot:] if dot >= 0 else ""
+
+
+def _sanitize_child_name(name: str, order: int) -> str:
+    """One container member's stored name, made safe BEFORE it ever becomes
+    part of a ``rel_path``, an output filename, or a resume-journal key.
+
+    A stored filename is untrusted regardless of which container kind
+    supplied it — an OLE Package's ``\\x01Ole10Native`` stored filename, an
+    email attachment's ``Content-Disposition`` filename
+    (``expand_eml_attachments`` reads ``part.get_filename()`` unsanitized —
+    see the item 4 probe), a zip member name — so this is the ONE place
+    every one of them passes through, rather than a guard added only for the
+    new Ole10Native path.
+
+    **Made safe part by part, and the folders kept.** ``\\`` is read as a
+    separator like ``/``. Empty, ``.`` and ``..`` parts are dropped, so a
+    member can never climb out of its parent's own ``rel_path`` (which also
+    disposes of a leading UNC ``\\\\server\\share`` or a POSIX absolute
+    path). The parts that remain keep their order and their separators: a ZIP
+    member's ``folder/a.txt`` and ``other/a.txt`` are two different files, and
+    ``inner.zip/b.txt`` says which archive a member came out of. A first draft
+    of this function kept only the LAST part of every name, which flattened
+    both, and the fixture corpus's ``11_production.zip/inner.zip/...`` with
+    them (``tests/test_walker.py::test_archive_members_keep_their_folders_in_rel_path``).
+    An Ole10Native stored filename is already cut to its basename by
+    :func:`~dociq.ingest.extract._unwrap_embedding` before it reaches here.
+
+    Within each part: trailing dots or spaces are stripped (Windows silently
+    strips them, so ``"x.txt"`` and ``"x.txt "`` would otherwise collide on
+    disk unseen, which the dedup pass below then catches). A part carrying
+    ``:`` (a drive letter, an NTFS stream) or a Windows-reserved device stem
+    (``CON``, ``PRN``, ``AUX``, ``NUL``, ``COM1-9``, ``LPT1-9``, whatever its
+    extension) is replaced by ``unnamed_child_<order+1>`` plus its extension.
+    A name with no safe part left becomes that replacement alone.
+    """
+    raw = unicodedata.normalize("NFC", name or "")
+    parts: list[str] = []
+    for part in raw.replace("\\", "/").split("/"):
+        part = part.rstrip(" .")
+        if part in ("", ".", ".."):
+            continue
+        stem = part.split(".", 1)[0]
+        if ":" in part or stem.lower() in _WINDOWS_RESERVED_STEMS:
+            suffix = _literal_ext(part)
+            if not suffix or ":" in suffix:
+                suffix = ""
+            part = f"unnamed_child_{order + 1}{suffix}"
+        parts.append(part)
+    return "/".join(parts) if parts else f"unnamed_child_{order + 1}"
+
+
+def _dedup_child_names(names: list[str]) -> list[str]:
+    """Disambiguate a repeated sanitized name within ONE container,
+    deterministically by container order — item 4's "two children of one
+    parent with the same name" shape (two Package objects each wrapping
+    ``notice.msg``; two attachments both named ``image001.png``; a stored
+    name that collides with another part's basename after sanitization).
+
+    ``names`` is already in container (``ZipMember.order``) order, so the
+    same input always yields the same output. The FIRST occurrence of a
+    repeated name keeps it plain — a container with no duplicate names never
+    grows a single filename — and every later occurrence is suffixed
+    ``__2``, ``__3``, ... before its extension, checked against every name
+    already assigned so a suffixed name can never collide with a literal
+    sibling that happens to share it.
+    """
+    counts = Counter(names)
+    seen_count: dict[str, int] = {}
+    used: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        seen_count[name] = n = seen_count.get(name, 0) + 1
+        # The suffix goes on the last part only: "folder.v1/a.txt" repeated
+        # becomes "folder.v1/a__2.txt", never "folder__2.v1/a.txt".
+        folder, sep, leaf = name.rpartition("/")
+        stem, dot, suffix = leaf.partition(".")
+        candidate = name if (counts[name] <= 1 or n == 1) else f"{folder}{sep}{stem}__{n}{dot}{suffix}"
+        while candidate in used:
+            n += 1
+            candidate = f"{folder}{sep}{stem}__{n}{dot}{suffix}"
+        used.add(candidate)
+        out.append(candidate)
+    return out
+
+
+def _container_count_word(child_ext: str) -> str:
+    return "embedded document(s)" if child_ext == ".docx" else "attachment(s)"
+
+
+def _expand_container(child_ext: str, raw: bytes,
+                      opt: ex.ExtractOptions) -> ex.ZipExpansion:
+    """The one dispatch every recursive step, and every top-level container
+    entry point (:func:`_extract_word`, :func:`_extract_message`), shares
+    for "what are this container's own children" — so a depth-capped
+    recursive read and an entry file's own first read can never diverge in
+    which function they call for the same extension."""
+    if child_ext == ".docx":
+        return ex.expand_docx_embeddings(raw)
+    if child_ext == ".msg":
+        return ex.expand_msg_attachments(raw, opt.scratch_dir)
+    return ex.expand_eml_attachments(raw)  # .eml, .email
+
+
 def _child_records(entry: FileEntry, exp: ex.ZipExpansion, config: RunConfig,
-                   opt: ex.ExtractOptions) -> list[DocumentRecord]:
-    """One :class:`DocumentRecord` per container member (archive member or
-    email attachment), parented to ``entry``. Shared by both container kinds
-    so a Tier-2-inside-a-container is handled identically either way (§3: a
-    Tier-2 file inside a container is still Tier-2, never blocking, never
-    silently extracted)."""
-    parent_key = entry.rel_path
+                   opt: ex.ExtractOptions, *, parent_rel: str | None = None,
+                   level: int = 1) -> list[DocumentRecord]:
+    """One :class:`DocumentRecord` per container member (archive member,
+    email/msg attachment, or Word embedded document — D-50), parented to
+    ``parent_rel`` (``entry.rel_path`` by default: the top-level entry
+    file). Shared by every container kind so a Tier-2-inside-a-container, an
+    untrusted stored name, and a duplicate name are handled identically no
+    matter what produced the member (§3 / D-50 / item 4) — fixed once, here,
+    where every child's ``rel_path`` is built.
+
+    **Recurses.** A member whose extension is ``.msg``, ``.eml``, ``.email``
+    or ``.docx`` is itself a container: its OWN attachments/embeddings are
+    expanded in turn and become ITS children (their parent token is the
+    child's own ``rel_path``), to a depth of :data:`ex._ZIP_MAX_DEPTH`
+    containers below the entry file. The entry file's own first expansion is
+    unconditional and already done by the caller (:func:`_extract_word`,
+    :func:`_extract_message` or :func:`_extract_archive`) before this
+    function is ever reached, so ``level`` here starts at 1 for the entry's
+    own direct children — mirroring
+    :func:`~dociq.ingest.extract.expand_zip`'s own precedent, "the top file
+    always expands, each further level counts from 1, expansion stops past
+    the cap". A child at ``level`` may itself be expanded (producing
+    ``level + 1`` children) only while ``level < ex._ZIP_MAX_DEPTH``; past
+    that, its own would-be children are still identified (so the note can
+    name them) but never turned into records, and a marked note on the
+    child says what was not expanded. ``.zip`` members keep today's
+    behavior — :func:`~dociq.ingest.extract.expand_zip` already flattens
+    nesting on its own, so it is not in :data:`_CONTAINER_EXTS`.
+
+    This also closes a silent loss that predates D-50: a ``.msg``/``.eml``
+    inside an archive, or attached to another email, never had its OWN
+    attachments read before this function recursed.
+    """
+    parent_key = parent_rel if parent_rel is not None else entry.rel_path
+    safe_names = _dedup_child_names(
+        [_sanitize_child_name(m.name, m.order) for m in exp.members])
     out: list[DocumentRecord] = []
-    for m in exp.members:
-        child_ext = Path(m.name).suffix.lower()
+    for m, safe_name in zip(exp.members, safe_names):
+        child_ext = Path(safe_name).suffix.lower()
         child_sha = hashlib.sha256(m.raw).hexdigest()
-        child_rel = f"{entry.rel_path}/{unicodedata.normalize('NFC', m.name)}"
+        child_rel = f"{parent_key}/{safe_name}"
+        # The record's filename is the member's own name, as before stage 2b;
+        # its folders live in rel_path.
+        child_filename = safe_name.rsplit("/", 1)[-1]
         if ex.is_tier1(child_ext) and child_ext != ".zip":
-            got = ex.extract(Path(m.name).name, m.raw, opt)
+            got = ex.extract(child_filename, m.raw, opt)
         else:
             got = ex.ExtractedDoc(status=ProcessingStatus.UNSUPPORTED,
                                   error=ex.tier2_hint(child_ext))
-        out.append(_record(entry, Path(m.name).name, child_ext, len(m.raw),
-                           child_sha, got, parent=parent_key, order=m.order,
+        extra_notes: tuple[str, ...] = ()
+        grandchildren: list[DocumentRecord] = []
+        if child_ext in _CONTAINER_EXTS:
+            if level < ex._ZIP_MAX_DEPTH:
+                try:
+                    child_exp = _expand_container(child_ext, m.raw, opt)
+                except Exception as exc:
+                    child_exp = ex.ZipExpansion(
+                        (), (f"{ex.M_ATTACH_ENUM}: {exc}"[:200],))
+                extra_notes = child_exp.notes + (
+                    (f"{len(child_exp.members)} "
+                     f"{_container_count_word(child_ext)} extracted as "
+                     "child document(s)",) if child_exp.members else ())
+                if child_exp.members:
+                    grandchildren = _child_records(
+                        entry, child_exp, config, opt,
+                        parent_rel=child_rel, level=level + 1)
+            else:
+                # Depth exhausted. Still look INSIDE the child so the note
+                # can name what it holds, exactly as the entry file's own
+                # first-level notes do — but never build a record for it and
+                # never recurse: the depth cap must be an ARITHMETIC bound,
+                # not merely a slow one, and every level below `level + 1`
+                # of a pathological chain would otherwise still be walked.
+                try:
+                    deeper = _expand_container(child_ext, m.raw, opt)
+                except Exception:
+                    deeper = ex.ZipExpansion()
+                if deeper.members:
+                    named = ", ".join(sorted(mm.name for mm in deeper.members))
+                    extra_notes = (
+                        f"{ex.M_ATTACH_SKIPPED}: nesting deeper than "
+                        f"{ex._ZIP_MAX_DEPTH} container(s) was not expanded "
+                        f"({named})",)
+        out.append(_record(entry, child_filename, child_ext, len(m.raw), child_sha,
+                           ex.ExtractedDoc(pages=got.pages,
+                                           notes=got.notes + extra_notes,
+                                           status=got.status, error=got.error),
+                           parent=parent_key, order=m.order,
                            rel_path=child_rel, config=config))
+        out.extend(grandchildren)
     return out
 
 
@@ -971,6 +1174,39 @@ def _extract_message(entry: FileEntry, raw: bytes, config: RunConfig,
         exp = ex.ZipExpansion((), (f"{ex.M_ATTACH_ENUM}: {exc}"[:200],))
     extra_notes = exp.notes + ((f"{len(exp.members)} attachment(s) extracted "
                                 f"as child document(s)",) if exp.members else ())
+    out = [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
+                   entry.sha256,
+                   ex.ExtractedDoc(pages=got.pages, notes=got.notes + extra_notes,
+                                   status=got.status, error=got.error),
+                   config=config)]
+    out.extend(_child_records(entry, exp, config, opt))
+    return out
+
+
+def _extract_word(entry: FileEntry, raw: bytes, config: RunConfig,
+                  opt: ex.ExtractOptions) -> list[DocumentRecord]:
+    """The Word file's own record (from ``ex.extract``, unchanged) plus one
+    child record per document embedded inside it (D-50).
+
+    Shaped like :func:`_extract_message`: the file's own page text and notes
+    come straight from ``ex.extract``, ``ex.expand_docx_embeddings`` supplies
+    the members, and :func:`_child_records` — the SAME function archive
+    members and email/msg attachments go through — turns them into child
+    records, so a duplicate-named embedded object or a nested embedded
+    document (an inner ``.docx``'s own embeddings) is handled identically to
+    a zip member or an email attachment, not by a second, divergent path.
+    An exception out of the expansion is caught here and becomes a marked
+    note on the Word file's own record rather than failing the file, the
+    same as a malformed ``.msg``/``.eml`` envelope above.
+    """
+    got = ex.extract(entry.path.name, raw, opt)
+    try:
+        exp = ex.expand_docx_embeddings(raw)
+    except Exception as exc:
+        exp = ex.ZipExpansion((), (f"{ex.M_ATTACH_ENUM}: {exc}"[:200],))
+    extra_notes = exp.notes + (
+        (f"{len(exp.members)} embedded document(s) extracted as child "
+         "document(s)",) if exp.members else ())
     out = [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
                    entry.sha256,
                    ex.ExtractedDoc(pages=got.pages, notes=got.notes + extra_notes,

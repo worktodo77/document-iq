@@ -1,7 +1,7 @@
-"""D-50 Word fidelity package, stage 1: fixture and RED tests only.
+"""The Word fidelity package, stage 1: fixture and RED tests only.
 
-Every test in this file is written against the CONTRACT the D-50 build spec
-makes true (every character in a Word document's text-bearing parts reaches
+Every test in this file is written against the CONTRACT the Word spec makes
+true (every character in a Word document's text-bearing parts reaches
 the page text, or is named in a note carrying an evidence marker) and MUST
 fail against today's ``_extract_docx`` -- which emits paragraphs, then every
 table, then one boilerplate note claiming the file has no page boundaries.
@@ -366,3 +366,601 @@ def test_ocr_unavailable_note_carries_an_evidence_marker(monkeypatch):
     assert unavailable_note is not None and ex.has_evidence_marker(unavailable_note), (
         f"the 'OCR is unavailable' note must carry an evidence marker: "
         f"{unavailable_note!r}; all notes: {got.notes!r}")
+
+
+# ---------------------------------------------------------------------------
+# Stage 2b: three gaps carried in stage 2a's disclosure (Word spec,
+# "4. Carried from stage 2a"). Every input here is built in ``tmp_path``, not
+# by changing fixture 16, so no existing position test above moves.
+# ---------------------------------------------------------------------------
+
+
+def _extract_bytes(name: str, raw: bytes):
+    return ex.extract(name, raw)
+
+
+def test_chartex_chart_is_disclosed_as_unread(tmp_path):
+    """Carried gap 1: chart detection matched only a graphicData URI ending
+    '/chart'. An Office 2016+ chartEx chart (waterfall, funnel, ...) uses the
+    namespace ``.../office/drawing/2014/chartex`` verbatim instead and must
+    be detected too."""
+    import docx as _docx
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import qn
+
+    d = _docx.Document()
+    d.add_paragraph("BEFORE the chartEx chart.")
+    sect_pr = d.element.body.find(qn("w:sectPr"))
+    ns = (
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"'
+    )
+    sect_pr.addprevious(parse_xml(
+        '<w:p ' + ns + '><w:r><w:drawing>'
+        '<wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="1828800" cy="1828800"/>'
+        '<wp:docPr id="1" name="ChartEx1"/>'
+        '<a:graphic><a:graphicData '
+        'uri="http://schemas.microsoft.com/office/drawing/2014/chartex">'
+        '<cx:chart/>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>'))
+    d.add_paragraph("AFTER the chartEx chart.")
+
+    path = tmp_path / "chartex.docx"
+    d.save(str(path))
+    got = _extract_bytes(path.name, path.read_bytes())
+
+    marked = [n for n in got.notes if ex.has_evidence_marker(n)]
+    has_chart = any(re.search(r"\bchart\b", n, re.IGNORECASE) for n in marked)
+    assert has_chart, (
+        f"expected a marked note naming a chart for an Office 2016+ chartEx "
+        f"graphic (graphicData uri is the chartex namespace, not a URI "
+        f"ending '/chart'): marked={marked!r}; all notes={got.notes!r}")
+
+
+def test_unread_constructs_are_disclosed_outside_the_body_too(tmp_path):
+    """Carried gap 2: altChunk, chart, SmartArt and large-picture disclosure
+    used to gate on ``in_body`` -- so one in a header, a footer, a footnote,
+    an endnote, a comment or a text box was lost without a word. This proves
+    three of those locations at once: a chart in a HEADER, an altChunk in a
+    FOOTNOTE, and a chart PLUS a large picture inside a TEXT BOX (itself in
+    the body).
+
+    Critic finding: a presence-only check ("some marked chart/altChunk/
+    picture note exists") cannot see a construct counted MORE than once.
+    ``_note_drawing`` is called on the outer text-box ``<w:drawing>`` (whose
+    own ``.iter()`` already walks down into anything nested inside it,
+    including a chart or picture placed in the box) and is then called
+    AGAIN when the walk separately reaches that nested ``<w:drawing>`` on
+    its own -- so a single chart or picture inside a text box was measured
+    to come out as 2 in the draft (critic probe p4_gap_probes.py, cases (a)
+    and (b)). Asserting the exact counts a CORRECT read produces (2 chart(s)
+    -- header + text box, each real construct appearing once; 1 altChunk(s);
+    1 picture(s)) pins the spec regardless of whether this particular
+    double-count is what is fixed to satisfy it.
+    """
+    import docx as _docx
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import qn
+
+    ns_all = (
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+        'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
+        'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"'
+    )
+    w_only = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    r_only = ('xmlns:r="http://schemas.openxmlformats.org/officeDocument/'
+             '2006/relationships"')
+
+    d = _docx.Document()
+    d.add_paragraph("BODY paragraph, nothing special.")
+    sect_pr = d.element.body.find(qn("w:sectPr"))
+
+    # A large picture (6in x 8in on an 8.5in x 11in page, ~51%) inside a
+    # text box -- same size word_constructs_docx uses for its own body
+    # picture disclosure test, so the >=25% threshold is comfortably cleared.
+    picture_drawing = (
+        '<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="5486400" cy="7315200"/>'
+        '<wp:docPr id="9" name="BoxPic"/>'
+        '<a:graphic><a:graphicData '
+        'uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+        '<pic:pic><pic:blipFill><a:blip r:embed="rIdBoxImg"/></pic:blipFill></pic:pic>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing>'
+    )
+    # A chart alongside the picture, both inside the same text box -- the
+    # second location this test's critic finding needs (case (a) above).
+    box_chart_drawing = (
+        '<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="1828800" cy="1828800"/>'
+        '<wp:docPr id="10" name="BoxChart"/>'
+        '<a:graphic><a:graphicData '
+        'uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+        '<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+        'r:id="rIdBoxChart"/>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing>'
+    )
+    sect_pr.addprevious(parse_xml(
+        '<w:p ' + ns_all + '>'
+        '<w:r><w:t>Text box anchor.</w:t></w:r>'
+        '<w:r><mc:AlternateContent><mc:Choice Requires="wps">'
+        '<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="914400" cy="914400"/>'
+        '<wp:docPr id="2" name="TextBox1"/>'
+        '<a:graphic><a:graphicData '
+        'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        '<wps:wsp><wps:cNvSpPr txBox="1"/>'
+        '<wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>'
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>'
+        '<wps:txbx><w:txbxContent>'
+        '<w:p><w:r><w:t>box text</w:t></w:r></w:p>'
+        '<w:p><w:r>' + picture_drawing + '</w:r></w:p>'
+        '<w:p><w:r>' + box_chart_drawing + '</w:r></w:p>'
+        '</w:txbxContent></wps:txbx>'
+        '<wps:bodyPr/></wps:wsp>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing>'
+        '</mc:Choice><mc:Fallback><w:pict/></mc:Fallback></mc:AlternateContent></w:r>'
+        '</w:p>'))
+    tapir_p = d.add_paragraph("Paragraph carrying a footnote reference.")
+    tapir_p._p.append(parse_xml(
+        '<w:r ' + w_only + '><w:footnoteReference w:id="1"/></w:r>'))
+    # wire the header part into the body's own (final) sectPr
+    sect_pr.insert(0, parse_xml(
+        '<w:headerReference w:type="default" r:id="rIdHeader1" '
+        + w_only + " " + r_only + "/>"))
+
+    buf = io.BytesIO()
+    d.save(buf)
+    base = buf.getvalue()
+
+    zin = zipfile.ZipFile(io.BytesIO(base))
+    names = zin.namelist()
+    ct = zin.read("[Content_Types].xml").decode("utf-8")
+    rels = zin.read("word/_rels/document.xml.rels").decode("utf-8")
+    pfx = "application/vnd.openxmlformats-officedocument.wordprocessingml."
+    add_ct = (
+        '<Override PartName="/word/footnotes.xml" ContentType="' + pfx + 'footnotes+xml"/>'
+        '<Override PartName="/word/header1.xml" ContentType="' + pfx + 'header+xml"/>'
+        '<Override PartName="/word/charts/chart1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>'
+        '<Override PartName="/word/charts/chart2.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>'
+        '<Default Extension="html" ContentType="text/html"/>'
+    )
+    assert "</Types>" in ct
+    ct = ct.replace("</Types>", add_ct + "</Types>")
+    rpfx = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+    add_rel = (
+        '<Relationship Id="rIdFootnotes" Type="' + rpfx + 'footnotes" Target="footnotes.xml"/>'
+        '<Relationship Id="rIdHeader1" Type="' + rpfx + 'header" Target="header1.xml"/>'
+        # The text-box chart lives in the BODY (word/document.xml), so its
+        # own r:id is resolved through document.xml's OWN relationships,
+        # unlike the header chart below (resolved through header1.xml.rels).
+        '<Relationship Id="rIdBoxChart" Type="' + rpfx + 'chart" Target="charts/chart2.xml"/>'
+    )
+    assert "</Relationships>" in rels
+    rels = rels.replace("</Relationships>", add_rel + "</Relationships>")
+
+    footnotes_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:footnotes ' + w_only + '>'
+        '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+        '<w:footnote w:type="continuationSeparator" w:id="0">'
+        '<w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+        '<w:footnote w:id="1">'
+        '<w:p><w:r><w:footnoteRef/></w:r>'
+        '<w:r><w:t xml:space="preserve"> footnote text.</w:t></w:r></w:p>'
+        '<w:altChunk r:id="rIdAltChunkFN" ' + r_only + '/>'
+        '</w:footnote></w:footnotes>'
+    )
+    footnotes_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rIdAltChunkFN" Type="' + rpfx
+        + 'aFChunk" Target="altchunk_fn.html"/></Relationships>'
+    )
+    header_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:hdr ' + ns_all + '>'
+        '<w:p><w:r><w:t>Header text.</w:t></w:r>'
+        '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="1828800" cy="1828800"/>'
+        '<wp:docPr id="3" name="HeaderChart1"/>'
+        '<a:graphic><a:graphicData '
+        'uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+        '<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+        'r:id="rIdHeaderChart"/>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
+        '</w:p></w:hdr>'
+    )
+    header_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rIdHeaderChart" Type="' + rpfx
+        + 'chart" Target="charts/chart1.xml"/></Relationships>'
+    )
+    chart_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+        '<c:chart/></c:chartSpace>'
+    )
+
+    path = tmp_path / "unread_outside_body.docx"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for n in names:
+            if n == "[Content_Types].xml":
+                zout.writestr(n, ct)
+            elif n == "word/_rels/document.xml.rels":
+                zout.writestr(n, rels)
+            else:
+                zout.writestr(n, zin.read(n))
+        zout.writestr("word/footnotes.xml", footnotes_xml)
+        zout.writestr("word/_rels/footnotes.xml.rels", footnotes_rels_xml)
+        zout.writestr("word/altchunk_fn.html",
+                      b"<html><body>ALTCHUNK IN FOOTNOTE</body></html>")
+        zout.writestr("word/header1.xml", header_xml)
+        zout.writestr("word/_rels/header1.xml.rels", header_rels_xml)
+        zout.writestr("word/charts/chart1.xml", chart_xml)
+        zout.writestr("word/charts/chart2.xml", chart_xml)
+    zin.close()
+
+    got = _extract_bytes(path.name, path.read_bytes())
+    marked = [n for n in got.notes if ex.has_evidence_marker(n)]
+    altchunk_notes = [n for n in marked if re.search(r"\baltchunk\b", n, re.IGNORECASE)]
+    chart_notes = [n for n in marked if re.search(r"\bchart\b", n, re.IGNORECASE)]
+    picture_notes = [n for n in marked if "picture" in n.lower()]
+    assert altchunk_notes and chart_notes and picture_notes, (
+        f"expected marked notes for an altChunk (in a footnote), a chart "
+        f"(in a header AND a text box) and a large picture (in a text box) "
+        f"-- none of these live in the body: marked={marked!r}; all "
+        f"notes={got.notes!r}")
+
+    def _count(notes: list[str], word: str) -> int:
+        m = re.search(r"(\d+)\s+" + word, notes[0], re.IGNORECASE) if notes else None
+        assert m is not None, f"no count found in {notes!r}"
+        return int(m.group(1))
+
+    assert _count(chart_notes, "chart") == 2, (
+        f"expected exactly 2 chart(s) -- one in the header, one in the text "
+        f"box, each counted once: {chart_notes!r}")
+    assert _count(altchunk_notes, "altChunk") == 1, (
+        f"expected exactly 1 altChunk(s) (the footnote's): {altchunk_notes!r}")
+    assert _count(picture_notes, "picture") == 1, (
+        f"expected exactly 1 picture(s) (the text box's large picture): "
+        f"{picture_notes!r}")
+
+
+def test_unread_constructs_in_footer_endnote_and_comment(tmp_path):
+    """Carried gap 2, the three Word-spec-named locations the test above does
+    not reach: a SmartArt drawing in a FOOTER, a chart in an ENDNOTE, and an
+    altChunk in a COMMENT."""
+    import docx as _docx
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import qn
+
+    ns_all = (
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" '
+        'xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+    )
+    w_only = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    r_only = ('xmlns:r="http://schemas.openxmlformats.org/officeDocument/'
+             '2006/relationships"')
+
+    d = _docx.Document()
+    d.add_paragraph("BODY paragraph, nothing special.")
+    sect_pr = d.element.body.find(qn("w:sectPr"))
+    sect_pr.insert(0, parse_xml(
+        '<w:footerReference w:type="default" r:id="rIdFooter1" '
+        + w_only + " " + r_only + "/>"))
+
+    buf = io.BytesIO()
+    d.save(buf)
+    base = buf.getvalue()
+
+    zin = zipfile.ZipFile(io.BytesIO(base))
+    names = zin.namelist()
+    ct = zin.read("[Content_Types].xml").decode("utf-8")
+    rels = zin.read("word/_rels/document.xml.rels").decode("utf-8")
+    pfx = "application/vnd.openxmlformats-officedocument.wordprocessingml."
+    add_ct = (
+        '<Override PartName="/word/footer1.xml" ContentType="' + pfx + 'footer+xml"/>'
+        '<Override PartName="/word/endnotes.xml" ContentType="' + pfx + 'endnotes+xml"/>'
+        '<Override PartName="/word/comments.xml" ContentType="' + pfx + 'comments+xml"/>'
+    )
+    assert "</Types>" in ct
+    ct = ct.replace("</Types>", add_ct + "</Types>")
+    rpfx = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+    add_rel = '<Relationship Id="rIdFooter1" Type="' + rpfx + 'footer" Target="footer1.xml"/>'
+    assert "</Relationships>" in rels
+    rels = rels.replace("</Relationships>", add_rel + "</Relationships>")
+
+    smartart_drawing = (
+        '<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="1828800" cy="1828800"/>'
+        '<wp:docPr id="30" name="FooterSmartArt"/>'
+        '<a:graphic><a:graphicData '
+        'uri="http://schemas.openxmlformats.org/drawingml/2006/diagram">'
+        '<dgm:relIds r:dm="rIdDm" r:lo="rIdLo" r:qs="rIdQs" r:cs="rIdCs"/>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing>'
+    )
+    chart_drawing = (
+        '<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="1828800" cy="1828800"/>'
+        '<wp:docPr id="31" name="EndnoteChart"/>'
+        '<a:graphic><a:graphicData '
+        'uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+        '<c:chart r:id="rIdEndChart"/>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing>'
+    )
+    footer_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:ftr ' + ns_all + '><w:p><w:r>' + smartart_drawing
+        + '</w:r></w:p></w:ftr>'
+    )
+    endnotes_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:endnotes ' + ns_all + '>'
+        '<w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>'
+        '<w:endnote w:type="continuationSeparator" w:id="0">'
+        '<w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote>'
+        '<w:endnote w:id="1"><w:p><w:r>' + chart_drawing
+        + '</w:r></w:p></w:endnote></w:endnotes>'
+    )
+    # w:altChunk is a BLOCK-level construct -- a direct child of its
+    # container (comment/footnote/endnote/body), a SIBLING of w:p, never
+    # nested inside a w:r -- mirroring the existing footnote altChunk case
+    # above (`_block_lines` only recognizes it as a direct child).
+    comments_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:comments ' + ns_all + '>'
+        '<w:comment w:id="1" w:author="Reviewer">'
+        '<w:p><w:r><w:t>reviewer comment text.</w:t></w:r></w:p>'
+        '<w:altChunk r:id="rIdCommentChunk"/>'
+        '</w:comment>'
+        '</w:comments>'
+    )
+
+    path = tmp_path / "unread_footer_endnote_comment.docx"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for n in names:
+            if n == "[Content_Types].xml":
+                zout.writestr(n, ct)
+            elif n == "word/_rels/document.xml.rels":
+                zout.writestr(n, rels)
+            else:
+                zout.writestr(n, zin.read(n))
+        zout.writestr("word/footer1.xml", footer_xml)
+        zout.writestr("word/endnotes.xml", endnotes_xml)
+        zout.writestr("word/comments.xml", comments_xml)
+    zin.close()
+
+    got = _extract_bytes(path.name, path.read_bytes())
+    marked = [n for n in got.notes if ex.has_evidence_marker(n)]
+    has_smartart = any(re.search(r"\bsmartart\b", n, re.IGNORECASE) for n in marked)
+    has_chart = any(re.search(r"\bchart\b", n, re.IGNORECASE) for n in marked)
+    has_altchunk = any(re.search(r"\baltchunk\b", n, re.IGNORECASE) for n in marked)
+    assert has_smartart and has_chart and has_altchunk, (
+        f"expected marked notes for a SmartArt drawing (in a footer), a "
+        f"chart (in an endnote) and an altChunk (in a comment): "
+        f"marked={marked!r}; all notes={got.notes!r}")
+
+
+def test_chartex_in_real_alternatecontent_shape_with_picture_fallback_is_one_chart(tmp_path):
+    """A chartEx graphic is never a bare ``graphicData`` in real Word output
+    -- it is the ``mc:Choice`` of an ``mc:AlternateContent`` whose
+    ``mc:Fallback`` is a plain picture (for a reader that does not
+    understand chartEx). The draft's chartEx detection (carried gap 1)
+    happens to handle this real shape (critic probe p4_gap_probes.py, case
+    (c)), but nothing pins it: this guards against a fix that only matches
+    a bare ``cx:chart`` graphicData and never looks inside
+    ``mc:AlternateContent`` at all, which would silently double-count via
+    the Fallback picture or miss the chart entirely."""
+    import docx as _docx
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import qn
+
+    ns_all = (
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+        'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" '
+        'xmlns:cx1="http://schemas.microsoft.com/office/drawing/2015/9/8/chartex"'
+    )
+    fallback_picture = (
+        '<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="5486400" cy="7315200"/>'
+        '<wp:docPr id="40" name="ChartExFallbackPic"/>'
+        '<a:graphic><a:graphicData '
+        'uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+        '<pic:pic><pic:blipFill><a:blip r:embed="rIdFallbackImg"/></pic:blipFill></pic:pic>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing>'
+    )
+    d = _docx.Document()
+    sect_pr = d.element.body.find(qn("w:sectPr"))
+    sect_pr.addprevious(parse_xml(
+        '<w:p ' + ns_all + '><w:r><mc:AlternateContent>'
+        '<mc:Choice Requires="cx1">'
+        '<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="1828800" cy="1828800"/>'
+        '<wp:docPr id="41" name="ChartEx1"/>'
+        '<a:graphic><a:graphicData '
+        'uri="http://schemas.microsoft.com/office/drawing/2014/chartex">'
+        '<cx:chart xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex" '
+        'r:id="rIdChartEx"/>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing>'
+        '</mc:Choice>'
+        '<mc:Fallback>' + fallback_picture + '</mc:Fallback>'
+        '</mc:AlternateContent></w:r></w:p>'))
+
+    path = tmp_path / "chartex_real_shape.docx"
+    d.save(str(path))
+    got = _extract_bytes(path.name, path.read_bytes())
+
+    marked = [n for n in got.notes if ex.has_evidence_marker(n)]
+    chart_notes = [n for n in marked if re.search(r"\bchart\b", n, re.IGNORECASE)]
+    picture_notes = [n for n in marked if "picture" in n.lower()]
+    assert len(chart_notes) == 1, (
+        f"expected exactly 1 marked chart note (the chartEx, once): "
+        f"{chart_notes!r}; all notes={got.notes!r}")
+    count = re.search(r"(\d+)\s+chart", chart_notes[0], re.IGNORECASE)
+    assert count is not None and count.group(1) == "1", (
+        f"expected the chart note's own count to be 1: {chart_notes[0]!r}")
+    assert not picture_notes, (
+        f"the Fallback picture must not ALSO be disclosed as an unread "
+        f"picture -- a reader that understands chartEx takes mc:Choice, "
+        f"never mc:Fallback: {picture_notes!r}")
+
+
+@pytest.mark.parametrize("mutate_sect,case_id", [
+    (lambda sect_pr, qn_: sect_pr.remove(sect_pr.find(qn_("w:pgSz"))), "removed"),
+    (lambda sect_pr, qn_: sect_pr.find(qn_("w:pgSz")).set(qn_("w:w"), "0"), "w_zero"),
+    (lambda sect_pr, qn_: sect_pr.find(qn_("w:pgSz")).attrib.pop(qn_("w:h")), "h_missing"),
+], ids=["pgsz_removed", "pgsz_w_zero", "pgsz_h_missing"])
+def test_unusable_pgsz_variants_all_disclose_unmeasurable_pictures(
+        tmp_path, mutate_sect, case_id):
+    """The existing carried-gap-3 test covers only a REMOVED w:pgSz. An
+    unusable one (w:w="0", or a missing w:h) must be treated the same way,
+    not silently pass the "has a pgSz element" check and then divide by
+    zero or KeyError -- or, worse, silently skip disclosure."""
+    import docx as _docx
+    from docx.oxml.ns import qn
+    from docx.shared import Inches
+    from lxml import etree
+
+    d = _docx.Document()
+    d.add_paragraph("BEFORE the unmeasurable picture.")
+    pixel_buf = io.BytesIO()
+    from PIL import Image
+    Image.new("RGB", (1, 1), (0, 0, 0)).save(pixel_buf, format="PNG")
+    d.add_picture(io.BytesIO(pixel_buf.getvalue()), width=Inches(6), height=Inches(8))
+    d.add_paragraph("AFTER the unmeasurable picture.")
+
+    buf = io.BytesIO()
+    d.save(buf)
+    base = buf.getvalue()
+
+    zin = zipfile.ZipFile(io.BytesIO(base))
+    names = zin.namelist()
+    root = etree.fromstring(zin.read("word/document.xml"))
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    body = next(c for c in root if c.tag == w + "body")
+    sect_pr = next(c for c in reversed(list(body)) if c.tag == w + "sectPr")
+    mutate_sect(sect_pr, qn)
+    new_doc_xml = etree.tostring(root, xml_declaration=True, encoding="UTF-8",
+                                 standalone=True)
+
+    path = tmp_path / f"unusable_pgsz_{case_id}.docx"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for n in names:
+            zout.writestr(n, new_doc_xml if n == "word/document.xml" else zin.read(n))
+    zin.close()
+
+    got = _extract_bytes(path.name, path.read_bytes())
+    marked = [n for n in got.notes if ex.has_evidence_marker(n)]
+    unmeasurable = [n for n in marked if "could not be measured" in n.lower()]
+    assert unmeasurable, (
+        f"expected a marked note saying pictures could not be measured "
+        f"against the page ({case_id}): marked={marked!r}; all "
+        f"notes={got.notes!r}")
+
+
+def test_no_usable_pgsz_and_no_picture_discloses_nothing_unmeasurable(tmp_path):
+    """The negative case the parametrized test above cannot cover: no usable
+    ``w:pgSz`` AND no picture at all must not, by itself, produce an
+    "unmeasurable" note -- there is nothing to measure. Guards against a fix
+    that notes the page's own unmeasurability regardless of whether any
+    picture exists."""
+    import docx as _docx
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    d = _docx.Document()
+    d.add_paragraph("No pictures anywhere in this document.")
+
+    buf = io.BytesIO()
+    d.save(buf)
+    base = buf.getvalue()
+
+    zin = zipfile.ZipFile(io.BytesIO(base))
+    names = zin.namelist()
+    root = etree.fromstring(zin.read("word/document.xml"))
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    body = next(c for c in root if c.tag == w + "body")
+    sect_pr = next(c for c in reversed(list(body)) if c.tag == w + "sectPr")
+    sect_pr.remove(sect_pr.find(qn("w:pgSz")))
+    new_doc_xml = etree.tostring(root, xml_declaration=True, encoding="UTF-8",
+                                 standalone=True)
+
+    path = tmp_path / "no_pgsz_no_picture.docx"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for n in names:
+            zout.writestr(n, new_doc_xml if n == "word/document.xml" else zin.read(n))
+    zin.close()
+
+    got = _extract_bytes(path.name, path.read_bytes())
+    marked = [n for n in got.notes if ex.has_evidence_marker(n)]
+    unmeasurable = [n for n in marked if "could not be measured" in n.lower()]
+    assert not unmeasurable, (
+        f"a document with no picture at all owes no 'could not be "
+        f"measured' note, usable page size or not: {unmeasurable!r}; all "
+        f"notes={got.notes!r}")
+
+
+def test_a_final_section_with_no_usable_pgsz_discloses_unmeasurable_pictures(tmp_path):
+    """Carried gap 3: when the final section has no usable ``w:pgSz``, large-
+    picture disclosure used to be skipped SILENTLY. A marked note must say
+    pictures could not be measured against the page, mirroring the PDF
+    path's own wording when image geometry cannot be measured."""
+    import docx as _docx
+    from docx.shared import Inches
+    from lxml import etree
+    from PIL import Image
+
+    d = _docx.Document()
+    d.add_paragraph("BEFORE the unmeasurable picture.")
+    pixel_buf = io.BytesIO()
+    Image.new("RGB", (1, 1), (0, 0, 0)).save(pixel_buf, format="PNG")
+    d.add_picture(io.BytesIO(pixel_buf.getvalue()), width=Inches(6), height=Inches(8))
+    d.add_paragraph("AFTER the unmeasurable picture.")
+
+    buf = io.BytesIO()
+    d.save(buf)
+    base = buf.getvalue()
+
+    zin = zipfile.ZipFile(io.BytesIO(base))
+    names = zin.namelist()
+    root = etree.fromstring(zin.read("word/document.xml"))
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    body = next(c for c in root if c.tag == w + "body")
+    sect_pr = next(c for c in reversed(list(body)) if c.tag == w + "sectPr")
+    pg_sz = next((c for c in sect_pr if c.tag == w + "pgSz"), None)
+    assert pg_sz is not None, "python-docx's own sectPr must carry a w:pgSz to remove"
+    sect_pr.remove(pg_sz)
+    new_doc_xml = etree.tostring(root, xml_declaration=True, encoding="UTF-8",
+                                 standalone=True)
+
+    path = tmp_path / "no_pgsz.docx"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for n in names:
+            zout.writestr(n, new_doc_xml if n == "word/document.xml" else zin.read(n))
+    zin.close()
+
+    got = _extract_bytes(path.name, path.read_bytes())
+    marked = [n for n in got.notes if ex.has_evidence_marker(n)]
+    unmeasurable = [n for n in marked if "could not be measured" in n.lower()]
+    assert unmeasurable, (
+        f"expected a marked note saying pictures could not be measured "
+        f"against the page (no usable w:pgSz on the final section): "
+        f"marked={marked!r}; all notes={got.notes!r}")

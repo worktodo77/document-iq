@@ -95,6 +95,17 @@ _EXPECTED = {
     # the fidelity package changes what the page's TEXT and NOTES carry,
     # never the DOCX page-count contract.
     "16_word_constructs.docx": (1, {PageKind.SYNTHETIC}),
+    # D-50 stage 2b: embedded documents become child documents, nested up to
+    # two levels deep -- follows the "14_transmittal.eml/attached_report.pdf"
+    # key shape above, one row per recovered child.
+    "17_word_embeddings.docx": (1, {PageKind.SYNTHETIC}),
+    "17_word_embeddings.docx/Microsoft_Excel_Worksheet1.xlsx": (1, {PageKind.SYNTHETIC}),
+    "17_word_embeddings.docx/oleObject2.pdf": (1, {PageKind.NATIVE}),
+    "17_word_embeddings.docx/notice.eml": (1, {PageKind.SYNTHETIC}),
+    "17_word_embeddings.docx/notice.eml/attached.txt": (1, {PageKind.SYNTHETIC}),
+    "17_word_embeddings.docx/Microsoft_Word_Document1.docx": (1, {PageKind.SYNTHETIC}),
+    "17_word_embeddings.docx/Microsoft_Word_Document1.docx/"
+    "Microsoft_Excel_Worksheet1.xlsx": (1, {PageKind.SYNTHETIC}),
 }
 
 
