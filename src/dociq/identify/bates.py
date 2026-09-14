@@ -65,6 +65,7 @@ from dociq.contracts import (
 __all__ = [
     "BatesZone",
     "FOOTER_BLOCK_MAX_LINES",
+    "TRACKED_DELETION_LABEL",
     "BatesFormat",
     "BatesCandidate",
     "BatesProposal",
@@ -112,6 +113,11 @@ _TAIL_LINES_BASE = 4
 is allowed for. Four lines is what the detector looked at before D-25 and it is
 still the whole of what a page's own text contributes."""
 
+TRACKED_DELETION_LABEL = "[deleted by "
+"""The start of every line on which the Word reader lists a tracked deletion
+(D-56): ``[deleted by <author>] <text>``. Defined here, where the zone that
+must never read such a line is, and imported by the reader that writes it."""
+
 
 @dataclass(frozen=True, slots=True)
 class BatesZone:
@@ -129,12 +135,23 @@ class BatesZone:
 
     def slice_lines(self, text: str) -> tuple[tuple[int, str], ...]:
         """Zone lines as ``(line index, text)``, head first then tail, without
-        repeating a line when the page is shorter than the zone."""
+        repeating a line when the page is shorter than the zone.
+
+        A line listing a tracked deletion (:data:`TRACKED_DELETION_LABEL`,
+        D-56) is not a zone line and does not count toward either bound: the
+        zone is chosen from the other lines, so a Word page's zone is the one
+        it would have without its deletion list. Deleted text is not what the
+        document says, and a stamp-shaped number in it would otherwise be read
+        as the page's locator, or refuse the real one as ambiguous, whenever
+        the footer below it is shorter than the tail zone. Indices stay
+        positions in ``text``."""
         lines = [ln.strip() for ln in text.split("\n")]
+        eligible = [i for i, ln in enumerate(lines)
+                    if not ln.startswith(TRACKED_DELETION_LABEL)]
         picked: dict[int, str] = {}
-        for i in range(min(self.head_lines, len(lines))):
+        for i in eligible[:self.head_lines]:
             picked[i] = lines[i]
-        for i in range(max(0, len(lines) - self.tail_lines), len(lines)):
+        for i in eligible[max(0, len(eligible) - self.tail_lines):]:
             picked[i] = lines[i]
         return tuple((i, picked[i]) for i in sorted(picked) if picked[i])
 

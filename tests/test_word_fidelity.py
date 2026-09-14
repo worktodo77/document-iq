@@ -8,10 +8,11 @@ extractor that emitted paragraphs, then every table, then one note claiming
 the file had no page boundaries, or against the defect named in its
 docstring. Do not make a failure here pass by loosening an assertion.
 
-One behaviour per test, per the spec. Every assertion uses ``str.find``/
-``str.count`` and reports every position it computed, so a failure here is
-always an assertion with a diagnostic message -- never a bare ``ValueError``
-or ``IndexError`` from a sentinel that was never found.
+One behaviour per test, per the spec. A position test uses ``str.find``/
+``str.count`` and reports every position it computed; a built-package test
+compares the exact lines or notes and reports what it got. Either way a
+failure here is an assertion with a diagnostic message -- never a bare
+``ValueError`` or ``IndexError`` from a sentinel that was never found.
 """
 
 from __future__ import annotations
@@ -108,19 +109,25 @@ def test_content_controls_are_read():
 # ---------------------------------------------------------------------------
 
 
-def test_tracked_changes_default_view_keeps_insertions_and_discloses_omitted_deletions():
+def test_tracked_changes_keep_insertions_in_the_body_and_list_deletions_after_it():
+    """D-56: the body reads with tracked changes accepted, and the deleted
+    passage is listed after the notes and comments. Before the ruling this
+    test held the omission and its count note; a listed deletion is no longer
+    missing evidence, so no marked note may count it."""
     got = _pages("16_word_constructs.docx")
     text = got.pages[0].text
-    i_jackal, i_koala = text.find("JACKAL"), text.find("KOALA")
-    marker_note = next(
-        (n for n in got.notes if ex.has_evidence_marker(n) and "delet" in n.lower()),
-        None,
-    )
-    assert i_jackal != -1 and i_koala == -1 and marker_note is not None, (
-        f"JACKAL (tracked insertion) must be present at a real position, got "
-        f"{i_jackal}; KOALA (tracked deletion) must be absent from the "
-        f"default view, got {i_koala}; a marked note must say deleted text "
-        f"was not shown, got {marker_note!r}; all notes={got.notes!r}")
+    lines = text.split("\n")
+    i_jackal = text.find("JACKAL")
+    listed = [i for i, line in enumerate(lines) if line == "[deleted by DocIQ fixtures] KOALA"]
+    body_koala = [line for line in lines if "KOALA" in line and not line.startswith("[deleted by ")]
+    i_vulture = next((i for i, line in enumerate(lines) if "VULTURE" in line), -1)
+    marker_note = [n for n in got.notes if ex.has_evidence_marker(n) and "delet" in n.lower()]
+    assert (i_jackal != -1 and listed and not body_koala and listed[0] > i_vulture != -1
+            and not marker_note), (
+        f"JACKAL (tracked insertion) at {i_jackal}; KOALA must be listed once as "
+        f"'[deleted by DocIQ fixtures] KOALA' after the comment (VULTURE, line "
+        f"{i_vulture}), at lines {listed}, and never in the body: {body_koala!r}; "
+        f"no marked note may count a listed deletion: {marker_note!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -290,33 +297,51 @@ def test_the_page_note_does_not_deny_the_rendered_page_break_it_carries():
 # ---------------------------------------------------------------------------
 
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-_WT_TAG = "{%s}t" % _W_NS
-_WT_FIXED_PARTS = ("word/document.xml", "word/footnotes.xml",
-                    "word/endnotes.xml", "word/comments.xml")
+_WT_TAGS = ("{%s}t" % _W_NS, "{%s}delText" % _W_NS)
+_TEXTPATH_TAG = "{urn:schemas-microsoft-com:vml}textpath"
+_TEXT_REL_TYPES = ("header", "footer", "footnotes", "endnotes", "comments")
 
 
 def _wt_fragments(raw: bytes) -> list:
-    """Every non-blank ``w:t`` text fragment reachable from this DOCX's
-    text-bearing parts (document, headers, footers, footnotes, endnotes,
-    comments), skipping anything nested under ``mc:Fallback``.
+    """Every non-blank ``w:t`` and ``w:delText`` fragment, and every VML
+    ``v:textpath`` string, in this DOCX's main document part and in every
+    header, footer, footnotes, endnotes and comments part the main part's
+    relationships name, skipping anything nested under ``mc:Fallback``.
 
     An independent, from-the-XML reading of "what this file's text-bearing
     parts actually hold", deliberately not sharing a code path with
     ``_extract_docx`` -- so it can catch what that extractor drops rather
-    than agreeing with it by construction.
+    than agreeing with it by construction. The parts are found the way a
+    package names them, through ``_rels/.rels`` and the main part's own
+    relationships; this test once listed fixed file names, and so could not
+    see a reader that did the same.
     """
+    import posixpath
+
+    rel_ns = "{http://schemas.openxmlformats.org/package/2006/relationships}"
     fragments: list = []
     with zipfile.ZipFile(io.BytesIO(raw)) as z:
-        names = z.namelist()
-        wanted = [
-            n for n in names
-            if n in _WT_FIXED_PARTS
-            or (n.startswith("word/header") and n.endswith(".xml"))
-            or (n.startswith("word/footer") and n.endswith(".xml"))
-        ]
-        for name in wanted:
+        names = set(z.namelist())
+
+        def targets(source: str, kinds) -> list:
+            folder, _sep, base = source.rpartition("/")
+            rels_name = f"{folder}/_rels/{base}.rels" if folder else f"_rels/{base}.rels"
+            if rels_name not in names:
+                return []
+            out = []
+            for rel in etree.fromstring(z.read(rels_name)).iter(rel_ns + "Relationship"):
+                if rel.get("Type", "").rsplit("/", 1)[-1] in kinds and rel.get("TargetMode") != "External":
+                    target = rel.get("Target")
+                    out.append(posixpath.normpath(target.lstrip("/")) if target.startswith("/")
+                               else posixpath.normpath(posixpath.join(folder, target)))
+            return out
+
+        main = targets("", ("officeDocument",))[0]
+        for name in [main] + targets(main, _TEXT_REL_TYPES):
             root = etree.fromstring(z.read(name))
-            for t in root.iter(_WT_TAG):
+            found = [(t, t.text) for t in root.iter(*_WT_TAGS)]
+            found += [(t, t.get("string")) for t in root.iter(_TEXTPATH_TAG)]
+            for t, value in found:
                 under_fallback = False
                 ancestor = t.getparent()
                 while ancestor is not None:
@@ -326,8 +351,8 @@ def _wt_fragments(raw: bytes) -> list:
                     ancestor = ancestor.getparent()
                 if under_fallback:
                     continue
-                if t.text and t.text.strip():
-                    fragments.append(t.text)
+                if value and value.strip():
+                    fragments.append(value)
     return fragments
 
 
@@ -338,9 +363,10 @@ def test_every_w_t_fragment_reaches_the_page_text_or_is_excluded_by_name(name):
     page_text = normalize(_page_text(name))
     missing = [f for f in fragments if normalize(f) not in page_text]
     assert not missing, (
-        f"{name}: {len(missing)} of {len(fragments)} w:t fragment(s) from "
-        f"document.xml/header*.xml/footer*.xml/footnotes.xml/endnotes.xml/"
-        f"comments.xml do not appear in the normalized page text: {missing!r}")
+        f"{name}: {len(missing)} of {len(fragments)} w:t, w:delText or "
+        f"v:textpath fragment(s) from the main part and its related header, "
+        f"footer, footnotes, endnotes and comments parts do not appear in the "
+        f"normalized page text: {missing!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +706,13 @@ def test_unread_constructs_in_footer_endnote_and_comment(tmp_path):
     assert "</Types>" in ct
     ct = ct.replace("</Types>", add_ct + "</Types>")
     rpfx = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
-    add_rel = '<Relationship Id="rIdFooter1" Type="' + rpfx + 'footer" Target="footer1.xml"/>'
+    # The endnotes and comments parts are related from the main part, as in
+    # any package Word writes: a part nothing relates is not the document's
+    # and is not read. This test first built them unrelated, which only a
+    # reader that found parts by file name could pass.
+    add_rel = ('<Relationship Id="rIdFooter1" Type="' + rpfx + 'footer" Target="footer1.xml"/>'
+               '<Relationship Id="rIdEndnotes" Type="' + rpfx + 'endnotes" Target="endnotes.xml"/>'
+               '<Relationship Id="rIdComments" Type="' + rpfx + 'comments" Target="comments.xml"/>')
     assert "</Relationships>" in rels
     rels = rels.replace("</Relationships>", add_rel + "</Relationships>")
 
@@ -980,6 +1012,11 @@ _RAW_NS = (
     'xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" '
     'xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
     'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" '
+    'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
+    'xmlns:w16se="http://schemas.microsoft.com/office/word/2015/wordml/symex" '
+    'xmlns:v="urn:schemas-microsoft-com:vml" '
+    'xmlns:o="urn:schemas-microsoft-com:office:office" '
+    'xmlns:inv="urn:invented:markup-this-reader-does-not-know" '
     'mc:Ignorable="w14"'
 )
 _RAW_RT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
@@ -1088,10 +1125,14 @@ def test_run_separators_table_joins_and_note_labels_render_exactly():
                       '<w:footnote w:id="1">' + _p(_t("NOTE")) + '</w:footnote>')
     text, notes = _read(_raw_docx(body, parts={"word/footnotes.xml": footnotes},
                                   rels=[("rIdFn", "footnotes", "footnotes.xml")]))
+    # D-56: the moved-from text names no move range, so no destination is
+    # known for it and it is listed as deleted; the deleted paragraph mark
+    # holds no character and lists nothing.
     assert text.split("\n") == [
         "A\tB", "C", "D", "E", "F-G", "LEFT\tRIGHT", "MOVED", "MARK",
-        "R1C1\tV", "R2C1", "REF", "[footnote 1] NOTE"], text.split("\n")
-    assert f"{ex.M_WORD_TRACKED_DELETION}: 1" in notes, notes
+        "R1C1\tV", "R2C1", "REF", "[footnote 1] NOTE",
+        "[deleted by Invented Reviewer] GONE"], text.split("\n")
+    assert not any(ex.M_WORD_TRACKED_DELETION in n for n in notes), notes
 
 
 def test_rows_and_cells_inside_content_controls_and_custom_xml_are_read():
@@ -1116,13 +1157,13 @@ def test_rows_and_cells_inside_content_controls_and_custom_xml_are_read():
 
 def test_a_symbol_character_is_rendered_or_disclosed():
     """``w:sym`` holds its character as a hex code. A real Unicode code point
-    is text; one in the private-use area belongs to a symbol font and has no
-    meaning as a character, so it is counted in a marked note. Before, both
-    vanished and joined the words beside them."""
+    is text; a Wingdings code names a picture no standard table maps, so it
+    keeps its place as U+FFFD (it used to vanish and join the words beside
+    it) and is counted in a marked note."""
     body = _p(_t("TICK"), '<w:r><w:sym w:font="Segoe UI Symbol" w:char="2713"/></w:r>',
               _t("BOX"), '<w:r><w:sym w:font="Wingdings" w:char="F0FC"/></w:r>')
     text, notes = _read(_raw_docx(body))
-    assert text == "TICK\u2713BOX", repr(text)
+    assert text == "TICK\u2713BOX\ufffd", repr(text)
     marked = [n for n in notes if ex.has_evidence_marker(n) and "symbol" in n.lower()]
     assert len(marked) == 1 and re.search(r"\b1 symbol", marked[0]), notes
 
@@ -1270,11 +1311,13 @@ def test_fixture16_header_note_and_footer_boundaries_are_exact():
     lines = _page_text("16_word_constructs.docx").split("\n")
     assert lines[:3] == ["YAK first-page header line.", "XERUS default header line.",
                          "AARDVARK opens this synthetic construct fixture."], lines[:3]
-    assert lines[-5:] == [
+    # D-56 puts the deletion list between the comments and the footer.
+    assert lines[-6:] == [
         "[footnote 1]  SALAMANDER is the footnote text.",
         "[endnote 1]  URCHIN is the endnote text.",
         "[comment by WALRUS Reviewer] VULTURE flags this passage for review.",
-        "ZEBU default footer line one.", "MNFV 000777"], lines[-5:]
+        "[deleted by DocIQ fixtures] KOALA",
+        "ZEBU default footer line one.", "MNFV 000777"], lines[-6:]
 
 
 @pytest.mark.parametrize("even_and_odd", [False, True])
@@ -1297,3 +1340,586 @@ def test_a_shared_header_part_is_read_once_and_even_pages_follow_settings(even_a
         parts=parts, rels=rels))
     expected = (["SHARED-HEADER", "EVEN-HEADER"] if even_and_odd else ["SHARED-HEADER"])
     assert text.split("\n") == expected + ["BODY-ONE", "BODY-TWO"], text
+
+
+# ---------------------------------------------------------------------------
+# D-56: tracked deletions are listed after the body. The Word spec addendum
+# (2026-09-14) states the order, the grouping and each shape pinned here.
+# ---------------------------------------------------------------------------
+
+_WHEN = 'w:date="2018-05-06T00:00:00Z"'
+
+
+def _del(author: str, *runs: str) -> str:
+    return f'<w:del w:id="1" w:author="{author}" {_WHEN}>' + "".join(runs) + "</w:del>"
+
+
+def _dt(text: str) -> str:
+    return f'<w:r><w:delText xml:space="preserve">{text}</w:delText></w:r>'
+
+
+def _text_box(blocks: str) -> str:
+    return ('<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:inline>'
+            '<wp:extent cx="914400" cy="914400"/><wp:docPr id="7" name="tb"/><a:graphic>'
+            '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+            '<wps:wsp><wps:txbx><w:txbxContent>' + blocks + '</w:txbxContent></wps:txbx>'
+            '</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice>'
+            '<mc:Fallback><w:pict/></mc:Fallback></mc:AlternateContent></w:r>')
+
+
+def test_tracked_deletions_are_listed_after_the_notes_and_before_the_footer():
+    """D-56. The body reads with changes accepted. After the footnotes,
+    endnotes and comments, and before the footer, each deleted passage is one
+    line, ``[deleted by <author>] <text>``, in page-text order: the header
+    parts' deletions, the body's, the notes' and comments', then the footer
+    parts'. Consecutive deleted runs by one author in one paragraph are one
+    passage (formatting splits a deletion into several w:del runs); a kept
+    character, another author, or the paragraph's end starts the next one.
+    A table cell's deletions are listed in the body's order, and a text
+    box's after its anchoring paragraph's own."""
+    cell = (f"<w:tbl><w:tr><w:tc>{_p(_t('CELL'), _del('Cy', _dt('GONECELL')))}</w:tc>"
+            "</w:tr></w:tbl>")
+    bold = '<w:r><w:rPr><w:b/></w:rPr><w:delText>two</w:delText></w:r>'
+    body = (
+        _p(_t("ALPHA "), _del("Ann", _dt("one ")), '<w:bookmarkStart w:id="0" w:name="x"/>',
+           _del("Ann", bold), _t(" BETA"), _del("Bob", _dt("three")))
+        + _p(_del("Ann", _dt("x")), _del("Bob", _dt("y")), _del("Ann", _dt("z")))
+        + cell
+        + _p(_t("ANCHOR"), _text_box(_p(_t("BOXTEXT"), _del("Dee", _dt("GONEBOX")))),
+             _t(" TAIL"), _del("Ann", _dt("AFTERBOX")))
+        + _p(_t("REF"), '<w:r><w:footnoteReference w:id="1"/></w:r>'))
+    parts = {
+        "word/header1.xml": _part("hdr", _p(_t("HDR"), _del("Ann", _dt("OLDHDR")))),
+        "word/footer1.xml": _part("ftr", _p(_t("FTR"), _del("Gus", _dt("OLDFTR")))),
+        "word/footnotes.xml": _part("footnotes", '<w:footnote w:id="1">'
+                                    + _p(_t("NOTE"), _del("Eve", _dt("GONENOTE")))
+                                    + "</w:footnote>"),
+        "word/comments.xml": _part("comments", '<w:comment w:id="0" w:author="Rev">'
+                                   + _p(_t("CMT"), _del("Fay", _dt("GONECMT")))
+                                   + "</w:comment>"),
+    }
+    rels = [("rIdH", "header", "header1.xml"), ("rIdF", "footer", "footer1.xml"),
+            ("rIdFn", "footnotes", "footnotes.xml"), ("rIdC", "comments", "comments.xml")]
+    sect = ('<w:headerReference w:type="default" r:id="rIdH"/>'
+            '<w:footerReference w:type="default" r:id="rIdF"/>')
+    text, notes = _read(_raw_docx(body, sect=sect, parts=parts, rels=rels))
+    assert text.split("\n") == [
+        "HDR", "ALPHA  BETA", "", "CELL", "ANCHOR TAIL", "BOXTEXT", "REF",
+        "[footnote 1] NOTE", "[comment by Rev] CMT",
+        "[deleted by Ann] OLDHDR",
+        "[deleted by Ann] one two", "[deleted by Bob] three",
+        "[deleted by Ann] x", "[deleted by Bob] y", "[deleted by Ann] z",
+        "[deleted by Cy] GONECELL", "[deleted by Ann] AFTERBOX", "[deleted by Dee] GONEBOX",
+        "[deleted by Eve] GONENOTE", "[deleted by Fay] GONECMT",
+        "[deleted by Gus] OLDFTR", "FTR"], text.split("\n")
+    assert not any(ex.has_evidence_marker(n) for n in notes), notes
+
+
+def test_moved_text_is_listed_only_when_its_destination_is_not_in_the_document():
+    """D-56 left open where moved-from text goes. Moved-from text whose move
+    names a ``w:moveToRangeStart`` the reader read is not listed: its words
+    stand in the body where they were moved to, and listing them again would
+    put every date and number in them into the output twice; a plain note
+    counts such moves. Moved-from text with no destination (no move range,
+    or a name no moveTo carries) reads, with changes accepted, as deleted,
+    and is listed."""
+    move_from = lambda author, text: (  # noqa: E731
+        f'<w:moveFrom w:id="2" w:author="{author}" {_WHEN}>' + _t(text) + "</w:moveFrom>")
+    body = (
+        f'<w:moveFromRangeStart w:id="11" w:name="move1" w:author="Ann" {_WHEN}/>'
+        + _p(_t("P1 "), move_from("Ann", "MOVEDTEXT"))
+        + '<w:moveFromRangeEnd w:id="11"/>'
+        + _p(_t("MIDDLE"))
+        + f'<w:moveToRangeStart w:id="13" w:name="move1" w:author="Ann" {_WHEN}/>'
+        + _p(f'<w:moveTo w:id="14" w:author="Ann" {_WHEN}>' + _t("MOVEDTEXT") + "</w:moveTo>")
+        + '<w:moveToRangeEnd w:id="13"/>'
+        + _p(_t("P2 "), move_from("Bob", "ORPHANMOVE"))
+        + _p(_t("P3 "), f'<w:moveFromRangeStart w:id="16" w:name="move9" w:author="Cy" {_WHEN}/>',
+             move_from("Cy", "NODEST"), '<w:moveFromRangeEnd w:id="16"/>'))
+    text, notes = _read(_raw_docx(body))
+    assert text.split("\n") == ["P1", "MIDDLE", "MOVEDTEXT", "P2", "P3",
+                                "[deleted by Bob] ORPHANMOVE", "[deleted by Cy] NODEST"], (
+        text.split("\n"))
+    moved = [n for n in notes if "moved" in n]
+    assert moved == ["1 passage(s) moved under tracked changes are shown only where "
+                     "they were moved to"], notes
+    assert not any(ex.has_evidence_marker(n) for n in notes), notes
+
+
+def test_nested_revisions_field_results_paragraph_marks_and_rows():
+    """D-56, the remaining shapes. A deletion inside an insertion, and an
+    insertion inside a deletion, are deleted text by the deletion's author. A
+    deleted field result is listed and its code is not. A deleted paragraph
+    mark holds no character: nothing is listed and the two paragraphs keep
+    their own lines. A deleted table row leaves the body, and its text is
+    listed once whether only the row, or also its runs, carry the deletion.
+    A line break inside a deleted passage is a space, so the label stands on
+    the one line the passage occupies."""
+    field = lambda *runs: "".join(runs)  # noqa: E731
+    body = (
+        _p(_t("A"), f'<w:ins w:id="3" w:author="Ann" {_WHEN}>' + _del("Bob", _dt("INSDEL"))
+           + "</w:ins>", _t("B"))
+        + _p(_t("C"), _del("Cy", f'<w:ins w:id="4" w:author="Dee" {_WHEN}>' + _dt("DELINS")
+                           + "</w:ins>"), _t("D"))
+        + _p(_t("F1"), _del("Ann", field(
+            '<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+            '<w:r><w:delInstrText xml:space="preserve"> DATE </w:delInstrText></w:r>',
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r>', _dt("12 March 2019"),
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r>')))
+        + _p('<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+             '<w:r><w:instrText xml:space="preserve"> REF Clause </w:instrText></w:r>',
+             '<w:r><w:fldChar w:fldCharType="separate"/></w:r>', _del("Bob", _dt("OLDRESULT")),
+             _t("NEWRESULT"), '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+        + _p(_t("MERGE1"), ppr=f'<w:pPr><w:rPr><w:del w:id="5" w:author="Cy" {_WHEN}/></w:rPr></w:pPr>')
+        + _p(_t("MERGE2"))
+        + "<w:tbl>"
+        + f'<w:tr><w:trPr><w:del w:id="6" w:author="Dee" {_WHEN}/></w:trPr><w:tc>'
+        + _p(_t("ROWGONE")) + "</w:tc></w:tr>"
+        + f'<w:tr><w:trPr><w:del w:id="7" w:author="Eve" {_WHEN}/></w:trPr><w:tc>'
+        + _p(_del("Eve", _dt("WORDROW"))) + "</w:tc></w:tr>"
+        + "<w:tr><w:tc>" + _p(_t("ROWKEPT")) + "</w:tc>"
+        + f'<w:tc><w:tcPr><w:cellDel w:id="8" w:author="Gus" {_WHEN}/></w:tcPr>'
+        + _p(_t("CELLGONE")) + "</w:tc></w:tr></w:tbl>"
+        + _p(_t("BR"), _del("Fay", '<w:r><w:delText>L1</w:delText><w:br/>'
+                                    '<w:delText>L2</w:delText></w:r>')))
+    text, notes = _read(_raw_docx(body))
+    assert text.split("\n") == [
+        "AB", "CD", "F1", "NEWRESULT", "MERGE1", "MERGE2", "ROWKEPT", "BR",
+        "[deleted by Bob] INSDEL", "[deleted by Cy] DELINS", "[deleted by Ann] 12 March 2019",
+        "[deleted by Bob] OLDRESULT", "[deleted by Dee] ROWGONE", "[deleted by Eve] WORDROW",
+        "[deleted by Gus] CELLGONE", "[deleted by Fay] L1 L2"], text.split("\n")
+    assert not any(ex.has_evidence_marker(n) for n in notes), notes
+
+
+def test_a_date_or_a_stamp_in_deleted_text_is_never_the_documents_own():
+    """D-56's reason for listing deletions after the body: a date in deleted
+    text never becomes the first date while the body has one, and a
+    stamp-shaped number in it is never read from a Bates zone. The listing
+    sits above a one-line footer, inside the tail zone by position, so the
+    zone itself must skip it: otherwise the deleted number refuses the
+    footer's real stamp as ambiguous, or becomes the locator of a page that
+    has none."""
+    from dociq.identify.bates import (BatesDecision, DecisionStatus, apply_bates,
+                                      detect_candidates, propose_format)
+    from dociq.ingest.walker import _dated
+
+    body = (_p(_t("Letter of 3 March 2019, invented."))
+            + _p(_t("Superseded text:"), _del("Ann", _dt("issued 12 January 2018 as MNFV 000999"))))
+    got = ex.extract("stamped.docx", _raw_docx(
+        body, sect='<w:footerReference w:type="default" r:id="rIdF"/>',
+        parts={"word/footer1.xml": _part("ftr", _p(_t("MNFV 000777")))},
+        rels=[("rIdF", "footer", "footer1.xml")]))
+    lines = got.pages[0].text.split("\n")
+    assert lines == ["Letter of 3 March 2019, invented.", "Superseded text:",
+                     "[deleted by Ann] issued 12 January 2018 as MNFV 000999", "MNFV 000777"], lines
+    dates, _notes = _dated(got.pages)
+    assert dates[:1] == ("2019-03-03",), dates
+    doc = document("stamped.docx", got.pages)
+    assert [c.raw for c in detect_candidates((doc,))] == ["MNFV 000777"]
+    decision = BatesDecision(DecisionStatus.CONFIRMED, propose_format((doc,), min_pages=1).format)
+    assert apply_bates((doc,), decision)[0].pages[0].bates == "MNFV 000777"
+
+    bare = ex.extract("bare.docx", _raw_docx(_p(_t("Short note.")) + _p(_del("Ann", _dt("MNFV 000999")))))
+    assert bare.pages[0].text.split("\n") == ["Short note.", "", "[deleted by Ann] MNFV 000999"], (
+        bare.pages[0].text)
+    bare_doc = document("bare.docx", bare.pages)
+    assert detect_candidates((bare_doc,)) == ()
+    assert apply_bates((bare_doc,), decision)[0].pages[0].bates is None
+
+
+def test_a_deleted_chart_is_counted_as_a_deletion_not_as_an_unread_chart():
+    """A deleted picture, chart or object holds nothing to list. It is counted
+    under the deletion marker, once per outermost graphic, and never as an
+    unread chart the document shows."""
+    chart = ('<w:r><w:drawing><wp:inline><wp:extent cx="1828800" cy="1828800"/>'
+             '<wp:docPr id="1" name="c"/><a:graphic><a:graphicData '
+             'uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+             '<c:chart r:id="rIdC"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+    text, notes = _read(_raw_docx(_p(_t("KEPT"), _del("Ann", chart))))
+    assert text == "KEPT", text
+    marked = [n for n in notes if ex.has_evidence_marker(n)]
+    assert marked == [f"{ex.M_WORD_TRACKED_DELETION}: 1 deleted drawing(s), picture(s) or "
+                      "object(s); any text inside them is listed with the deletions"], notes
+
+
+# ---------------------------------------------------------------------------
+# Parts are found through the main part's relationships, never by file name
+# ---------------------------------------------------------------------------
+
+
+def test_notes_comments_and_settings_are_found_through_the_main_parts_relationships():
+    """Footnotes, endnotes, comments and settings were opened by their default
+    file names. A valid package that names them otherwise lost the notes and
+    comments with no marker and called a displayed even-page header hidden;
+    stale parts left under the default names were read as the document's
+    own. Unrelated parts are not the document's: not read, and a plain note
+    counts the ones holding text."""
+    hdr = lambda text: _part("hdr", _p(_t(text)))  # noqa: E731
+    parts = {
+        "word/header1.xml": hdr("HDR-DEFAULT"), "word/header2.xml": hdr("HDR-EVEN"),
+        "word/footnotes2.xml": _part("footnotes", '<w:footnote w:id="2">'
+                                     + _p(_t("FOOT-PANGOLIN")) + "</w:footnote>"),
+        "word/endnotes7.xml": _part("endnotes", '<w:endnote w:id="3">'
+                                    + _p(_t("END-QUOKKA")) + "</w:endnote>"),
+        "word/comments1.xml": _part("comments", '<w:comment w:id="0" w:author="Made-Up Person">'
+                                    + _p(_t("CMT-AXOLOTL")) + "</w:comment>"),
+        "word/settings3.xml": _part("settings", "<w:evenAndOddHeaders/>"),
+        "word/footnotes.xml": _part("footnotes", '<w:footnote w:id="9">'
+                                    + _p(_t("DECOY-STALE-FOOT")) + "</w:footnote>"),
+        "word/comments.xml": _part("comments", '<w:comment w:id="9" w:author="Stale">'
+                                   + _p(_t("DECOY-STALE-CMT")) + "</w:comment>"),
+        "word/settings.xml": _part("settings", '<w:evenAndOddHeaders w:val="0"/>'),
+    }
+    rels = [("rIdH", "header", "header1.xml"), ("rIdE", "header", "header2.xml"),
+            ("rIdFn", "footnotes", "footnotes2.xml"), ("rIdEn", "endnotes", "endnotes7.xml"),
+            ("rIdC", "comments", "comments1.xml"), ("rIdS", "settings", "settings3.xml")]
+    sect = ('<w:headerReference w:type="default" r:id="rIdH"/>'
+            '<w:headerReference w:type="even" r:id="rIdE"/>')
+    text, notes = _read(_raw_docx(_p(_t("BODY")), sect=sect, parts=parts, rels=rels))
+    assert text.split("\n") == [
+        "HDR-DEFAULT", "HDR-EVEN", "BODY", "[footnote 2] FOOT-PANGOLIN",
+        "[endnote 3] END-QUOKKA", "[comment by Made-Up Person] CMT-AXOLOTL"], text.split("\n")
+    assert not any(ex.has_evidence_marker(n) for n in notes), notes
+    assert ("2 Word part(s) holding text that no relationship in the package reaches "
+            "were not read; Word does not show them") in notes, notes
+
+
+def test_parts_outside_word_resolve_against_the_folder_of_the_part_naming_them():
+    """Relationship targets resolve against the folder of the part that names
+    them (``doc/``, not ``word/``), and a footnotes part is whatever the
+    footnotes relationship names, here ``notes.xml``."""
+    text, _notes = _read(_raw_docx(
+        _p(_t("BODY")), main="doc/main.xml",
+        sect='<w:headerReference w:type="default" r:id="rIdH"/>',
+        parts={"doc/header1.xml": _part("hdr", _p(_t("HEADER-IN-DOC-FOLDER"))),
+               "doc/notes.xml": _part("footnotes", '<w:footnote w:id="1">'
+                                      + _p(_t("NOTE-IN-DOC-FOLDER")) + "</w:footnote>")},
+        rels=[("rIdH", "header", "header1.xml"), ("rIdFn", "footnotes", "notes.xml")]))
+    assert text.split("\n") == ["HEADER-IN-DOC-FOLDER", "BODY",
+                                "[footnote 1] NOTE-IN-DOC-FOLDER"], text.split("\n")
+
+
+# ---------------------------------------------------------------------------
+# Symbols: the Symbol font mapped, anything unmapped kept in place and named
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("font,char,expected", [
+    ("Symbol", "F0B1", "\u00b1"), ("Symbol", "F0B3", "\u2265"), ("Symbol", "F0B0", "\u00b0"),
+    ("Symbol", "00B1", "\u00b1"), ("Symbol", "0061", "\u03b1"), ("symbol", "F0E6", "\u239b"),
+    ("Symbol", "F0D2", "\u00ae"), ("Segoe UI Symbol", "2713", "\u2713"),
+])
+def test_a_symbol_font_character_is_rendered_in_place(font, char, expected):
+    """A Symbol-font ``w:sym`` was deleted in place, so "10 ± 2 mm" read
+    "102 mm", a figure the document never states, under a note that called
+    the character untranslatable."""
+    text, notes = _read(_raw_docx(_p(_t("Tolerance 10"),
+                                     f'<w:r><w:sym w:font="{font}" w:char="{char}"/></w:r>',
+                                     _t("2 mm"))))
+    assert text == f"Tolerance 10{expected}2 mm", repr(text)
+    assert not any("symbol" in n.lower() for n in notes), notes
+
+
+def test_the_symbol_font_table_matches_the_adobe_symbol_encoding():
+    """The table is checked against reportlab's ``symbol`` codec, the Adobe
+    Symbol encoding: every code it maps to an ordinary character maps to the
+    same one here, every code it leaves undefined is the placeholder, and each
+    private-use value it uses is replaced by the character it draws."""
+    import codecs
+
+    import reportlab.pdfbase.rl_codecs as rl
+
+    rl.RL_Codecs.register()
+    codecs.lookup("symbol")
+    drawn = {0xF6D9: "\u00a9", 0xF6DA: "\u00ae", 0xF6DB: "\u2122", 0xF8E6: "\u23d0",
+             0xF8E7: "\u23af", 0xF8E8: "\u00ae", 0xF8E9: "\u00a9", 0xF8EA: "\u2122"}
+    drawn.update({pua: chr(u) for pua, u in zip(
+        range(0xF8EB, 0xF8FF),
+        [0x239B, 0x239C, 0x239D, 0x23A1, 0x23A2, 0x23A3, 0x23A7, 0x23A8, 0x23A9, 0x23AA,
+         0x23AE, 0x239E, 0x239F, 0x23A0, 0x23A4, 0x23A5, 0x23A6, 0x23AB, 0x23AC, 0x23AD])})
+    wrong = []
+    for code in list(range(0x20, 0x7F)) + list(range(0xA0, 0x100)):
+        try:
+            theirs = bytes([code]).decode("symbol")
+        except UnicodeDecodeError:
+            theirs = ex.SYMBOL_PLACEHOLDER
+        if 0xE000 <= ord(theirs) <= 0xF8FF:
+            theirs = drawn.get(ord(theirs), ex.SYMBOL_PLACEHOLDER)
+        ours = (ex._SYMBOL_FONT_TABLE[0][code - 0x20] if code < 0x7F
+                else ex._SYMBOL_FONT_TABLE[1][code - 0xA0])
+        if ours != theirs:
+            wrong.append((hex(code), ours, theirs))
+    assert len(ex._SYMBOL_FONT_TABLE[0]) == 95 and len(ex._SYMBOL_FONT_TABLE[1]) == 96
+    assert not wrong, wrong
+
+
+def test_an_unmapped_symbol_keeps_its_place_and_is_disclosed():
+    """A code no standard table maps (Wingdings, whose ``00FC`` is a tick and
+    not u-umlaut; the Symbol font's radical extender; a surrogate) stands as
+    U+FFFD where it was, never nothing, and a marked note names the count and
+    the fonts. A symbol inside a field's code is code, not text."""
+    sym = lambda font, char: f'<w:r><w:sym w:font="{font}" w:char="{char}"/></w:r>'  # noqa: E731
+    body = (_p(_t("ITEM"), sym("Wingdings", "F0FC"), _t("DONE"), sym("Wingdings", "00FC"),
+               _t("X"), sym("Symbol", "F060"), _t("Y"), sym("Invented Font", "D800"), _t("Z"))
+            + _p('<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+                 '<w:r><w:instrText xml:space="preserve"> QUOTE </w:instrText></w:r>',
+                 sym("Symbol", "F0B1"), '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+                 _t("SHOWN"), '<w:r><w:fldChar w:fldCharType="end"/></w:r>'))
+    text, notes = _read(_raw_docx(body))
+    assert text.split("\n") == ["ITEM\ufffdDONE\ufffdX\ufffdY\ufffdZ", "SHOWN"], repr(text)
+    marked = [n for n in notes if ex.has_evidence_marker(n) and "symbol" in n.lower()]
+    assert marked == [f"{ex.M_WORD_UNREAD}: 4 symbol character(s) with no standard text "
+                      "mapping (font(s): Invented Font, Symbol, Wingdings), each shown as "
+                      "U+FFFD"], notes
+
+
+def test_a_symex_character_is_read_once_and_an_unknown_choice_falls_back():
+    """``w16se:symEx`` (Word 2016+) holds its character like ``w:sym``, inside
+    an ``mc:Choice`` whose Fallback repeats it; it read as nothing, with no
+    note. A Choice requiring markup this reader does not understand is not
+    taken: its Fallback is what the markup-compatibility rules give such a
+    reader."""
+    body = (_p(_t("Status "), '<mc:AlternateContent><mc:Choice Requires="w16se"><w:r>'
+               '<w16se:symEx w16se:font="Segoe UI Emoji" w16se:char="2705"/></w:r></mc:Choice>'
+               '<mc:Fallback><w:r><w:t>\u2705</w:t></w:r></mc:Fallback></mc:AlternateContent>',
+               _t(" accepted"))
+            + _p('<mc:AlternateContent><mc:Choice Requires="inv"><w:r><w:t>CHOICE-UNKNOWN</w:t>'
+                 '</w:r></mc:Choice><mc:Fallback><w:r><w:t>FALLBACK-READ</w:t></w:r>'
+                 '</mc:Fallback></mc:AlternateContent>'))
+    text, notes = _read(_raw_docx(body))
+    assert text.split("\n") == ["Status \u2705 accepted", "FALLBACK-READ"], text.split("\n")
+    assert not any(ex.has_evidence_marker(n) for n in notes), notes
+
+
+# ---------------------------------------------------------------------------
+# Text kept outside w:t: watermarks and legacy form fields; rows in alternate
+# content; header parts no section displays
+# ---------------------------------------------------------------------------
+
+_WATERMARK = ('<w:r><w:pict><v:shapetype id="_x0000_t136" coordsize="21600,21600"/>'
+              '<v:shape id="PowerPlusWaterMarkObject1" type="#_x0000_t136" '
+              'style="position:absolute;rotation:315">'
+              '<v:textpath style="font-family:Calibri" string="{text}"/></v:shape></w:pict></w:r>')
+
+
+def test_a_watermark_is_read_as_its_own_line_after_its_anchor():
+    """A VML watermark keeps its text only in ``v:textpath/@string``; a DRAFT or
+    SUPERSEDED stamp vanished with no note. It is read as a line of its own
+    directly after the paragraph that anchors it, as a text box is."""
+    text, notes = _read(_raw_docx(
+        _p(_t("BODYTEXT")), sect='<w:headerReference w:type="default" r:id="rIdH"/>',
+        parts={"word/header1.xml": _part("hdr", _p(_t("HDRTEXT"), _WATERMARK.format(
+            text="DRAFT-NOT-FOR-CONSTRUCTION")) + _p(_t("HDRLINE2")))},
+        rels=[("rIdH", "header", "header1.xml")]))
+    assert text.split("\n") == ["HDRTEXT", "DRAFT-NOT-FOR-CONSTRUCTION", "HDRLINE2",
+                                "BODYTEXT"], text.split("\n")
+    assert not any(ex.has_evidence_marker(n) for n in notes), notes
+
+
+@pytest.mark.parametrize("hidden_part", ["watermark_only", "deletion_only", "unreadable"])
+def test_a_header_part_no_section_displays_counts_whatever_content_it_holds(hidden_part):
+    """Whether an undisplayed header part holds content is decided by the
+    reader itself, so it can never be narrower than what the reader reads: it
+    counted ``w:t`` only, and a hidden part holding only a watermark or only
+    deleted text was not disclosed. A part that will not parse counts too."""
+    content = {"watermark_only": _part("hdr", _p(_WATERMARK.format(text="HIDDENWM"))),
+               "deletion_only": _part("hdr", _p(_del("Ann", _dt("HIDDENDEL")))),
+               "unreadable": "<w:hdr this is not xml"}[hidden_part]
+    text, notes = _read(_raw_docx(
+        _p(_t("BODYTEXT")),
+        sect=('<w:headerReference w:type="first" r:id="rIdF"/>'
+              '<w:headerReference w:type="default" r:id="rIdH"/>'),
+        parts={"word/header1.xml": _part("hdr", _p(_t("DEFAULTHDR"))),
+               "word/coverpage.xml": content},
+        rels=[("rIdH", "header", "header1.xml"), ("rIdF", "header", "coverpage.xml")]))
+    assert text.split("\n") == ["DEFAULTHDR", "BODYTEXT"], text.split("\n")
+    marked = [n for n in notes if ex.has_evidence_marker(n) and "header/footer part" in n]
+    assert len(marked) == 1 and re.search(r"\b1 header/footer part", marked[0]), notes
+
+
+@pytest.mark.parametrize("first_footer_type", ["footer", "invented"])
+def test_header_and_footer_parts_no_section_references_are_disclosed(first_footer_type):
+    """A header part the main part relates but no section references, and a
+    first-page footer without ``w:titlePg``, are each a part no section
+    displays; both were dropped with no note (the footer because only header
+    references were counted). A footer reference is counted even when its
+    relationship is not typed as a footer."""
+    text, notes = _read(_raw_docx(
+        _p(_t("BODYTEXT")),
+        sect=('<w:footerReference w:type="default" r:id="rIdD"/>'
+              '<w:footerReference w:type="first" r:id="rIdFF"/>'),
+        parts={"word/header1.xml": _part("hdr", _p(_t("RELATEDHEADER"))),
+               "word/footer1.xml": _part("ftr", _p(_t("SHOWNFOOTER"))),
+               "word/footer2.xml": _part("ftr", _p(_t("FIRSTFOOTER")))},
+        rels=[("rIdH", "header", "header1.xml"), ("rIdD", "footer", "footer1.xml"),
+              ("rIdFF", first_footer_type, "footer2.xml")]))
+    assert text.split("\n") == ["BODYTEXT", "SHOWNFOOTER"], text.split("\n")
+    marked = [n for n in notes if ex.has_evidence_marker(n) and "header/footer part" in n]
+    assert len(marked) == 1 and re.search(r"\b2 header/footer part", marked[0]), notes
+
+
+def test_legacy_form_field_values_and_rows_inside_alternate_content_are_read():
+    """A legacy check box or drop-down shows its value from ``w:ffData``, not
+    from a result run, and read as nothing ("Approved:  by engineer"). A
+    table row wrapped in ``mc:AlternateContent`` was dropped, as rows in
+    content controls once were."""
+    def checkbox(default: str, checked: str = "") -> str:
+        return ('<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Check1"/>'
+                f'<w:enabled/><w:checkBox><w:sizeAuto/><w:default w:val="{default}"/>{checked}'
+                '</w:checkBox></w:ffData></w:fldChar></w:r>'
+                '<w:r><w:instrText xml:space="preserve"> FORMCHECKBOX </w:instrText></w:r>'
+                '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+    dropdown = ('<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Drop1"/>'
+                '<w:ddList><w:result w:val="1"/><w:listEntry w:val="PENDING"/>'
+                '<w:listEntry w:val="APPROVED"/></w:ddList></w:ffData></w:fldChar></w:r>'
+                '<w:r><w:instrText xml:space="preserve"> FORMDROPDOWN </w:instrText></w:r>'
+                '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+    cell = lambda text: f"<w:tc>{_p(_t(text))}</w:tc>"  # noqa: E731
+    body = (_p(_t("Approved: "), checkbox("1"), _t(" by engineer"))
+            + _p(_t("Rejected: "), checkbox("1", '<w:checked w:val="0"/>'), _t(" end"))
+            + _p(_t("Status: "), dropdown)
+            + "<w:tbl><w:tr>" + cell("ROW1") + "</w:tr>"
+            + '<mc:AlternateContent><mc:Choice Requires="w14"><w:tr>' + cell("ROWCHOICE")
+            + "</w:tr></mc:Choice><mc:Fallback><w:tr>" + cell("ROWFALLBACK")
+            + "</w:tr></mc:Fallback></mc:AlternateContent></w:tbl>")
+    text, _notes = _read(_raw_docx(body))
+    assert text.split("\n") == ["Approved: \u2612 by engineer", "Rejected: \u2610 end",
+                                "Status: APPROVED", "ROW1", "ROWCHOICE"], text.split("\n")
+
+
+def test_a_field_code_running_on_past_a_paragraph_mark_stays_code():
+    """A field's code can continue into the next paragraph. The field state
+    ended at each paragraph, so a nested field's cached result inside the
+    outer code came out as text; a code that never ends is disclosed."""
+    body = (_p('<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+               '<w:r><w:instrText xml:space="preserve"> IF 1 = 1 "</w:instrText></w:r>')
+            + _p('<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+                 '<w:r><w:instrText xml:space="preserve"> DOCPROPERTY Title </w:instrText></w:r>',
+                 '<w:r><w:fldChar w:fldCharType="separate"/></w:r>', _t("INNERCACHED"),
+                 '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+                 '<w:r><w:instrText xml:space="preserve">" "" </w:instrText></w:r>',
+                 '<w:r><w:fldChar w:fldCharType="separate"/></w:r>', _t("OUTERRESULT"),
+                 '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+            + _p(_t("AFTER")))
+    text, notes = _read(_raw_docx(body))
+    assert text.split("\n") == ["", "OUTERRESULT", "AFTER"] or text.split("\n") == [
+        "OUTERRESULT", "AFTER"], text.split("\n")
+    assert not any(ex.has_evidence_marker(n) for n in notes), notes
+    open_code = _p('<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+                   '<w:r><w:instrText xml:space="preserve"> TOC </w:instrText></w:r>') + _p(_t("LOST"))
+    _text, notes = _read(_raw_docx(_p(_t("BEFORE")) + open_code))
+    assert [n for n in notes if ex.has_evidence_marker(n)] == [
+        f"{ex.M_WORD_UNREAD}: 1 field code(s) never ended; the text after each in its "
+        "part was read as field code and left out"], notes
+
+
+# ---------------------------------------------------------------------------
+# Pictures measured at the size they are drawn; the page area and threshold
+# ---------------------------------------------------------------------------
+
+
+def _group_drawing(children: str, *, ext=(5486400, 7315200), ch_ext=None) -> str:
+    xfrm = ""
+    if ch_ext is not None:
+        xfrm = (f'<a:xfrm><a:off x="0" y="0"/><a:ext cx="{ext[0]}" cy="{ext[1]}"/>'
+                f'<a:chOff x="0" y="0"/><a:chExt cx="{ch_ext[0]}" cy="{ch_ext[1]}"/></a:xfrm>')
+    return (f'<w:r><w:drawing><wp:inline><wp:extent cx="{ext[0]}" cy="{ext[1]}"/>'
+            '<wp:docPr id="1" name="g"/><a:graphic><a:graphicData '
+            'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">'
+            f'<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr>{xfrm}</wpg:grpSpPr>' + children
+            + '</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+
+
+def _group_picture(cx: int, cy: int) -> str:
+    return ('<pic:pic><pic:nvPicPr><pic:cNvPr id="3" name="p"/><pic:cNvPicPr/></pic:nvPicPr>'
+            '<pic:blipFill><a:blip r:embed="rIdImg"/></pic:blipFill><pic:spPr><a:xfrm>'
+            f'<a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm></pic:spPr></pic:pic>')
+
+
+@pytest.mark.parametrize("child_scale,picture_scale,nested,large", [
+    (1.0, 1.0, False, True), (0.1, 0.1, False, True), (10.0, 1.0, False, False),
+    (0.5, 0.5, True, True)])
+def test_a_picture_inside_a_resized_group_is_measured_at_its_drawn_size(
+        child_scale, picture_scale, nested, large):
+    """A group draws its child coordinate space (``chExt``) at its extent
+    (6x8in here). A picture filling a child space ten times smaller than the
+    group is drawn at 6x8in, and went undisclosed; a 6x8in-in-child-units
+    picture in a child space ten times larger is drawn at 0.6x0.8in, and was
+    reported. A nested group compounds its own ``ext / chExt``."""
+    ext = (5486400, 7315200)
+    ch = (int(ext[0] * child_scale), int(ext[1] * child_scale))
+    pic = (int(ext[0] * picture_scale), int(ext[1] * picture_scale))
+    if nested:
+        inner = ('<wpg:grpSp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/>'
+                 f'<a:ext cx="{pic[0]}" cy="{pic[1]}"/><a:chOff x="0" y="0"/>'
+                 f'<a:chExt cx="{pic[0] // 4}" cy="{pic[1] // 4}"/></a:xfrm></wpg:grpSpPr>'
+                 + _group_picture(pic[0] // 4, pic[1] // 4) + "</wpg:grpSp>")
+    else:
+        inner = _group_picture(*pic)
+    _text, notes = _read(_raw_docx(_p(_group_drawing(inner, ext=ext, ch_ext=ch))))
+    marked = [n for n in notes if ex.has_evidence_marker(n) and "picture" in n]
+    assert bool(marked) is large, (child_scale, picture_scale, nested, notes)
+
+
+def test_the_page_area_is_the_final_sections_and_a_quarter_page_picture_is_disclosed():
+    """The large-picture share is measured against the FINAL section's page,
+    not the first section's, and a picture covering exactly 25% is disclosed
+    (the threshold is at least 25%)."""
+    quarter = ('<w:r><w:drawing><wp:inline><wp:extent cx="3886200" cy="5029200"/>'
+               '<wp:docPr id="1" name="p"/><a:graphic><a:graphicData '
+               'uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic>'
+               '<pic:blipFill><a:blip r:embed="rIdImg"/></pic:blipFill></pic:pic>'
+               '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+    huge_first = '<w:pPr><w:sectPr><w:pgSz w:w="144000" w:h="144000"/></w:sectPr></w:pPr>'
+    _text, notes = _read(_raw_docx(_p(_t("SECTION ONE"), ppr=huge_first) + _p(quarter)))
+    marked = [n for n in notes if ex.has_evidence_marker(n) and "picture" in n]
+    assert len(marked) == 1 and re.search(r"\b1 picture", marked[0]), notes
+
+
+@pytest.mark.parametrize("value", ["false", "off", "0"])
+def test_an_on_off_flag_written_false_or_off_turns_the_header_off(value):
+    """``w:titlePg`` and ``w:evenAndOddHeaders`` are off when their ``w:val``
+    is ``0``, ``false`` or ``off``."""
+    hdr = lambda text: _part("hdr", _p(_t(text)))  # noqa: E731
+    text, _notes = _read(_raw_docx(
+        _p(_t("BODY")),
+        sect=('<w:headerReference w:type="first" r:id="rIdF"/>'
+              '<w:headerReference w:type="default" r:id="rIdD"/>'
+              '<w:headerReference w:type="even" r:id="rIdE"/>'
+              f'<w:titlePg w:val="{value}"/>'),
+        parts={"word/header1.xml": hdr("FIRST"), "word/header2.xml": hdr("DEFAULT"),
+               "word/header3.xml": hdr("EVEN"),
+               "word/settings.xml": _part("settings", f'<w:evenAndOddHeaders w:val="{value}"/>')},
+        rels=[("rIdF", "header", "header1.xml"), ("rIdD", "header", "header2.xml"),
+              ("rIdE", "header", "header3.xml"), ("rIdS", "settings", "settings.xml")]))
+    assert text.split("\n") == ["DEFAULT", "BODY"], text.split("\n")
+
+
+def test_a_picture_with_a_negative_extent_is_unmeasured():
+    body = _p('<w:r><w:drawing><wp:inline><wp:extent cx="-5486400" cy="7315200"/>'
+              '<wp:docPr id="1" name="p"/><a:graphic><a:graphicData '
+              'uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic>'
+              '<pic:blipFill><a:blip r:embed="rIdImg"/></pic:blipFill></pic:pic>'
+              '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+    _text, notes = _read(_raw_docx(body))
+    assert any(ex.has_evidence_marker(n) and "could not be measured" in n for n in notes), notes
+
+
+def test_fixture16_text_box_stands_on_its_own_line_after_its_anchor():
+    """Word spec part 3, line for line: the box's text is not inlined into the
+    anchoring paragraph's line."""
+    lines = _page_text("16_word_constructs.docx").split("\n")
+    raven = [i for i, line in enumerate(lines) if "RAVEN" in line]
+    quail = [i for i, line in enumerate(lines) if "QUAIL" in line]
+    assert len(raven) == 1 and len(quail) == 1 and raven[0] == quail[0] + 1, (
+        [lines[i] for i in quail + raven])
+    assert "RAVEN" not in lines[quail[0]] and "QUAIL" not in lines[raven[0]], lines
+
+
+def test_the_true_page_note_is_on_every_word_record_and_carries_no_marker():
+    """Word spec part 7: the page note describes the page model on the record and
+    on its page, and is not an evidence marker."""
+    got = _pages("16_word_constructs.docx")
+    assert got.notes[0] == ex.WORD_LAYOUT_NOTE and got.pages[0].notes[0] == ex.WORD_LAYOUT_NOTE, (
+        got.notes)
+    assert not ex.has_evidence_marker(ex.WORD_LAYOUT_NOTE)

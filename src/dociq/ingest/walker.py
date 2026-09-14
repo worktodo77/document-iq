@@ -858,11 +858,16 @@ def _stamped(pages: tuple[PageRecord, ...],
 def _record(entry: FileEntry, filename: str, ext: str, size: int, sha: str,
             got: ex.ExtractedDoc, *, parent: str | None = None,
             order: int | None = None, rel_path: str | None = None,
-            config: RunConfig | None = None) -> DocumentRecord:
+            config: RunConfig | None = None,
+            verbatim_notes: tuple[str, ...] = ()) -> DocumentRecord:
     dates, date_notes = _dated(got.pages)
     # Every DocumentRecord in the run is built here, which makes this the one
-    # place that has to scrub absolute paths out of hashed content.
-    notes = tuple(ex.sanitize_message(n) for n in got.notes + date_notes)
+    # place that has to scrub run-varying text out of hashed content.
+    # ``verbatim_notes`` quote a container member's stored name exactly, and
+    # are deterministic by construction: scrubbed, a stored name that looks
+    # like an absolute path would be cut to its last part, and the quote
+    # would no longer be the name.
+    notes = verbatim_notes + tuple(ex.sanitize_message(n) for n in got.notes + date_notes)
     doc = DocumentRecord(
         doc_id="",  # Stage 3b (Track B) assigns it
         rel_path=rel_path if rel_path is not None else entry.rel_path,
@@ -880,10 +885,13 @@ def _extract_one(entry: FileEntry, config: RunConfig,
                  opt: ex.ExtractOptions) -> list[DocumentRecord]:
     """One source file → one record, or many when it is a container.
 
-    An archive and an email are recognized by their extension, as before. A
-    Word file is recognized by its bytes (:func:`~dociq.ingest.extract.is_word_package`),
-    so its embedded documents (D-50) are recovered whatever it is called, and
-    PDF bytes named ``.docx`` are never handed to the embedded-object reader.
+    An email is recognized by its extension, as before. An archive is
+    recognized by its ``.zip`` extension unless its bytes are a Word, Excel or
+    PowerPoint package (:func:`~dociq.ingest.extract.is_office_package`), which
+    is read as the document it is. A Word file is recognized by its bytes
+    (:func:`~dociq.ingest.extract.is_word_package`), so its embedded documents
+    (D-50) are recovered whatever it is called, and PDF bytes named ``.docx``
+    are never handed to the embedded-object reader.
 
     Never raises: a pool worker that raises turns one bad file into a dead run.
     """
@@ -895,7 +903,7 @@ def _extract_one(entry: FileEntry, config: RunConfig,
                         ex.ExtractedDoc(status=ProcessingStatus.FAILED,
                                         error=ex.clip_message(f"read failed: {exc}", 200)),
                         config=config)]
-    if entry.ext == ".zip":
+    if entry.ext == ".zip" and not ex.is_office_package(raw):
         return _extract_archive(entry, raw, config, opt)
     got = ex.extract(entry.path.name, raw, opt)
     kind = _container_kind(entry.ext, raw)
@@ -911,11 +919,14 @@ def _extract_one(entry: FileEntry, config: RunConfig,
 
 _WINDOWS_RESERVED_STEMS = {
     "con", "prn", "aux", "nul",
-    "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
-    "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+    "com\u00b9", "com\u00b2", "com\u00b3",
+    "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    "lpt\u00b9", "lpt\u00b2", "lpt\u00b3",
 }
 """Windows device names — reserved whatever the extension (``CON.txt`` is as
-reserved as bare ``CON``), case-insensitively."""
+reserved as bare ``CON``), case-insensitively. Windows' own list names the
+digit forms 0-9 and the superscript forms of 1, 2 and 3."""
 
 _MESSAGE_EXTS = (".msg", ".eml", ".email")
 """Extensions whose OWN attachments this walker reads, by name. A Word
@@ -939,70 +950,150 @@ def _literal_ext(name: str) -> str:
     """A filename's suffix by plain string search — never
     ``pathlib.Path(...).suffix``, which parses a leading ``C:`` as a Windows
     drive component and would misread exactly the untrusted names
-    :func:`_sanitize_child_name` exists to see safely, and which gives a
-    name that is only an extension (``".eml"``) no suffix at all."""
+    :func:`_child_names` exists to see safely, and which gives a name that is
+    only an extension (``".eml"``) no suffix at all."""
     dot = name.rfind(".")
     return name[dot:] if dot >= 0 else ""
 
 
-def _sanitize_child_name(name: str, order: int) -> str:
-    """One container member's stored name, made safe BEFORE it ever becomes
-    part of a ``rel_path``, an output filename, or a resume-journal key.
+_R_EMPTY = "empty, '.' and '..' parts were removed"
+_R_TRAILING = "trailing dots or spaces were removed"
+_R_COLON = "':' was replaced by '_'"
+_R_DEVICE = "a Windows device name was prefixed with '_'"
+_R_NOTHING = "no usable part was left"
+_R_NUMBERED = "numbered to keep it apart from another name in this container"
+
+
+def _name_parts(name: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """``([(stored part, safe part), ...], reasons)`` for one stored name.
+
+    Every transformation, in order, each with the reason the note gives:
+
+    1. NFC, and ``\\`` read as a separator like ``/``. Neither changes what
+       the name says, and neither is noted.
+    2. An empty, ``.`` or ``..`` part is dropped (a POSIX absolute path loses
+       its leading ``/``; a UNC ``\\\\server\\share\\x`` keeps
+       ``server/share/x``), so a member can never climb out of its parent's
+       ``rel_path``: :data:`_R_EMPTY`. A part of only dots or spaces goes the
+       same way.
+    3. Trailing dots and spaces are removed from a part (Windows strips them
+       silently, so ``x.txt`` and ``x.txt `` would name one file):
+       :data:`_R_TRAILING`.
+    4. Each ``:`` becomes ``_`` (a drive letter or an NTFS stream on
+       Windows; ``Minutes 10:30.pdf`` becomes ``Minutes 10_30.pdf``):
+       :data:`_R_COLON`.
+    5. A part whose text before its first dot is a Windows device name
+       (:data:`_WINDOWS_RESERVED_STEMS`: ``CON``, ``PRN``, ``AUX``, ``NUL``,
+       ``COM`` and ``LPT`` with 0-9 or a superscript 1-3; any case, any
+       extension) gets ``_`` in front (``Aux/`` becomes ``_Aux/``):
+       :data:`_R_DEVICE`.
+
+    Every other character is kept. :func:`_child_names` adds the last two
+    reasons, :data:`_R_NOTHING` and :data:`_R_NUMBERED`."""
+    raw = unicodedata.normalize("NFC", name or "")
+    parts: list[tuple[str, str]] = []
+    reasons: list[str] = []
+    for part in raw.replace("\\", "/").split("/"):
+        safe = part.rstrip(" .")
+        if not safe:
+            reasons.append(_R_EMPTY)
+            continue
+        if safe != part:
+            reasons.append(_R_TRAILING)
+        if ":" in safe:
+            safe = safe.replace(":", "_")
+            reasons.append(_R_COLON)
+        if safe.split(".", 1)[0].lower() in _WINDOWS_RESERVED_STEMS:
+            safe = "_" + safe
+            reasons.append(_R_DEVICE)
+        parts.append((part, safe))
+    return parts, reasons
+
+
+def _child_names(members: Sequence[ex.ZipMember]) -> list[tuple[str, str | None]]:
+    """``(safe name, note)`` for every member of ONE container, in member
+    order. The safe name becomes part of a ``rel_path`` and a resume-journal
+    key; the note, when the name had to change, quotes the stored name
+    exactly and says why (:func:`_name_parts`), so the name is never lost.
 
     A stored filename is untrusted regardless of which container kind
     supplied it — an OLE Package's ``\\x01Ole10Native`` stored filename, an
-    email attachment's ``Content-Disposition`` filename
-    (``expand_eml_attachments`` reads ``part.get_filename()`` unsanitized),
-    a zip member name — so this is the ONE place every one of them passes
-    through, rather than a guard added only for the Ole10Native path.
+    email attachment's ``Content-Disposition`` filename, a zip member name —
+    so this is the ONE place every one of them passes through.
 
-    **Made safe part by part, and the folders kept.** ``\\`` is read as a
-    separator like ``/``. Empty, ``.`` and ``..`` parts are dropped, so a
-    member can never climb out of its parent's own ``rel_path``: a POSIX
-    absolute path loses its leading ``/``, and a UNC ``\\\\server\\share\\x``
-    keeps ``server/share/x`` as folders below the parent. The parts that
-    remain keep their order and their separators: a ZIP member's
-    ``folder/a.txt`` and ``other/a.txt`` are two different files, and
-    ``inner.zip/b.txt`` says which archive a member came out of. A first draft
-    of this function kept only the LAST part of every name, which flattened
-    both, and the fixture corpus's ``11_production.zip/inner.zip/...`` with
-    them (``tests/test_walker.py::test_archive_members_keep_their_folders_in_rel_path``).
-    An Ole10Native stored filename is already cut to its basename by
-    :func:`~dociq.ingest.extract._unwrap_embedding` before it reaches here.
-
-    Within each part: trailing dots or spaces are stripped (Windows silently
-    strips them, so ``"x.txt"`` and ``"x.txt "`` would otherwise collide on
-    disk unseen, which the dedup pass below then catches). A part carrying
-    ``:`` (a drive letter, an NTFS stream) or a Windows-reserved device stem
-    (``CON``, ``PRN``, ``AUX``, ``NUL``, ``COM1-9``, ``LPT1-9``, whatever its
-    extension) is replaced by ``unnamed_child_<order+1>``, plus the part's
-    extension when that extension itself carries no ``:`` (``CON.txt``
-    becomes ``unnamed_child_1.txt``; ``notes.txt:hidden`` becomes
-    ``unnamed_child_1``). A name with no safe part left becomes that
-    replacement alone.
-    """
-    raw = unicodedata.normalize("NFC", name or "")
-    parts: list[str] = []
-    for part in raw.replace("\\", "/").split("/"):
-        part = part.rstrip(" .")
-        if part in ("", ".", ".."):
-            continue
-        stem = part.split(".", 1)[0]
-        if ":" in part or stem.lower() in _WINDOWS_RESERVED_STEMS:
-            suffix = _literal_ext(part)
-            if not suffix or ":" in suffix:
-                suffix = ""
-            part = f"unnamed_child_{order + 1}{suffix}"
-        parts.append(part)
-    return "/".join(parts) if parts else f"unnamed_child_{order + 1}"
+    **Folders are kept, and kept apart.** A zip member's ``folder/a.txt`` and
+    ``other/a.txt`` are two different files, and ``inner.zip/b.txt`` says
+    which archive a member came out of (a first draft kept only a name's LAST
+    part and flattened both:
+    ``tests/test_walker.py::test_archive_members_keep_their_folders_in_rel_path``).
+    A changed folder part is a function of the stored folder, so every member
+    of ``Aux/`` lands in one ``_Aux/`` (numbering members one by one used to
+    split one folder into two invented ones). Where a changed folder would
+    take a name another stored folder in this container already has, the
+    folder that needed no change keeps it and the changed one is numbered
+    (``_Aux__2/``). Two members whose whole names still coincide are
+    numbered by :func:`_dedup_child_names`. A name with no usable part left
+    is ``unnamed_child_<order+1>``. An Ole10Native stored filename is already
+    cut to its basename by :func:`~dociq.ingest.extract._unwrap_embedding`
+    before it reaches here."""
+    split = [_name_parts(m.name) for m in members]
+    # Folder prefixes that needed no change claim their names first.
+    owner: dict[tuple[str, ...], tuple[str, ...]] = {}
+    for parts, _reasons in split:
+        stored: tuple[str, ...] = ()
+        for part, safe in parts[:-1]:
+            if part != safe:
+                break
+            stored += (part,)
+            owner.setdefault(stored, stored)
+    assigned: dict[tuple[str, ...], tuple[tuple[str, ...], bool]] = {}
+    joined: list[str] = []
+    all_reasons: list[list[str]] = []
+    for m, (parts, reasons) in zip(members, split):
+        reasons = list(reasons)
+        stored_prefix: tuple[str, ...] = ()
+        safe_prefix: tuple[str, ...] = ()
+        numbered = False
+        for part, safe in parts[:-1]:
+            stored_prefix += (part,)
+            if stored_prefix not in assigned:
+                candidate, number = safe_prefix + (safe,), 2
+                while owner.get(candidate, stored_prefix) != stored_prefix:
+                    candidate = safe_prefix + (f"{safe}__{number}",)
+                    number += 1
+                owner[candidate] = stored_prefix
+                assigned[stored_prefix] = (candidate, numbered or candidate[-1] != safe)
+            safe_prefix, numbered = assigned[stored_prefix]
+        if numbered:
+            reasons.append(_R_NUMBERED)
+        if parts:
+            joined.append("/".join(safe_prefix + (parts[-1][1],)))
+        else:
+            joined.append(f"unnamed_child_{m.order + 1}")
+            reasons.append(_R_NOTHING)
+        all_reasons.append(reasons)
+    out: list[tuple[str, str | None]] = []
+    for m, name, final, reasons in zip(members, joined, _dedup_child_names(joined),
+                                       all_reasons):
+        if final != name:
+            reasons.append(_R_NUMBERED)
+        plain = unicodedata.normalize("NFC", m.name or "").replace("\\", "/")
+        note = None
+        if final != plain:
+            why = "; ".join(dict.fromkeys(reasons))
+            note = ex.clip_message(
+                f"stored name {m.name!r} is recorded as {final!r}"
+                + (f": {why}" if why else ""), 1200)
+        out.append((final, note))
+    return out
 
 
 def _dedup_child_names(names: list[str]) -> list[str]:
-    """Disambiguate a repeated sanitized name within ONE container,
+    """Disambiguate a repeated safe name within ONE container,
     deterministically by container order — two children of one parent with
     the same name (two Package objects each wrapping ``notice.msg``; two
     attachments both named ``image001.png``; a stored name that collides
-    with another part's basename after sanitization).
+    with another part's basename after its unsafe parts were changed).
 
     ``names`` is already in container (``ZipMember.order``) order, so the
     same input always yields the same output. The FIRST occurrence of a
@@ -1033,6 +1124,31 @@ def _dedup_child_names(names: list[str]) -> list[str]:
 
 def _container_count_word(kind: str) -> str:
     return "embedded document(s)" if kind == ".docx" else "attachment(s)"
+
+
+def _is_read_child(safe_name: str, raw: bytes) -> bool:
+    """Whether :func:`_child_records` hands this member to an extractor, as
+    opposed to inventorying it as a format DocIQ does not read."""
+    ext = _literal_ext(safe_name.rsplit("/", 1)[-1]).lower()
+    return ex.is_tier1(ext) and (ext != ".zip" or ex.is_office_package(raw))
+
+
+def _count_notes(kind: str, members: Sequence[ex.ZipMember]) -> tuple[str, ...]:
+    """The container's own count notes: how many children were extracted,
+    and how many were only inventoried. One count of both used to call a
+    ``.doc`` or ``.rtf`` child "extracted" when its record was UNSUPPORTED."""
+    if not members:
+        return ()
+    names = [name for name, _note in _child_names(members)]
+    read = sum(1 for name, m in zip(names, members) if _is_read_child(name, m.raw))
+    word = _container_count_word(kind)
+    out = []
+    if read:
+        out.append(f"{read} {word} extracted as child document(s)")
+    if len(members) - read:
+        out.append(f"{len(members) - read} {word} inventoried as child document(s) "
+                   "only, in a format DocIQ does not read")
+    return tuple(out)
 
 
 def _expand_container(kind: str, raw: bytes,
@@ -1091,9 +1207,10 @@ def _child_records(entry: FileEntry, exp: ex.ZipExpansion, config: RunConfig,
     recover, an exception out of its expansion — are kept on it, marked.
     That is one level shallower than :func:`~dociq.ingest.extract.expand_zip`,
     which also reads the members of its deepest archive; either way the
-    loss is disclosed. ``.zip`` members keep today's behavior —
+    loss is disclosed. ``.zip`` archive members keep today's behavior —
     :func:`~dociq.ingest.extract.expand_zip` already flattens nesting on its
-    own, so a zip member is never expanded here.
+    own, so an archive member is never expanded here; a Word, Excel or
+    PowerPoint package stored under a ``.zip`` name is read like any other.
 
     This also closes a silent loss that predates D-50: a ``.msg``/``.eml``
     inside an archive, or attached to another email, never had its OWN
@@ -1105,10 +1222,8 @@ def _child_records(entry: FileEntry, exp: ex.ZipExpansion, config: RunConfig,
     lost section recognition and an approved omission kept its pages.
     """
     parent_key = parent_rel if parent_rel is not None else entry.rel_path
-    safe_names = _dedup_child_names(
-        [_sanitize_child_name(m.name, m.order) for m in exp.members])
     out: list[DocumentRecord] = []
-    for m, safe_name in zip(exp.members, safe_names):
+    for m, (safe_name, name_note) in zip(exp.members, _child_names(exp.members)):
         child_sha = hashlib.sha256(m.raw).hexdigest()
         child_rel = f"{parent_key}/{safe_name}"
         # The record's filename is the member's own name, as before D-50;
@@ -1116,7 +1231,7 @@ def _child_records(entry: FileEntry, exp: ex.ZipExpansion, config: RunConfig,
         child_filename = safe_name.rsplit("/", 1)[-1]
         child_ext = _literal_ext(child_filename).lower()
         kind = None
-        if ex.is_tier1(child_ext) and child_ext != ".zip":
+        if _is_read_child(safe_name, m.raw):
             got = ex.extract(child_filename, m.raw, opt)
             kind = _container_kind(child_ext, m.raw)
         else:
@@ -1127,10 +1242,7 @@ def _child_records(entry: FileEntry, exp: ex.ZipExpansion, config: RunConfig,
         if kind is not None:
             child_exp = _expand_or_note(kind, m.raw, opt)
             if level < ex._ZIP_MAX_DEPTH:
-                extra_notes = child_exp.notes + (
-                    (f"{len(child_exp.members)} "
-                     f"{_container_count_word(kind)} extracted as "
-                     "child document(s)",) if child_exp.members else ())
+                extra_notes = child_exp.notes + _count_notes(kind, child_exp.members)
                 if child_exp.members:
                     grandchildren = _child_records(
                         entry, child_exp, config, opt,
@@ -1157,7 +1269,8 @@ def _child_records(entry: FileEntry, exp: ex.ZipExpansion, config: RunConfig,
         out.append(_record(entry, child_filename, child_ext, len(m.raw), child_sha,
                            replace(got, notes=got.notes + extra_notes),
                            parent=parent_key, order=m.order,
-                           rel_path=child_rel, config=config))
+                           rel_path=child_rel, config=config,
+                           verbatim_notes=(name_note,) if name_note else ()))
         out.extend(grandchildren)
     return out
 
@@ -1208,9 +1321,7 @@ def _extract_container(entry: FileEntry, raw: bytes, got: ex.ExtractedDoc,
     than failing the file.
     """
     exp = _expand_or_note(kind, raw, opt)
-    extra_notes = exp.notes + (
-        (f"{len(exp.members)} {_container_count_word(kind)} extracted as child "
-         "document(s)",) if exp.members else ())
+    extra_notes = exp.notes + _count_notes(kind, exp.members)
     out = [_record(entry, entry.path.name, entry.ext, entry.size_bytes,
                    entry.sha256, replace(got, notes=got.notes + extra_notes),
                    config=config)]

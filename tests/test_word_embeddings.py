@@ -248,12 +248,18 @@ def _docx_with_aux_objects(*, body_part: str, footer_part: str,
         '</w:object></w:r></w:p>'
         '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
         '</w:body></w:document>')
+    # The footer and footnotes parts are related from the main part, as in any
+    # package Word writes; their objects are found through those relationships.
     doc_rels = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/'
         '2006/relationships"><Relationship Id="rIdEmbed1" '
         'Type="http://schemas.openxmlformats.org/officeDocument/2006/'
         f'relationships/oleObject" Target="{body_part[len("word/"):]}"/>'
+        '<Relationship Id="rIdFooter1" Type="http://schemas.openxmlformats.org/'
+        'officeDocument/2006/relationships/footer" Target="footer1.xml"/>'
+        '<Relationship Id="rIdFootnotes" Type="http://schemas.openxmlformats.org/'
+        'officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>'
         '</Relationships>')
     footer_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -1072,7 +1078,7 @@ _UNTRUSTED_EXACT_LEAF = {
        "reserved_with_ext", "reserved_device", "trailing_dots_spaces"])
 def test_untrusted_ole10native_stored_filename_is_sanitized(tmp_path, stored_name):
     """An ``\\x01Ole10Native`` stored filename is untrusted. Before
-    walker._sanitize_child_name existed, ``_child_records`` built
+    the walker made stored names safe (now ``walker._child_names``), ``_child_records`` built
     ``child_rel`` from ``unicodedata.normalize('NFC', m.name)`` alone --
     empty, '.', '..', a path-carrying name, a drive letter or ':', trailing
     dots/spaces, and a Windows-reserved device name all passed straight
@@ -1287,17 +1293,22 @@ _OBJ_CT = (
 
 
 def _docx_objects(objects, *, body_text: str = "an invented paragraph",
-                  extra_parts: dict | None = None) -> bytes:
+                  extra_parts: dict | None = None, extra_rels=()) -> bytes:
     """A .docx whose body holds one ``<o:OLEObject>`` per ``objects`` entry,
     ``(Type, ProgID, relationship Target, part bytes or None)``, in order.
     The Target is written exactly as given (relative to ``word/``, or
     package-absolute with a leading ``/``); bytes are stored at the part the
-    Target resolves to, and ``None`` stores nothing (a link). Unlike
+    Target resolves to, and ``None`` stores nothing (a link).
+    ``extra_parts`` are stored as given; ``extra_rels`` are more main-part
+    relationships, ``(id, type, target)``. Unlike
     ``_minimal_docx_with_embeds``, the content types cover every part, so
     python-docx opens the result and the Word file's own text is read."""
     import posixpath
 
     objs, rels, parts = [], [], {}
+    for rid, rtype, target in extra_rels:
+        rels.append(f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/'
+                    f'officeDocument/2006/relationships/{rtype}" Target="{target}"/>')
     for i, (typ, progid, target, data) in enumerate(objects, start=1):
         rid = f"rIdObj{i}"
         objs.append(
@@ -1444,7 +1455,13 @@ def test_every_contract_record_rebuild_names_every_field():
     that class; ``dataclasses.replace`` is the way to change a few. If it
     reads fields of another contract class (``_record`` turns an
     ``ExtractedDoc`` into a ``DocumentRecord``), the function it sits in
-    must read every field of that source class."""
+    must read every field of that source class.
+
+    A field copied through a local name (``pg_, st_ = got.pages, got.status``
+    then ``pages=pg_``) is a copy too: the guard once counted only keywords
+    whose value read ``base.<field>`` directly, so a rebuild through locals
+    dropped ``spans`` with this test green. The guard checks itself on that
+    shape first."""
     import ast
     import dataclasses
     from pathlib import Path
@@ -1456,11 +1473,37 @@ def test_every_contract_record_rebuild_names_every_field():
     fields = {k: {f.name for f in dataclasses.fields(v)} for k, v in classes.items()}
     src = Path(__file__).resolve().parents[1] / "src"
 
-    def reads(node):
+    def aliases(func) -> dict:
+        """``{local name: node}`` for ``name = base.f`` and tuple
+        assignments of such reads anywhere in ``func``."""
+        out: dict = {}
+        for n in ast.walk(func):
+            if not isinstance(n, ast.Assign) or len(n.targets) != 1:
+                continue
+            target, value = n.targets[0], n.value
+            pairs = ([(target, value)] if isinstance(target, ast.Name)
+                     else list(zip(target.elts, value.elts))
+                     if isinstance(target, ast.Tuple) and isinstance(value, ast.Tuple)
+                     and len(target.elts) == len(value.elts) else [])
+            for t, v in pairs:
+                is_read = (
+                    isinstance(v, (ast.Attribute, ast.Subscript))
+                    and isinstance(v.value, ast.Name)
+                    or isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
+                    and v.func.attr == "get" and isinstance(v.func.value, ast.Name))
+                if isinstance(t, ast.Name) and is_read:
+                    out[t.id] = v
+        return out
+
+    def reads(node, local=None):
         """``{base name: {field names}}`` read as ``base.f``, ``base["f"]``
-        or ``base.get("f")`` anywhere under ``node``."""
+        or ``base.get("f")`` anywhere under ``node``, following a local name
+        bound to such a read."""
         out: dict = {}
         for n in ast.walk(node):
+            if local and isinstance(n, ast.Name) and n.id in local:
+                for base, got in reads(local[n.id]).items():
+                    out.setdefault(base, set()).update(got)
             if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
                     and n.attr != "get"):
                 out.setdefault(n.value.id, set()).add(n.attr)
@@ -1475,13 +1518,12 @@ def test_every_contract_record_rebuild_names_every_field():
                 out.setdefault(n.func.value.id, set()).add(n.args[0].value)
         return out
 
-    sites, failures = [], []
-    for path in sorted(src.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    def scan(tree, label: str, sites: list, failures: list) -> None:
         for func in ast.walk(tree):
             if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            func_reads = reads(func)
+            local = aliases(func)
+            func_reads = reads(func, local)
             for call in ast.walk(func):
                 if not isinstance(call, ast.Call):
                     continue
@@ -1494,7 +1536,7 @@ def test_every_contract_record_rebuild_names_every_field():
                 for kw in call.keywords:
                     if not kw.arg:
                         continue
-                    for base, got in reads(kw.value).items():
+                    for base, got in reads(kw.value, local).items():
                         per_base.setdefault(base, [set(), set()])
                         per_base[base][0] |= got
                         if kw.arg in got:
@@ -1502,7 +1544,7 @@ def test_every_contract_record_rebuild_names_every_field():
                 for base, (read, copied) in per_base.items():
                     if len(copied) < 2:
                         continue
-                    where = f"{path.relative_to(src)}:{call.lineno} ({func.name})"
+                    where = f"{label}:{call.lineno} ({func.name})"
                     if read <= fields[name]:
                         sites.append(where)
                         missing = fields[name] - named
@@ -1518,6 +1560,21 @@ def test_every_contract_record_rebuild_names_every_field():
                     if unread:
                         failures.append(f"{where}: builds {name} from {source} "
                                         f"{base!r} without reading {sorted(unread)}")
+
+    probe_sites: list = []
+    probe_failures: list = []
+    scan(ast.parse(
+        "def rebuild(got, extra_notes):\n"
+        "    pg_, st_, er_ = got.pages, got.status, got.error\n"
+        "    return ex.ExtractedDoc(pages=pg_, notes=got.notes + extra_notes,\n"
+        "                           status=st_, error=er_)\n"), "probe", probe_sites, probe_failures)
+    assert any("without ['spans']" in f for f in probe_failures), (
+        f"the guard must see a field dropped through locals: {probe_failures!r}")
+
+    sites, failures = [], []
+    for path in sorted(src.rglob("*.py")):
+        scan(ast.parse(path.read_text(encoding="utf-8")), str(path.relative_to(src)),
+             sites, failures)
     assert any("_record" in s for s in sites) and any("_doc_from_jsonable" in s for s in sites), (
         f"the guard must see the known rebuild sites, or it checks nothing: {sites!r}")
     assert not failures, "\n".join(failures)
@@ -1529,9 +1586,10 @@ def test_every_contract_record_rebuild_names_every_field():
 
 
 def test_msg_child_attachments_are_read_through_the_msg_reader(tmp_path, monkeypatch):
-    """All 13 corpus Package objects wrap an Outlook .msg (Word spec,
-    construct table), and nothing exercised a .msg child: dropping .msg from
-    the recursion, or reading it with the .eml parser, passed every test.
+    """A Package object can wrap any file, an Outlook .msg among them (Word
+    spec, construct table: 13 ``Package`` objects in the corpus), and nothing
+    exercised a .msg child: dropping .msg from the recursion, or reading it
+    with the .eml parser, passed every test.
     The .msg reader is replaced by a stub so the test needs no Outlook
     writer; what is pinned is that the walker hands it the child's bytes and
     turns what it returns into grandchildren."""
@@ -1871,7 +1929,11 @@ def test_compound_files_are_recovered_by_what_they_hold(tmp_path):
 
     r = _walk_files(tmp_path, {"objects.docx": raw})
     parent = next(d for d in r.documents if d.rel_path == "objects.docx")
-    assert "2 embedded document(s) extracted as child document(s)" in parent.notes, parent.notes
+    # The legacy .doc child is inventoried only, never extracted: the count
+    # note said "2 ... extracted" while that child's record was UNSUPPORTED.
+    assert "1 embedded document(s) extracted as child document(s)" in parent.notes, parent.notes
+    assert ("1 embedded document(s) inventoried as child document(s) only, in a format "
+            "DocIQ does not read") in parent.notes, parent.notes
     workbook = next(d for d in r.documents if d.rel_path == "objects.docx/oleObject1.xlsx")
     assert "CASSOWARY-PACKAGE-STREAM" in _text(workbook), _text(workbook)
     assert any(d.rel_path == "objects.docx/oleObject2.doc" for d in r.unsupported), (
@@ -1892,12 +1954,13 @@ def test_a_stored_name_that_is_only_an_extension_keeps_its_extension(tmp_path):
 
 
 def test_a_malformed_part_loses_only_its_own_objects(tmp_path):
-    """One malformed XML part named like a header used to abort the whole
-    expansion, so every embedded document of the file was lost behind one
-    note."""
+    """One malformed header part used to abort the whole expansion, so every
+    embedded document of the file was lost behind one note. (The part is
+    related from the main part: a part nothing relates is not scanned.)"""
     xlsx = make_fixtures._we_xlsx_bytes(tmp_path / "keep.xlsx", "TUATARA-KEPT")
     raw = _docx_objects([("Embed", "Excel.Sheet.12", "embeddings/keep.xlsx", xlsx)],
-                        extra_parts={"word/header9.xml": b"<w:hdr this is not xml"})
+                        extra_parts={"word/header9.xml": b"<w:hdr this is not xml"},
+                        extra_rels=[("rIdH9", "header", "header9.xml")])
     exp = ex.expand_docx_embeddings(raw)
     assert [m.name for m in exp.members] == ["keep.xlsx"], exp.members
     marked = [n for n in exp.notes if ex.has_evidence_marker(n)]
@@ -1941,3 +2004,548 @@ def test_package_citations_resolve_inside_the_repository():
                 if not 1 <= int(m.group(1)) <= 10 or "section" in m.group(0):
                     bad.append(f"{rel}:{no}: {line.strip()}")
     assert not bad, "\n".join(bad)
+
+
+# ---------------------------------------------------------------------------
+# 28. A stored name that has to change loses as little as possible, and the
+# record quotes it exactly
+# ---------------------------------------------------------------------------
+
+
+def _zip_of(entries) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in entries:
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def _eml_attaching_all(items) -> bytes:
+    import base64
+
+    lines = ["From: engineer@example.com", "To: contractor@example.com",
+             "Subject: INVENTED-MULTI-ATTACHMENT", "Date: Fri, 19 Jul 2024 09:00:00 +0000",
+             "MIME-Version: 1.0",
+             'Content-Type: multipart/mixed; boundary="dociq-multi-boundary"',
+             "", "--dociq-multi-boundary", "Content-Type: text/plain; charset=utf-8", "",
+             "carrier body", ""]
+    for name, payload in items:
+        lines += ["--dociq-multi-boundary",
+                  f'Content-Type: application/octet-stream; name="{name}"',
+                  "Content-Transfer-Encoding: base64",
+                  f'Content-Disposition: attachment; filename="{name}"', "",
+                  base64.b64encode(payload).decode("ascii"), ""]
+    lines += ["--dociq-multi-boundary--", ""]
+    return "\r\n".join(lines).encode("utf-8")
+
+
+def test_a_changed_stored_name_loses_as_little_as_possible_and_is_quoted_exactly(tmp_path):
+    """Ordinary names ("Con. Schedule Rev 3", "Aux/", "Minutes 10:30",
+    "RE: Delay Notice") were replaced whole by ``unnamed_child_N``, with no
+    record of the stored name, and one ``Aux/`` folder became two invented
+    folders. Now each unsafe character or device name is changed as little as
+    possible, a changed folder stays one folder (and yields to a stored folder
+    that already has its new name), and the child's first note quotes the
+    stored name exactly -- unscrubbed, so a name that looks like an absolute
+    path is still quoted whole."""
+    production = _zip_of([
+        ("Con. Schedule Rev 3.txt", b"ZIP-CON"), ("Aux/Pump test.txt", b"ZIP-PUMP"),
+        ("_Aux/literal.txt", b"ZIP-LITERAL"), ("Aux/Valve log.txt", b"ZIP-VALVE"),
+        ("PRN.2 register.txt", b"ZIP-PRN"), ("Minutes 10:30.txt", b"ZIP-COLON"),
+        ("notes.txt. ", b"ZIP-TRAILING"), ("/srv/Invented/abs.txt", b"ZIP-ABSOLUTE"),
+        ("Plain Schedule Rev 4.txt", b"ZIP-PLAIN")])
+    carrier = _eml_attaching_all([
+        ("RE: Delay Notice.eml", _small_eml_bytes("INVENTED-NOTICE", "EML-NOTICE-BODY")),
+        ("Minutes 10:30.txt", b"EML-COLON")])
+    r = _walk_files(tmp_path, {"production.zip": production, "carrier.eml": carrier})
+    by_rel = {d.rel_path: d for d in list(r.documents) + list(r.unsupported)}
+    device = "a Windows device name was prefixed with '_'"
+    numbered = "numbered to keep it apart from another name in this container"
+    expected = {
+        "production.zip/_Con. Schedule Rev 3.txt": (
+            "ZIP-CON", f"stored name 'Con. Schedule Rev 3.txt' is recorded as "
+                       f"'_Con. Schedule Rev 3.txt': {device}"),
+        "production.zip/_Aux__2/Pump test.txt": (
+            "ZIP-PUMP", f"stored name 'Aux/Pump test.txt' is recorded as "
+                        f"'_Aux__2/Pump test.txt': {device}; {numbered}"),
+        "production.zip/_Aux__2/Valve log.txt": (
+            "ZIP-VALVE", f"stored name 'Aux/Valve log.txt' is recorded as "
+                         f"'_Aux__2/Valve log.txt': {device}; {numbered}"),
+        "production.zip/_Aux/literal.txt": ("ZIP-LITERAL", None),
+        "production.zip/_PRN.2 register.txt": (
+            "ZIP-PRN", f"stored name 'PRN.2 register.txt' is recorded as "
+                       f"'_PRN.2 register.txt': {device}"),
+        "production.zip/Minutes 10_30.txt": (
+            "ZIP-COLON", "stored name 'Minutes 10:30.txt' is recorded as "
+                         "'Minutes 10_30.txt': ':' was replaced by '_'"),
+        "production.zip/notes.txt": (
+            "ZIP-TRAILING", "stored name 'notes.txt. ' is recorded as 'notes.txt': "
+                            "trailing dots or spaces were removed"),
+        "production.zip/srv/Invented/abs.txt": (
+            "ZIP-ABSOLUTE", "stored name '/srv/Invented/abs.txt' is recorded as "
+                            "'srv/Invented/abs.txt': empty, '.' and '..' parts were removed"),
+        "production.zip/Plain Schedule Rev 4.txt": ("ZIP-PLAIN", None),
+        "carrier.eml/RE_ Delay Notice.eml": (
+            "EML-NOTICE-BODY", "stored name 'RE: Delay Notice.eml' is recorded as "
+                               "'RE_ Delay Notice.eml': ':' was replaced by '_'"),
+        "carrier.eml/Minutes 10_30.txt": (
+            "EML-COLON", "stored name 'Minutes 10:30.txt' is recorded as "
+                         "'Minutes 10_30.txt': ':' was replaced by '_'"),
+    }
+    for rel, (sentinel, note) in expected.items():
+        doc = by_rel.get(rel)
+        assert doc is not None, (rel, sorted(by_rel))
+        assert sentinel in _text(doc), (rel, _text(doc))
+        name_notes = [n for n in doc.notes if n.startswith("stored name ")]
+        assert name_notes == ([note] if note else []), (rel, doc.notes)
+        if note:
+            assert doc.notes[0] == note, doc.notes
+
+
+@pytest.mark.parametrize("device", [
+    "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+    "COM8", "COM9", "COM\u00b9", "COM\u00b2", "COM\u00b3", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4",
+    "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT\u00b9", "LPT\u00b2", "LPT\u00b3"])
+def test_every_windows_device_name_is_prefixed_and_nothing_else_is(device):
+    """The device names Windows reserves, whatever the case and extension,
+    held as a literal list here rather than read back from the product's own
+    set; a name that only starts like one keeps its name."""
+    got = walker._child_names([
+        ex.ZipMember(f"{device.lower()}.log", b"", 0), ex.ZipMember(f"{device}X.log", b"", 1)])
+    assert [name for name, _note in got] == [f"_{device.lower()}.log", f"{device}X.log"], got
+    assert got[1][1] is None, got
+
+
+def test_repeated_stored_names_are_numbered_exactly_and_the_first_keeps_its_name():
+    got = walker._child_names([ex.ZipMember("dup.txt", b"", i) for i in range(3)])
+    assert got == [
+        ("dup.txt", None),
+        ("dup__2.txt", "stored name 'dup.txt' is recorded as 'dup__2.txt': numbered to "
+                       "keep it apart from another name in this container"),
+        ("dup__3.txt", "stored name 'dup.txt' is recorded as 'dup__3.txt': numbered to "
+                       "keep it apart from another name in this container")], got
+
+
+# ---------------------------------------------------------------------------
+# 29. Hashed output carries no memory address or temporary file name
+# ---------------------------------------------------------------------------
+
+_PIPELINE_CHILD = '''
+import json
+import sys
+from pathlib import Path
+
+from dociq import pipeline
+from dociq.contracts import RunConfig
+from dociq.ingest import extract as ex
+from dociq.ingest import walker
+
+src, out = sys.argv[1], sys.argv[2]
+outcome = pipeline.run(
+    RunConfig(source_root=src, output_root=out, ocr_engine_version=ex.ocr_engine_version()),
+    pipeline.PipelineOptions(walk=walker.WalkOptions(ocr_enabled=False, resume=False, workers=1),
+                             write_workbook=False, write_summary_pdf=False,
+                             write_package=False, auto_confirm_bates=True))
+log = json.loads((Path(out) / "processing_log.json").read_text(encoding="utf-8"))
+print(json.dumps([log["content_sha256"],
+                  [[d.rel_path, d.status.value, d.error, list(d.notes)]
+                   for d in list(outcome.result.documents) + list(outcome.result.unsupported)]]))
+'''
+
+
+def _macro_enabled_word(text: str) -> bytes:
+    import docx
+
+    d = docx.Document()
+    d.add_paragraph(text)
+    buf = io.BytesIO()
+    d.save(buf)
+    zin = zipfile.ZipFile(io.BytesIO(buf.getvalue()))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename == "[Content_Types].xml":
+                data = data.replace(
+                    b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+                    b"application/vnd.ms-word.document.macroEnabled.main+xml")
+            zout.writestr(zipfile.ZipInfo(info.filename, date_time=(2021, 3, 4, 5, 6, 8)), data)
+    return out.getvalue()
+
+
+def test_a_rejected_word_main_part_hashes_identically_in_two_interpreters(tmp_path):
+    """python-docx rejects a macro-enabled main part with a message holding its
+    stream object's repr, memory address and all; that text reached the
+    record's error and the hashed log, so two runs of one input disagreed.
+    One Word file at the top level and one held in an embedded Package
+    stream, each run in two fresh interpreters: one content hash."""
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    macro = _macro_enabled_word("INVENTED-MACRO-BODY")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "macro.docx").write_bytes(macro)
+    (src / "memo.docx").write_bytes(_docx_objects(
+        [("Embed", "Package", "embeddings/oleObject1.bin",
+          make_fixtures._write_compound_file({"Package": macro}))]))
+    script = tmp_path / "pipeline_child.py"
+    script.write_text(_PIPELINE_CHILD, encoding="utf-8")
+    repo_src = str(Path(__file__).resolve().parents[1] / "src")
+    runs = []
+    for seed in (1, 2):
+        env = dict(os.environ, PYTHONHASHSEED=str(seed), PYTHONPATH=repo_src)
+        done = subprocess.run([sys.executable, str(script), str(src), str(tmp_path / f"out{seed}")],
+                              capture_output=True, text=True, env=env, timeout=600)
+        assert done.returncode == 0, done.stderr[-2000:]
+        runs.append(json.loads(done.stdout.strip().splitlines()[-1]))
+    failed = {row[0]: row for row in runs[0][1] if row[1] == "failed"}
+    assert {"macro.docx", "memo.docx/oleObject1.docx"} <= set(failed), runs[0][1]
+    assert runs[0][0] == runs[1][0], (
+        "content_sha256 differs between two runs: "
+        + "; ".join(str(row[2]) for row in runs[0][1] + runs[1][1] if row[1] == "failed"))
+    assert not any(" at 0x" in json.dumps(row) for row in runs[0][1]), runs[0][1]
+
+
+def test_sanitize_message_removes_addresses_and_temporary_names():
+    assert ex.sanitize_message(
+        "file '<_io.BytesIO object at 0x000001AD7ECCB8D0>' is not a Word file") == (
+        "file '<_io.BytesIO object>' is not a Word file")
+    assert ex.sanitize_message(
+        "cannot open C:\\Users\\Invented\\AppData\\Local\\Temp\\tmpk3j2l1x0.msg: bad") == (
+        "cannot open <temp file>.msg: bad")
+    assert ex.sanitize_message("see /var/tmp/tmpab_cd123/report.pdf") == "see report.pdf"
+    assert ex.sanitize_message("kept: tmpfile_notes.txt and 0x1F") == (
+        "kept: tmpfile_notes.txt and 0x1F")
+
+
+# ---------------------------------------------------------------------------
+# 30. Parts are found through relationships, and compared as OPC compares them
+# ---------------------------------------------------------------------------
+
+
+def _part_xml(root: str, inner: str) -> bytes:
+    return (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:{root} {_MIN_NS}>'
+            f"{inner}</w:{root}>").encode("utf-8")
+
+
+def _object_para(rid: str) -> str:
+    return (f'<w:p><w:r><w:object><o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" '
+            f'r:id="{rid}"/></w:object></w:r></w:p>')
+
+
+def _rels_xml(*rels) -> bytes:
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships '
+            'xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            + "".join(f'<Relationship Id="{i}" Type="http://schemas.openxmlformats.org/'
+                      f'officeDocument/2006/relationships/{t}" Target="{g}"/>' for i, t, g in rels)
+            + "</Relationships>").encode("utf-8")
+
+
+def test_objects_in_notes_and_comments_are_found_through_relationships_whatever_their_names(tmp_path):
+    """The notes parts were found by their default file names: objects in a
+    ``footnotes2.xml`` or a comments part lost their place in the order, and a
+    stale, unrelated ``footnotes.xml`` produced a false "relationship id does
+    not exist" note. Every header, footer, footnotes, endnotes and comments
+    part the main part relates is scanned, in part-name order."""
+    xlsx = lambda name: make_fixtures._we_xlsx_bytes(tmp_path / name, name.upper())  # noqa: E731
+    raw = _docx_objects(
+        [("Embed", "Excel.Sheet.12", "embeddings/m_body.xlsx", xlsx("m_body.xlsx"))],
+        extra_parts={
+            "word/footnotes2.xml": _part_xml("footnotes", '<w:footnote w:id="1">'
+                                            + _object_para("rIdA") + "</w:footnote>"),
+            "word/_rels/footnotes2.xml.rels": _rels_xml(("rIdA", "oleObject", "embeddings/a_foot.xlsx")),
+            "word/embeddings/a_foot.xlsx": xlsx("a_foot.xlsx"),
+            "word/header1.xml": _part_xml("hdr", _object_para("rIdB")),
+            "word/_rels/header1.xml.rels": _rels_xml(("rIdB", "oleObject", "embeddings/b_head.xlsx")),
+            "word/embeddings/b_head.xlsx": xlsx("b_head.xlsx"),
+            "word/comments7.xml": _part_xml("comments", '<w:comment w:id="0" w:author="x">'
+                                            + _object_para("rIdC") + "</w:comment>"),
+            "word/_rels/comments7.xml.rels": _rels_xml(("rIdC", "oleObject", "objects/c_cmt.xlsx")),
+            "word/objects/c_cmt.xlsx": xlsx("c_cmt.xlsx"),
+            "word/footnotes.xml": _part_xml("footnotes", '<w:footnote w:id="9">'
+                                           + _object_para("rIdObjFn") + "</w:footnote>"),
+        },
+        extra_rels=[("rIdFn", "footnotes", "footnotes2.xml"), ("rIdH", "header", "header1.xml"),
+                    ("rIdCm", "comments", "comments7.xml")])
+    exp = ex.expand_docx_embeddings(raw)
+    assert [m.name for m in exp.members] == ["m_body.xlsx", "c_cmt.xlsx", "a_foot.xlsx",
+                                             "b_head.xlsx"], exp.members
+    assert exp.notes == (), exp.notes
+
+
+def test_an_object_target_differing_only_in_case_or_escaping_is_recovered_without_a_note(tmp_path):
+    """Part names compare case-insensitively and a target's percent-escapes
+    name the same part: ``KEEP.XLSX`` got a false "not in the package" note
+    while the trailing sweep recovered ``keep.xlsx`` anyway."""
+    raw = _docx_objects(
+        [("Embed", "Excel.Sheet.12", "embeddings/KEEP.XLSX", None),
+         ("Embed", "Excel.Sheet.12", "embeddings/Sheet%201.xlsx", None)],
+        extra_parts={
+            "word/embeddings/keep.xlsx": make_fixtures._we_xlsx_bytes(tmp_path / "k.xlsx", "KEPT-CASE"),
+            "word/embeddings/Sheet 1.xlsx": make_fixtures._we_xlsx_bytes(tmp_path / "s.xlsx", "KEPT-ESC")})
+    exp = ex.expand_docx_embeddings(raw)
+    assert [m.name for m in exp.members] == ["keep.xlsx", "Sheet 1.xlsx"], exp.members
+    assert exp.notes == (), exp.notes
+
+
+# ---------------------------------------------------------------------------
+# 31. Each disclosure path of the embedded-object reader, held by a test that
+# fails when its note is deleted or unmarked
+# ---------------------------------------------------------------------------
+
+
+def _deep_zip() -> bytes:
+    """A zip nested five archives deep: expanded, the fifth is past the cap."""
+    raw = _zip_of([("leaf.txt", b"INVENTED-DEEP-LEAF")])
+    for level in (4, 3, 2):
+        raw = _zip_of([(f"l{level}.zip", raw)])
+    return _zip_of([("x.txt", b"INVENTED-SHALLOW"), ("l1.zip", _zip_of([("l2.zip", raw)]))])
+
+
+def test_an_embedded_archive_that_cannot_be_read_is_named_in_a_marked_note():
+    raw = _docx_objects([("Embed", "Package", "embeddings/oleObject1.bin",
+                          _package("report.zip", b"INVENTED-NOT-A-ZIP"))])
+    exp = ex.expand_docx_embeddings(raw)
+    assert exp.members == (), exp.members
+    marked = [n for n in exp.notes if ex.has_evidence_marker(n)]
+    assert len(marked) == 1 and "embedded archive 'report.zip' could not be read" in marked[0], (
+        exp.notes)
+
+
+def test_an_embedded_archives_own_unmarked_notes_are_marked():
+    raw = _docx_objects([("Embed", "Package", "embeddings/oleObject1.bin",
+                          _package("deep.zip", _deep_zip()))])
+    exp = ex.expand_docx_embeddings(raw)
+    assert "deep.zip/x.txt" in [m.name for m in exp.members], exp.members
+    deep = [n for n in exp.notes if "nesting deeper than" in n]
+    assert len(deep) == 1 and deep[0].startswith(
+        f"{ex.M_ATTACH_SKIPPED}: embedded archive 'deep.zip': "), exp.notes
+
+
+def test_at_the_nesting_limit_a_containers_unmarked_notes_are_marked(tmp_path):
+    innermost = _eml_attaching("deep.zip", _deep_zip())
+    chain = _eml_attaching("c.eml", innermost)
+    chain = _eml_attaching("b.eml", chain)
+    r = _walk_files(tmp_path, {"top.eml": _eml_attaching("a.eml", chain)})
+    capped = next((d for d in r.documents if d.rel_path == "top.eml/a.eml/b.eml/c.eml"), None)
+    assert capped is not None, [d.rel_path for d in r.documents]
+    limit = [n for n in capped.notes if "nesting deeper than 3 levels" in n]
+    assert len(limit) == 1 and limit[0].startswith(
+        f"{ex.M_ATTACH_SKIPPED}: inside a container at the nesting limit: "), capped.notes
+
+
+def test_unparsable_relationships_of_a_related_part_are_named_in_a_marked_note():
+    raw = _docx_objects([], extra_parts={
+        "word/header9.xml": _part_xml("hdr", _object_para("rIdX")),
+        "word/_rels/header9.xml.rels": b"<Relationships this is not xml"},
+        extra_rels=[("rIdH9", "header", "header9.xml")])
+    exp = ex.expand_docx_embeddings(raw)
+    marked = [n for n in exp.notes if ex.has_evidence_marker(n)]
+    assert len(marked) == 1 and "the relationships of 'word/header9.xml' could not be parsed" in (
+        marked[0]), exp.notes
+
+
+def test_a_package_stream_holding_a_word_file_or_a_pdf_is_recovered_as_what_it_is(tmp_path):
+    word = _docx_objects([], body_text="WOMBAT-INNER-WORD")
+    pdf = _minimal_pdf_bytes()
+    raw = _docx_objects([
+        ("Embed", "Package", "embeddings/oleObject1.bin", make_fixtures._write_compound_file({"Package": word})),
+        ("Embed", "Package", "embeddings/oleObject2.bin", make_fixtures._write_compound_file({"Package": pdf}))])
+    exp = ex.expand_docx_embeddings(raw)
+    # The fixture's compound-file writer pads a stream to 4096 bytes.
+    assert [(m.name, m.raw[:len(data)]) for m, data in zip(exp.members, (word, pdf))] == [
+        ("oleObject1.docx", word), ("oleObject2.pdf", pdf)], [m.name for m in exp.members]
+    r = _walk_files(tmp_path, {"outer.docx": raw})
+    inner = next(d for d in r.documents if d.rel_path == "outer.docx/oleObject1.docx")
+    assert "WOMBAT-INNER-WORD" in _text(inner), _text(inner)
+
+
+@pytest.mark.parametrize("stream,ext", [("Workbook", ".xls"), ("Book", ".xls"),
+                                        ("__properties_version1.0", ".msg")])
+def test_a_legacy_office_stream_keeps_the_compound_file_whole_under_its_kind(stream, ext):
+    compound = make_fixtures._write_compound_file({stream: b"INVENTED-LEGACY-STREAM"})
+    exp = ex.expand_docx_embeddings(_docx_objects(
+        [("Embed", "Invented.1", "embeddings/oleObject3.bin", compound)]))
+    assert [(m.name, m.raw) for m in exp.members] == [(f"oleObject3{ext}", compound)], exp.members
+
+
+def test_the_member_cap_also_stops_the_unreferenced_part_sweep(tmp_path, monkeypatch):
+    monkeypatch.setattr(ex, "_ZIP_MAX_MEMBERS", 1)
+    raw = _docx_objects(
+        [("Embed", "Excel.Sheet.12", "embeddings/ref.xlsx",
+          make_fixtures._we_xlsx_bytes(tmp_path / "r.xlsx", "CAP-REF"))],
+        extra_parts={"word/embeddings/unref.xlsx": make_fixtures._we_xlsx_bytes(
+            tmp_path / "u.xlsx", "CAP-UNREF")})
+    exp = ex.expand_docx_embeddings(raw)
+    assert [m.name for m in exp.members] == ["ref.xlsx"], exp.members
+    assert any(ex.has_evidence_marker(n) and "truncated at 1 members" in n for n in exp.notes), (
+        exp.notes)
+
+
+# ---------------------------------------------------------------------------
+# 32. A Word package is read wherever it arrives, whatever it is called
+# ---------------------------------------------------------------------------
+
+
+def test_a_word_package_named_zip_is_read_wherever_it_arrives(tmp_path):
+    """Named ``.zip``, a Word file was unpacked as an archive at the top level,
+    inside an archive, attached to an email and held in a Package object: its
+    body and its PDF object were never read, and its parts became
+    "unrecognized format" records."""
+    word = (FIXTURES / "17_word_embeddings.docx").read_bytes()
+    r = _walk_files(tmp_path, {
+        "report.zip": word,
+        "bundle.zip": _zip_of([("inner.zip", word)]),
+        "mail.eml": _eml_attaching("report.zip", word),
+        "outer.docx": _docx_objects([("Embed", "Package", "embeddings/oleObject1.bin",
+                                      _package("report.zip", word))]),
+    })
+    by_rel = {d.rel_path: d for d in r.documents}
+    for route in ("report.zip", "bundle.zip/inner.zip", "mail.eml/report.zip",
+                  "outer.docx/report.zip"):
+        rec = by_rel.get(route)
+        assert rec is not None and "This sentence opens the fixture" in _text(rec), (
+            route, sorted(by_rel))
+        for child, sentinel in (("Microsoft_Excel_Worksheet1.xlsx", "BISON-WORKBOOK"),
+                                ("oleObject2.pdf", "CONDOR-PDF")):
+            got = by_rel.get(f"{route}/{child}")
+            assert got is not None and sentinel in _text(got), (route, child, sorted(by_rel))
+    parts = [d.rel_path for d in list(r.documents) + list(r.unsupported)
+             if d.rel_path.endswith((".xml", ".rels"))]
+    assert parts == [], parts
+
+
+@pytest.mark.parametrize("name", ["memo.txt", "memo.csv", "memo.eml", "memo.md", "memo.log",
+                                  "memo.email"])
+def test_a_word_package_under_a_text_name_is_read_as_word(tmp_path, name):
+    """The text, CSV and email readers never fail, so a Word file named
+    ``.txt`` was never retried by content: its page was its raw zip bytes,
+    reported FULL, while its embedded documents were recovered."""
+    word = (FIXTURES / "17_word_embeddings.docx").read_bytes()
+    r = _walk_files(tmp_path, {name: word})
+    rec = next(d for d in r.documents if d.rel_path == name)
+    ext = name[name.rfind("."):]
+    assert "This sentence opens the fixture" in _text(rec) and not _text(rec).startswith("PK"), (
+        _text(rec)[:80])
+    assert (f"extension {ext} but content is a zip-family container; recovered via Word "
+            "extractor") in rec.notes, rec.notes
+
+
+def test_two_different_archives_with_one_name_are_filed_apart(tmp_path):
+    """Two Package objects (or two email attachments) each holding a
+    different ``bundle.zip`` put both archives' members under one
+    ``bundle.zip/`` folder, as if one archive had held them all."""
+    zip_a = _zip_of([("a.txt", b"ALPHA-FIRST-ARCHIVE")])
+    zip_b = _zip_of([("a.txt", b"BRAVO-SECOND-ARCHIVE")])
+    exp = ex.expand_docx_embeddings(_docx_objects([
+        ("Embed", "Package", "embeddings/oleObject1.bin", _package("bundle.zip", zip_a)),
+        ("Embed", "Package", "embeddings/oleObject2.bin", _package("bundle.zip", zip_b))]))
+    assert [(m.name, m.raw) for m in exp.members] == [
+        ("bundle.zip/a.txt", b"ALPHA-FIRST-ARCHIVE"),
+        ("bundle__2.zip/a.txt", b"BRAVO-SECOND-ARCHIVE")], exp.members
+    assert exp.notes == ("embedded archive 'bundle.zip' has the name of one already listed; "
+                         "its members are listed under 'bundle__2.zip'",), exp.notes
+    r = _walk_files(tmp_path, {"mail.eml": _eml_attaching_all([("bundle.zip", zip_a),
+                                                              ("bundle.zip", zip_b)])})
+    by_rel = {d.rel_path: _text(d) for d in r.documents}
+    assert "ALPHA-FIRST-ARCHIVE" in by_rel.get("mail.eml/bundle.zip/a.txt", ""), sorted(by_rel)
+    assert "BRAVO-SECOND-ARCHIVE" in by_rel.get("mail.eml/bundle__2.zip/a.txt", ""), sorted(by_rel)
+
+
+def test_an_email_child_named_dot_email_has_its_own_attachments_read(tmp_path):
+    inner = _small_eml_bytes("INNER-DOT-EMAIL", "DOT-EMAIL-BODY",
+                             attachment=("leaf.txt", "DOT-EMAIL-LEAF"))
+    r = _walk_files(tmp_path, {"mail.eml": _eml_attaching("inner.email", inner)})
+    leaf = next((d for d in r.documents if d.rel_path == "mail.eml/inner.email/leaf.txt"), None)
+    assert leaf is not None and "DOT-EMAIL-LEAF" in _text(leaf), [d.rel_path for d in r.documents]
+
+
+def test_attachment_counts_say_how_many_were_read_and_how_many_only_inventoried(tmp_path):
+    r = _walk_files(tmp_path, {"mail.eml": _eml_attaching_all([
+        ("notes.txt", b"INVENTED-READ"), ("drawing.dwg", b"INVENTED-NOT-READ")])})
+    parent = next(d for d in r.documents if d.rel_path == "mail.eml")
+    assert "1 attachment(s) extracted as child document(s)" in parent.notes, parent.notes
+    assert ("1 attachment(s) inventoried as child document(s) only, in a format DocIQ does "
+            "not read") in parent.notes, parent.notes
+
+
+# ---------------------------------------------------------------------------
+# 33. The remaining disclosure paths, one test each (the Word spec addendum's
+# note table names the test that holds every note the package emits)
+# ---------------------------------------------------------------------------
+
+
+def test_an_object_naming_a_relationship_id_that_does_not_exist_is_named():
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships '
+            'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>')
+    exp = ex.expand_docx_embeddings(_docx_with_raw_object(
+        '<o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" r:id="rIdMissing"/>', rels))
+    marked = [n for n in exp.notes if ex.has_evidence_marker(n)]
+    assert exp.members == () and len(marked) == 1 and (
+        "names relationship id 'rIdMissing', which does not exist" in marked[0]), exp.notes
+
+
+def test_an_embedded_part_that_cannot_be_decompressed_is_named_for_a_retry(tmp_path):
+    """A stored part whose bytes fail their checksum is named under the
+    transient archive-member marker, so the walker re-reads the file."""
+    good = make_fixtures._we_xlsx_bytes(tmp_path / "c.xlsx", "CRC-KEPT")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(_docx_objects(
+            [("Embed", "Excel.Sheet.12", "embeddings/bad.xlsx", good)]))) as zin, \
+            zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zout:
+        for info in zin.infolist():
+            zout.writestr(info.filename, zin.read(info.filename))
+    raw = bytearray(buf.getvalue())
+    at = raw.find(good[40:80])
+    assert at > 0
+    raw[at] ^= 0xFF
+    exp = ex.expand_docx_embeddings(bytes(raw))
+    assert exp.members == (), exp.members
+    assert any(n.startswith(f"{ex.M_ZIP_MEMBER}: 'word/embeddings/bad.xlsx'") for n in exp.notes), (
+        exp.notes)
+    assert ex.has_transient_marker(exp.notes[0]), exp.notes
+
+
+def test_a_compound_file_that_cannot_be_opened_is_named():
+    garbage = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 600
+    exp = ex.expand_docx_embeddings(_docx_objects(
+        [("Embed", "Invented.1", "embeddings/oleObject1.bin", garbage)]))
+    marked = [n for n in exp.notes if ex.has_evidence_marker(n)]
+    assert exp.members == () and len(marked) == 1 and (
+        "'word/embeddings/oleObject1.bin' is a compound file that could not be read" in marked[0]), (
+        exp.notes)
+
+
+def test_a_compound_file_without_its_reader_installed_is_named(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "olefile", None)
+    exp = ex.expand_docx_embeddings(_docx_objects(
+        [("Embed", "Package", "embeddings/oleObject1.bin", _package("x.txt", b"INVENTED"))]))
+    marked = [n for n in exp.notes if ex.has_evidence_marker(n)]
+    assert exp.members == () and len(marked) == 1 and "'olefile' is not installed" in marked[0], (
+        exp.notes)
+
+
+def test_an_attached_archive_that_cannot_be_read_is_named(tmp_path):
+    r = _walk_files(tmp_path, {"mail.eml": _eml_attaching("bad.zip", b"INVENTED-NOT-A-ZIP")})
+    parent = next(d for d in r.documents if d.rel_path == "mail.eml")
+    marked = [n for n in parent.notes if ex.has_evidence_marker(n)]
+    assert len(marked) == 1 and marked[0].startswith(
+        f"{ex.M_ZIP_ATTACH}: attachment 'bad.zip' is a zip that could not be read"), parent.notes
+
+
+def test_two_inner_archives_with_one_name_in_one_archive_are_filed_apart():
+    buf = io.BytesIO()
+    with pytest.warns(UserWarning), zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("inner.zip", _zip_of([("a.txt", b"INNER-ONE")]))
+        zf.writestr("inner.zip", _zip_of([("a.txt", b"INNER-TWO")]))
+    exp = ex.expand_zip(buf.getvalue())
+    assert [(m.name, m.raw) for m in exp.members] == [("inner.zip/a.txt", b"INNER-ONE"),
+                                                      ("inner__2.zip/a.txt", b"INNER-TWO")], exp
+    assert exp.notes == ("archive 'inner.zip' has the name of one already listed; its members "
+                         "are listed under 'inner__2.zip'",), exp.notes

@@ -52,7 +52,7 @@ import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 from ..contracts import (
     ExtractionError,
@@ -61,7 +61,7 @@ from ..contracts import (
     ProcessingStatus,
     needs_ocr_review,
 )
-from ..identify.bates import FOOTER_BLOCK_MAX_LINES, BatesZone
+from ..identify.bates import FOOTER_BLOCK_MAX_LINES, TRACKED_DELETION_LABEL, BatesZone
 from ..sections.model import SectionSpan
 from ..sections.resolve import resolve_sections
 from ..sections.tier1_outline import spans_from_outline
@@ -184,11 +184,11 @@ M_IMAGE_UNREAD = "page image content was not read"
 # The Word fidelity package. Two markers, not one folded into
 # M_IMAGE_UNREAD, because they answer different questions: one is "this
 # construct was never read at all" (altChunk, a chart, SmartArt, a large
-# picture), the other is "this text WAS read and then deliberately left out
-# of the default view" (a tracked deletion). Keeping them apart means the
-# still-open ruling on whether deleted text should ALSO be shown (Word spec
-# part 8, zero corpus exposure) can change without touching the vocabulary the
-# unread-construct notes key off.
+# picture), the other is "this was deleted under tracked changes and is not
+# in the output". D-56 lists deleted TEXT after the body, so a listed
+# deletion is no longer missing evidence and carries no note; the deletion
+# marker is left for deleted content that holds no text to list (a deleted
+# picture, chart or object).
 M_WORD_UNREAD = "Word content was not read"
 M_WORD_TRACKED_DELETION = "tracked deletion(s) were not shown"
 
@@ -1766,7 +1766,75 @@ _DOCX_NS = {
     "cx": "http://schemas.microsoft.com/office/drawing/2014/chartex",
     # D-50: the embedded object, o:OLEObject.
     "o": "urn:schemas-microsoft-com:office:office",
+    # VML: a watermark's text lives in v:textpath/@string.
+    "v": "urn:schemas-microsoft-com:vml",
 }
+
+_MCE_UNDERSTOOD = frozenset({
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "http://schemas.microsoft.com/office/word/2010/wordml",
+    "http://schemas.microsoft.com/office/word/2012/wordml",
+    "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+    "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+    "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas",
+    "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
+    "http://schemas.microsoft.com/office/word/2015/wordml/symex",
+    "http://schemas.microsoft.com/office/drawing/2010/main",
+    "http://schemas.microsoft.com/office/drawing/2014/chartex",
+})
+"""Namespaces a markup-compatibility ``mc:Choice`` may require and still be
+taken: the constructs this reader reads or discloses from them. A Choice
+requiring anything else is skipped for the next Choice or the Fallback, as
+the markup-compatibility rules tell a reader that does not understand it.
+Taking every Choice regardless lost the Fallback's text wherever the Choice
+held a construct the reader has no rule for. Every dated chartex namespace
+(``.../drawing/2015/9/8/chartex`` and later) is understood too: each is
+disclosed as a chart."""
+
+_SYMBOL_FONT_TABLE = (
+    # 0x20-0x7E
+    " !\u2200#\u2203%&\u220b()\u2217+"
+    ",\u2212./01234567"
+    "89:;<=>?\u2245\u0391\u0392\u03a7"
+    "\u2206\u0395\u03a6\u0393\u0397\u0399\u03d1\u039a\u039b\u039c\u039d\u039f"
+    "\u03a0\u0398\u03a1\u03a3\u03a4\u03a5\u03c2\u2126\u039e\u03a8\u0396["
+    "\u2234]\u22a5_\ufffd\u03b1\u03b2\u03c7\u03b4\u03b5\u03c6\u03b3"
+    "\u03b7\u03b9\u03d5\u03ba\u03bb\u00b5\u03bd\u03bf\u03c0\u03b8\u03c1\u03c3"
+    "\u03c4\u03c5\u03d6\u03c9\u03be\u03c8\u03b6{|}\u223c",
+    # 0xA0-0xFF
+    "\u20ac\u03d2\u2032\u2264\u2044\u221e\u0192\u2663\u2666\u2665\u2660\u2194"
+    "\u2190\u2191\u2192\u2193\u00b0\u00b1\u2033\u2265\u00d7\u221d\u2202\u2022"
+    "\u00f7\u2260\u2261\u2248\u2026\u23d0\u23af\u21b5\u2135\u2111\u211c\u2118"
+    "\u2297\u2295\u2205\u2229\u222a\u2283\u2287\u2284\u2282\u2286\u2208\u2209"
+    "\u2220\u2207\u00ae\u00a9\u2122\u220f\u221a\u22c5\u00ac\u2227\u2228\u21d4"
+    "\u21d0\u21d1\u21d2\u21d3\u25ca\u2329\u00ae\u00a9\u2122\u2211\u239b\u239c"
+    "\u239d\u23a1\u23a2\u23a3\u23a7\u23a8\u23a9\u23aa\ufffd\u232a\u222b\u2320"
+    "\u23ae\u2321\u239e\u239f\u23a0\u23a4\u23a5\u23a6\u23ab\u23ac\u23ad\ufffd",
+)
+"""The Symbol font's characters, by the Adobe Symbol encoding: codes
+0x20-0x7E, then 0xA0-0xFF (0x7F-0x9F draw nothing). It is the table reportlab
+ships as its ``symbol`` codec, a declared dependency, and a test holds the two
+equal. Adobe gives the serif and sans-serif copyright, registered and
+trademark signs, the bracket, brace and integral pieces and the arrow
+extenders private-use code points; here each is the ordinary character it
+draws (U+00A9, U+00AE, U+2122, U+239B-U+23AD, U+23AF, U+23D0). U+FFFD marks
+the three codes that draw no character (0x60 radical extender, 0xF0, 0xFF).
+No such table for Wingdings ships with any dependency, so Wingdings and the
+other symbol fonts below are disclosed, not guessed."""
+
+_SYMBOL_ENCODED_FONTS = frozenset({
+    "wingdings", "wingdings 2", "wingdings 3", "webdings", "marlett",
+    "mt extra", "zapfdingbats", "zapf dingbats", "itc zapf dingbats",
+    "monotype sorts",
+})
+"""Fonts whose 8-bit codes name pictures, not characters: a code in 0x00-0xFF
+or F000-F0FF in one of these is never read as the Unicode character it
+happens to share a number with (Wingdings' ``00FC`` is a tick, not u-umlaut)."""
+
+SYMBOL_PLACEHOLDER = "\ufffd"
+"""What stands in place of a symbol character with no standard text mapping,
+so the characters either side of it never run together (``10`` and ``2``
+used to become ``102``)."""
 
 _WORD_GROUP_URIS = (
     "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
@@ -1844,6 +1912,59 @@ _WORD_MAIN_CONTENT_TYPES = (
 )
 
 
+class _PartNames:
+    """A package's part names, looked up the way the Open Packaging
+    Conventions compare them: case-insensitively (ASCII), and with a
+    relationship target's percent-escapes read either way.
+
+    ``Target="embeddings/KEEP.XLSX"`` names the part stored as
+    ``word/embeddings/keep.xlsx``; an exact string test called it missing,
+    wrote a false "not in the package" note, and the trailing sweep then
+    recovered the same part anyway. Where two stored names differ only by
+    case, the first in sorted order answers, so the lookup never depends on
+    zip order."""
+
+    def __init__(self, names):
+        self.names = set(names)
+        folded: dict[str, str] = {}
+        for name in sorted(self.names):
+            folded.setdefault(name.lower(), name)
+        self._folded = folded
+
+    def resolve(self, candidate: str) -> str | None:
+        if candidate in self.names:
+            return candidate
+        from urllib.parse import quote, unquote
+
+        for form in (candidate, unquote(candidate), quote(candidate, safe="/")):
+            found = self._folded.get(form.lower())
+            if found is not None:
+                return found
+        return None
+
+
+def _content_type_lookup(zf):
+    """``part name -> content type`` from ``[Content_Types].xml``: an
+    ``Override`` for the part, else the ``Default`` for its extension, else
+    ``""``."""
+    from lxml import etree
+
+    overrides: dict[str, str] = {}
+    defaults: dict[str, str] = {}
+    try:
+        root = etree.fromstring(zf.read("[Content_Types].xml"))
+    except Exception:
+        return lambda name: ""
+    for el in root:
+        local = _docx_local(el)
+        if local == "Override":
+            overrides[(el.get("PartName") or "").lstrip("/").lower()] = el.get("ContentType") or ""
+        elif local == "Default":
+            defaults[(el.get("Extension") or "").lower()] = el.get("ContentType") or ""
+    return lambda name: (overrides.get(name.lower())
+                         or defaults.get(name.rpartition(".")[2].lower(), ""))
+
+
 def _opc_main_part(zf) -> tuple[str, str] | None:
     """``(part name, content type)`` of the part an Office package's own
     ``_rels/.rels`` names as its main document, or ``None`` when the zip is
@@ -1856,26 +1977,18 @@ def _opc_main_part(zf) -> tuple[str, str] | None:
         return None
     try:
         rels = etree.fromstring(zf.read("_rels/.rels"))
-        types = etree.fromstring(zf.read("[Content_Types].xml"))
     except Exception:
         return None
+    parts = _PartNames(names)
+    content_type = _content_type_lookup(zf)
     for rel in rels:
         if ((rel.get("Type") or "").rsplit("/", 1)[-1] != "officeDocument"
                 or rel.get("TargetMode") == "External"):
             continue
-        part = _opc_target("", rel.get("Target") or "")
-        if part not in names:
+        part = parts.resolve(_opc_target("", rel.get("Target") or ""))
+        if part is None:
             continue
-        ext = part.rpartition(".")[2].lower()
-        override = default = ""
-        for el in types:
-            local = _docx_local(el)
-            if (local == "Override"
-                    and (el.get("PartName") or "").lstrip("/").lower() == part.lower()):
-                override = el.get("ContentType") or ""
-            elif local == "Default" and (el.get("Extension") or "").lower() == ext:
-                default = el.get("ContentType") or ""
-        return part, override or default
+        return part, content_type(part)
     return None
 
 
@@ -1886,32 +1999,72 @@ def docx_main_part(zf) -> str | None:
     return main[0] if main and main[1] in _WORD_MAIN_CONTENT_TYPES else None
 
 
-def is_word_package(raw: bytes) -> bool:
-    """True when ``raw`` is a Word package, whatever name it arrived under.
+def _office_kind(content_type: str) -> str | None:
+    """The extension DocIQ reads an Office package's main content type as:
+    ``.docx``, ``.xlsx``, ``.pptx``, or ``None`` for anything else (a
+    Visio drawing, a plain archive)."""
+    if content_type in _WORD_MAIN_CONTENT_TYPES:
+        return ".docx"
+    if "spreadsheetml" in content_type or "ms-excel" in content_type:
+        return ".xlsx"
+    if "presentationml" in content_type or "ms-powerpoint" in content_type:
+        return ".pptx"
+    return None
 
-    D-50 recovers the documents embedded in a Word file, and a production
-    delivers Word files named ``.pdf``, attached to an email as
-    ``report.pdf``, or zipped under another name. The content-sniff recovery
-    already reads such a file as Word, so whether its embedded documents are
-    expanded must be decided by the same bytes, never by the name: a file is
-    sent to :func:`expand_docx_embeddings` exactly when this is true, and PDF
-    bytes named ``.docx`` never are.
-    """
+
+def _package_kind(raw: bytes) -> str | None:
+    """:func:`_office_kind` of ``raw``'s main part, or ``None`` when ``raw`` is
+    not a zip or names no main part DocIQ reads."""
     if sniff_kind(raw) != "zip":
-        return False
+        return None
     import zipfile
 
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            return docx_main_part(zf) is not None
+            main = _opc_main_part(zf)
     except Exception:
-        return False
+        return None
+    return _office_kind(main[1]) if main else None
 
 
-def _docx_rels(zf, part_name: str) -> dict[str, tuple[str, bool]]:
-    """``{r:id: (target, is_external)}`` for the ``.rels`` part belonging to
-    ``part_name`` (e.g. ``"word/header2.xml"`` -> ``"word/_rels/header2.xml.rels"``).
-    The target is returned as written; :func:`_opc_target` resolves it.
+def is_word_package(raw: bytes) -> bool:
+    """True when ``raw`` is a Word package, whatever name it arrived under.
+
+    D-50 recovers the documents embedded in a Word file, and a production
+    delivers Word files named ``.pdf``, ``.txt`` or ``.zip``, attached to an
+    email as ``report.pdf``, or zipped under another name. Whether a READ
+    file's embedded documents are expanded is decided by these bytes, never by
+    the name (:func:`dociq.ingest.walker._container_kind`), and PDF bytes named
+    ``.docx`` are never sent. A Word package named ``.zip`` is read rather than
+    unpacked as an archive: :func:`is_office_package` is checked first wherever
+    a ``.zip`` name would otherwise be expanded.
+    """
+    return _package_kind(raw) == ".docx"
+
+
+def is_office_package(raw: bytes) -> bool:
+    """True when ``raw`` is a Word, Excel or PowerPoint package DocIQ reads.
+
+    Checked before anything named ``.zip`` is expanded as an archive — at the
+    top level, inside an archive, attached to an email or ``.msg``, or held in
+    an embedded Package object — so such a file is read as the document it is
+    instead of being flattened into its XML parts, each listed as an
+    unrecognized format."""
+    return _package_kind(raw) is not None
+
+
+class _Rel(NamedTuple):
+    target: str
+    external: bool
+    type: str
+    """The relationship type URI's last segment (``header``, ``footnotes``)."""
+
+
+def _docx_rels(zf, part_name: str) -> dict[str, _Rel]:
+    """``{r:id: (target, is_external, type)}`` for the ``.rels`` part belonging
+    to ``part_name`` (e.g. ``"word/header2.xml"`` ->
+    ``"word/_rels/header2.xml.rels"``, found case-insensitively). The target is
+    returned as written; :func:`_opc_target` resolves it.
 
     Absent is ordinary, not corrupt: a part with no relationships of its own
     (a footnotes part with no hyperlinks, say) simply has no ``.rels``
@@ -1921,106 +2074,239 @@ def _docx_rels(zf, part_name: str) -> dict[str, tuple[str, bool]]:
 
     dirname, _sep, base = part_name.rpartition("/")
     rels_path = f"{dirname}/_rels/{base}.rels" if dirname else f"_rels/{base}.rels"
-    if rels_path not in zf.namelist():
+    found = _PartNames(zf.namelist()).resolve(rels_path)
+    if found is None:
         return {}
-    root = etree.fromstring(zf.read(rels_path))
-    out: dict[str, tuple[str, bool]] = {}
+    root = etree.fromstring(zf.read(found))
+    out: dict[str, _Rel] = {}
     for rel in root:
         rid, target = rel.get("Id"), rel.get("Target")
         if rid and target:
-            out[rid] = (target, rel.get("TargetMode") == "External")
+            out[rid] = _Rel(target, rel.get("TargetMode") == "External",
+                            (rel.get("Type") or "").rsplit("/", 1)[-1])
     return out
 
 
+_WORD_TEXT_PART_TYPES = frozenset(_WORD_MAIN_CONTENT_TYPES) | {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml." + kind
+    for kind in ("header+xml", "footer+xml", "footnotes+xml", "endnotes+xml",
+                 "comments+xml", "document.glossary+xml")}
+"""Content types of the parts a Word package keeps text in. One of these
+that no relationship reaches is not part of the document Word shows."""
+
+
+class _DelEntry(NamedTuple):
+    """One tracked deletion found while reading (D-56), in the order its text
+    would stand in the page text."""
+
+    kind: str
+    """``"del"``, or ``"move"`` for moved-from text."""
+    author: str
+    move_name: str | None
+    """The move's name, from its ``w:moveFromRangeStart``, pairing it with the
+    ``w:moveToRangeStart`` of the same name; ``None`` outside a named range."""
+    text: str
+
+
 class _DocxWalker:
-    """Reads one DOCX package's text-bearing parts (Word spec parts 1-9).
+    """Reads one DOCX package's text-bearing parts (Word spec parts 1-9, and
+    the 2026-09-14 addendum).
 
     One instance per file, holding the state every part's walk needs: the
-    main document part and its relationships, whether the settings part asks
+    main document part and its relationships, the parts those relationships
+    name (settings, footnotes, endnotes, comments, headers, footers: found by
+    relationship type, never by file name), whether the settings part asks
     for even-page headers/footers, the final section's page area (for the
-    large-picture test), the disclosure counters, and which physical
-    header/footer parts have already been emitted (a part can be referenced
-    by more than one section and must still be read only once).
+    large-picture test), the disclosure counters, the tracked deletions found
+    so far and where each belongs, and which physical header/footer parts
+    have already been emitted (a part can be referenced by more than one
+    section and must still be read only once).
     """
 
-    _PROPERTY_ELEMENTS = frozenset({"pPr", "rPr", "sdtPr", "sdtEndPr"})
+    _PROPERTY_ELEMENTS = frozenset({"pPr", "rPr", "sdtPr", "sdtEndPr", "trPr", "tcPr"})
     """Property containers hold no text. A tab-stop list (``w:pPr/w:tabs/
     w:tab``) is not a tab character, and a deleted paragraph mark
     (``w:pPr/w:rPr/w:del``) is not deleted text; walking into either put
-    characters on the page the document does not contain."""
+    characters on the page the document does not contain. A deleted table
+    row or cell is read from its own properties by :meth:`_table_lines`."""
+
+    _RANGE_MARKERS = frozenset({"moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart"})
 
     def __init__(self, zf, main_part: str):
         self.zf = zf
-        self.names = set(zf.namelist())
+        self.parts = _PartNames(zf.namelist())
+        self.names = self.parts.names
         self.main_part = main_part
-        self.folder = main_part.rpartition("/")[0]
         self.rels = _docx_rels(zf, main_part)
-        self.even_and_odd = self._settings_have_even_odd()
+        settings = self.related("settings")
+        self.even_and_odd = bool(settings) and self._settings_have_even_odd(settings[0])
         self.page_area_emu2: float | None = None
         self.counters = {"altchunk": 0, "chart": 0, "smartart": 0,
-                         "picture": 0, "tracked_del": 0, "picture_unmeasured": 0,
-                         "symbol": 0, "subdoc": 0, "hidden_hdr_ftr": 0}
+                         "picture": 0, "picture_unmeasured": 0,
+                         "symbol": 0, "subdoc": 0, "hidden_hdr_ftr": 0,
+                         "deleted_graphic": 0, "open_field_code": 0}
+        self.symbol_fonts: set[str] = set()
         self._seen_header_parts: set[str] = set()
         self._seen_footer_parts: set[str] = set()
+        # D-56: where a tracked deletion found now is collected. Each part's
+        # reader points it at the list for that part's place in the page.
+        self._del_sink: list[_DelEntry] = []
+        self.header_deletions: list[_DelEntry] = []
+        self.footer_deletions: list[_DelEntry] = []
+        self._move_to_names: set[str] = set()
+        self._open_moves: list[tuple[str | None, str | None]] = []
+        self._moved: set[str] = set()
 
-    def _beside_main(self, base: str) -> str:
-        """A part named ``base`` in the main document part's own folder."""
-        return f"{self.folder}/{base}" if self.folder else base
+    def related(self, kind: str) -> list[str]:
+        """The stored part names the main part's internal relationships of
+        type ``kind`` name, in relationship order, each once."""
+        out: list[str] = []
+        for rel in self.rels.values():
+            if rel.type != kind or rel.external:
+                continue
+            part = self.parts.resolve(_opc_target(self.main_part, rel.target))
+            if part is not None and part not in out:
+                out.append(part)
+        return out
 
-    def _settings_have_even_odd(self) -> bool:
-        part = self._beside_main("settings.xml")
-        if part not in self.names:
-            return False
+    def _settings_have_even_odd(self, part: str) -> bool:
         from lxml import etree
 
         root = etree.fromstring(self.zf.read(part))
         return any(_docx_local(el) == "evenAndOddHeaders" and _on_off(el)
                    for el in root)
 
+    @staticmethod
+    def _author(el) -> str:
+        return " ".join((el.get(_wq("author")) or "").splitlines())
+
+    def _range_marker(self, el, name: str) -> None:
+        """Move ranges pair a ``w:moveFrom`` with the ``w:moveTo`` its text
+        went to (by ``w:name``); they can open at block level, in a
+        paragraph, or between table rows."""
+        if name == "moveToRangeStart":
+            if el.get(_wq("name")):
+                self._move_to_names.add(el.get(_wq("name")))
+        elif name == "moveFromRangeStart":
+            self._open_moves.append((el.get(_wq("id")), el.get(_wq("name"))))
+        else:
+            rid = el.get(_wq("id"))
+            for i in range(len(self._open_moves) - 1, -1, -1):
+                if self._open_moves[i][0] == rid:
+                    del self._open_moves[i]
+                    break
+
     # -- Word spec part 2: one paragraph's inline text, plus any text boxes it
     #    anchors (Word spec part 3), collected but not inlined ------------------
 
-    def _inline_text(self, p_el, part_rels: dict
-                     ) -> tuple[str, list[list[str]]]:
+    def _inline_text(self, p_el, part_rels: dict, field_code: list[bool] | None = None,
+                     deleted: tuple | None = None) -> tuple[str, list[list[str]]]:
+        """``(text, boxes)``: the paragraph's text as it reads with tracked
+        changes accepted, and the lines of each text box or watermark it
+        anchors. ``deleted`` is ``(kind, author, move name)`` when the whole
+        paragraph is deleted content (a deleted row, a deleted text box).
+
+        D-56: every character a tracked deletion removed goes to the
+        deletion list instead of the text, grouped: consecutive deleted
+        characters by one author (and one kind, and one move) form one
+        passage, and any character the accepted text keeps between them
+        ends it. Properties, bookmarks and other markup that holds no
+        character do not end a passage; a paragraph's end does."""
         parts: list[str] = []
         boxes: list[list[str]] = []
-        # One entry per complex field open in this paragraph, True while its
-        # CODE runs (between fldChar begin and separate). A field nested in
-        # another field's code (IF { MERGEFIELD } ...) carries its own cached
-        # result there, and that result is part of the outer code, not text.
-        field_code: list[bool] = []
+        box_entries: list[_DelEntry] = []
+        # One entry per complex field open, True while its CODE runs
+        # (between fldChar begin and separate). A field nested in another
+        # field's code (IF { MERGEFIELD } ...) carries its own cached result
+        # there, and that result is part of the outer code, not text. Shared
+        # by the paragraphs of one story: a field's code can run on past a
+        # paragraph mark.
+        if field_code is None:
+            field_code = []
+        group: list | None = None  # [(kind, author, move name), [text]]
+        graphic_depth = 0
 
-        def walk(node) -> None:
+        def close() -> None:
+            nonlocal group
+            if group is not None:
+                (kind, author, move_name), texts = group
+                if "".join(texts):
+                    self._del_sink.append(_DelEntry(kind, author, move_name, "".join(texts)))
+                group = None
+
+        def put(s: str, key) -> None:
+            nonlocal group
+            if not s:
+                return
+            if key is None:
+                close()
+                parts.append(s)
+                return
+            if group is None or group[0] != key:
+                close()
+                group = [key, []]
+            group[1].append(s)
+
+        def mark():
+            return len(parts), group, (len(group[1]) if group is not None else 0)
+
+        def deleted_since(start) -> tuple[list | None, int]:
+            _n, grp, n_grp = start
+            if group is None:
+                return None, 0
+            return group, (n_grp if group is grp else 0)
+
+        def walk(node, key) -> None:
+            nonlocal graphic_depth
             for child in node:
                 name = _docx_local(child)
                 if name in self._PROPERTY_ELEMENTS:
                     continue
-                if name in ("del", "moveFrom"):
-                    # The default view: insertions read as ordinary text
-                    # (below, by falling through to the generic recursion —
-                    # w:ins is never special-cased), deletions and
-                    # move-froms omitted and counted for disclosure.
-                    self.counters["tracked_del"] += 1
+                if name in self._RANGE_MARKERS:
+                    self._range_marker(child, name)
+                    continue
+                if name == "del":
+                    walk(child, ("del", self._author(child), None))
+                    continue
+                if name == "moveFrom":
+                    walk(child, ("move", self._author(child),
+                                 self._open_moves[-1][1] if self._open_moves else None))
                     continue
                 if name == "txbxContent":
                     # Walked as BLOCK content and returned to the caller to
                     # emit right after this paragraph's own line (Word spec
                     # part 3) — never inlined into the paragraph's own text.
                     # Its own drawings/altChunks still count (Word spec part
-                    # 9): nothing about being inside a text box makes a
-                    # chart or a large picture read.
-                    boxes.append(self._block_lines(list(child), part_rels))
+                    # 9). Its deletions are listed after this paragraph's.
+                    held, self._del_sink = self._del_sink, []
+                    try:
+                        lines = self._block_lines(list(child), part_rels, deleted=key)
+                        box_entries.extend(self._del_sink)
+                    finally:
+                        self._del_sink = held
+                    if key is None:
+                        boxes.append(lines)
+                    continue
+                if name == "textpath" and child.tag == f"{{{_DOCX_NS['v']}}}textpath":
+                    # A VML watermark or WordArt keeps its text only in this
+                    # attribute. It is read as a line of its own after the
+                    # paragraph that anchors it, as a text box is.
+                    text = child.get("string") or ""
+                    if text and key is None:
+                        boxes.append([text])
+                    elif text:
+                        box_entries.append(_DelEntry(key[0], key[1], key[2], text))
                     continue
                 if name == "AlternateContent":
-                    # Read Choice only when present, never both: the text
-                    # box in this fixture stores its content verbatim in
-                    # BOTH mc:Choice and mc:Fallback, and reading both would
-                    # double it.
-                    walk(_alternate_choice(child))
+                    walk(_alternate_choice(child), key)
                     continue
                 if name == "fldChar":
                     kind = child.get(_wq("fldCharType"))
                     if kind == "begin":
+                        if not any(field_code):
+                            # A legacy form field shows its value from
+                            # w:ffData, not from any result run.
+                            put(_form_field_value(child), key)
                         field_code.append(True)
                     elif kind == "separate" and field_code:
                         field_code[-1] = False
@@ -2028,87 +2314,144 @@ class _DocxWalker:
                         field_code.pop()
                     continue
                 if any(field_code) and name in (
-                        "t", "tab", "ptab", "br", "cr", "noBreakHyphen", "sym"):
+                        "t", "delText", "tab", "ptab", "br", "cr", "noBreakHyphen",
+                        "sym", "symEx", "textpath"):
                     continue
-                if name == "t":
-                    if child.text:
-                        parts.append(child.text)
+                if name in ("t", "delText"):
+                    # A delText outside any w:del is still deleted text; its
+                    # author is unknown.
+                    put(child.text or "", key if key is not None or name == "t"
+                        else ("del", "", None))
                     continue
                 if name in ("tab", "ptab"):
                     # A positional tab (w:ptab: Word's own left/center/right
                     # header layout) separates words exactly as a tab does.
-                    parts.append("\t")
+                    put("\t", key)
                     continue
                 if name in ("br", "cr"):
-                    parts.append("\n")
+                    put("\n", key)
                     continue
                 if name == "noBreakHyphen":
-                    parts.append("-")
+                    put("-", key)
                     continue
-                if name == "sym":
-                    self._symbol(child, parts)
+                if name in ("sym", "symEx"):
+                    put(self._symbol(child), key)
                     continue
-                if name in ("instrText", "delText"):
-                    continue  # field code / deleted text: excluded by name
+                if name in ("instrText", "delInstrText"):
+                    continue  # field code: excluded by name
                 if name == "ruby":
                     # A phonetic guide follows its base text in brackets,
                     # rather than running into it.
                     base = next((c for c in child if _docx_local(c) == "rubyBase"), None)
                     guide = next((c for c in child if _docx_local(c) == "rt"), None)
                     if base is not None:
-                        walk(base)
+                        walk(base, key)
                     if guide is not None:
-                        before = len(parts)
-                        walk(guide)
-                        text = "".join(parts[before:])
-                        del parts[before:]
+                        start = mark()
+                        walk(guide, key)
+                        text = "".join(parts[start[0]:])
+                        grp, first = deleted_since(start)
                         if text:
+                            del parts[start[0]:]
                             parts.append(f"({text})")
+                        elif grp is not None and "".join(grp[1][first:]):
+                            shown = "".join(grp[1][first:])
+                            del grp[1][first:]
+                            grp[1].append(f"({shown})")
                     continue
                 if name == "subDoc":
                     # A master document's link to a sub-document stored
                     # elsewhere: its text is not in this package.
-                    self.counters["subdoc"] += 1
+                    if key is None:
+                        self.counters["subdoc"] += 1
                     continue
                 if name == "hyperlink":
-                    before = len(parts)
-                    walk(child)
-                    display = "".join(parts[before:])
+                    start = mark()
+                    walk(child, key)
+                    shown = "".join(parts[start[0]:])
                     rel = part_rels.get(child.get(_rq("id")))
                     # An internal w:anchor link has no r:id and so no
                     # relationship: it adds nothing beyond the display text
                     # already appended above. The target follows "when the
                     # two differ" (Word spec part 2), never merely when the
-                    # display text does not contain it.
-                    if rel and rel[1] and rel[0].strip() != display.strip():
-                        parts.append(f" <{rel[0]}>")
+                    # display text does not contain it; where the display
+                    # text was deleted, the target follows it in the list.
+                    if rel and rel[1]:
+                        grp, first = deleted_since(start)
+                        deleted_shown = "".join(grp[1][first:]) if grp is not None else ""
+                        if shown or not deleted_shown:
+                            if rel[0].strip() != shown.strip() and (shown or key is None):
+                                put(f" <{rel[0]}>", None)
+                        elif rel[0].strip() != deleted_shown.strip():
+                            put(f" <{rel[0]}>", grp[0])
                     continue
-                if name == "drawing":
-                    # Word spec part 9: counted wherever this walker reaches
-                    # it — body, header, footer, footnote, endnote, comment
-                    # or text box — not only the body.
-                    self._note_drawing(child)
-                    walk(child)  # a text box's txbxContent can be nested here
+                if name in ("drawing", "pict", "object"):
+                    if key is None:
+                        if name == "drawing":
+                            # Word spec part 9: counted wherever this walker
+                            # reaches it — body, header, footer, footnote,
+                            # endnote, comment or text box.
+                            self._note_drawing(child)
+                        walk(child, key)  # a text box's txbxContent can be nested here
+                        continue
+                    # A deleted picture, chart or object shows nothing
+                    # listable; it is counted, once per outermost graphic,
+                    # and any text box inside it is listed.
+                    if graphic_depth == 0:
+                        self.counters["deleted_graphic"] += 1
+                    graphic_depth += 1
+                    try:
+                        walk(child, key)
+                    finally:
+                        graphic_depth -= 1
                     continue
-                walk(child)  # w:r, w:ins, w:sdt, w:smartTag, ... — transparent
+                walk(child, key)  # w:r, w:ins, w:moveTo, w:sdt, w:smartTag, ... — transparent
 
-        walk(p_el)
+        walk(p_el, deleted)
+        close()
+        self._del_sink.extend(box_entries)
         return "".join(parts), boxes
 
-    def _symbol(self, sym_el, parts: list[str]) -> None:
-        """``w:sym``: one character, given as a hex code in a named font. A
-        Unicode character is text. A code in the private-use area belongs to
-        a symbol font (Wingdings' tick is ``F0FC``) and means nothing as a
-        character, so it is counted for disclosure instead."""
+    def _symbol(self, sym_el) -> str:
+        """``w:sym`` (or ``w16se:symEx``): one character, given as a hex code in
+        a named font. In the Symbol font the code is mapped through the Symbol
+        encoding (``F0B1`` is ±). In Wingdings and the other fonts of
+        :data:`_SYMBOL_ENCODED_FONTS` a code names a picture no standard table
+        maps, and in any other font a private-use, surrogate or malformed code
+        means nothing as a character: each of those stands as
+        :data:`SYMBOL_PLACEHOLDER` in its place and is counted, with its font,
+        for a marked note. Any other code is the Unicode character itself."""
+        font = code_text = None
+        for key, value in sym_el.attrib.items():
+            local = key.rsplit("}", 1)[-1]
+            if local == "font":
+                font = value
+            elif local == "char":
+                code_text = value
         try:
-            code = int(sym_el.get(_wq("char")) or "", 16)
+            code = int(code_text or "", 16)
         except ValueError:
             code = -1
-        if (0 < code < 0x110000 and not 0xD800 <= code <= 0xDFFF
-                and not 0xE000 <= code <= 0xF8FF):
-            parts.append(chr(code))
+        folded = (font or "").strip().lower()
+        if folded == "symbol" and (0x20 <= code <= 0xFF or 0xF020 <= code <= 0xF0FF):
+            low = code & 0xFF
+            if 0x20 <= low <= 0x7E:
+                char = _SYMBOL_FONT_TABLE[0][low - 0x20]
+            elif 0xA0 <= low <= 0xFF:
+                char = _SYMBOL_FONT_TABLE[1][low - 0xA0]
+            else:
+                char = SYMBOL_PLACEHOLDER
+        elif folded in _SYMBOL_ENCODED_FONTS and (0 <= code <= 0xFF or 0xF000 <= code <= 0xF0FF):
+            char = SYMBOL_PLACEHOLDER
+        elif (0 < code < 0x110000 and not 0xD800 <= code <= 0xDFFF
+              and not 0xE000 <= code <= 0xF8FF):
+            char = chr(code)
         else:
+            char = SYMBOL_PLACEHOLDER
+        if char == SYMBOL_PLACEHOLDER:
             self.counters["symbol"] += 1
+            self.symbol_fonts.add((font or "").strip() or "no font named")
+        return char
 
     # -- Word spec part 9: chart / SmartArt / large-picture disclosure ----------
 
@@ -2137,32 +2480,44 @@ class _DocxWalker:
         elif uri.endswith("/picture"):
             self._note_picture(extent)
         elif uri in _WORD_GROUP_URIS:
-            self._note_group(gd)
+            self._note_group(gd, (1.0, 1.0), extent)
 
-    def _note_group(self, el) -> None:
+    def _note_group(self, el, scale: tuple[float, float],
+                    frame: tuple[float, float] | None) -> None:
         """The charts, SmartArt and pictures inside a group shape or a
         drawing canvas. The group's own URI is neither, so what it holds was
-        never looked at. A picture is measured by its own ``a:xfrm`` extent.
-        A text box inside the group is not looked at here: its content is
-        block text the paragraph walk reads, drawings and all."""
+        never looked at. A text box inside the group is not looked at here:
+        its content is block text the paragraph walk reads, drawings and all.
+
+        A picture is measured at the size it is DRAWN. A group lays its
+        children out in its own child coordinate space (``a:chOff``/
+        ``a:chExt``) and draws that space at its extent (``a:ext``, or, for
+        the outermost group, the drawing's ``wp:extent`` when it states
+        none), so a child's displayed size is its ``a:ext`` times
+        ``ext / chExt`` on each axis, compounded through nested groups.
+        Measured in child units, a large picture in a scaled-down space went
+        undisclosed and a small one in a scaled-up space was reported."""
         for child in el:
             name = _docx_local(child)
             if name in ("drawing", "txbxContent"):
                 continue
             if name == "AlternateContent":
-                self._note_group(_alternate_choice(child))
+                self._note_group(_alternate_choice(child), scale, frame)
+                continue
+            if name in ("wgp", "grpSp"):
+                self._note_group(child, _group_scale(child, scale, frame), None)
                 continue
             if name == "graphicData" and child.tag == f"{{{_DOCX_NS['a']}}}graphicData":
                 if child.get("uri", "").endswith("/picture"):
-                    self._note_picture(_xfrm_extent(
-                        next(child.iter(f"{{{_DOCX_NS['pic']}}}pic"), None)))
+                    self._note_picture(_scaled(_xfrm_extent(
+                        next(child.iter(f"{{{_DOCX_NS['pic']}}}pic"), None)), scale))
                 else:
                     self._classify_graphic(child, None)
                 continue
             if name == "pic":
-                self._note_picture(_xfrm_extent(child))
+                self._note_picture(_scaled(_xfrm_extent(child), scale))
                 continue
-            self._note_group(child)
+            self._note_group(child, scale, frame)
 
     def _own_graphicdata(self, elements):
         """Every ``a:graphicData`` that belongs to THIS drawing, paired with
@@ -2180,9 +2535,9 @@ class _DocxWalker:
         depth (a text box inside a text box included, since each drawing gets
         its own bounded call the moment the walk actually reaches it).
 
-        ``mc:AlternateContent`` is resolved to ``Choice`` only, matching
-        ``_inline_text``'s own rule — a chartEx graphic's picture Fallback
-        must never be counted as a second, unread picture.
+        ``mc:AlternateContent`` is resolved by :func:`_alternate_choice`,
+        matching ``_inline_text``'s own rule — a chartEx graphic's picture
+        Fallback must never be counted as a second, unread picture.
         """
         for el in elements:
             name = _docx_local(el)
@@ -2199,8 +2554,8 @@ class _DocxWalker:
     def _own_graphicdata_in(self, elements, extent_host):
         """Descend inside one ``wp:inline``/``wp:anchor`` for its OWN
         ``a:graphicData`` (there is exactly one), still stopping at a nested
-        ``w:drawing`` and resolving ``AlternateContent`` to ``Choice`` only.
-        Split from :meth:`_own_graphicdata` only so ``extent_host`` — the
+        ``w:drawing`` and resolving ``AlternateContent`` as above. Split from
+        :meth:`_own_graphicdata` only so ``extent_host`` — the
         ``wp:inline``/``wp:anchor`` whose ``wp:extent`` measures THIS
         graphic — is fixed once and threaded through, rather than
         recomputed or lost across the AlternateContent recursion.
@@ -2233,40 +2588,60 @@ class _DocxWalker:
     # -- Word spec part 1 / part 4: the one block walker for body, cells, text
     #    boxes, headers, footers, footnotes, endnotes and comments --------
 
-    def _block_lines(self, elements, part_rels: dict) -> list[str]:
+    def _block_lines(self, elements, part_rels: dict, deleted: tuple | None = None,
+                     field_code: list[bool] | None = None) -> list[str]:
+        """The lines of one story's block content. With ``deleted`` set every
+        character goes to the deletion list and the lines come back empty.
+
+        A complex field's state is shared by the story's paragraphs, because
+        a field's code can run on past a paragraph mark: the cached result of
+        a field nested in that code is code, not text. A story that ends
+        while a field's code is still open had the text after the field's
+        start read as code; that is counted for a marked note, never left
+        silent."""
         lines: list[str] = []
+        own_fields = field_code is None
+        if field_code is None:
+            field_code = []
         for el in elements:
             name = _docx_local(el)
             if name == "p":
-                text, boxes = self._inline_text(el, part_rels)
+                text, boxes = self._inline_text(el, part_rels, field_code, deleted)
                 lines.append(text)
                 for box in boxes:
                     lines.extend(box)
             elif name == "tbl":
-                lines.extend(self._table_lines(el, part_rels))
+                lines.extend(self._table_lines(el, part_rels, deleted))
             elif name == "sdt":
                 content = next((c for c in el if _docx_local(c) == "sdtContent"), None)
                 if content is not None:
-                    lines.extend(self._block_lines(list(content), part_rels))
+                    lines.extend(self._block_lines(list(content), part_rels, deleted, field_code))
             elif name == "customXml":
-                lines.extend(self._block_lines(list(el), part_rels))
+                lines.extend(self._block_lines(list(el), part_rels, deleted, field_code))
             elif name == "AlternateContent":
                 # Block-level alternate content, resolved as the inline walk
-                # resolves it: Choice when present, never both.
-                lines.extend(self._block_lines(list(_alternate_choice(el)), part_rels))
+                # resolves it.
+                lines.extend(self._block_lines(list(_alternate_choice(el)), part_rels,
+                                               deleted, field_code))
             elif name == "altChunk":
                 # Word spec part 9: counted wherever it is found, same as a
                 # drawing — an altChunk in a header/footer/footnote/endnote
                 # is exactly as unread as one in the body.
-                self.counters["altchunk"] += 1
+                if deleted is None:
+                    self.counters["altchunk"] += 1
+            elif name in self._RANGE_MARKERS:
+                self._range_marker(el, name)
             # w:sectPr and anything else (bookmarks, proofErr, ...): ignored.
+        if own_fields and any(field_code):
+            self.counters["open_field_code"] += 1
         return lines
 
     def _wrapped(self, elements, want: str):
         """The ``want`` children (``tr`` of a table, ``tc`` of a row), looking
-        through the content controls and custom XML that can wrap them (Word
-        spec part 1). A repeating-section content control wraps whole rows,
-        and a row or cell reached only through one lost its text."""
+        through the content controls, custom XML and alternate content that
+        can wrap them (Word spec part 1). A repeating-section content control
+        wraps whole rows, and a row or cell reached only through one lost its
+        text."""
         for el in elements:
             name = _docx_local(el)
             if name == want:
@@ -2277,15 +2652,34 @@ class _DocxWalker:
                     yield from self._wrapped(content, want)
             elif name == "customXml":
                 yield from self._wrapped(el, want)
+            elif name == "AlternateContent":
+                yield from self._wrapped(_alternate_choice(el), want)
+            elif name in self._RANGE_MARKERS:
+                self._range_marker(el, name)
 
-    def _table_lines(self, tbl_el, part_rels: dict) -> list[str]:
+    def _tracked(self, el, props: str, marker: str) -> tuple | None:
+        """``("del", author, None)`` when ``el``'s ``props`` child carries a
+        ``marker`` element (a deleted row's ``w:trPr/w:del``, a deleted
+        cell's ``w:tcPr/w:cellDel``)."""
+        pr = next((c for c in el if _docx_local(c) == props), None)
+        found = next((c for c in pr if _docx_local(c) == marker), None) if pr is not None else None
+        return ("del", self._author(found), None) if found is not None else None
+
+    def _table_lines(self, tbl_el, part_rels: dict, deleted: tuple | None = None) -> list[str]:
         rows = []
         for tr in self._wrapped(tbl_el, "tr"):
-            cells = [self._cell_text(tc, part_rels) for tc in self._wrapped(tr, "tc")]
-            rows.append("\t".join(cells))  # Word spec part 4: row = cells joined by tab
+            row_deleted = deleted or self._tracked(tr, "trPr", "del")
+            cells = []
+            for tc in self._wrapped(tr, "tc"):
+                cell_deleted = row_deleted or self._tracked(tc, "tcPr", "cellDel")
+                text = self._cell_text(tc, part_rels, cell_deleted)
+                if cell_deleted is None:
+                    cells.append(text)
+            if row_deleted is None:
+                rows.append("\t".join(cells))  # Word spec part 4: row = cells joined by tab
         return rows
 
-    def _cell_text(self, tc_el, part_rels: dict) -> str:
+    def _cell_text(self, tc_el, part_rels: dict, deleted: tuple | None = None) -> str:
         tc_pr = next((c for c in tc_el if _docx_local(c) == "tcPr"), None)
         if tc_pr is not None:
             vmerge = next((c for c in tc_pr if _docx_local(c) == "vMerge"), None)
@@ -2298,15 +2692,15 @@ class _DocxWalker:
         # Word spec part 4: a cell's lines joined by newline; a nested table (the
         # FERRET case) is walked in order with the cell's own paragraphs by
         # the same block walker that reads the body.
-        return "\n".join(self._block_lines(content, part_rels))
+        return "\n".join(self._block_lines(content, part_rels, deleted))
 
     # -- Word spec part 5: headers and footers -----------------------------------
 
     def _rel_part(self, rid: str | None) -> str | None:
         rel = self.rels.get(rid) if rid else None
-        if rel is None or rel[1]:
+        if rel is None or rel.external:
             return None
-        return _opc_target(self.main_part, rel[0])
+        return self.parts.resolve(_opc_target(self.main_part, rel.target))
 
     def _section_refs(self, sect_pr) -> dict[str, tuple[list[str], list[str]]]:
         """For ``headerReference`` and ``footerReference``: this section's
@@ -2334,55 +2728,91 @@ class _DocxWalker:
         for sect_pr in body_el.iter(_wq("sectPr")):
             refs = self._section_refs(sect_pr)
             for part in refs["headerReference"][0]:
-                if part in self._seen_header_parts or part not in self.names:
+                if part in self._seen_header_parts:
                     continue
                 self._seen_header_parts.add(part)
-                header_lines.extend(self._read_hdr_ftr_part(part))
+                header_lines.extend(self._read_story_part(part, self.header_deletions))
             for part in refs["footerReference"][0]:
-                if part in self._seen_footer_parts or part not in self.names:
+                if part in self._seen_footer_parts:
                     continue
                 self._seen_footer_parts.add(part)
-                footer_lines.extend(self._read_hdr_ftr_part(part))
+                footer_lines.extend(self._read_story_part(part, self.footer_deletions))
             hidden.extend(refs["headerReference"][1] + refs["footerReference"][1])
-        # A part only a hidden type references, with text in it, is named in
-        # a note (Word keeps a first-page header part when "Different first
-        # page" is unticked). Sorted, so the count never depends on set order.
-        unread = sorted({p for p in hidden if p in self.names}
+        # A header or footer part that no section displays, with content in
+        # it, is named in a note: one only a hidden type references (Word
+        # keeps a first-page part when "Different first page" is unticked),
+        # and one the main part relates that no section references at all.
+        # Sorted, so the count never depends on set order.
+        unread = sorted(set(hidden + self.related("header") + self.related("footer"))
                         - self._seen_header_parts - self._seen_footer_parts)
-        self.counters["hidden_hdr_ftr"] = sum(1 for p in unread if self._has_text(p))
+        self.counters["hidden_hdr_ftr"] = sum(1 for p in unread if self._part_has_content(p))
         return header_lines, footer_lines
 
-    def _has_text(self, part_name: str) -> bool:
+    def _read_story_part(self, part_name: str, sink: list[_DelEntry]) -> list[str]:
+        from lxml import etree
+
+        root = etree.fromstring(self.zf.read(part_name))
+        part_rels = _docx_rels(self.zf, part_name)
+        held, self._del_sink = self._del_sink, sink
+        self._open_moves = []
+        try:
+            return self._block_lines(list(root), part_rels)
+        finally:
+            self._del_sink = held
+
+    def _part_has_content(self, part_name: str) -> bool:
+        """Whether reading ``part_name`` would put anything in the output:
+        text, a watermark, a deletion, a symbol, or a construct a note would
+        count. Read with the same walker, so what counts as content here can
+        never be narrower than what the reader reads (it once counted
+        ``w:t`` only, and a hidden header holding only a watermark was not
+        disclosed). Nothing this looks at is kept. An unreadable part counts:
+        whatever it holds was not read."""
         from lxml import etree
 
         try:
             root = etree.fromstring(self.zf.read(part_name))
+            part_rels = _docx_rels(self.zf, part_name)
         except Exception:
-            return True  # unreadable: whatever it holds was not read
-        return any(t.text and t.text.strip() for t in root.iter(_wq("t")))
-
-    def _read_hdr_ftr_part(self, part_name: str) -> list[str]:
-        from lxml import etree
-
-        root = etree.fromstring(self.zf.read(part_name))
-        part_rels = _docx_rels(self.zf, part_name)
-        return self._block_lines(list(root), part_rels)
+            return True
+        saved = (dict(self.counters), set(self.symbol_fonts), set(self._move_to_names),
+                 list(self._open_moves), self._del_sink)
+        self._del_sink = []
+        try:
+            lines: list[str] = []
+            for story in _stories(root):
+                lines.extend(self._block_lines(story, part_rels))
+            return (any(line.strip() for line in lines)
+                    or any(e.text.strip() for e in self._del_sink)
+                    or self.counters != saved[0])
+        except Exception:
+            return True
+        finally:
+            (self.counters, self.symbol_fonts, self._move_to_names,
+             self._open_moves, self._del_sink) = saved
 
     # -- Word spec part 6: footnotes, endnotes, comments -------------------------
 
     def read_notes(self) -> list[str]:
-        lines = self._read_note_part(self._beside_main("footnotes.xml"), "footnote")
-        lines += self._read_note_part(self._beside_main("endnotes.xml"), "endnote")
-        lines += self._read_comments()
+        """Every footnotes, endnotes and comments part the main part's
+        relationships name, whatever it is called. A part with a standard
+        name that nothing relates is not the document's: reading it put a
+        stale footnote on the page as this document's own."""
+        lines: list[str] = []
+        for part in self.related("footnotes"):
+            lines += self._read_note_part(part, "footnote")
+        for part in self.related("endnotes"):
+            lines += self._read_note_part(part, "endnote")
+        for part in self.related("comments"):
+            lines += self._read_comments(part)
         return lines
 
     def _read_note_part(self, part_name: str, tag: str) -> list[str]:
-        if part_name not in self.names:
-            return []
         from lxml import etree
 
         root = etree.fromstring(self.zf.read(part_name))
         part_rels = _docx_rels(self.zf, part_name)
+        self._open_moves = []
         out = []
         for note in (c for c in root if _docx_local(c) == tag):
             if note.get(_wq("type")) not in (None, "normal"):
@@ -2391,14 +2821,12 @@ class _DocxWalker:
             out.append(f"[{tag} {note.get(_wq('id'))}] {text}")
         return out
 
-    def _read_comments(self) -> list[str]:
-        part_name = self._beside_main("comments.xml")
-        if part_name not in self.names:
-            return []
+    def _read_comments(self, part_name: str) -> list[str]:
         from lxml import etree
 
         root = etree.fromstring(self.zf.read(part_name))
         part_rels = _docx_rels(self.zf, part_name)
+        self._open_moves = []
         out = []
         for c in (c for c in root if _docx_local(c) == "comment"):
             # w:date is deliberately never read: it is metadata about the
@@ -2409,9 +2837,54 @@ class _DocxWalker:
             out.append(f"[comment by {c.get(_wq('author')) or ''}] {text}")
         return out
 
+    # -- D-56: the deletion list -------------------------------------------------
+
+    def deletion_lines(self, entries: list[_DelEntry]) -> list[str]:
+        """One line per deleted passage, in page-text order:
+        ``[deleted by <author>] <text>``, with the passage's own line breaks
+        read as spaces so the label stands on every line it occupies.
+        Moved-from text whose move names a ``w:moveToRangeStart`` somewhere
+        the reader read is not listed: its words already stand in the text
+        where they were moved to, and listing them again would put every
+        date and number in them into the output twice. Moved-from text with
+        no such destination reads, with changes accepted, as a deletion, and
+        is listed as one."""
+        out: list[str] = []
+        for entry in entries:
+            if entry.kind == "move" and entry.move_name in self._move_to_names:
+                self._moved.add(entry.move_name)
+                continue
+            text = re.sub(r"[\r\n]+", " ", entry.text)
+            out.append(f"{TRACKED_DELETION_LABEL}{entry.author}] {text}")
+        return out
+
+    def orphan_parts_with_content(self) -> int:
+        """Word text parts no relationship chain from the main part reaches,
+        that hold content. Word neither shows nor keeps them; they are not
+        read, and a plain note counts them."""
+        reachable = {self.main_part}
+        queue = [self.main_part]
+        while queue:
+            part = queue.pop()
+            try:
+                rels = _docx_rels(self.zf, part)
+            except Exception:
+                continue
+            for rel in rels.values():
+                if rel.external:
+                    continue
+                target = self.parts.resolve(_opc_target(part, rel.target))
+                if target is not None and target not in reachable:
+                    reachable.add(target)
+                    queue.append(target)
+        content_type = _content_type_lookup(self.zf)
+        return sum(1 for name in sorted(self.names - reachable)
+                   if content_type(name) in _WORD_TEXT_PART_TYPES
+                   and self._part_has_content(name))
+
     # -- Word spec part 9: the disclosure notes themselves -----------------------
 
-    def disclosure_notes(self) -> list[str]:
+    def disclosure_notes(self, orphans: int = 0) -> list[str]:
         c = self.counters
         notes = []
         if c["altchunk"]:
@@ -2434,27 +2907,93 @@ class _DocxWalker:
                 "could not be measured against the page — the final section "
                 "carries no usable page size, or the picture no usable extent")
         if c["symbol"]:
-            notes.append(f"{M_WORD_UNREAD}: {c['symbol']} symbol character(s) "
-                         "from a symbol font, which have no text equivalent")
+            notes.append(f"{M_WORD_UNREAD}: {c['symbol']} symbol character(s) with no "
+                         f"standard text mapping (font(s): "
+                         f"{', '.join(sorted(self.symbol_fonts))}), each shown as U+FFFD")
         if c["subdoc"]:
             notes.append(f"{M_WORD_UNREAD}: {c['subdoc']} sub-document link(s); "
                          "a sub-document's text is stored outside this file")
         if c["hidden_hdr_ftr"]:
             notes.append(
                 f"{M_WORD_UNREAD}: {c['hidden_hdr_ftr']} header/footer part(s) "
-                "that no section displays (a first-page part without w:titlePg, "
-                "or an even-page part without w:evenAndOddHeaders)")
-        if c["tracked_del"]:
-            notes.append(f"{M_WORD_TRACKED_DELETION}: {c['tracked_del']}")
+                "that no section displays (referenced under a type the section "
+                "does not show, such as a first-page part without w:titlePg or an "
+                "even-page part without w:evenAndOddHeaders, or referenced by no "
+                "section)")
+        if c["open_field_code"]:
+            notes.append(f"{M_WORD_UNREAD}: {c['open_field_code']} field code(s) never "
+                         "ended; the text after each in its part was read as field "
+                         "code and left out")
+        if c["deleted_graphic"]:
+            notes.append(f"{M_WORD_TRACKED_DELETION}: {c['deleted_graphic']} deleted "
+                         "drawing(s), picture(s) or object(s); any text inside them is "
+                         "listed with the deletions")
+        if self._moved:
+            notes.append(f"{len(self._moved)} passage(s) moved under tracked changes "
+                         "are shown only where they were moved to")
+        if orphans:
+            notes.append(f"{orphans} Word part(s) holding text that no relationship "
+                         "in the package reaches were not read; Word does not show them")
         return notes
 
 
+def _stories(root) -> list[list]:
+    """The block content of each story in one part: a header's or footer's
+    own children, each footnote, endnote or comment, or a document's body."""
+    local = _docx_local(root)
+    if local in ("footnotes", "endnotes", "comments"):
+        return [list(child) for child in root]
+    if local in ("document", "glossaryDocument"):
+        body = next((c for c in root if _docx_local(c) == "body"), None)
+        return [list(body)] if body is not None else []
+    return [list(root)]
+
+
+def _form_field_value(fld_char) -> str:
+    """What a legacy form field shows, from its ``w:ffData``: a check box as
+    ☒ or ☐ (``w:checked`` when present, else ``w:default``), a drop-down as its
+    selected entry (``w:result``, else ``w:default``, else the first). A text
+    form field shows its result runs, which the walk reads; ``""`` here."""
+    ff = next((c for c in fld_char if _docx_local(c) == "ffData"), None)
+    if ff is None:
+        return ""
+    for c in ff:
+        local = _docx_local(c)
+        if local == "checkBox":
+            checked = next((x for x in c if _docx_local(x) == "checked"), None)
+            default = next((x for x in c if _docx_local(x) == "default"), None)
+            on = (_on_off(checked) if checked is not None
+                  else default is not None and _on_off(default))
+            return "\u2612" if on else "\u2610"
+        if local == "ddList":
+            entries = [x.get(_wq("val")) or "" for x in c if _docx_local(x) == "listEntry"]
+            pick = next((x for x in c if _docx_local(x) == "result"), None)
+            if pick is None:
+                pick = next((x for x in c if _docx_local(x) == "default"), None)
+            try:
+                index = int(pick.get(_wq("val"))) if pick is not None else 0
+            except (TypeError, ValueError):
+                index = 0
+            return entries[index] if 0 <= index < len(entries) else ""
+    return ""
+
+
+def _mce_understood(uri: str | None) -> bool:
+    return uri is not None and (uri in _MCE_UNDERSTOOD
+                                or ("/office/drawing/" in uri and uri.endswith("/chartex")))
+
+
 def _alternate_choice(alternate_content):
-    """``mc:AlternateContent`` resolved to its ``mc:Choice`` when present, else
-    its ``mc:Fallback``, else nothing — never both."""
-    choice = next((c for c in alternate_content if _docx_local(c) == "Choice"), None)
-    if choice is not None:
-        return choice
+    """``mc:AlternateContent`` resolved as the markup-compatibility rules tell
+    a reader to: the first ``mc:Choice`` whose ``Requires`` namespaces are all
+    ones this reader understands (:data:`_MCE_UNDERSTOOD`), else the
+    ``mc:Fallback``, else nothing — never two of them."""
+    for choice in alternate_content:
+        if _docx_local(choice) != "Choice":
+            continue
+        required = (choice.get("Requires") or "").split()
+        if all(_mce_understood(choice.nsmap.get(prefix)) for prefix in required):
+            return choice
     fallback = next((c for c in alternate_content if _docx_local(c) == "Fallback"), None)
     return fallback if fallback is not None else ()
 
@@ -2482,6 +3021,28 @@ def _xfrm_extent(el) -> tuple[float, float] | None:
     return _emu_extent(next((c for c in xfrm if _docx_local(c) == "ext"), None))
 
 
+def _group_scale(group_el, scale: tuple[float, float],
+                 frame: tuple[float, float] | None) -> tuple[float, float]:
+    """``scale`` compounded with one group's own ``ext / chExt``, from its
+    ``wpg:grpSpPr/a:xfrm``. A group that states no usable child extent draws
+    its children at their own size."""
+    props = next((c for c in group_el if _docx_local(c) == "grpSpPr"), None)
+    xfrm = (next((c for c in props if _docx_local(c) == "xfrm"), None)
+            if props is not None else None)
+    if xfrm is None:
+        return scale
+    ext = _emu_extent(next((c for c in xfrm if _docx_local(c) == "ext"), None)) or frame
+    child = _emu_extent(next((c for c in xfrm if _docx_local(c) == "chExt"), None))
+    if ext is None or child is None or not child[0] or not child[1]:
+        return scale
+    return scale[0] * ext[0] / child[0], scale[1] * ext[1] / child[1]
+
+
+def _scaled(extent: tuple[float, float] | None,
+            scale: tuple[float, float]) -> tuple[float, float] | None:
+    return None if extent is None else (extent[0] * scale[0], extent[1] * scale[1])
+
+
 def _wq(local: str) -> str:
     return f"{{{_DOCX_NS['w']}}}{local}"
 
@@ -2499,7 +3060,7 @@ def _extract_docx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
     ``Document(...)`` raises the same way it always did on a corrupt or
     non-OOXML file. Everything that becomes page text comes from
     :class:`_DocxWalker` reading the part XML directly; see its docstring
-    and the Word spec (parts 1-9) for why.
+    and the Word spec (parts 1-9 and the 2026-09-14 addendum) for why.
     """
     try:
         import docx  # python-docx
@@ -2545,9 +3106,17 @@ def _extract_docx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                     # than guesses (a negative size once made every share
                     # negative, so no picture was ever large)
 
+            body_deletions: list[_DelEntry] = []
+            walker._del_sink = body_deletions
             body_lines = walker._block_lines(list(body_el), walker.rels)
             header_lines, footer_lines = walker.read_headers_and_footers(body_el)
+            note_deletions: list[_DelEntry] = []
+            walker._del_sink = note_deletions
             note_lines = walker.read_notes()
+            deletion_lines = walker.deletion_lines(
+                walker.header_deletions + body_deletions + note_deletions
+                + walker.footer_deletions)
+            orphans = walker.orphan_parts_with_content()
     except ExtractionError:
         raise
     except Exception as exc:
@@ -2557,8 +3126,11 @@ def _extract_docx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
     # label lines — the Bates head zone is 3 lines and a label could push a
     # stamp out of it. Notes (part 6) land after the body and before the
     # footer, per the same reasoning applied to where they appear at all.
-    all_lines = header_lines + body_lines + note_lines + footer_lines
-    notes = [WORD_LAYOUT_NOTE] + walker.disclosure_notes()
+    # D-56: the deletion list follows the notes and comments, so the footer
+    # still ends the page, and no line of it is ever a Bates zone line
+    # (BatesZone.slice_lines).
+    all_lines = header_lines + body_lines + note_lines + deletion_lines + footer_lines
+    notes = [WORD_LAYOUT_NOTE] + walker.disclosure_notes(orphans)
     return synthetic_pages(["\n".join(all_lines)], notes=tuple(notes)), notes
 
 
@@ -3009,21 +3581,55 @@ def expand_eml_attachments(raw: bytes) -> ZipExpansion:
             continue
         raw_members.append((name, payload))
 
+    return ZipExpansion(*_flatten_attached_archives(raw_members, notes))
+
+
+def _flatten_attached_archives(raw_members: list[tuple[str, bytes]], notes: list[str]
+                               ) -> tuple[tuple[ZipMember, ...], tuple[str, ...]]:
+    """An email's or ``.msg``'s attachments as members, each ``.zip`` among
+    them flattened into its own members one level, under its name. A Word,
+    Excel or PowerPoint package named ``.zip`` is kept whole and read, and
+    a second archive with a name already used is listed under a numbered
+    name (:func:`_unused_prefix`), so no locator claims two archives' members
+    came out of one."""
     members: list[ZipMember] = []
     for name, payload in raw_members:
-        if _ext(name) == ".zip":
+        if _ext(name) == ".zip" and not is_office_package(payload):
             try:
                 inner = expand_zip(payload)
             except Exception as exc:
                 notes.append(f"{M_ZIP_ATTACH}: attachment '{name}' is a zip "
                              f"that could not be read: {exc}"[:200])
                 continue
-            notes.extend(f"{name}: {n}" for n in inner.notes)
+            prefix = _unused_prefix(name, members, notes, "attached archive")
+            notes.extend(f"{prefix}: {n}" for n in inner.notes)
             for m in inner.members:
-                members.append(ZipMember(f"{name}/{m.name}", m.raw, len(members)))
+                members.append(ZipMember(f"{prefix}/{m.name}", m.raw, len(members)))
         else:
             members.append(ZipMember(name, payload, len(members)))
-    return ZipExpansion(tuple(members), tuple(notes))
+    return tuple(members), tuple(notes)
+
+
+def _unused_prefix(name: str, members: list[ZipMember], notes: list[str], what: str) -> str:
+    """``name`` as the folder an archive's members are listed under, numbered
+    (``bundle__2.zip``) when a member already listed is named it or sits under
+    it, with a plain note saying so. Two different archives that share a
+    name were otherwise filed as one."""
+    def taken(prefix: str) -> bool:
+        return any(m.name == prefix or m.name.startswith(prefix + "/") for m in members)
+
+    if not taken(name):
+        return name
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    number = 2
+    while taken(f"{stem}__{number}{dot}{ext}"):
+        number += 1
+    prefix = f"{stem}__{number}{dot}{ext}"
+    notes.append(f"{what} '{name}' has the name of one already listed; its "
+                 f"members are listed under '{prefix}'")
+    return prefix
 
 
 def expand_msg_attachments(raw: bytes, scratch_dir: Path | None) -> ZipExpansion:
@@ -3085,21 +3691,7 @@ def expand_msg_attachments(raw: bytes, scratch_dir: Path | None) -> ZipExpansion
             except Exception:
                 pass
 
-    members: list[ZipMember] = []
-    for name, payload in raw_members:
-        if _ext(name) == ".zip":
-            try:
-                inner = expand_zip(payload)
-            except Exception as exc:
-                notes.append(f"{M_ZIP_ATTACH}: attachment '{name}' is a zip "
-                             f"that could not be read: {exc}"[:200])
-                continue
-            notes.extend(f"{name}: {n}" for n in inner.notes)
-            for m2 in inner.members:
-                members.append(ZipMember(f"{name}/{m2.name}", m2.raw, len(members)))
-        else:
-            members.append(ZipMember(name, payload, len(members)))
-    return ZipExpansion(tuple(members), tuple(notes))
+    return ZipExpansion(*_flatten_attached_archives(raw_members, notes))
 
 
 def expand_zip(raw: bytes, depth: int = 0) -> ZipExpansion:
@@ -3148,11 +3740,12 @@ def expand_zip(raw: bytes, depth: int = 0) -> ZipExpansion:
                              f"{str(exc)[:120]}")
                 continue
             total += len(blob)
-            if _ext(info.filename) == ".zip":
+            if _ext(info.filename) == ".zip" and not is_office_package(blob):
                 inner = expand_zip(blob, depth + 1)
-                notes.extend(f"{info.filename}: {n}" for n in inner.notes)
+                prefix = _unused_prefix(info.filename, members, notes, "archive")
+                notes.extend(f"{prefix}: {n}" for n in inner.notes)
                 for m in inner.members:
-                    members.append(ZipMember(f"{info.filename}/{m.name}", m.raw,
+                    members.append(ZipMember(f"{prefix}/{m.name}", m.raw,
                                              len(members)))
                 continue
             members.append(ZipMember(info.filename, blob, len(members)))
@@ -3235,19 +3828,22 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
 
     The walker calls this only for bytes :func:`is_word_package` accepts.
     The main document part is the one ``_rels/.rels`` names, never a
-    hard-coded ``word/document.xml``, and the parts below live in its folder.
+    hard-coded ``word/document.xml``, and every other part is the one a
+    relationship names, never one found by its file name.
 
     Order: every ``o:OLEObject`` in the main document part, in document
-    order, then in the header/footer/footnote/endnote parts, in part-name
-    order — each resolved through ITS OWN part's relationships, since a
-    header's ``r:id`` and the body's ``r:id`` are two different namespaces,
-    by :func:`_opc_target`. Then any part under ``embeddings/`` that no
-    ``o:OLEObject`` referenced, in name order. Each part is unwrapped once,
-    keyed by its resolved part name — an object referenced twice (or picked
-    up again by the trailing embeddings sweep) is not read twice. A part
-    whose XML will not parse is named in a marked note and costs only the
-    objects it references; one malformed part used to abort the whole
-    expansion.
+    order, then in each header, footer, footnotes, endnotes and comments part
+    the main part's relationships name, in part-name order — each resolved
+    through ITS OWN part's relationships, since a header's ``r:id`` and the
+    body's ``r:id`` are two different namespaces, by :func:`_opc_target`, and
+    looked up as OPC compares part names (:class:`_PartNames`). Then every
+    part those parts relate as an ``oleObject`` or ``package`` that no
+    ``o:OLEObject`` referenced, together with any part under the main part's
+    own ``embeddings/`` folder, in name order. Each part is unwrapped once,
+    keyed by its stored part name — an object referenced twice (or picked
+    up again by the trailing sweep) is not read twice. A part whose XML will
+    not parse is named in a marked note and costs only the objects it
+    references; one malformed part used to abort the whole expansion.
 
     Unwrapped by what the bytes ARE, never by ``ProgID`` alone (a real
     corpus's ProgID is informational, not load-bearing), reading only the
@@ -3269,11 +3865,12 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
       ``__properties_version1.0``) is kept whole as stored, under its own
       extension, and the walker's Tier-1/Tier-2 split takes it from there.
 
-    A child that is itself a ``.zip`` is flattened into its members, as an
-    archive attached to an email is. Anything else — any other compound
-    file, a ``Type="Link"`` object, a relationship to a part not in the
-    package, or content that is neither a ZIP nor a compound file — is not
-    recovered, and is named in a marked note.
+    A child that is itself a ``.zip`` archive is flattened into its members,
+    as an archive attached to an email is; a Word, Excel or PowerPoint package
+    stored under a ``.zip`` name is kept whole and read. Anything else — any
+    other compound file, a ``Type="Link"`` object, a relationship to a part
+    not in the package, or content that is neither a ZIP nor a compound file
+    — is not recovered, and is named in a marked note.
     """
     import zipfile
 
@@ -3326,8 +3923,38 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
                              "them")
         return rels_by_part[part]
 
-    def resolve_and_unwrap(owner_part: str, rid: str | None, obj_type: str) -> None:
+    def related(owner: str, kinds: tuple[str, ...]) -> list[str]:
+        out = []
+        for rel in (rels_of(owner) or {}).values():
+            if rel.type in kinds and not rel.external:
+                part = parts.resolve(_opc_target(owner, rel.target))
+                if part is not None:
+                    out.append(part)
+        return out
+
+    def unwrap_part(part_name: str) -> bool:
+        """Read and unwrap one stored part; ``False`` once a cap stops the
+        expansion."""
         nonlocal total, truncated
+        if over_member_cap():
+            return False
+        try:
+            blob = zf.read(part_name)
+        except Exception as exc:
+            notes.append(f"{M_ZIP_MEMBER}: '{part_name}': {str(exc)[:120]}")
+            return True
+        total += len(blob)
+        if total > cap_bytes:
+            if not truncated:
+                notes.append(f"{M_ATTACH_SKIPPED}: embedded objects "
+                             f"truncated at {_ZIP_MAX_MB} MB uncompressed; "
+                             f"'{part_name}' and later objects were not read")
+                truncated = True
+            return False
+        _unwrap_embedding(part_name, blob, members, notes)
+        return True
+
+    def resolve_and_unwrap(owner_part: str, rid: str | None, obj_type: str) -> None:
         if obj_type == "Link":
             notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
                          f"'{owner_part}' is a link rather than a stored "
@@ -3347,42 +3974,30 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
                          f"'{owner_part}' names relationship id {rid!r}, "
                          "which does not exist; it is not recovered")
             return
-        path, external = target
-        if external:
+        if target.external:
             notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
                          f"'{owner_part}' links to an external target "
-                         f"'{path}' rather than storing it; it is not "
+                         f"'{target.target}' rather than storing it; it is not "
                          "recovered")
             return
-        part_name = _opc_target(owner_part, path)
+        written = _opc_target(owner_part, target.target)
+        part_name = parts.resolve(written)
+        if part_name is None:
+            if written not in seen_parts:
+                seen_parts.add(written)
+                notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
+                             f"'{owner_part}' names part '{written}', which is "
+                             "not in the package; it is not recovered")
+            return
         if part_name in seen_parts:
             return
         seen_parts.add(part_name)
-        if part_name not in names:
-            notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
-                         f"'{owner_part}' names part '{part_name}', which is "
-                         "not in the package; it is not recovered")
-            return
-        if over_member_cap():
-            return
-        try:
-            blob = zf.read(part_name)
-        except Exception as exc:
-            notes.append(f"{M_ZIP_MEMBER}: '{part_name}': {str(exc)[:120]}")
-            return
-        total += len(blob)
-        if total > cap_bytes:
-            if not truncated:
-                notes.append(f"{M_ATTACH_SKIPPED}: embedded objects "
-                             f"truncated at {_ZIP_MAX_MB} MB uncompressed; "
-                             f"'{part_name}' and later objects were not read")
-                truncated = True
-            return
-        _unwrap_embedding(part_name, blob, members, notes)
+        unwrap_part(part_name)
 
     # A set, for membership only: every walk below iterates a SORTED list or
     # document order, so no output depends on the hash seed.
     names = set(zf.namelist())
+    parts = _PartNames(names)
     with zf:
         main_part = docx_main_part(zf)
         if main_part is None:
@@ -3396,14 +4011,9 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
                 break
             resolve_and_unwrap(main_part, rid, obj_type)
 
-        def is_aux(name: str) -> bool:
-            if not name.startswith(prefix) or "/" in name[len(prefix):]:
-                return False
-            base = name[len(prefix):]
-            return ((base.startswith(("header", "footer")) and base.endswith(".xml"))
-                    or base in ("footnotes.xml", "endnotes.xml"))
-
-        for part in sorted(n for n in names if is_aux(n)):
+        aux = sorted(set(related(main_part, ("header", "footer", "footnotes",
+                                             "endnotes", "comments"))) - {main_part})
+        for part in aux:
             if truncated:
                 break
             for rid, obj_type, _progid in objects_in(part):
@@ -3411,27 +4021,18 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
                     break
                 resolve_and_unwrap(part, rid, obj_type)
 
-        for part_name in sorted(n for n in names
-                                if n.startswith(f"{prefix}embeddings/")):
+        sweep = set(related(main_part, ("oleObject", "package")))
+        for part in aux:
+            sweep.update(related(part, ("oleObject", "package")))
+        sweep.update(n for n in names if n.startswith(f"{prefix}embeddings/"))
+        for part_name in sorted(sweep):
             if truncated:
                 break
             if part_name in seen_parts:
                 continue
             seen_parts.add(part_name)
-            if over_member_cap():
+            if not unwrap_part(part_name):
                 break
-            try:
-                blob = zf.read(part_name)
-            except Exception as exc:
-                notes.append(f"{M_ZIP_MEMBER}: '{part_name}': {str(exc)[:120]}")
-                continue
-            total += len(blob)
-            if total > cap_bytes:
-                notes.append(f"{M_ATTACH_SKIPPED}: embedded objects "
-                             f"truncated at {_ZIP_MAX_MB} MB uncompressed; "
-                             f"'{part_name}' and later objects were not read")
-                break
-            _unwrap_embedding(part_name, blob, members, notes)
 
     return ZipExpansion(tuple(members), tuple(notes))
 
@@ -3466,7 +4067,7 @@ def _unwrap_embedding(part_name: str, blob: bytes, members: list[ZipMember],
         return
     try:
         import olefile
-    except ImportError as exc:  # pragma: no cover — declared dependency
+    except ImportError as exc:  # a declared dependency; held by a test all the same
         notes.append(f"{M_ATTACH_SKIPPED}: '{part_name}' is a compound "
                      f"file and 'olefile' is not installed ({exc}); it "
                      "is not recovered")
@@ -3534,30 +4135,19 @@ def _package_stream_extension(payload: bytes) -> str:
         return ".pdf"
     if kind != "zip":
         return ".bin"
-    import zipfile
-
-    try:
-        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
-            main = _opc_main_part(zf)
-    except Exception:
-        return ".zip"
-    content_type = main[1] if main else ""
-    if content_type in _WORD_MAIN_CONTENT_TYPES:
-        return ".docx"
-    if "spreadsheetml" in content_type or "ms-excel" in content_type:
-        return ".xlsx"
-    if "presentationml" in content_type or "ms-powerpoint" in content_type:
-        return ".pptx"
-    return ".zip"
+    return _package_kind(payload) or ".zip"
 
 
 def _add_embedded_member(name: str, payload: bytes, members: list[ZipMember],
                          notes: list[str]) -> None:
-    """One recovered child, or — for a ``.zip`` — each of its members, named
-    under it, as :func:`expand_eml_attachments` flattens an attached archive.
-    Kept whole, a zip became one unsupported record whose members were never
-    read."""
-    if _ext(name) != ".zip":
+    """One recovered child, or — for a ``.zip`` archive — each of its members,
+    named under it, as :func:`expand_eml_attachments` flattens an attached
+    archive. Kept whole, a zip became one unsupported record whose members
+    were never read. A Word, Excel or PowerPoint package whose stored name
+    ends ``.zip`` is kept whole, and read; unpacked, its text and its own
+    embedded documents became unrecognized XML parts. A second archive with a
+    name already used is listed under a numbered name."""
+    if _ext(name) != ".zip" or is_office_package(payload):
         members.append(ZipMember(name, payload, len(members)))
         return
     try:
@@ -3567,11 +4157,12 @@ def _add_embedded_member(name: str, payload: bytes, members: list[ZipMember],
                      f"be read ({clip_message(str(exc), 120)}); its members "
                      "are not recovered")
         return
+    prefix = _unused_prefix(name, members, notes, "embedded archive")
     for n in inner.notes:
-        notes.append(f"{name}: {n}" if has_evidence_marker(n)
-                     else f"{M_ATTACH_SKIPPED}: embedded archive '{name}': {n}")
+        notes.append(f"{prefix}: {n}" if has_evidence_marker(n)
+                     else f"{M_ATTACH_SKIPPED}: embedded archive '{prefix}': {n}")
     for m in inner.members:
-        members.append(ZipMember(f"{name}/{m.name}", m.raw, len(members)))
+        members.append(ZipMember(f"{prefix}/{m.name}", m.raw, len(members)))
 
 
 # ---------------------------------------------------------------------------
@@ -3593,6 +4184,9 @@ _SNIFF_LABELS = {"pdf": "PDF", "zip": "a zip-family container",
                  "ole": "a legacy OLE container"}
 # Extensions sharing one extractor — a failed .xlsm must not retry .xlsx.
 _EXT_ALIASES = {".xlsm": ".xlsx", ".email": ".eml", ".md": ".txt", ".log": ".txt"}
+# Readers that decode any bytes as text and never raise, so the retry-on-
+# failure path never reaches a misnamed PDF, zip or compound file under them.
+_NEVER_FAILING_EXTS = frozenset({".txt", ".md", ".log", ".csv", ".eml", ".email"})
 
 
 def _ext(filename: str) -> str:
@@ -3603,6 +4197,11 @@ def _ext(filename: str) -> str:
 
 # Windows drive paths, UNC paths, and POSIX absolute paths.
 _ABS_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\|(?<![\w.])/)[^\s\"'<>|]*")
+# A Python object's default repr, which carries its memory address:
+# "<_io.BytesIO object at 0x000001AD7ECCB8D0>", "<function f at 0x7f...>".
+_OBJECT_ADDRESS = re.compile(r"(<[^<>]*?) at 0x[0-9A-Fa-f]+>")
+# A name Python's tempfile module made: "tmp" and 8 random characters.
+_TEMP_NAME = re.compile(r"^tmp[a-z0-9_]{8}(\.[A-Za-z0-9]+)?([^A-Za-z0-9_]*)$")
 
 
 def clip_message(msg: str, limit: int) -> str:
@@ -3619,22 +4218,39 @@ def clip_message(msg: str, limit: int) -> str:
 
 
 def sanitize_message(msg: str) -> str:
-    """Strip absolute paths out of a message that will reach a record.
+    """Strip what differs from one run to the next out of a message that will
+    reach a record.
 
     An error string is hashed content: it lands in ``DocumentRecord.error``,
-    which lands in the log's ``content`` section. A parser that reports
-    ``C:\\Users\\...\\Temp\\tmp61yhcl7p\\x.msg`` therefore puts a per-run
-    random string inside the byte-identical claim. Reducing every absolute
-    path to its final component fixes the whole class at the one place every
-    message passes, rather than auditing each ``f"...{exc}"`` for ever.
+    which lands in the log's ``content`` section, and a note lands in the same
+    place. Anything in it that is a fact about the run rather than the file
+    breaks the byte-identical claim, so it is removed here, at the one place
+    every such message passes (``walker._record``), rather than by auditing
+    each ``f"...{exc}"`` for ever:
+
+    * an absolute path is reduced to its final component (a parser reports
+      ``C:\\Users\\...\\Temp\\tmp61yhcl7p\\x.msg``);
+    * that component, when it is a name the ``tempfile`` module made
+      (``tmp`` and eight random characters), becomes ``<temp file>``;
+    * an object's default repr loses its memory address:
+      python-docx rejects a macro-enabled main part with
+      ``file '<_io.BytesIO object at 0x000001AD7ECCB8D0>' is not a Word
+      file``, and the address differed between two runs of one file.
+
+    Nothing else in the text of an exception reaching a record varies by run:
+    DocIQ's own messages name no process id, thread, time or duration (the
+    watchdog's elapsed time was taken out of ``walker._abandoned`` for this
+    reason), and page notes carry fixed text only.
     """
     if not msg:
         return msg
 
     def _basename(m: re.Match[str]) -> str:
-        return m.group(0).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or "<path>"
+        base = m.group(0).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or "<path>"
+        temp = _TEMP_NAME.match(base)
+        return f"<temp file>{temp.group(1) or ''}{temp.group(2)}" if temp else base
 
-    return _ABS_PATH.sub(_basename, msg)
+    return _ABS_PATH.sub(_basename, _OBJECT_ADDRESS.sub(r"\1>", msg))
 
 
 def sniff_kind(raw: bytes) -> str:
@@ -3727,7 +4343,7 @@ def extract(filename: str, raw: bytes,
     """
     opt = opt or ExtractOptions()
     ext = _ext(filename)
-    if ext == ".zip":
+    if ext == ".zip" and not is_office_package(raw):
         raise ExtractionError(
             "ZIP is expanded by the walker into child documents; "
             "call expand_zip() instead of extract().")
@@ -3737,7 +4353,20 @@ def extract(filename: str, raw: bytes,
     if not raw:
         return ExtractedDoc(status=ProcessingStatus.FAILED, error="empty file")
     try:
-        pages, notes = _dispatch(ext, raw, opt)
+        # A Word, Excel or PowerPoint package named .zip has no extractor
+        # of its own name and is read by content, with the sniff note. The
+        # text-family readers never fail, so bytes that sniff as a PDF, a
+        # zip or a compound file under one of their names are tried by
+        # content first: a Word file named .txt was read as its raw zip
+        # bytes and reported FULL.
+        if ext in _NEVER_FAILING_EXTS and sniff_kind(raw):
+            try:
+                pages, notes = _retry_by_content(ext, raw, opt, ExtractionError(
+                    f"{ext} name on {_SNIFF_LABELS[sniff_kind(raw)]} bytes"))
+            except Exception:
+                pages, notes = _dispatch(ext, raw, opt)
+        else:
+            pages, notes = _dispatch(ext, raw, opt)
     except Exception as exc:
         try:
             pages, notes = _retry_by_content(ext, raw, opt, exc)
