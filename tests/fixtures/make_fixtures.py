@@ -97,40 +97,76 @@ def _pin_ooxml(path: Path) -> None:
 
 def _write_compound_file(streams: dict) -> bytes:
     """A minimal OLE2/CFB v3 container, standard library only, holding every
-    named stream in ``streams`` directly under Root Entry.
+    named stream in ``streams``. A plain name sits directly under Root Entry;
+    a name with ``/`` in it (``"ObjectPool/_1111/\\x01Ole10Native"``) sits in
+    the storages its path names, created on first use. That second shape is
+    how a legacy Word or Excel file keeps its own embedded objects, and the
+    embedded-object reader must be tested against it.
 
-    Follows ``scratchpad/build_xls.py``'s approach and its reason: every
-    stream's DECLARED size (what ``olefile.openstream().read()`` hands back)
-    is padded to at least 4096 bytes, the mini-stream cutoff, so a reader
-    always takes the ordinary FAT sector chain and the mini-FAT/mini-stream
-    machinery -- not implemented here -- is never reached. A stream already
-    at or past that size (the fixture's embedded PDF) is declared at its
-    real length, so nothing is appended after content a consumer reads by
-    its own prefix or declared-length fields (the ``%PDF`` sniff,
-    ``extract._parse_ole10_native``'s bounds-checked reads). The physical
-    storage for each stream is then padded once more, silently, up to a
-    whole number of 512-byte sectors -- CFB requires whole sectors, and that
-    padding is never read back because ``olefile`` stops at the DECLARED
-    size, not at the allocated one.
+    Every stream's DECLARED size (what ``olefile.openstream().read()`` hands
+    back) is padded to at least 4096 bytes, the mini-stream cutoff, so a
+    reader always takes the ordinary FAT sector chain and the
+    mini-FAT/mini-stream machinery -- not implemented here -- is never
+    reached. A stream already at or past that size (the fixture's embedded
+    PDF) is declared at its real length, so nothing is appended after
+    content a consumer reads by its own prefix or declared-length fields (the
+    ``%PDF`` sniff, ``extract._parse_ole10_native``'s bounds-checked reads).
+    The physical storage for each stream is then padded once more, silently,
+    up to a whole number of 512-byte sectors -- CFB requires whole sectors,
+    and that padding is never read back because ``olefile`` stops at the
+    DECLARED size, not at the allocated one.
 
-    Multiple streams sit under Root Entry as a right-only sibling chain
-    (item *i*'s ``right`` is item *i + 1*, every ``left`` is empty) rather
-    than a balanced tree: a straight chain is still a legal binary search
-    tree, and ``olefile``'s directory walk (``child``, then ``left``, then
-    ``right`` -- the same order the CFB spec defines) reads it correctly
-    without this writer needing to implement red-black balancing for what is
-    at most a handful of streams.
+    The children of each storage sit as a right-only sibling chain (child
+    *i*'s ``right`` is child *i + 1*, every ``left`` is empty) rather than a
+    balanced tree, and ``olefile``'s directory walk (``child``, then
+    ``left``, then ``right`` -- the same order the CFB spec defines) reads it
+    correctly without this writer implementing red-black balancing for what
+    is at most a handful of entries. Entries are numbered in depth-first
+    order, so a call with only plain names writes exactly the bytes it wrote
+    before paths were accepted.
     """
     import struct
 
     SEC = 512
     FREESECT, ENDOFCHAIN, FATSECT = -1, -2, -3
 
-    names = list(streams.keys())
+    # Depth-first directory: [name, type (5 root, 1 storage, 2 stream),
+    # stream bytes, child indexes]. Root Entry is index 0.
+    nodes: list = [["Root Entry", 5, b"", []]]
+    storage_index: dict = {(): 0}
+    for path, data in streams.items():
+        parts = path.split("/")
+        parent = ()
+        for depth in range(1, len(parts)):
+            key = tuple(parts[:depth])
+            if key not in storage_index:
+                nodes.append([parts[depth - 1], 1, b"", []])
+                storage_index[key] = len(nodes) - 1
+                nodes[storage_index[parent]][3].append(storage_index[key])
+            parent = key
+        nodes.append([parts[-1], 2, data, []])
+        nodes[storage_index[parent]][3].append(len(nodes) - 1)
+
+    # Renumber depth-first so entry ids, sibling links and stream sector
+    # order all follow one traversal.
+    dfs: list = []
+
+    def visit(i: int) -> None:
+        dfs.append(i)
+        for k in nodes[i][3]:
+            visit(k)
+
+    visit(0)
+    new_id = {old: new for new, old in enumerate(dfs)}
+    entries = [nodes[old] for old in dfs]
+
     sizes: list = []
     padded: list = []
-    for name in names:
-        data = streams[name]
+    for _name, etype, data, _kids in entries:
+        if etype != 2:
+            sizes.append(0)
+            padded.append(b"")
+            continue
         logical_len = max(4096, len(data))
         data = data + b"\x00" * (logical_len - len(data))
         if len(data) % SEC:
@@ -138,7 +174,7 @@ def _write_compound_file(streams: dict) -> bytes:
         sizes.append(logical_len)
         padded.append(data)
 
-    dir_sectors = max(1, -(-(len(names) + 1) // 4))  # 4 x 128-byte entries/sector
+    dir_sectors = max(1, -(-len(entries) // 4))  # 4 x 128-byte entries/sector
     stream_sector_counts = [len(p) // SEC for p in padded]
     provisional = dir_sectors + sum(stream_sector_counts)
     n_fat_sectors = 1
@@ -177,14 +213,18 @@ def _write_compound_file(streams: dict) -> bytes:
         assert len(entry) == 128
         return entry
 
-    entries = [dir_entry("Root Entry", 5, -1, -1, 1 if names else -1, ENDOFCHAIN, 0)]
-    for i, name in enumerate(names):
-        right = i + 2 if i + 1 < len(names) else -1
-        entries.append(dir_entry(name, 2, -1, right, -1,
-                                 stream_first_sids[i], sizes[i]))
-    while len(entries) % 4:
-        entries.append(b"\x00" * 128)
-    dir_bytes = b"".join(entries)
+    right_of: dict = {}
+    for _name, _etype, _data, kids in entries:
+        for a, b in zip(kids, kids[1:]):
+            right_of[new_id[a]] = new_id[b]
+    dir_blobs = []
+    for i, (name, etype, _data, kids) in enumerate(entries):
+        dir_blobs.append(dir_entry(name, etype, -1, right_of.get(i, -1),
+                                   new_id[kids[0]] if kids else -1,
+                                   stream_first_sids[i], sizes[i]))
+    while len(dir_blobs) % 4:
+        dir_blobs.append(b"\x00" * 128)
+    dir_bytes = b"".join(dir_blobs)
     assert len(dir_bytes) == dir_sectors * SEC
 
     header = bytearray(512)
@@ -243,8 +283,9 @@ def _ole10_native(filename: str, data: bytes, label: str | None = None,
     ``label`` and ``filename`` default to the SAME string when ``label`` is
     omitted, which made a real Package object's two-string layout
     indistinguishable from a reader that only ever looks at one of them
-    (critic finding: mutants ``label_name`` and ``no_temp_advance`` both
-    passed every test against a degenerate wrapper). Callers exercising the
+    (a reader that named the child by the label, and one that never advanced
+    past the temp path, both passed every test against such a wrapper).
+    Callers exercising the
     real shape pass a ``label`` distinct from ``filename`` and a non-empty
     ``temp_path`` -- a genuine Package object's temp path is a full local
     path, never empty, and its length DWORD counts the trailing NUL the
@@ -477,18 +518,17 @@ _WC_OLE_IMG = b"EMF-PLACEHOLDER-NOT-A-REAL-IMAGE"
 
 def word_constructs_docx(path: Path) -> None:
     """The Word fidelity package's fixture: one sentinel word per Word
-    construct the extractor must (or must not) surface. See ``docs/reviews``
-    / the Word spec for the full sentinel table. Built with python-docx's API
-    where it has one and raw injected OOXML where it does not (content
-    controls, tracked changes,
-    fields, text box, footnotes, endnotes, altChunk, OLE object, chart,
-    rendered page break) -- the same technique ``docx()`` above uses for
-    determinism (``_pin_ooxml``) and the scratchpad ``build_docx.py`` showed
-    for footnote/endnote part injection.
+    construct the extractor must (or must not) surface (Word spec, "Fixture
+    and tests"); the numbered comments below are the sentinel table. Built
+    with python-docx's API where it has one and raw injected OOXML where it
+    does not (content controls, tracked changes, fields, text box, footnotes,
+    endnotes, altChunk, OLE object, chart, rendered page break), pinned for
+    determinism with ``_pin_ooxml`` like ``docx()`` above.
 
-    Never client text (D-12): every sentinel is an invented animal name (or,
-    for the footer stamp, an invented production prefix), chosen so none is a
-    substring of another.
+    Never client text (D-12): every sentinel is an invented animal name,
+    chosen so none is a substring of another. The footer stamp is the
+    exception: ``MNFV`` is the prefix of the real MNFV production (register
+    D-13), the one the Bates tests already use, with an invented number.
     """
     import docx as _docx
     from docx.oxml import parse_xml
@@ -639,7 +679,7 @@ def word_constructs_docx(path: Path) -> None:
         "ALPACA is the last body paragraph, after the altChunk, the OLE "
         "object and the chart.")
 
-    # 13. Two body pictures (Word spec part 9, stage 2a): one covers >= 25% of the
+    # 13. Two body pictures (Word spec part 9): one covers >= 25% of the
     # page (6in x 8in on an 8.5in x 11in page, ~51%) and must be disclosed as
     # unread; one is far below that (1in x 1in, ~1%) and must not be. Both
     # are the SAME generated one-pixel PNG -- the disclosure test is about
@@ -673,7 +713,7 @@ def word_constructs_docx(path: Path) -> None:
     base = buf.getvalue()
 
     # ---- rewrite the package: footnotes, endnotes, chart, OLE, altChunk ----
-    # Same technique as ``build_docx.py``: python-docx has no API for any of
+    # python-docx has no API for any of
     # these parts, so they are added by hand, with their own Content_Types
     # overrides/defaults and document.xml.rels relationships.
     zin = zipfile.ZipFile(io.BytesIO(base))
@@ -820,8 +860,8 @@ def _we_inner_docx_bytes(path: Path, sentence: str, *, progid: str,
     """Object 4's inner .docx: one sentence paragraph plus one embedded
     object of its own (D-50's nesting case -- a container inside a
     container), referenced by a real ``<o:OLEObject>`` exactly as the outer
-    fixture references its own five objects. Critic finding: without this,
-    the inner .xlsx sat under ``word/embeddings/`` with a relationship but no
+    fixture references its own five objects. Without it, the inner .xlsx
+    sat under ``word/embeddings/`` with a relationship but no
     ``<o:OLEObject>`` pointing at it, so it was only ever reachable through
     the unreferenced-part sweep -- never through the nested-embed path this
     object exists to exercise."""
@@ -846,8 +886,8 @@ def _we_inner_docx_bytes(path: Path, sentence: str, *, progid: str,
 def word_embeddings_docx(path: Path) -> None:
     """D-50 fixture: a Word file embedding one of each shape
     ``expand_docx_embeddings`` must unwrap, in document order, one sentence
-    paragraph between each (Word spec section 3). Never client text
-    (D-12) -- every sentinel is an invented animal name.
+    paragraph between each. Never client text (D-12) -- every sentinel is
+    an invented animal name.
 
     1. BISON-WORKBOOK -- an .xlsx stored as an ordinary Office part
        (``word/embeddings/Microsoft_Excel_Worksheet1.xlsx``).
@@ -896,12 +936,11 @@ def word_embeddings_docx(path: Path) -> None:
     assert len(pdf_bytes) >= 4096, (
         f"the embedded PDF must clear the mini-stream cutoff unassisted; "
         f"got {len(pdf_bytes)} bytes")
-    # A real 86-of-86 corpus Acrobat object also carries \x01CompObj,
-    # \x01Ole and \x03ObjInfo alongside CONTENTS (word_brief_stage2b.md's
-    # corpus table). Their bytes are never parsed by anything -- olefile
-    # sorts \x01CompObj first in listdir(), so a reader that unwraps
-    # whichever stream comes first, or the only stream present, fails as
-    # soon as these exist (critic finding: mutant first_stream).
+    # Word stores an Acrobat object with \x01CompObj, \x01Ole and
+    # \x03ObjInfo beside CONTENTS. Their bytes are never parsed by anything
+    # -- olefile sorts \x01CompObj first in listdir(), so a reader that
+    # unwraps whichever stream comes first, or the only stream present,
+    # fails as soon as these exist.
     acrobat_bytes = _write_compound_file({
         "CONTENTS": pdf_bytes,
         "\x01CompObj": b"INVENTED-COMPOBJ-STREAM-BYTES-ACROBAT-OBJECT",
@@ -940,14 +979,13 @@ def word_embeddings_docx(path: Path) -> None:
     # A degenerate wrapper -- label == stored filename == "notice.eml", no
     # directory, empty temp path -- cannot tell apart a reader that names the
     # child by the label, skips the basename step, or never advances past
-    # the temp path (critic finding: mutants label_name and
-    # no_temp_advance). The stored filename is an invented full Windows path
+    # the temp path. The stored filename is an invented full Windows path
     # so Path(...).name is what recovers the bare "notice.eml" child name;
     # the label is a distinct human caption, never used to name anything;
     # the temp path is a distinct invented path a reader must skip over. A
-    # real 13-of-13 corpus Package object also carries \x01CompObj and
-    # \x03ObjInfo alongside \x01Ole10Native (word_brief_stage2b.md's corpus
-    # table) -- see the Acrobat object above for why they are needed.
+    # Package object also carries \x01CompObj and \x03ObjInfo beside
+    # \x01Ole10Native -- see the Acrobat object above for why they are
+    # needed.
     package_bytes = _write_compound_file({
         "\x01Ole10Native": _ole10_native(
             r"C:\Users\DocIQFixtures\Correspondence\notice.eml", eml_bytes,

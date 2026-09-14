@@ -1,17 +1,14 @@
-"""D-50 stage 2b: documents embedded in a Word file become child documents.
+"""D-50: documents embedded in a Word file become child documents.
 
-Every test here is written against the CONTRACT stage 2b's build spec makes
-true and MUST fail against ``b5aba07`` (no ``expand_docx_embeddings``, no
-walker routing for a .docx's embedded objects, no recursion into a
-container's own children). This file is the target for that package, not a
-regression suite: do not "fix" a failure here by loosening an assertion, and
-do not touch ``src/`` from this file.
+The regression suite for the ruling: which embedded objects are recovered,
+in what order, under what names, how containers nest inside containers, and
+that every object not recovered is named in a note carrying an evidence
+marker. Each test was watched failing before the code it holds existed. Do
+not make a failure here pass by loosening an assertion.
 
-New symbols the stage 2b draft adds to ``dociq.ingest.extract``
-(``expand_docx_embeddings`` chief among them) are referenced only INSIDE the
-test function that needs them, never at module import time -- so a symbol
-still missing on ``b5aba07`` fails that one test with an ``AttributeError``,
-not the whole module's collection.
+Symbols of ``dociq.ingest.extract`` are referenced inside the test that needs
+them, never at module import time, so one missing symbol fails one test
+rather than the whole module's collection.
 """
 
 from __future__ import annotations
@@ -231,15 +228,18 @@ def _docx_with_raw_object(object_xml: str, rels_xml: str | None = None,
 
 
 def _docx_with_aux_objects(*, body_part: str, footer_part: str,
-                           footnote_target_part: str, body_bytes: bytes,
-                           footer_bytes: bytes) -> bytes:
+                           footnote_target_parts: list[str], body_bytes: bytes,
+                           footer_bytes: bytes,
+                           extra_parts: dict | None = None) -> bytes:
     """A .docx carrying one ``<o:OLEObject>`` in the body, one in
-    ``word/footer1.xml`` and one in ``word/footnotes.xml`` -- each resolved
-    through THAT part's own ``.rels``, and each using the SAME literal r:id
+    ``word/footer1.xml`` and one per ``footnote_target_parts`` entry in
+    ``word/footnotes.xml`` -- each resolved through THAT part's own
+    ``.rels``, and the body and footer objects using the SAME literal r:id
     string ("rIdEmbed1") on purpose, since a header/footer/footnote r:id
-    only makes sense within its own part's relationship namespace. The
-    footnotes object points at the SAME part as the body object, to exercise
-    "each part read once" (a part referenced twice yields one child)."""
+    only makes sense within its own part's relationship namespace. A
+    footnote target may name the SAME part as the body object, to exercise
+    "each part read once" (a part referenced twice yields one child).
+    ``extra_parts`` are written as they are, referenced by nothing."""
     doc_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         f'<w:document {_MIN_NS}><w:body>'
@@ -270,17 +270,24 @@ def _docx_with_aux_objects(*, body_part: str, footer_part: str,
         '</Relationships>')
     footnotes_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f'<w:footnotes {_MIN_NS}><w:footnote w:id="1"><w:p><w:r>'
-        '<w:object w:dxaOrig="1440" w:dyaOrig="1440">'
-        '<o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" r:id="rIdEmbed1"/>'
-        '</w:object></w:r></w:p></w:footnote></w:footnotes>')
+        f'<w:footnotes {_MIN_NS}><w:footnote w:id="1">'
+        + "".join(
+            '<w:p><w:r><w:object w:dxaOrig="1440" w:dyaOrig="1440">'
+            f'<o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" r:id="rIdFn{i}"/>'
+            '</w:object></w:r></w:p>'
+            for i in range(len(footnote_target_parts)))
+        + '</w:footnote></w:footnotes>')
     footnotes_rels = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/'
-        '2006/relationships"><Relationship Id="rIdEmbed1" '
-        'Type="http://schemas.openxmlformats.org/officeDocument/2006/'
-        'relationships/oleObject" '
-        f'Target="{footnote_target_part[len("word/"):]}"/></Relationships>')
+        '2006/relationships">'
+        + "".join(
+            f'<Relationship Id="rIdFn{i}" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+            'relationships/oleObject" '
+            f'Target="{target[len("word/"):]}"/>'
+            for i, target in enumerate(footnote_target_parts))
+        + '</Relationships>')
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -294,6 +301,8 @@ def _docx_with_aux_objects(*, body_part: str, footer_part: str,
         zf.writestr("word/_rels/footnotes.xml.rels", footnotes_rels)
         zf.writestr(body_part, body_bytes)
         zf.writestr(footer_part, footer_bytes)
+        for name, data in (extra_parts or {}).items():
+            zf.writestr(name, data)
     return buf.getvalue()
 
 
@@ -366,13 +375,11 @@ def test_fixture17_children_recovered_in_document_order_with_sentinels(tmp_path)
 
     # Sentinel leak check, across EVERY record this walk produced -- not just
     # the 4 direct children -- so a sentinel copied into the PARENT's own
-    # text, into a grandchild, or into an unrelated record is caught too
-    # (critic finding: mutant leak_parent, which folds every child's page
-    # text into the parent's own, passed a leak check scoped to the 4
-    # children alone). Ground truth from a correct reference walk (critic
-    # probe p5_reference_walk.py): every sentinel is held by exactly one
-    # record, and the PDF and inner-docx-nested-xlsx paths pin the
-    # "<part stem>.pdf" / nested-rel_path naming rules along with it.
+    # text, into a grandchild, or into an unrelated record is caught too (a
+    # mutant that folded every child's page text into the parent's own
+    # passed a check scoped to the 4 children alone). Every sentinel is held
+    # by exactly one record, and the PDF and inner-docx-nested-xlsx paths pin
+    # the "<part stem>.pdf" / nested-rel_path naming rules along with it.
     sentinel_owner = {
         "BISON-WORKBOOK": f"{parent_rel}/Microsoft_Excel_Worksheet1.xlsx",
         "CONDOR-PDF": f"{parent_rel}/oleObject2.pdf",
@@ -413,11 +420,10 @@ def test_nested_children_two_levels_deep_and_doc_id_assignment_has_no_warnings(t
     grandkids_of_inner = [d for d in r.documents
                           if d.parent_doc_id == inner_docx_child.rel_path]
     # Grandchild rel_path, count and container_order are all pinned, not
-    # just "some grandchild carries the sentinel" (critic finding: mutant
-    # flat_relpath built a grandchild's rel_path from the TOP file instead
-    # of its immediate parent, colliding GECKO-NESTED's path with object 1's
-    # -- only test 6's accounting caught it, as a bare failure with no
-    # detail).
+    # just "some grandchild carries the sentinel" (a mutant that built a
+    # grandchild's rel_path from the TOP file instead of its immediate
+    # parent collided GECKO-NESTED's path with object 1's, and only the
+    # accounting test below caught it, as a bare failure with no detail).
     assert len(grandkids_of_email) == 1, (
         f"expected exactly one child of {email_rel!r}: "
         f"{[g.rel_path for g in grandkids_of_email]!r}")
@@ -470,10 +476,9 @@ def test_object5_is_neither_zip_nor_compound_file_marked_note_no_child(tmp_path)
     # EXACTLY one marked note, naming object 5 -- not "some marked note
     # among possibly several", and specifically NOT a false "could not be
     # read" disclosure duplicated onto every one of the 4 objects that WERE
-    # recovered (critic finding: mutant false_notes added such a note for
-    # each of the 4 recovered parts and passed a presence-only check; on a
-    # correct walk this would also wrongly count the Word file as
-    # evidence-lost in accounting).
+    # recovered (a mutant that added such a note for each recovered part
+    # passed a presence-only check; it would also wrongly count the Word
+    # file as evidence-lost in accounting).
     assert len(marked) == 1, (
         f"expected EXACTLY one marked note on the Word file's own record "
         f"(object 5 only): {marked!r}; all notes: {parent.notes!r}")
@@ -525,9 +530,9 @@ def test_malformed_ole10native_stream_is_a_marked_note_not_an_exception():
         f"a malformed Ole10Native stream must not produce a child: "
         f"{exp.members!r}")
     marked = [n for n in exp.notes if ex.has_evidence_marker(n)]
-    # The brief requires every marked note to name the PART and say why
-    # (critic finding: mutant malformed_no_part used generic wording with no
-    # part name and passed an "Ole10Native"-only check).
+    # Every marked note names the PART and says why (expand_docx_embeddings'
+    # own docstring); generic wording with no part name passed an
+    # "Ole10Native"-only check.
     assert any("oleObject1.bin" in n and "Ole10Native" in n for n in marked), (
         f"expected ONE marked note naming both the part "
         f"('word/embeddings/oleObject1.bin') and the malformed stream "
@@ -540,28 +545,17 @@ def test_malformed_ole10native_stream_is_a_marked_note_not_an_exception():
 
 
 def test_nesting_chain_past_zip_max_depth_yields_a_marked_note(tmp_path):
-    # NOTE on design (word_brief_stage2b_tests.md brief_errors item 1): the
-    # brief does not say whether the TOP-level Word file counts as one of
-    # the "_ZIP_MAX_DEPTH containers". expand_zip's own precedent (extract.py
-    # ~2770) calls the top zip depth 0 and stops only at depth >
-    # _ZIP_MAX_DEPTH, i.e. it expands the top file plus _ZIP_MAX_DEPTH
-    # nested levels. Applied the same way to container (.docx-in-.docx)
-    # recursion: the entry file's own objects are always expanded (not
-    # depth-gated -- that is the ordinary, always-performed first pass), and
-    # each further level of recursion into a CHILD's own embeddings is
-    # counted starting at 1, refused once that count reaches
-    # _ZIP_MAX_DEPTH. That yields exactly _ZIP_MAX_DEPTH nested containers
-    # below the entry file. This is the loosest reading consistent with
-    # expand_zip's own wording ("deeper than N levels") and is verified
-    # against an independent reference walker built for exactly this
-    # question (critic probe p5_reference_walk.py) -- it produces the exact
-    # record chain and note placement pinned below. Critic finding: the
-    # PRIOR (loose) form of this test only required "SOME marked note,
-    # SOMEWHERE, mentioning 'depth'" -- which a cap reached one container
-    # early (mutant depth_off_by_one) satisfied just as well as a correct
-    # cap, and which rejected a differently-worded but CORRECT note (mutant
-    # deeper_wording, "nesting deeper than N ..." mirroring expand_zip's own
-    # phrasing) because it does not contain the substring "depth".
+    # The bound this pins (walker._child_records' docstring): the entry
+    # file's own objects always expand, and a child container at level L
+    # (its direct children are level 1) expands only while L <
+    # _ZIP_MAX_DEPTH. So records exist down to _ZIP_MAX_DEPTH containers
+    # below the entry file, and the deepest one's own members are named in a
+    # marked note, not recovered. That is one level shallower than
+    # expand_zip, which also reads the members of its deepest archive; the
+    # loss is disclosed either way. An earlier form of this test only
+    # required "some marked note, somewhere, mentioning 'depth'", which a
+    # cap reached one container early satisfied just as well, and which
+    # rejected a correct note worded "nesting deeper than N".
     depth = ex._ZIP_MAX_DEPTH + 2
 
     inner = _minimal_docx_with_embeds([])
@@ -617,11 +611,9 @@ def test_nesting_chain_past_zip_max_depth_yields_a_marked_note(tmp_path):
 
 
 def test_pipeline_page_accounting_reconciles_over_the_fixture_corpus(tmp_path):
-    """May already PASS before parts 1-2 (the brief calls this out
-    explicitly): fixture 17 is one more Tier-1 .docx today, with no
-    children, and accounting only has to balance against what the walk
-    actually produced. Reported either way -- not treated as a gate
-    failure if it already passes."""
+    """A guard, not a proof of recovery: accounting balances against what
+    the walk produced, so it passed before embedded documents were recovered
+    too. It holds that nested children do not break the reconciliation."""
     from dociq import pipeline
     from dociq.operator import OperatorStamp
 
@@ -636,17 +628,17 @@ def test_pipeline_page_accounting_reconciles_over_the_fixture_corpus(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 7 (critic missing_tests). Unwrap by what the bytes ARE, not by ProgID alone
+# 7. Unwrap by what the bytes ARE, not by ProgID alone
 # ---------------------------------------------------------------------------
 
 
 def test_unwrap_is_keyed_on_bytes_not_on_progid(tmp_path):
     """Every fixture 17 object's ProgID happens to match its bytes, so a
     dispatcher keyed on ProgID alone would pass fixture 17 too -- this
-    mismatches them on purpose. The corpus also carries
-    'Acrobat.Document.*' ProgID variants (word_brief_stage2b.md's corpus
-    table), so a PDF under a ProgID other than 'AcroExch.Document.DC' must
-    still be recovered."""
+    mismatches them on purpose. The corpus carries PDFs under four Acrobat
+    ProgIDs (Word spec, embedded-objects rows of the construct table), so a
+    PDF under a ProgID other than 'AcroExch.Document.DC' must still be
+    recovered."""
     xlsx_bytes = make_fixtures._we_xlsx_bytes(
         tmp_path / "unused.xlsx", "SERVAL-PROGID-MISMATCH")
     pdf_bytes = _minimal_pdf_bytes()
@@ -669,38 +661,47 @@ def test_unwrap_is_keyed_on_bytes_not_on_progid(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8 (critic missing_tests). Object order: body, then aux parts in part-name
-# order (each through its OWN .rels), then the unreferenced-part sweep; each
-# part read once
+# 8. Object order: body, then aux parts in part-name order (each through its
+# OWN .rels), then the unreferenced-part sweep; each part read once
 # ---------------------------------------------------------------------------
 
 
 def test_object_order_body_then_aux_parts_each_own_rels_dedup(tmp_path):
     """A part referenced from the body, the footer and the footnotes, with
     colliding r:id strings resolved through each part's OWN relationships.
-    Critic finding: mutant skip_aux ignored every non-body part and passed
-    all 7 tests -- an object in a header/footer/footnote would vanish
-    silently, which is the exact class D-50 exists to close."""
+
+    The part NAMES are chosen so that the order the unreferenced-part sweep
+    would produce on its own (name order: a_orphan, b_footer, m_body,
+    z_footnote) differs from the required one. With plainer names the sweep
+    recovered the footer's and footnotes' objects in the expected order
+    anyway, so a reader that skipped every header, footer and footnote part
+    (or only the footnote and endnote parts) passed this test."""
     body_bytes = make_fixtures._we_xlsx_bytes(tmp_path / "body.xlsx", "BODY-OBJ")
     footer_bytes = make_fixtures._we_xlsx_bytes(tmp_path / "footer.xlsx", "FOOTER-OBJ")
+    footnote_bytes = make_fixtures._we_xlsx_bytes(tmp_path / "fn.xlsx", "FOOTNOTE-OBJ")
+    orphan_bytes = make_fixtures._we_xlsx_bytes(tmp_path / "orphan.xlsx", "ORPHAN-OBJ")
     raw = _docx_with_aux_objects(
-        body_part="word/embeddings/body_obj.xlsx",
-        footer_part="word/embeddings/footer_obj.xlsx",
-        # SAME part as the body object -- must be read once, not twice.
-        footnote_target_part="word/embeddings/body_obj.xlsx",
-        body_bytes=body_bytes, footer_bytes=footer_bytes)
+        body_part="word/embeddings/m_body.xlsx",
+        footer_part="word/embeddings/b_footer.xlsx",
+        # The second target is the SAME part as the body object -- read once.
+        footnote_target_parts=["word/embeddings/z_footnote.xlsx",
+                               "word/embeddings/m_body.xlsx"],
+        body_bytes=body_bytes, footer_bytes=footer_bytes,
+        extra_parts={"word/embeddings/z_footnote.xlsx": footnote_bytes,
+                     "word/embeddings/a_orphan.xlsx": orphan_bytes})
 
     exp = ex.expand_docx_embeddings(raw)
     got = [(m.name, m.order) for m in exp.members]
-    assert got == [("body_obj.xlsx", 0), ("footer_obj.xlsx", 1)], (
-        f"expected body's object first, then the footer's (word/footer1.xml "
-        f"sorts before word/footnotes.xml by part name), and the "
-        f"footnotes' duplicate reference to the SAME part must not add a "
-        f"third member: {got!r}")
+    assert got == [("m_body.xlsx", 0), ("b_footer.xlsx", 1),
+                   ("z_footnote.xlsx", 2), ("a_orphan.xlsx", 3)], (
+        f"expected the body's object, then the footer's (word/footer1.xml "
+        f"sorts before word/footnotes.xml), then the footnote's, then the "
+        f"part nothing references; the footnote's second reference to the "
+        f"body's part adds nothing: {got!r}")
 
 
 # ---------------------------------------------------------------------------
-# 9 (critic missing_tests). Unreferenced word/embeddings/ parts: after every
+# 9. Unreferenced word/embeddings/ parts: after every
 # referenced object, in name order -- not merely alphabetical over all parts
 # ---------------------------------------------------------------------------
 
@@ -731,7 +732,7 @@ def test_unreferenced_embeddings_parts_come_after_referenced_in_name_order(tmp_p
 
 
 # ---------------------------------------------------------------------------
-# 10 (critic missing_tests). Link / missing r:id / external target / a
+# 10. Link / missing r:id / external target / a
 # relationship to a part not in the package: each a marked note, no child
 # ---------------------------------------------------------------------------
 
@@ -804,7 +805,7 @@ def test_relationship_to_missing_part_is_not_recovered(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 11 (critic missing_tests). A legacy-Office compound file (neither PDF
+# 11. A legacy-Office compound file (neither PDF
 # CONTENTS nor Ole10Native) is kept as stored, and the walker marks it Tier 2
 # ---------------------------------------------------------------------------
 
@@ -834,7 +835,7 @@ def test_legacy_compound_file_kept_as_stored_and_marked_tier2(tmp_path):
     # (§3: "a Tier-2 file inside a container is still a Tier-2 file"),
     # exactly like a Tier-2 zip member (test_walker.py::
     # test_a_tier2_archive_member_lands_on_the_unsupported_list) -- never
-    # left on r.documents. Probed and confirmed: word2b_impl/probe_ppt_tier2.py.
+    # left on r.documents.
     child = next((d for d in r.unsupported if d.rel_path.endswith(".ppt")), None)
     assert child is not None, (
         f"expected a Tier-2 record for the stored .ppt part: "
@@ -845,7 +846,7 @@ def test_legacy_compound_file_kept_as_stored_and_marked_tier2(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 12 (critic missing_tests). An Ole10Native stream with no stored filename
+# 12. An Ole10Native stream with no stored filename
 # names its child "<part stem>.bin"
 # ---------------------------------------------------------------------------
 
@@ -863,7 +864,7 @@ def test_ole10native_empty_filename_falls_back_to_part_stem(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 13 (critic missing_tests). Every Ole10Native read is bounds-checked,
+# 13. Every Ole10Native read is bounds-checked,
 # including the DATA-length read (5a only ever reaches the temp-path check)
 # ---------------------------------------------------------------------------
 
@@ -885,7 +886,7 @@ def test_ole10native_data_length_bounds_checked_not_silently_truncated(tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# 14 (critic missing_tests). Member-count and total-bytes caps on embeddings
+# 14. Member-count and total-bytes caps on embeddings
 # are disclosed when they bite, mirroring expand_zip's own caps
 # ---------------------------------------------------------------------------
 
@@ -920,7 +921,7 @@ def test_embeddings_byte_cap_is_disclosed(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 15 (critic missing_tests). If expand_docx_embeddings raises, the walker
+# 15. If expand_docx_embeddings raises, the walker
 # marks the Word record rather than failing the whole file
 # ---------------------------------------------------------------------------
 
@@ -943,8 +944,8 @@ def test_walker_marks_the_word_record_when_expansion_raises(tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# 16 (critic missing_tests). Recursion covers a .msg/.eml inside a .zip and
-# a .eml attached to a .eml -- the silent loss that predates D-50
+# 16. Recursion covers an .eml inside a .zip and an .eml attached to an
+# .eml -- the silent loss that predates D-50 (.msg: see section 21)
 # ---------------------------------------------------------------------------
 
 
@@ -1021,7 +1022,7 @@ def test_recursion_covers_eml_attached_to_eml(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 17 (critic missing_tests). "N embedded document(s) extracted as child
+# 17. "N embedded document(s) extracted as child
 # document(s)" on the Word record, present only when something was recovered
 # ---------------------------------------------------------------------------
 
@@ -1043,7 +1044,7 @@ def test_no_embedded_document_count_note_when_nothing_recovered(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 18 (item 4). A stored filename is untrusted: made safe before it becomes
+# 18. A stored filename is untrusted: made safe before it becomes
 # part of a rel_path, whatever container kind supplied it.
 # ---------------------------------------------------------------------------
 
@@ -1053,6 +1054,12 @@ _UNTRUSTED_EXACT_LEAF = {
     "drive_absolute": "evil.txt",       # only the final path component survives
     "windows_traversal": "evil.txt",    # '..' segments are discarded, not walked
     "trailing_dots_spaces": "notice.eml",  # Windows would strip these silently
+    # A stored filename with no usable basename names the child after its
+    # part, "<part stem>.bin" (expand_docx_embeddings' docstring), the same
+    # as an empty one -- not the sanitizer's generic placeholder.
+    "dotdot": "oleObject1.bin",
+    "drive_root": "oleObject1.bin",
+    "blank": "oleObject1.bin",
 }
 
 
@@ -1064,9 +1071,8 @@ _UNTRUSTED_EXACT_LEAF = {
        "drive_absolute", "drive_relative", "reserved_bare",
        "reserved_with_ext", "reserved_device", "trailing_dots_spaces"])
 def test_untrusted_ole10native_stored_filename_is_sanitized(tmp_path, stored_name):
-    """item 4: an ``\\x01Ole10Native`` stored filename is untrusted. Probed
-    against the walker as it stood before this fix
-    (``word2b_impl/probe_untrusted_names.py``): ``_child_records`` built
+    """An ``\\x01Ole10Native`` stored filename is untrusted. Before
+    walker._sanitize_child_name existed, ``_child_records`` built
     ``child_rel`` from ``unicodedata.normalize('NFC', m.name)`` alone --
     empty, '.', '..', a path-carrying name, a drive letter or ':', trailing
     dots/spaces, and a Windows-reserved device name all passed straight
@@ -1118,6 +1124,9 @@ def test_untrusted_ole10native_stored_filename_is_sanitized(tmp_path, stored_nam
     ("drive_absolute", "C:\\Windows\\evil.txt"),
     ("windows_traversal", "..\\..\\evil.txt"),
     ("trailing_dots_spaces", "notice.eml.   "),
+    ("dotdot", ".."),
+    ("drive_root", "C:\\"),
+    ("blank", "   "),
 ])
 def test_untrusted_ole10native_stored_filename_exact_leaf(
         tmp_path, case_id, stored_name):
@@ -1145,17 +1154,16 @@ def test_untrusted_ole10native_stored_filename_exact_leaf(
 
 
 # ---------------------------------------------------------------------------
-# 19 (item 4). Two children of one parent with the same name: disambiguated
+# 19. Two children of one parent with the same name: disambiguated
 # deterministically by container order, for every container kind.
 # ---------------------------------------------------------------------------
 
 
 def test_two_embedded_objects_with_the_same_stored_name_get_distinct_rel_paths(
         tmp_path):
-    """item 4's 'two children of one parent with the same name' shape: two
-    Package objects, each wrapping a plainly-named 'duplicate.txt'. Probed
-    against the walker as it stood before this fix
-    (``word2b_impl/probe_duplicate_names.py``): both children's rel_path was
+    """Two children of one parent with the same name: two Package objects,
+    each wrapping a plainly-named 'duplicate.txt'. Before
+    walker._dedup_child_names existed, both children's rel_path was
     built from the raw stored name with no dedup, so the second SILENTLY
     replaced the first as far as any rel_path-keyed lookup (Stage 3b Doc ID
     assignment, the resume journal) was concerned.
@@ -1202,8 +1210,8 @@ def test_two_embedded_objects_with_the_same_stored_name_get_distinct_rel_paths(
 
 def test_two_email_attachments_with_the_same_name_get_distinct_rel_paths(
         tmp_path):
-    """item 4's other half: ``expand_eml_attachments`` reads
-    ``part.get_filename()`` unsanitized (word_brief_stage2b_impl.md item 4),
+    """The other half: ``expand_eml_attachments`` reads
+    ``part.get_filename()`` unsanitized,
     and two attachments sharing a name -- 'duplicate.txt' pasted twice, a
     common real-world shape -- collided the same way object 19's Package
     objects did, on the SAME code path (``_child_records``) before this fix.
@@ -1253,3 +1261,683 @@ def test_two_email_attachments_with_the_same_name_get_distinct_rel_paths(
     from dociq.docid import assign
     result = assign.assign_doc_ids(r.documents, index=None)
     assert result.warnings == (), result.warnings
+
+
+# ---------------------------------------------------------------------------
+# Shared builders for the sections below
+# ---------------------------------------------------------------------------
+
+_OBJ_CT = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    '<Default Extension="rels" '
+    'ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    '<Default Extension="xml" ContentType="application/xml"/>'
+    '<Default Extension="bin" '
+    'ContentType="application/vnd.openxmlformats-officedocument.oleObject"/>'
+    '<Default Extension="docx" '
+    'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document"/>'
+    '<Default Extension="xlsx" '
+    'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>'
+    '<Default Extension="doc" ContentType="application/msword"/>'
+    '<Override PartName="/word/document.xml" ContentType='
+    '"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+    '</Types>'
+)
+
+
+def _docx_objects(objects, *, body_text: str = "an invented paragraph",
+                  extra_parts: dict | None = None) -> bytes:
+    """A .docx whose body holds one ``<o:OLEObject>`` per ``objects`` entry,
+    ``(Type, ProgID, relationship Target, part bytes or None)``, in order.
+    The Target is written exactly as given (relative to ``word/``, or
+    package-absolute with a leading ``/``); bytes are stored at the part the
+    Target resolves to, and ``None`` stores nothing (a link). Unlike
+    ``_minimal_docx_with_embeds``, the content types cover every part, so
+    python-docx opens the result and the Word file's own text is read."""
+    import posixpath
+
+    objs, rels, parts = [], [], {}
+    for i, (typ, progid, target, data) in enumerate(objects, start=1):
+        rid = f"rIdObj{i}"
+        objs.append(
+            f'<w:p><w:r><w:object><o:OLEObject Type="{typ}" ProgID="{progid}" '
+            f'r:id="{rid}"/></w:object></w:r></w:p>')
+        rels.append(
+            f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/'
+            f'officeDocument/2006/relationships/oleObject" Target="{target}"'
+            + (' TargetMode="External"' if typ == "Link" else "") + '/>')
+        if data is not None:
+            name = (target.lstrip("/") if target.startswith("/")
+                    else posixpath.normpath(posixpath.join("word", target)))
+            parts[name] = data
+    doc_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document {_MIN_NS}><w:body>'
+        f'<w:p><w:r><w:t>{body_text}</w:t></w:r></w:p>' + "".join(objs)
+        + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
+        '</w:body></w:document>')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", _OBJ_CT)
+        zf.writestr("_rels/.rels", _MIN_ROOT_RELS)
+        zf.writestr("word/document.xml", doc_xml)
+        zf.writestr(
+            "word/_rels/document.xml.rels",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/'
+            '2006/relationships">' + "".join(rels) + '</Relationships>')
+        for name, data in {**parts, **(extra_parts or {})}.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def _walk_files(tmp_path, files: dict, notes=None):
+    src = tmp_path / "src"
+    src.mkdir()
+    for name, data in files.items():
+        (src / name).parent.mkdir(parents=True, exist_ok=True)
+        (src / name).write_bytes(data)
+    return walker.run(_cfg(tmp_path, src),
+                      walker.WalkOptions(ocr_enabled=False, resume=False), notes)
+
+
+def _package(stored_name: str, payload: bytes) -> bytes:
+    return make_fixtures._write_compound_file(
+        {"\x01Ole10Native": make_fixtures._ole10_native(stored_name, payload)})
+
+
+def _eml_attaching(name: str, payload: bytes) -> bytes:
+    import base64
+
+    return "\r\n".join([
+        "From: engineer@example.com", "To: contractor@example.com",
+        "Subject: INVENTED-ATTACHMENT-CARRIER",
+        "Date: Fri, 19 Jul 2024 09:00:00 +0000", "MIME-Version: 1.0",
+        'Content-Type: multipart/mixed; boundary="dociq-carrier-boundary"',
+        "", "--dociq-carrier-boundary",
+        "Content-Type: text/plain; charset=utf-8", "", "carrier body", "",
+        "--dociq-carrier-boundary",
+        f'Content-Type: application/octet-stream; name="{name}"',
+        "Content-Transfer-Encoding: base64",
+        f'Content-Disposition: attachment; filename="{name}"',
+        "", base64.b64encode(payload).decode("ascii"), "",
+        "--dociq-carrier-boundary--", "",
+    ]).encode("utf-8")
+
+
+def _marked(doc) -> list[str]:
+    return [n for n in doc.notes if ex.has_evidence_marker(n)]
+
+
+# ---------------------------------------------------------------------------
+# 20. A PDF child keeps its section recognition wherever it is nested
+# ---------------------------------------------------------------------------
+
+
+def test_nested_pdf_keeps_its_section_and_is_dropped_under_an_approval(tmp_path):
+    """The walker rebuilt every container child's extraction result field by
+    field and left out ``spans``, so a PDF inside a zip, an email or a Word
+    file lost section recognition, and an approved omission kept every one
+    of its pages while the same PDF at the top level dropped one. Page 2 of
+    fixture 03 is a photograph page with OCR off
+    (``tests/test_codex_r2_findings.py::_PHOTOGRAPH_PAGES``)."""
+    from dociq import pipeline
+    from dociq.contracts import Disposition, matter_key
+    from dociq.sections.model import ApprovedOmission
+    from dociq.sections.templates import PROGRESS_REPORT
+
+    pdf = (FIXTURES / "03_mixed_transmittal.pdf").read_bytes()
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as zf:
+        zf.writestr("vol1/03_mixed_transmittal.pdf", pdf)
+    acrobat = make_fixtures._write_compound_file({"CONTENTS": pdf})
+    files = {
+        "03_mixed_transmittal.pdf": pdf,
+        "bundle.zip": zip_buf.getvalue(),
+        "mail.eml": _eml_attaching("03_mixed_transmittal.pdf", pdf),
+        "memo.docx": _docx_objects(
+            [("Embed", "AcroExch.Document.DC", "embeddings/oleObject1.bin", acrobat)]),
+    }
+    src = tmp_path / "src"
+    src.mkdir()
+    for name, data in files.items():
+        (src / name).write_bytes(data)
+    approval = ApprovedOmission(
+        family_id="progress-photographs", approved_by="abachowski",
+        approved_at="2026-09-14T12:00:00Z", matter="nested",
+        matter_root=matter_key(str(src)),
+        template_id=PROGRESS_REPORT.template_id,
+        template_version=PROGRESS_REPORT.version)
+    outcome = pipeline.run(_cfg(tmp_path, src), pipeline.PipelineOptions(
+        walk=walker.WalkOptions(ocr_enabled=False, resume=False),
+        template=PROGRESS_REPORT, approvals=(approval,), matter_name="nested"))
+
+    def shape(rel_path):
+        doc = next((d for d in outcome.result.documents if d.rel_path == rel_path), None)
+        assert doc is not None, (
+            f"no record {rel_path!r}: {[d.rel_path for d in outcome.result.documents]!r}")
+        return [(p.section, p.section_tier, p.disposition) for p in doc.pages]
+
+    top = shape("03_mixed_transmittal.pdf")
+    assert top[1][2] is Disposition.DROP and top[1][0], (
+        f"the top-level copy's page 2 must be placed and dropped, or this test "
+        f"proves nothing: {top!r}")
+    for nested in ("bundle.zip/vol1/03_mixed_transmittal.pdf",
+                   "mail.eml/03_mixed_transmittal.pdf",
+                   "memo.docx/oleObject1.pdf"):
+        assert shape(nested) == top, (
+            f"{nested!r} must carry the same section, tier and disposition on "
+            f"every page as the top-level copy: {shape(nested)!r} != {top!r}")
+
+
+def test_every_contract_record_rebuild_names_every_field():
+    """The class guard for the loss above: a record rebuilt from another
+    record's fields one keyword at a time silently drops any field the call
+    does not name, including one added to the dataclass later.
+
+    Every call in ``src/`` that builds an ``ExtractedDoc``, a
+    ``DocumentRecord`` or a ``PageRecord`` is read. A call that copies at
+    least two same-named fields from one object (``status=got.status``,
+    ``doc_id=d["doc_id"]``) is a rebuild. If every field it reads from that
+    object belongs to the class being built, it must name every field of
+    that class; ``dataclasses.replace`` is the way to change a few. If it
+    reads fields of another contract class (``_record`` turns an
+    ``ExtractedDoc`` into a ``DocumentRecord``), the function it sits in
+    must read every field of that source class."""
+    import ast
+    import dataclasses
+    from pathlib import Path
+
+    from dociq.contracts import DocumentRecord, PageRecord
+
+    classes = {"ExtractedDoc": ex.ExtractedDoc, "DocumentRecord": DocumentRecord,
+               "PageRecord": PageRecord}
+    fields = {k: {f.name for f in dataclasses.fields(v)} for k, v in classes.items()}
+    src = Path(__file__).resolve().parents[1] / "src"
+
+    def reads(node):
+        """``{base name: {field names}}`` read as ``base.f``, ``base["f"]``
+        or ``base.get("f")`` anywhere under ``node``."""
+        out: dict = {}
+        for n in ast.walk(node):
+            if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                    and n.attr != "get"):
+                out.setdefault(n.value.id, set()).add(n.attr)
+            elif (isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)
+                  and isinstance(n.slice, ast.Constant)
+                  and isinstance(n.slice.value, str)):
+                out.setdefault(n.value.id, set()).add(n.slice.value)
+            elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                  and n.func.attr == "get" and isinstance(n.func.value, ast.Name)
+                  and n.args and isinstance(n.args[0], ast.Constant)
+                  and isinstance(n.args[0].value, str)):
+                out.setdefault(n.func.value.id, set()).add(n.args[0].value)
+        return out
+
+    sites, failures = [], []
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            func_reads = reads(func)
+            for call in ast.walk(func):
+                if not isinstance(call, ast.Call):
+                    continue
+                name = (call.func.attr if isinstance(call.func, ast.Attribute)
+                        else getattr(call.func, "id", None))
+                if name not in classes:
+                    continue
+                named = {kw.arg for kw in call.keywords if kw.arg}
+                per_base: dict = {}
+                for kw in call.keywords:
+                    if not kw.arg:
+                        continue
+                    for base, got in reads(kw.value).items():
+                        per_base.setdefault(base, [set(), set()])
+                        per_base[base][0] |= got
+                        if kw.arg in got:
+                            per_base[base][1].add(kw.arg)
+                for base, (read, copied) in per_base.items():
+                    if len(copied) < 2:
+                        continue
+                    where = f"{path.relative_to(src)}:{call.lineno} ({func.name})"
+                    if read <= fields[name]:
+                        sites.append(where)
+                        missing = fields[name] - named
+                        if missing:
+                            failures.append(f"{where}: rebuilds {name} from "
+                                            f"{base!r} without {sorted(missing)}")
+                        continue
+                    source = next((k for k, v in fields.items() if read <= v), None)
+                    if source is None:
+                        continue  # copied from something that is not a contract record
+                    sites.append(where)
+                    unread = fields[source] - func_reads.get(base, set())
+                    if unread:
+                        failures.append(f"{where}: builds {name} from {source} "
+                                        f"{base!r} without reading {sorted(unread)}")
+    assert any("_record" in s for s in sites) and any("_doc_from_jsonable" in s for s in sites), (
+        f"the guard must see the known rebuild sites, or it checks nothing: {sites!r}")
+    assert not failures, "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# 21. An Outlook .msg child's own attachments are read, whatever carries it
+# ---------------------------------------------------------------------------
+
+
+def test_msg_child_attachments_are_read_through_the_msg_reader(tmp_path, monkeypatch):
+    """All 13 corpus Package objects wrap an Outlook .msg (Word spec,
+    construct table), and nothing exercised a .msg child: dropping .msg from
+    the recursion, or reading it with the .eml parser, passed every test.
+    The .msg reader is replaced by a stub so the test needs no Outlook
+    writer; what is pinned is that the walker hands it the child's bytes and
+    turns what it returns into grandchildren."""
+    msg_bytes = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"INVENTED-MSG-BYTES" * 40
+    seen: list[bytes] = []
+
+    def fake_msg(raw, scratch_dir):
+        seen.append(raw)
+        return ex.ZipExpansion((ex.ZipMember("leaf.txt", b"MSG-LEAF-QUOKKA", 0),), ())
+
+    monkeypatch.setattr(ex, "expand_msg_attachments", fake_msg)
+    raw = _docx_objects([("Embed", "Package", "embeddings/oleObject1.bin",
+                          _package("notice.msg", msg_bytes))])
+    r = _walk_files(tmp_path, {"outer.docx": raw})
+
+    assert msg_bytes in seen, "the .msg child's bytes never reached the .msg reader"
+    leaf = next((d for d in r.documents
+                 if d.rel_path == "outer.docx/notice.msg/leaf.txt"), None)
+    assert leaf is not None, [d.rel_path for d in r.documents]
+    assert leaf.parent_doc_id == "outer.docx/notice.msg", leaf.parent_doc_id
+    assert "MSG-LEAF-QUOKKA" in _text(leaf), _text(leaf)
+
+
+# ---------------------------------------------------------------------------
+# 22. The embedded-object stream is chosen by name, not by set order
+# ---------------------------------------------------------------------------
+
+_HASHSEED_CHILD = '''
+import json
+import sys
+
+from dociq.contracts import RunConfig
+from dociq.ingest import extract as ex
+from dociq.ingest import walker
+
+src, out = sys.argv[1], sys.argv[2]
+r = walker.run(RunConfig(source_root=src, output_root=out,
+                         ocr_engine_version=ex.ocr_engine_version()),
+               walker.WalkOptions(ocr_enabled=False, resume=False, workers=1))
+print(json.dumps([[d.rel_path, d.status.value, d.ext, d.sha256, d.parent_doc_id,
+                   d.container_order, list(d.notes), d.error]
+                  for d in list(r.documents) + list(r.unsupported)]))
+'''
+
+
+def test_embedded_object_records_are_identical_under_every_hash_seed(tmp_path):
+    """A legacy Word document keeps its own embedded objects in
+    ``ObjectPool/_NNN/`` storages, each with its own ``\\x01Ole10Native``.
+    The reader used to take whichever stream ``next()`` met first in a SET of
+    full stream paths ending in "Ole10Native", so which nested object
+    replaced the legacy document depended on ``PYTHONHASHSEED``. Only
+    root-level streams are an object's own; the legacy document is kept as
+    stored. Ten interpreters, ten hash seeds, one answer."""
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    legacy_doc = make_fixtures._write_compound_file({
+        "WordDocument": b"INVENTED-WORDDOCUMENT-STREAM",
+        "1Table": b"INVENTED-TABLE-STREAM",
+        "ObjectPool/_1111/\x01Ole10Native": make_fixtures._ole10_native(
+            "alpha.txt", b"ALPHA-NESTED-PACKAGE"),
+        "ObjectPool/_2222/\x01Ole10Native": make_fixtures._ole10_native(
+            "bravo.txt", b"BRAVO-NESTED-PACKAGE"),
+    })
+    raw = _docx_objects([
+        ("Embed", "Word.Document.8",
+         "embeddings/Microsoft_Word_97_-_2003_Document.doc", legacy_doc),
+        ("Embed", "Package", "embeddings/oleObject2.bin",
+         _package("delta.txt", b"DELTA-ROOT-PACKAGE")),
+    ])
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "legacy.docx").write_bytes(raw)
+    script = tmp_path / "hashseed_child.py"
+    script.write_text(_HASHSEED_CHILD, encoding="utf-8")
+    repo_src = str(Path(__file__).resolve().parents[1] / "src")
+
+    outputs = {}
+    for seed in range(10):
+        env = dict(os.environ, PYTHONHASHSEED=str(seed), PYTHONPATH=repo_src)
+        done = subprocess.run(
+            [sys.executable, str(script), str(src), str(tmp_path / f"out{seed}")],
+            capture_output=True, text=True, env=env, timeout=300)
+        assert done.returncode == 0, done.stderr[-2000:]
+        outputs[seed] = done.stdout.strip().splitlines()[-1]
+    distinct = set(outputs.values())
+    assert len(distinct) == 1, (
+        "records differ between hash seeds: "
+        + "; ".join(f"seed {s}: {[row[0] for row in json.loads(o)]}"
+                    for s, o in outputs.items()))
+
+    rows = {row[0]: row for row in json.loads(distinct.pop())}
+    assert "legacy.docx/Microsoft_Word_97_-_2003_Document.doc" in rows, sorted(rows)
+    assert "legacy.docx/delta.txt" in rows, sorted(rows)
+    assert not any(k.endswith(("alpha.txt", "bravo.txt")) for k in rows), (
+        f"an object nested inside the legacy document is not the Word file's "
+        f"own embedded object: {sorted(rows)}")
+
+
+# ---------------------------------------------------------------------------
+# 23. Embedded objects are expanded by what the file IS, not by its name
+# ---------------------------------------------------------------------------
+
+
+def test_only_a_word_package_is_sent_to_the_embedded_object_expander(tmp_path, monkeypatch):
+    """PDF bytes named .docx (fixture 10, the misnamed-file case productions
+    deliver) were sent to the expander by their name. The expander could
+    not open them, and the walker recorded a TRANSIENT "could not enumerate
+    attachments" gap on a file that read completely, retried it serially on
+    every run and never replayed it on resume. A workbook is a zip too and
+    must not be sent either."""
+    import hashlib
+
+    real = ex.expand_docx_embeddings
+    sent: list[str] = []
+
+    def spy(raw):
+        sent.append(hashlib.sha256(raw).hexdigest())
+        return real(raw)
+
+    monkeypatch.setattr(ex, "expand_docx_embeddings", spy)
+    notes = walker.RunNotes()
+    r = _walk_files(tmp_path, {
+        "misnamed.docx": (FIXTURES / "attachments" / "10_misnamed.docx").read_bytes(),
+        "06_register.xlsx": (FIXTURES / "06_register.xlsx").read_bytes(),
+        "17_word_embeddings.docx": (FIXTURES / "17_word_embeddings.docx").read_bytes(),
+    }, notes)
+
+    misnamed = next(d for d in r.documents if d.rel_path == "misnamed.docx")
+    assert not any(ex.has_evidence_marker(n) for n in misnamed.notes), misnamed.notes
+    assert notes.load_dependent == [], notes.load_dependent
+    word = {d.sha256 for d in r.documents if d.rel_path in (
+        "17_word_embeddings.docx",
+        "17_word_embeddings.docx/Microsoft_Word_Document1.docx")}
+    assert set(sent) == word, (
+        f"exactly the two Word packages must reach the expander: sent "
+        f"{len(sent)} blob(s), {len(set(sent) - word)} of them not Word")
+
+
+def test_a_word_package_under_another_name_still_yields_its_embedded_documents(tmp_path):
+    """A Word file delivered as .pdf or .xlsx, inside a zip, attached to an
+    email or wrapped in a Package object under another name was read as Word
+    by the content-sniff recovery, but its embedded documents were routed by
+    name and silently never recovered."""
+    word = (FIXTURES / "17_word_embeddings.docx").read_bytes()
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as zf:
+        zf.writestr("exhibit.pdf", word)
+    r = _walk_files(tmp_path, {
+        "as_pdf.pdf": word,
+        "as_xlsx.xlsx": word,
+        "bundle.zip": zip_buf.getvalue(),
+        "mail.eml": _eml_attaching("report.pdf", word),
+        "outer.docx": _docx_objects([("Embed", "Package", "embeddings/oleObject1.bin",
+                                      _package("memo.pdf", word))]),
+    })
+    by_rel = {d.rel_path: d for d in r.documents}
+    for route in ("as_pdf.pdf", "as_xlsx.xlsx", "bundle.zip/exhibit.pdf",
+                  "mail.eml/report.pdf", "outer.docx/memo.pdf"):
+        child = by_rel.get(f"{route}/Microsoft_Excel_Worksheet1.xlsx")
+        assert child is not None, (
+            f"the workbook embedded in the Word file at {route!r} was not "
+            f"recovered: {sorted(k for k in by_rel if k.startswith(route))!r}")
+        assert child.parent_doc_id == route, child.parent_doc_id
+        assert "BISON-WORKBOOK" in _text(child), _text(child)
+
+
+# ---------------------------------------------------------------------------
+# 24. A container's own disclosure survives nesting, and the depth cap
+# ---------------------------------------------------------------------------
+
+
+def _inner_with_losses(tmp_path) -> bytes:
+    """A Word file holding one recoverable workbook, one part that is
+    neither a ZIP nor a compound file, and one link."""
+    return _docx_objects([
+        ("Embed", "Excel.Sheet.12", "embeddings/good.xlsx",
+         make_fixtures._we_xlsx_bytes(tmp_path / "good.xlsx", "WOMBAT-GOOD")),
+        ("Embed", "DocIQFixture.Unreadable.1", "embeddings/junk.bin",
+         b"INVENTED-NEITHER-ZIP-NOR-COMPOUND"),
+        ("Link", "Excel.Sheet.12", "file:///C:/elsewhere/linked.xlsx", None),
+    ], body_text="inner with losses")
+
+
+def _chain(inner: bytes, levels: int) -> bytes:
+    raw = inner
+    for i in range(levels, 0, -1):
+        raw = _docx_objects([("Embed", "Word.Document.12", f"embeddings/l{i}.docx", raw)],
+                            body_text=f"level {i - 1}")
+    return raw
+
+
+def _assert_losses_named(doc) -> None:
+    marked = _marked(doc)
+    assert any("junk.bin" in n for n in marked), (
+        f"{doc.rel_path!r}: the unrecoverable part must be named in a marked "
+        f"note: {doc.notes!r}")
+    assert any("link" in n.lower() for n in marked), (
+        f"{doc.rel_path!r}: the link must be named in a marked note: {doc.notes!r}")
+
+
+def test_a_nested_word_files_own_losses_are_named_on_its_own_record(tmp_path, monkeypatch):
+    """Every nested case the suite built was well formed, so a nested
+    container's marked notes, its count note, and the note for an exception
+    out of its expansion could each be dropped with every test green."""
+    inner = _inner_with_losses(tmp_path)
+    r = _walk_files(tmp_path, {"outer.docx": _chain(inner, 1)})
+    rec = next(d for d in r.documents if d.rel_path == "outer.docx/l1.docx")
+    _assert_losses_named(rec)
+    assert "1 embedded document(s) extracted as child document(s)" in rec.notes, rec.notes
+    assert any(d.rel_path == "outer.docx/l1.docx/good.xlsx" for d in r.documents)
+
+    real = ex.expand_docx_embeddings
+
+    def raise_for_inner(raw):
+        if raw == inner:
+            raise RuntimeError("INVENTED-NESTED-FAILURE")
+        return real(raw)
+
+    monkeypatch.setattr(ex, "expand_docx_embeddings", raise_for_inner)
+    tmp2 = tmp_path / "second"
+    tmp2.mkdir()
+    r2 = _walk_files(tmp2, {"outer.docx": _chain(inner, 1)})
+    rec2 = next(d for d in r2.documents if d.rel_path == "outer.docx/l1.docx")
+    assert any(ex.M_ATTACH_ENUM in n and "INVENTED-NESTED-FAILURE" in n
+               for n in _marked(rec2)), rec2.notes
+
+
+def test_the_depth_capped_word_file_still_names_its_own_losses(tmp_path, monkeypatch):
+    """At the depth cap the walker looked inside the capped child only to
+    name its members, discarded the child's own notes, and swallowed an
+    exception. An unrecoverable object or a link at the cap was then named
+    nowhere; walked on its own, the same file names both."""
+    inner = _inner_with_losses(tmp_path)
+    levels = ex._ZIP_MAX_DEPTH
+    capped = "top.docx/" + "/".join(f"l{i}.docx" for i in range(1, levels + 1))
+    r = _walk_files(tmp_path, {"top.docx": _chain(inner, levels)})
+    rec = next((d for d in r.documents if d.rel_path == capped), None)
+    assert rec is not None, [d.rel_path for d in r.documents]
+    _assert_losses_named(rec)
+    assert any("nesting deeper than" in n and "good.xlsx" in n for n in _marked(rec)), rec.notes
+    assert not any(d.rel_path.startswith(capped + "/") for d in r.documents)
+
+    real = ex.expand_docx_embeddings
+
+    def raise_for_inner(raw):
+        if raw == inner:
+            raise RuntimeError("INVENTED-CAPPED-FAILURE")
+        return real(raw)
+
+    monkeypatch.setattr(ex, "expand_docx_embeddings", raise_for_inner)
+    tmp2 = tmp_path / "second"
+    tmp2.mkdir()
+    r2 = _walk_files(tmp2, {"top.docx": _chain(inner, levels)})
+    rec2 = next(d for d in r2.documents if d.rel_path == capped)
+    assert any(ex.M_ATTACH_ENUM in n and "INVENTED-CAPPED-FAILURE" in n
+               for n in _marked(rec2)), rec2.notes
+
+
+# ---------------------------------------------------------------------------
+# 25. Relationship targets: package-absolute, or relative to the source part
+# ---------------------------------------------------------------------------
+
+
+def test_a_package_absolute_object_target_is_recovered_without_a_false_note(tmp_path):
+    """``Target="/word/embeddings/..."`` is a valid OPC part name. It used to
+    be joined onto ``word/`` as ``/word/...``, so the object got a FINAL
+    "not in the package" note while the unreferenced-part sweep recovered
+    the same part anyway."""
+    xlsx = make_fixtures._we_xlsx_bytes(tmp_path / "abs.xlsx", "NUMBAT-ABSOLUTE")
+    raw = _docx_objects([
+        ("Embed", "Excel.Sheet.12", "/word/embeddings/abs.xlsx", xlsx),
+        ("Embed", "Excel.Sheet.12", "embeddings/../embeddings/rel.xlsx",
+         make_fixtures._we_xlsx_bytes(tmp_path / "rel.xlsx", "NUMBAT-RELATIVE")),
+    ])
+    exp = ex.expand_docx_embeddings(raw)
+    assert [m.name for m in exp.members] == ["abs.xlsx", "rel.xlsx"], exp.members
+    assert exp.notes == (), exp.notes
+
+
+# ---------------------------------------------------------------------------
+# 26. What a compound file or a Package holds decides what is recovered
+# ---------------------------------------------------------------------------
+
+
+def test_a_zip_wrapped_in_a_package_object_has_its_members_read(tmp_path):
+    """A zip attached to an email is flattened into its members; the same zip
+    wrapped in a Word Package object became one UNSUPPORTED record whose
+    members were never read."""
+    inner_zip = io.BytesIO()
+    with zipfile.ZipFile(inner_zip, "w") as zf:
+        zf.writestr("memo.txt", b"PANGOLIN-ZIPPED-MEMO")
+        zf.writestr("sub/second.txt", b"PANGOLIN-ZIPPED-SECOND")
+    raw = _docx_objects([("Embed", "Package", "embeddings/oleObject1.bin",
+                          _package("production.zip", inner_zip.getvalue()))])
+    r = _walk_files(tmp_path, {"outer.docx": raw})
+    by_rel = {d.rel_path: d for d in r.documents}
+    for rel, sentinel in (("outer.docx/production.zip/memo.txt", "PANGOLIN-ZIPPED-MEMO"),
+                          ("outer.docx/production.zip/sub/second.txt",
+                           "PANGOLIN-ZIPPED-SECOND")):
+        assert rel in by_rel, sorted(by_rel)
+        assert sentinel in _text(by_rel[rel]), _text(by_rel[rel])
+        assert by_rel[rel].parent_doc_id == "outer.docx", by_rel[rel].parent_doc_id
+    assert not any(d.rel_path.endswith("production.zip") for d in r.unsupported), (
+        [d.rel_path for d in r.unsupported])
+
+
+def test_compound_files_are_recovered_by_what_they_hold(tmp_path):
+    """Every compound file that was not a PDF ``CONTENTS`` or an
+    ``\\x01Ole10Native`` wrapper used to be kept as a ``.bin`` child, listed
+    "Unrecognized format" with no marker, while the Word record counted it
+    as extracted. A ``Package`` stream holds the file itself; a legacy
+    Office document is kept whole under its own kind; anything else is not
+    recovered and a marked note names the part."""
+    xlsx = make_fixtures._we_xlsx_bytes(tmp_path / "pkg.xlsx", "CASSOWARY-PACKAGE-STREAM")
+    legacy_doc = make_fixtures._write_compound_file(
+        {"WordDocument": b"INVENTED-WORD-97", "1Table": b"INVENTED-TABLE"})
+    equation = make_fixtures._write_compound_file({"Equation Native": b"\x1c\x00" * 40})
+    not_pdf = make_fixtures._write_compound_file({"CONTENTS": b"INVENTED-NOT-A-PDF"})
+    raw = _docx_objects([
+        ("Embed", "Excel.Sheet.12", "embeddings/oleObject1.bin",
+         make_fixtures._write_compound_file({"Package": xlsx})),
+        ("Embed", "Word.Document.8", "embeddings/oleObject2.bin", legacy_doc),
+        ("Embed", "Equation.3", "embeddings/oleObject3.bin", equation),
+        ("Embed", "AcroExch.Document.DC", "embeddings/oleObject4.bin", not_pdf),
+    ])
+    exp = ex.expand_docx_embeddings(raw)
+    assert [(m.name, m.raw) for m in exp.members] == [
+        ("oleObject1.xlsx", xlsx), ("oleObject2.doc", legacy_doc)], (
+        [m.name for m in exp.members])
+    marked = [n for n in exp.notes if ex.has_evidence_marker(n)]
+    assert len(marked) == 2 and "oleObject3.bin" in marked[0] and "oleObject4.bin" in marked[1], (
+        exp.notes)
+
+    r = _walk_files(tmp_path, {"objects.docx": raw})
+    parent = next(d for d in r.documents if d.rel_path == "objects.docx")
+    assert "2 embedded document(s) extracted as child document(s)" in parent.notes, parent.notes
+    workbook = next(d for d in r.documents if d.rel_path == "objects.docx/oleObject1.xlsx")
+    assert "CASSOWARY-PACKAGE-STREAM" in _text(workbook), _text(workbook)
+    assert any(d.rel_path == "objects.docx/oleObject2.doc" for d in r.unsupported), (
+        [d.rel_path for d in r.unsupported])
+
+
+def test_a_stored_name_that_is_only_an_extension_keeps_its_extension(tmp_path):
+    """``Path(".eml").suffix`` is empty, so an attachment stored as ".eml" was
+    listed as an unrecognized format instead of being read."""
+    eml = _small_eml_bytes("DOTNAME-EMAIL", "DOTNAME-BODY-JERBOA")
+    raw = _docx_objects([("Embed", "Package", "embeddings/oleObject1.bin",
+                          _package(".eml", eml))])
+    r = _walk_files(tmp_path, {"dotname.docx": raw})
+    child = next((d for d in r.documents if d.parent_doc_id == "dotname.docx"), None)
+    assert child is not None, [(d.rel_path, d.status.value) for d in r.unsupported]
+    assert child.ext == ".eml" and "DOTNAME-BODY-JERBOA" in _text(child), (
+        child.rel_path, child.ext, _text(child))
+
+
+def test_a_malformed_part_loses_only_its_own_objects(tmp_path):
+    """One malformed XML part named like a header used to abort the whole
+    expansion, so every embedded document of the file was lost behind one
+    note."""
+    xlsx = make_fixtures._we_xlsx_bytes(tmp_path / "keep.xlsx", "TUATARA-KEPT")
+    raw = _docx_objects([("Embed", "Excel.Sheet.12", "embeddings/keep.xlsx", xlsx)],
+                        extra_parts={"word/header9.xml": b"<w:hdr this is not xml"})
+    exp = ex.expand_docx_embeddings(raw)
+    assert [m.name for m in exp.members] == ["keep.xlsx"], exp.members
+    marked = [n for n in exp.notes if ex.has_evidence_marker(n)]
+    assert len(marked) == 1 and "header9.xml" in marked[0], exp.notes
+
+
+# ---------------------------------------------------------------------------
+# 27. Every citation in the package resolves inside the repository
+# ---------------------------------------------------------------------------
+
+
+def test_package_citations_resolve_inside_the_repository():
+    """The package's comments cited the uncommitted build briefs by their
+    item and gap numbers and file names, and review probes and mutants by
+    file name, none of which a reader of the repository can open. They cite
+    the Word spec (``docs/design/word_fidelity_spec.md``, parts 1 to 10) or
+    a register ruling instead."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    files = ["src/dociq/ingest/extract.py", "src/dociq/ingest/walker.py",
+             "src/dociq/selftest.py", "tests/conftest.py",
+             "tests/fixtures/make_fixtures.py", "tests/test_word_fidelity.py",
+             "tests/test_word_embeddings.py", "tests/test_extract.py",
+             "tests/test_walker.py"]
+    # Built from pieces so this test's own source is not a match.
+    scratch = re.compile("|".join([
+        r"word" + r"_brief", r"\bbrief" + r"_errors\b", r"\bmissing" + r"_tests\b",
+        r"word2b" + r"_", r"scratch" + r"pad", r"\b[Ii]tem" + r" \d+\b",
+        r"\bgap" + r" \d\b", r"\bcritic" + r" (?:finding|probe)",
+        r"\b(?:p\d+|probe)_[a-z0-9_]+" + r"\.py\b"]))
+    part = re.compile(r"Word spec,? (?:part|parts|section) (\d+)")
+    assert (root / "docs" / "design" / "word_fidelity_spec.md").is_file()
+    bad = []
+    for rel in files:
+        for no, line in enumerate((root / rel).read_text(encoding="utf-8").splitlines(), 1):
+            if scratch.search(line):
+                bad.append(f"{rel}:{no}: {line.strip()}")
+            for m in part.finditer(line):
+                if not 1 <= int(m.group(1)) <= 10 or "section" in m.group(0):
+                    bad.append(f"{rel}:{no}: {line.strip()}")
+    assert not bad, "\n".join(bad)

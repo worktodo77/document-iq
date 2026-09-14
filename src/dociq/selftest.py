@@ -91,12 +91,12 @@ _EXPECTED = {
     # routing, the way D-46 made it prove reduction -- a fixture the
     # selftest extracts but never checks is a feature it cannot vouch for.
     "15_mixed_content_page.pdf": (1, {PageKind.MIXED}),
-    # D-50: one sentinel per Word construct, still one synthetic page --
-    # the fidelity package changes what the page's TEXT and NOTES carry,
-    # never the DOCX page-count contract.
+    # Word spec, "Fixture and tests": one sentinel per Word construct, still
+    # one synthetic page -- the fidelity package changes what the page's TEXT
+    # and NOTES carry, never the DOCX page-count contract.
     "16_word_constructs.docx": (1, {PageKind.SYNTHETIC}),
-    # D-50 stage 2b: embedded documents become child documents, nested up to
-    # two levels deep -- follows the "14_transmittal.eml/attached_report.pdf"
+    # D-50: embedded documents become child documents, nested up to two
+    # levels deep -- follows the "14_transmittal.eml/attached_report.pdf"
     # key shape above, one row per recovered child.
     "17_word_embeddings.docx": (1, {PageKind.SYNTHETIC}),
     "17_word_embeddings.docx/Microsoft_Excel_Worksheet1.xlsx": (1, {PageKind.SYNTHETIC}),

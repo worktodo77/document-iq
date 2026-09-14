@@ -1,13 +1,12 @@
-"""The Word fidelity package, stage 1: fixture and RED tests only.
+"""The Word fidelity package: the Word reader's regression suite.
 
-Every test in this file is written against the CONTRACT the Word spec makes
-true (every character in a Word document's text-bearing parts reaches
-the page text, or is named in a note carrying an evidence marker) and MUST
-fail against today's ``_extract_docx`` -- which emits paragraphs, then every
-table, then one boilerplate note claiming the file has no page boundaries.
-This file is the target for the next package, not a regression suite: do not
-"fix" a failure here by loosening an assertion, and do not touch
-``src/dociq/ingest/extract.py`` from this file.
+Every test here holds a part of the Word spec
+(``docs/design/word_fidelity_spec.md``): every character in a Word
+document's text-bearing parts reaches the page text, or is named in a note
+carrying an evidence marker. Each test was watched failing against the
+extractor that emitted paragraphs, then every table, then one note claiming
+the file had no page boundaries, or against the defect named in its
+docstring. Do not make a failure here pass by loosening an assertion.
 
 One behaviour per test, per the spec. Every assertion uses ``str.find``/
 ``str.count`` and reports every position it computed, so a failure here is
@@ -345,7 +344,7 @@ def test_every_w_t_fragment_reaches_the_page_text_or_is_excluded_by_name(name):
 
 
 # ---------------------------------------------------------------------------
-# 15/16. The two unmarked OCR notes in _extract_pdf (D-49 gap)
+# 15/16. The two unmarked OCR notes in _extract_pdf (Word spec part 10)
 # ---------------------------------------------------------------------------
 
 
@@ -369,9 +368,10 @@ def test_ocr_unavailable_note_carries_an_evidence_marker(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Stage 2b: three gaps carried in stage 2a's disclosure (Word spec,
-# "4. Carried from stage 2a"). Every input here is built in ``tmp_path``, not
-# by changing fixture 16, so no existing position test above moves.
+# Word spec part 9, wherever the reader walks: an Office 2016+ chart, a
+# construct outside the body, and a page that cannot be measured. Every input
+# here is built in ``tmp_path``, not by changing fixture 16, so no existing
+# position test above moves.
 # ---------------------------------------------------------------------------
 
 
@@ -380,7 +380,7 @@ def _extract_bytes(name: str, raw: bytes):
 
 
 def test_chartex_chart_is_disclosed_as_unread(tmp_path):
-    """Carried gap 1: chart detection matched only a graphicData URI ending
+    """Word spec part 9: chart detection matched only a graphicData URI ending
     '/chart'. An Office 2016+ chartEx chart (waterfall, funnel, ...) uses the
     namespace ``.../office/drawing/2014/chartex`` verbatim instead and must
     be detected too."""
@@ -421,22 +421,22 @@ def test_chartex_chart_is_disclosed_as_unread(tmp_path):
 
 
 def test_unread_constructs_are_disclosed_outside_the_body_too(tmp_path):
-    """Carried gap 2: altChunk, chart, SmartArt and large-picture disclosure
+    """Word spec part 9: altChunk, chart, SmartArt and large-picture disclosure
     used to gate on ``in_body`` -- so one in a header, a footer, a footnote,
     an endnote, a comment or a text box was lost without a word. This proves
     three of those locations at once: a chart in a HEADER, an altChunk in a
     FOOTNOTE, and a chart PLUS a large picture inside a TEXT BOX (itself in
     the body).
 
-    Critic finding: a presence-only check ("some marked chart/altChunk/
-    picture note exists") cannot see a construct counted MORE than once.
+    A presence-only check ("some marked chart/altChunk/picture note
+    exists") cannot see a construct counted MORE than once.
     ``_note_drawing`` is called on the outer text-box ``<w:drawing>`` (whose
     own ``.iter()`` already walks down into anything nested inside it,
     including a chart or picture placed in the box) and is then called
     AGAIN when the walk separately reaches that nested ``<w:drawing>`` on
     its own -- so a single chart or picture inside a text box was measured
-    to come out as 2 in the draft (critic probe p4_gap_probes.py, cases (a)
-    and (b)). Asserting the exact counts a CORRECT read produces (2 chart(s)
+    to come out as 2 in a draft of the reader. Asserting the exact counts
+    a CORRECT read produces (2 chart(s)
     -- header + text box, each real construct appearing once; 1 altChunk(s);
     1 picture(s)) pins the spec regardless of whether this particular
     double-count is what is fixed to satisfy it.
@@ -475,7 +475,7 @@ def test_unread_constructs_are_disclosed_outside_the_body_too(tmp_path):
         '</a:graphicData></a:graphic></wp:inline></w:drawing>'
     )
     # A chart alongside the picture, both inside the same text box -- the
-    # second location this test's critic finding needs (case (a) above).
+    # second location the double count above needs.
     box_chart_drawing = (
         '<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
         '<wp:extent cx="1828800" cy="1828800"/>'
@@ -637,7 +637,7 @@ def test_unread_constructs_are_disclosed_outside_the_body_too(tmp_path):
 
 
 def test_unread_constructs_in_footer_endnote_and_comment(tmp_path):
-    """Carried gap 2, the three Word-spec-named locations the test above does
+    """Word spec part 9, the three locations the test above does
     not reach: a SmartArt drawing in a FOOTER, a chart in an ENDNOTE, and an
     altChunk in a COMMENT."""
     import docx as _docx
@@ -759,9 +759,8 @@ def test_chartex_in_real_alternatecontent_shape_with_picture_fallback_is_one_cha
     """A chartEx graphic is never a bare ``graphicData`` in real Word output
     -- it is the ``mc:Choice`` of an ``mc:AlternateContent`` whose
     ``mc:Fallback`` is a plain picture (for a reader that does not
-    understand chartEx). The draft's chartEx detection (carried gap 1)
-    happens to handle this real shape (critic probe p4_gap_probes.py, case
-    (c)), but nothing pins it: this guards against a fix that only matches
+    understand chartEx). Nothing else pins this real shape: this guards
+    against a fix that only matches
     a bare ``cx:chart`` graphicData and never looks inside
     ``mc:AlternateContent`` at all, which would silently double-count via
     the Fallback picture or miss the chart entirely."""
@@ -830,7 +829,7 @@ def test_chartex_in_real_alternatecontent_shape_with_picture_fallback_is_one_cha
 ], ids=["pgsz_removed", "pgsz_w_zero", "pgsz_h_missing"])
 def test_unusable_pgsz_variants_all_disclose_unmeasurable_pictures(
         tmp_path, mutate_sect, case_id):
-    """The existing carried-gap-3 test covers only a REMOVED w:pgSz. An
+    """The test below covers only a REMOVED w:pgSz. An
     unusable one (w:w="0", or a missing w:h) must be treated the same way,
     not silently pass the "has a pgSz element" check and then divide by
     zero or KeyError -- or, worse, silently skip disclosure."""
@@ -919,7 +918,7 @@ def test_no_usable_pgsz_and_no_picture_discloses_nothing_unmeasurable(tmp_path):
 
 
 def test_a_final_section_with_no_usable_pgsz_discloses_unmeasurable_pictures(tmp_path):
-    """Carried gap 3: when the final section has no usable ``w:pgSz``, large-
+    """Word spec part 9: when the final section has no usable ``w:pgSz``, large-
     picture disclosure used to be skipped SILENTLY. A marked note must say
     pictures could not be measured against the page, mirroring the PDF
     path's own wording when image geometry cannot be measured."""
@@ -964,3 +963,337 @@ def test_a_final_section_with_no_usable_pgsz_discloses_unmeasurable_pictures(tmp
         f"expected a marked note saying pictures could not be measured "
         f"against the page (no usable w:pgSz on the final section): "
         f"marked={marked!r}; all notes={got.notes!r}")
+
+
+# ---------------------------------------------------------------------------
+# Built packages, exact text: separators, wrappers, and the constructs the
+# reader used to drop without a note
+# ---------------------------------------------------------------------------
+
+_RAW_NS = (
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+    'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" '
+    'xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" '
+    'xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+    'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" '
+    'mc:Ignorable="w14"'
+)
+_RAW_RT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+_RAW_WML = "application/vnd.openxmlformats-officedocument.wordprocessingml."
+_LETTER = '<w:pgSz w:w="12240" w:h="15840"/>'
+
+
+def _raw_docx(body: str, *, main: str = "word/document.xml", sect: str = "",
+              pg: str = _LETTER, parts: dict | None = None,
+              rels: list | None = None) -> bytes:
+    """A Word package built by hand: ``body`` inside ``w:body``, a final
+    ``w:sectPr`` holding ``sect`` and ``pg``, and ``parts`` ({name: xml}).
+    ``rels`` are the main part's relationships, ``(id, type, target)``,
+    ``type`` being the last segment of the relationship type URI; a target
+    beginning ``http`` or ``file:`` is external."""
+    main_dir, main_base = main.rsplit("/", 1)
+    kinds = {"header": "header+xml", "footer": "footer+xml",
+             "footnotes": "footnotes+xml", "endnotes": "endnotes+xml",
+             "settings": "settings+xml", "comments": "comments+xml"}
+    overrides = [f'<Override PartName="/{main}" ContentType="{_RAW_WML}document.main+xml"/>']
+    for name in (parts or {}):
+        base = name.rsplit("/", 1)[-1]
+        kind = next((v for k, v in kinds.items() if base.startswith(k)), None)
+        if kind:
+            overrides.append(f'<Override PartName="/{name}" ContentType="{_RAW_WML}{kind}"/>')
+    ct = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          '<Default Extension="rels" '
+          'ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+          '<Default Extension="xml" ContentType="application/xml"/>'
+          + "".join(overrides) + '</Types>')
+    rel_xml = "".join(
+        f'<Relationship Id="{i}" Type="{_RAW_RT}{t}" Target="{g}"'
+        + (' TargetMode="External"' if g.startswith(("http", "file:")) else "") + "/>"
+        for i, t, g in (rels or []))
+    doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           f'<w:document {_RAW_NS}><w:body>{body}<w:sectPr>{sect}{pg}</w:sectPr>'
+           '</w:body></w:document>')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", ct)
+        zf.writestr("_rels/.rels",
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    f'<Relationship Id="rId1" Type="{_RAW_RT}officeDocument" Target="{main}"/>'
+                    '</Relationships>')
+        zf.writestr(main, doc)
+        zf.writestr(f"{main_dir}/_rels/{main_base}.rels",
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    + rel_xml + '</Relationships>')
+        for name, xml in (parts or {}).items():
+            zf.writestr(name, xml)
+    return buf.getvalue()
+
+
+def _p(*runs: str, ppr: str = "") -> str:
+    return "<w:p>" + ppr + "".join(runs) + "</w:p>"
+
+
+def _t(text: str) -> str:
+    return f'<w:r><w:t xml:space="preserve">{text}</w:t></w:r>'
+
+
+def _part(tag: str, inner: str) -> str:
+    return (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<w:{tag} {_RAW_NS}>{inner}</w:{tag}>')
+
+
+def _read(raw: bytes):
+    got = ex.extract("built.docx", raw)
+    assert got.pages, (got.status, got.error, got.notes)
+    return got.pages[0].text, got.notes
+
+
+_REV = 'w:author="Invented Reviewer" w:date="2018-05-06T00:00:00Z"'
+
+
+def test_run_separators_table_joins_and_note_labels_render_exactly():
+    """Word spec parts 2, 4, 6 and 8 as exact strings. The class test above
+    normalizes and matches substrings, so it cannot see a separator added or
+    lost: tab-stop DEFINITIONS in ``w:pPr`` came out as tab characters the
+    document does not hold, a positional tab (``w:ptab``, Word's own
+    three-column header layout) was dropped and joined the words beside it,
+    and a deleted paragraph MARK counted as deleted text."""
+    cell = lambda text, pr="": f"<w:tc>{pr}{_p(_t(text))}</w:tc>"  # noqa: E731
+    body = (
+        _p('<w:r><w:t>A</w:t><w:tab/><w:t>B</w:t></w:r>',
+           ppr='<w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/>'
+               '<w:tab w:val="right" w:leader="dot" w:pos="9350"/></w:tabs></w:pPr>')
+        + _p('<w:r><w:t>C</w:t><w:br/><w:t>D</w:t><w:cr/><w:t>E</w:t></w:r>')
+        + _p('<w:r><w:t>F</w:t><w:noBreakHyphen/><w:t>G</w:t></w:r>')
+        + _p(_t("LEFT"), '<w:r><w:ptab w:relativeTo="margin" w:alignment="right" '
+                         'w:leader="none"/></w:r>', _t("RIGHT"))
+        + _p(f'<w:moveFrom w:id="1" {_REV}>' + _t("GONE") + '</w:moveFrom>',
+             f'<w:moveTo w:id="2" {_REV}>' + _t("MOVED") + '</w:moveTo>')
+        + _p(_t("MARK"), ppr=f'<w:pPr><w:rPr><w:del w:id="3" {_REV}/></w:rPr></w:pPr>')
+        + "<w:tbl><w:tr>" + cell("R1C1")
+        + cell("V", '<w:tcPr><w:vMerge w:val="restart"/></w:tcPr>') + "</w:tr>"
+        + "<w:tr>" + cell("R2C1") + cell("V", "<w:tcPr><w:vMerge/></w:tcPr>")
+        + "</w:tr></w:tbl>"
+        + _p(_t("REF"), '<w:r><w:footnoteReference w:id="1"/></w:r>'))
+    footnotes = _part("footnotes",
+                      '<w:footnote w:type="separator" w:id="-1">'
+                      '<w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+                      '<w:footnote w:id="1">' + _p(_t("NOTE")) + '</w:footnote>')
+    text, notes = _read(_raw_docx(body, parts={"word/footnotes.xml": footnotes},
+                                  rels=[("rIdFn", "footnotes", "footnotes.xml")]))
+    assert text.split("\n") == [
+        "A\tB", "C", "D", "E", "F-G", "LEFT\tRIGHT", "MOVED", "MARK",
+        "R1C1\tV", "R2C1", "REF", "[footnote 1] NOTE"], text.split("\n")
+    assert f"{ex.M_WORD_TRACKED_DELETION}: 1" in notes, notes
+
+
+def test_rows_and_cells_inside_content_controls_and_custom_xml_are_read():
+    """Word spec part 1 recurses into ``w:sdt`` and ``w:customXml``; the
+    table reader took only DIRECT ``w:tr`` and ``w:tc`` children, so a row
+    or a cell wrapped in either (a repeating-section content control) lost
+    its text with no note."""
+    cell = lambda text: f"<w:tc>{_p(_t(text))}</w:tc>"  # noqa: E731
+    body = (
+        "<w:tbl><w:tr>" + cell("PLAIN1") + cell("PLAIN2") + "</w:tr>"
+        "<w:sdt><w:sdtPr/><w:sdtContent><w:tr>" + cell("ROWSDT") + cell("X")
+        + "</w:tr></w:sdtContent></w:sdt>"
+        "<w:tr>" + cell("CELLPLAIN") + "<w:sdt><w:sdtContent>" + cell("CELLSDT")
+        + "</w:sdtContent></w:sdt></w:tr>"
+        '<w:customXml w:element="row"><w:tr>' + cell("CUSTOMROW")
+        + '<w:customXml w:element="cell">' + cell("CUSTOMCELL") + "</w:customXml>"
+        "</w:tr></w:customXml></w:tbl>")
+    text, _notes = _read(_raw_docx(body))
+    assert text.split("\n") == ["PLAIN1\tPLAIN2", "ROWSDT\tX",
+                                "CELLPLAIN\tCELLSDT", "CUSTOMROW\tCUSTOMCELL"], text
+
+
+def test_a_symbol_character_is_rendered_or_disclosed():
+    """``w:sym`` holds its character as a hex code. A real Unicode code point
+    is text; one in the private-use area belongs to a symbol font and has no
+    meaning as a character, so it is counted in a marked note. Before, both
+    vanished and joined the words beside them."""
+    body = _p(_t("TICK"), '<w:r><w:sym w:font="Segoe UI Symbol" w:char="2713"/></w:r>',
+              _t("BOX"), '<w:r><w:sym w:font="Wingdings" w:char="F0FC"/></w:r>')
+    text, notes = _read(_raw_docx(body))
+    assert text == "TICK\u2713BOX", repr(text)
+    marked = [n for n in notes if ex.has_evidence_marker(n) and "symbol" in n.lower()]
+    assert len(marked) == 1 and re.search(r"\b1 symbol", marked[0]), notes
+
+
+def test_ruby_nested_field_codes_block_alternate_content_and_subdocuments():
+    """Four constructs the reader got wrong without a note: a phonetic guide
+    (``w:ruby``) ran into its base text; the cached result of a field nested
+    inside another field's CODE was emitted as text; ``mc:AlternateContent``
+    directly under the body was skipped whole; a ``w:subDoc`` link (a master
+    document's sub-document, stored elsewhere) was ignored."""
+    body = (
+        _p('<w:r><w:ruby><w:rubyPr/><w:rt>' + _t("GUIDE") + '</w:rt><w:rubyBase>'
+           + _t("BASE") + '</w:rubyBase></w:ruby></w:r>')
+        + _p('<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+             '<w:r><w:instrText xml:space="preserve"> IF </w:instrText></w:r>'
+             '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+             '<w:r><w:instrText xml:space="preserve"> MERGEFIELD Flag </w:instrText></w:r>'
+             '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' + _t("INNERCACHED")
+             + '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+             '<w:r><w:instrText xml:space="preserve"> = "1" "YES" "NO" </w:instrText></w:r>'
+             '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' + _t("OUTERRESULT")
+             + '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+        + '<mc:AlternateContent><mc:Choice Requires="w14">' + _p(_t("BLOCKCHOICE"))
+        + '</mc:Choice><mc:Fallback>' + _p(_t("BLOCKFALLBACK"))
+        + '</mc:Fallback></mc:AlternateContent>'
+        + _p('<w:subDoc r:id="rIdSub"/>')
+        + _p(_t("END")))
+    text, notes = _read(_raw_docx(
+        body, rels=[("rIdSub", "subDocument", "file:///C:/Invented/sub.docx")]))
+    assert text.split("\n") == ["BASE(GUIDE)", "OUTERRESULT", "BLOCKCHOICE", "", "END"], (
+        text.split("\n"))
+    marked = [n for n in notes if ex.has_evidence_marker(n) and "sub-document" in n.lower()]
+    assert len(marked) == 1, notes
+
+
+def test_a_chart_and_a_large_picture_inside_a_group_shape_are_disclosed():
+    """A group shape (``wpg:wgp``) is one graphic whose own URI is neither a
+    chart nor a picture; the chart and the picture it groups were never
+    looked at. The reader already walked into groups for text-box text."""
+    chart = ('<wpg:graphicFrame><wpg:cNvPr id="2" name="c"/><wpg:cNvFrPr/><wpg:xfrm/>'
+             '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+             '<c:chart r:id="rIdC"/></a:graphicData></a:graphic></wpg:graphicFrame>')
+    picture = ('<pic:pic><pic:nvPicPr><pic:cNvPr id="3" name="p"/><pic:cNvPicPr/></pic:nvPicPr>'
+               '<pic:blipFill><a:blip r:embed="rIdImg"/></pic:blipFill><pic:spPr><a:xfrm>'
+               '<a:off x="0" y="0"/><a:ext cx="5486400" cy="7315200"/></a:xfrm></pic:spPr>'
+               '</pic:pic>')
+    body = _p('<w:r><w:drawing><wp:inline><wp:extent cx="5486400" cy="7315200"/>'
+              '<wp:docPr id="1" name="g"/><a:graphic><a:graphicData '
+              'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">'
+              '<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr/>' + chart + picture
+              + '</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+    _text, notes = _read(_raw_docx(body))
+    marked = [n for n in notes if ex.has_evidence_marker(n)]
+    assert any(re.search(r"\b1 chart", n) for n in marked), notes
+    assert any(re.search(r"\b1 picture", n) and "25%" in n for n in marked), notes
+
+
+@pytest.mark.parametrize("case", ["negative_page_width", "picture_without_extent"])
+def test_an_unmeasurable_picture_is_disclosed_as_unmeasured(case):
+    """A negative page width made the page area negative, and a picture with
+    no ``wp:extent`` returned early: either way a picture that may cover the
+    page was neither counted nor called unmeasurable."""
+    extent = "" if case == "picture_without_extent" else '<wp:extent cx="5486400" cy="7315200"/>'
+    body = _p('<w:r><w:drawing><wp:inline>' + extent + '<wp:docPr id="1" name="p"/>'
+              '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+              '<pic:pic><pic:blipFill><a:blip r:embed="rIdImg"/></pic:blipFill></pic:pic>'
+              '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+    pg = '<w:pgSz w:w="-12240" w:h="15840"/>' if case == "negative_page_width" else _LETTER
+    _text, notes = _read(_raw_docx(body, pg=pg))
+    assert any(ex.has_evidence_marker(n) and "could not be measured" in n for n in notes), notes
+
+
+def test_a_hyperlink_target_is_kept_when_the_display_text_merely_contains_it():
+    """Word spec part 2: the target follows the display text "when the two
+    differ". A substring test dropped a target the display text contains but
+    is not, so ``.../rev2`` shown over a link to ``.../rev`` lost the real
+    referent."""
+    body = (_p('<w:hyperlink r:id="rIdA">' + _t("http://example.invalid/docs/rev2")
+               + '</w:hyperlink>')
+            + _p('<w:hyperlink r:id="rIdB">' + _t("http://example.invalid/same")
+                 + '</w:hyperlink>'))
+    text, _notes = _read(_raw_docx(body, rels=[
+        ("rIdA", "hyperlink", "http://example.invalid/docs/rev"),
+        ("rIdB", "hyperlink", "http://example.invalid/same")]))
+    assert text.split("\n") == [
+        "http://example.invalid/docs/rev2 <http://example.invalid/docs/rev>",
+        "http://example.invalid/same"], text
+
+
+def test_a_header_part_no_section_displays_is_disclosed():
+    """Word spec part 5 reads a first-page part only under ``w:titlePg`` and an
+    even-page part only under ``w:evenAndOddHeaders``. A part with text that
+    the flags leave undisplayed (Word keeps it when "Different first page" is
+    unticked) was dropped with no note, and ``w:val="0"`` on either flag,
+    which turns it OFF, was read as on."""
+    hdr = lambda text: _part("hdr", _p(_t(text)))  # noqa: E731
+    rels = [("rIdF", "header", "header1.xml"), ("rIdD", "header", "header2.xml"),
+            ("rIdE", "header", "header3.xml"), ("rIdS", "settings", "settings.xml")]
+    parts = {"word/header1.xml": hdr("FIRSTHIDDEN"), "word/header2.xml": hdr("DEFAULTSHOWN"),
+             "word/header3.xml": hdr("EVENHIDDEN"),
+             "word/settings.xml": _part("settings", '<w:evenAndOddHeaders w:val="0"/>')}
+    sect = ('<w:headerReference w:type="first" r:id="rIdF"/>'
+            '<w:headerReference w:type="default" r:id="rIdD"/>'
+            '<w:headerReference w:type="even" r:id="rIdE"/>')
+    for title_pg in ("", '<w:titlePg w:val="0"/>'):
+        text, notes = _read(_raw_docx(_p(_t("BODY")), sect=sect + title_pg,
+                                      pg=_LETTER, parts=parts, rels=rels))
+        assert text.split("\n") == ["DEFAULTSHOWN", "BODY"], (title_pg, text)
+        marked = [n for n in notes if ex.has_evidence_marker(n) and "header" in n.lower()]
+        assert len(marked) == 1 and re.search(r"\b2 header/footer part", marked[0]), (
+            title_pg, notes)
+
+
+def test_a_package_absolute_header_target_is_read():
+    """``Target="/word/header1.xml"`` is a valid OPC part name; joined onto
+    ``word/`` it became ``/word/header1.xml``, matched no part, and the header
+    (and any stamp in it) vanished with no note."""
+    header = _part("hdr", _p(_t("ABSHEADER MNFV 000042")))
+    text, _notes = _read(_raw_docx(
+        _p(_t("BODYTEXT")), sect='<w:headerReference w:type="default" r:id="rIdH"/>',
+        parts={"word/header1.xml": header}, rels=[("rIdH", "header", "/word/header1.xml")]))
+    assert text.split("\n") == ["ABSHEADER MNFV 000042", "BODYTEXT"], text
+
+
+def test_the_main_document_part_is_found_through_the_package_relationships():
+    """A package names its main part in ``_rels/.rels``; ``word/document2.xml``
+    is as valid as ``word/document.xml``. The reader opened the literal name,
+    so a file python-docx had read became FAILED."""
+    header = _part("hdr", _p(_t("HEADER-TWO")))
+    footnotes = _part("footnotes", '<w:footnote w:id="1">' + _p(_t("NOTE-TWO")) + '</w:footnote>')
+    text, _notes = _read(_raw_docx(
+        _p(_t("MAINPARTTWO")), main="word/document2.xml",
+        sect='<w:headerReference w:type="default" r:id="rIdH"/>',
+        parts={"word/header1.xml": header, "word/footnotes.xml": footnotes},
+        rels=[("rIdH", "header", "header1.xml"), ("rIdFn", "footnotes", "footnotes.xml")]))
+    assert text.split("\n") == ["HEADER-TWO", "MAINPARTTWO", "[footnote 1] NOTE-TWO"], text
+
+
+def test_fixture16_header_note_and_footer_boundaries_are_exact():
+    """Word spec parts 5 and 6, pinned line for line. "Within the first 3
+    lines" and "within the last 8" held under a header label line, a footer
+    label line, notes moved after the footer and the first-page and default
+    headers swapped, because fixture 16 has two header lines, three note
+    lines and two footer lines."""
+    lines = _page_text("16_word_constructs.docx").split("\n")
+    assert lines[:3] == ["YAK first-page header line.", "XERUS default header line.",
+                         "AARDVARK opens this synthetic construct fixture."], lines[:3]
+    assert lines[-5:] == [
+        "[footnote 1]  SALAMANDER is the footnote text.",
+        "[endnote 1]  URCHIN is the endnote text.",
+        "[comment by WALRUS Reviewer] VULTURE flags this passage for review.",
+        "ZEBU default footer line one.", "MNFV 000777"], lines[-5:]
+
+
+@pytest.mark.parametrize("even_and_odd", [False, True])
+def test_a_shared_header_part_is_read_once_and_even_pages_follow_settings(even_and_odd):
+    """Two sections referencing one default header part read it once (Word
+    spec part 5: "each part emitted once"), and the even-page part is read
+    only when settings ask for even and odd headers. Fixture 16 has one
+    section and no even-page part, so neither rule was pinned."""
+    hdr = lambda text: _part("hdr", _p(_t(text)))  # noqa: E731
+    refs = '<w:headerReference w:type="default" r:id="rIdH"/>'
+    body = (_p(_t("BODY-ONE"), ppr=f"<w:pPr><w:sectPr>{refs}{_LETTER}</w:sectPr></w:pPr>")
+            + _p(_t("BODY-TWO")))
+    parts = {"word/header1.xml": hdr("SHARED-HEADER"), "word/header2.xml": hdr("EVEN-HEADER")}
+    rels = [("rIdH", "header", "header1.xml"), ("rIdE", "header", "header2.xml")]
+    if even_and_odd:
+        parts["word/settings.xml"] = _part("settings", "<w:evenAndOddHeaders/>")
+        rels.append(("rIdS", "settings", "settings.xml"))
+    text, _notes = _read(_raw_docx(
+        body, sect=refs + '<w:headerReference w:type="even" r:id="rIdE"/>',
+        parts=parts, rels=rels))
+    expected = (["SHARED-HEADER", "EVEN-HEADER"] if even_and_odd else ["SHARED-HEADER"])
+    assert text.split("\n") == expected + ["BODY-ONE", "BODY-TWO"], text

@@ -257,7 +257,7 @@ def test_ocr_disabled_leaves_the_scanned_pages_empty_and_says_so():
 
 
 def test_docx_is_one_synthetic_page_with_the_layout_approximation_disclosed():
-    # D-50 withdraws the old "DOCX carries no page boundaries" claim: it was
+    # Word spec part 7 withdraws the old "DOCX carries no page boundaries" claim: it was
     # false for the corpus files that DO carry a rendered page break. The
     # replacement note says something true for every DOCX instead of
     # denying page breaks exist.
