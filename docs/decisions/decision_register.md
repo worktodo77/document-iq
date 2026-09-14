@@ -120,6 +120,21 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-56 — a Word file's tracked deletions are listed after its body (2026-09-14)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-56 | How text deleted under Word's tracked changes appears (Word spec part 8, left open for Alex) | **Listed after the body.** The page body stays the document as it reads with its tracked changes accepted (insertions kept, deletions and moved-from text left out). Each deleted passage is then listed after the body, the way comments are: `[deleted by <author>] <text>`, with no change dates, so a date inside deleted text cannot become the document's first date unless the body carries none. Ruled by Alex over two alternatives: deleted text shown in place inside a marker (closest to Word's redline view, but a deleted date or stamp-like number sits in running text where date and stamp detection read it as the document's own), and keeping the build as it stands (final text only, with a marked note counting the deletions, so what was deleted never reaches the output). | 2026-09-14 |
+
+**What the ruling was made on.** None of the 53 acceptance-corpus `.docx` files carries a tracked
+change (the Word spec's census), so the ruling governs future matters only and no corpus figure
+moves. Before it, the Word package omitted deleted and moved-from text and disclosed only a count
+under `M_WORD_TRACKED_DELETION`. The ruling does not say where moved-from text goes when its
+moved-to copy is already in the body, or whether the count note stays once the text is listed:
+the build decides both and says so in the package's register entry.
+
+**Status: ruled, not yet built.** Built in the Word package's next fix round.
+
 ## D-55 — the spreadsheet package keeps fixing and reviewing until a round finds nothing serious (2026-09-14)
 
 | # | Decision | Ruling | Date |
