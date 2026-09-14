@@ -275,6 +275,222 @@ def xlsx(path: Path) -> None:
     _pin_ooxml(path)
 
 
+def workbook_constructs(path: Path) -> None:
+    """18_workbook_constructs.xlsx -- the spreadsheet-fidelity fixture for the
+    2026-09-10 sweep (findings E1, E4-E7, E10-E13). Sentinel words only, per
+    the client-data rule D-12; no sentinel is a substring of another.
+
+    ``Register``: a header row; a formula with NO stored value (E1 -- openpyxl
+    never computes it); two cells holding the SAME raw 0.15 under different
+    percentage formats (E10); a cell with an embedded newline and a cell with
+    an embedded tab (E5); a two-row blank run (E4); a hyperlinked cell (E13)
+    and a cell comment (E11); a print header and footer (E12).
+    ``Chart1``: a chartsheet (E6) -- ``Workbook.worksheets`` silently omits it.
+    ``Later``: proves a skipped chartsheet does not just vanish, it SHIFTS
+    everything that comes after it.
+    """
+    import openpyxl
+    import openpyxl.chart
+    import openpyxl.comments
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Register"
+    ws["A1"], ws["B1"], ws["C1"] = "Ref", "Amount", "Note"
+    ws["B2"] = 10
+    ws["B3"] = 20
+    ws["B4"] = "=SUM(B2:B3)"
+    ws["C2"] = 0.15
+    ws["C2"].number_format = "0%"
+    ws["C3"] = 0.15
+    ws["C3"].number_format = "0.00%"
+    ws["A4"] = "HOLLY\nIVY"
+    ws["D4"] = "TAB\tSTOP"
+    # Rows 5 and 6 are left with no cells at all -- a two-row blank run.
+    ws["A7"] = "JUNIPER"
+    ws["A8"] = "KESTREL"
+    ws["A8"].hyperlink = "https://example.invalid/LARK"
+    ws["B2"].comment = openpyxl.comments.Comment("MAGPIE", "NIGHTJAR")
+    ws.oddHeader.center.text = "OSPREY"
+    ws.oddFooter.center.text = "PUFFIN"
+
+    chart_sheet = wb.create_chartsheet("Chart1")
+    chart = openpyxl.chart.BarChart()
+    chart.add_data(openpyxl.chart.Reference(ws, min_col=2, min_row=2, max_row=3))
+    chart_sheet.add_chart(chart)
+
+    later = wb.create_sheet("Later")
+    later["A1"] = "QUETZAL"
+
+    wb.properties.created = FIXED_TIMESTAMP
+    wb.properties.modified = FIXED_TIMESTAMP
+    wb.properties.creator = "DocIQ fixtures"
+    wb.properties.lastModifiedBy = "DocIQ fixtures"
+    wb.save(str(path))
+    _pin_ooxml(path)
+
+
+def legacy_workbook(path: Path) -> None:
+    """19_legacy_workbook.xls -- BIFF8 records inside a hand-built OLE2
+    compound file, since no ``.xls`` writer is installed anywhere on this
+    machine. Exercises E2 (a date-formatted cell reads back as its serial
+    number), E3 (a boolean and an error cell read back as raw codes) and E15
+    (a whole-number cell reads back as ``5.0``).
+
+    One sheet ("Legacy"): A1 a text cell, B1 a NUMBER formatted as a date
+    (the serial for 2024-07-16), C1 a BOOLEAN TRUE, D1 an ERROR cell holding
+    ``#DIV/0!`` (BIFF error code 0x07), E1 a whole-number NUMBER, a blank
+    row, then a trailing text cell -- so a reader that mis-decodes any one of
+    them still has to explain the others.
+
+    Read back with ``xlrd`` before returning and raises if any cell it wrote
+    is missing or wrong: a byte-level BIFF/CFB writer with no library behind
+    it has to prove its own output rather than merely emit bytes.
+    """
+    import struct
+
+    import xlrd
+
+    def rec(opcode: int, data: bytes) -> bytes:
+        return struct.pack("<HH", opcode, len(data)) + data
+
+    def unicode_str_1len(s: str) -> bytes:
+        b = s.encode("ascii")
+        return struct.pack("<BB", len(b), 0) + b
+
+    def unicode_str_2len(s: str) -> bytes:
+        b = s.encode("ascii")
+        return struct.pack("<HB", len(b), 0) + b
+
+    def label(r: int, c: int, s: str, xf: int = 0) -> bytes:
+        return rec(0x0204, struct.pack("<HHH", r, c, xf) + unicode_str_2len(s))
+
+    def number(r: int, c: int, d: float, xf: int = 0) -> bytes:
+        return rec(0x0203, struct.pack("<HHHd", r, c, xf, d))
+
+    def boolerr(r: int, c: int, val: int, is_err: int, xf: int = 0) -> bytes:
+        return rec(0x0205, struct.pack("<HHHBB", r, c, xf, val, is_err))
+
+    target_date = datetime.date(2024, 7, 16)
+    epoch = datetime.date(1899, 12, 30)
+    serial = (target_date - epoch).days
+
+    sheet_name = "Legacy"
+    bof_globals = rec(0x0809, struct.pack("<HHHHII", 0x0600, 0x0005, 0, 0, 0, 0))
+    codepage = rec(0x0042, struct.pack("<H", 1200))
+    datemode = rec(0x0022, struct.pack("<H", 0))  # 0 = 1900 date system
+    xf_general = rec(0x00E0, struct.pack("<HHHBBBBIiH", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    # XF 1 = built-in number format 14 ('m/d/yyyy') -> a DATE-formatted cell.
+    xf_date = rec(0x00E0, struct.pack("<HHHBBBBIiH", 0, 14, 0, 0, 0, 0, 0, 0, 0, 0))
+    boundsheet_placeholder = rec(
+        0x0085, struct.pack("<iBB", 0, 0, 0) + unicode_str_1len(sheet_name))
+    globals_no_offset = (bof_globals + codepage + datemode + xf_general
+                          + xf_date + boundsheet_placeholder)
+    eof_globals = rec(0x000A, b"")
+    worksheet_bof_offset = len(globals_no_offset) + len(eof_globals)
+    boundsheet = rec(
+        0x0085, struct.pack("<iBB", worksheet_bof_offset, 0, 0)
+        + unicode_str_1len(sheet_name))
+    globals_bytes = (bof_globals + codepage + datemode + xf_general + xf_date
+                      + boundsheet + eof_globals)
+
+    bof_sheet = rec(0x0809, struct.pack("<HHHHII", 0x0600, 0x0010, 0, 0, 0, 0))
+    dims = rec(0x0200, struct.pack("<IIHHH", 0, 3, 0, 5, 0))  # rows 0..2, cols 0..4
+    row0 = (label(0, 0, "RAVENXLS")
+            + number(0, 1, float(serial), xf=1)
+            + boolerr(0, 2, 1, 0)      # TRUE
+            + boolerr(0, 3, 0x07, 1)   # #DIV/0!
+            + number(0, 4, 5.0))
+    row2 = label(2, 0, "SWIFT")
+    eof_sheet = rec(0x000A, b"")
+    worksheet_bytes = bof_sheet + dims + row0 + row2 + eof_sheet
+
+    assert len(globals_bytes) == worksheet_bof_offset, (
+        len(globals_bytes), worksheet_bof_offset)
+    workbook_stream = globals_bytes + worksheet_bytes
+    stream_total = 4096
+    assert len(workbook_stream) <= stream_total, len(workbook_stream)
+    workbook_stream = workbook_stream + b"\x00" * (stream_total - len(workbook_stream))
+
+    # --- OLE2/CFB container: one FAT sector, one directory sector, then the
+    # padded Workbook stream as a plain sector chain. The stream is exactly
+    # at the mini-stream cutoff (4096 bytes) so no MiniFAT is needed. ---
+    sec = 512
+    freesect, endofchain, fatsect = -1, -2, -3
+    n_stream_sectors = stream_total // sec
+    fat_sector_idx, dir_sector_idx, stream_first_sid = 0, 1, 2
+    total_sectors = 2 + n_stream_sectors
+
+    fat_entries = [freesect] * (sec // 4)
+    fat_entries[fat_sector_idx] = fatsect
+    fat_entries[dir_sector_idx] = endofchain
+    for i in range(n_stream_sectors):
+        sid = stream_first_sid + i
+        fat_entries[sid] = endofchain if i == n_stream_sectors - 1 else sid + 1
+    fat_sector_bytes = b"".join(struct.pack("<i", v) for v in fat_entries)
+
+    def dir_entry(name, etype, colour, left, right, child, first_sid, tot_size):
+        name_utf16 = name.encode("utf-16-le") + b"\x00\x00" if name else b""
+        name_field = name_utf16.ljust(64, b"\x00")
+        cb = len(name_utf16) if name else 0
+        rest = struct.pack("<HBBiii", cb, etype, colour, left, right, child)
+        rest += b"\x00" * 16  # CLSID
+        rest += b"\x00" * 4   # state bits
+        rest += b"\x00" * 16  # timestamps
+        rest += struct.pack("<ii", first_sid, tot_size)
+        rest += b"\x00" * 4
+        entry = name_field + rest
+        assert len(entry) == 128, len(entry)
+        return entry
+
+    root_entry = dir_entry("Root Entry", 5, 1, -1, -1, 1, -2, 0)
+    wb_entry = dir_entry("Workbook", 2, 1, -1, -1, -1, stream_first_sid, stream_total)
+    empty_entry = b"\x00" * 128
+    dir_sector_bytes = root_entry + wb_entry + empty_entry + empty_entry
+
+    header = bytearray(512)
+    struct.pack_into("<8s", header, 0, b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
+    struct.pack_into("<H", header, 24, 0x003E)
+    struct.pack_into("<H", header, 26, 0x0003)
+    struct.pack_into("<H", header, 28, 0xFFFE)
+    struct.pack_into("<H", header, 30, 9)
+    struct.pack_into("<H", header, 32, 6)
+    struct.pack_into("<I", header, 40, 0)
+    struct.pack_into("<I", header, 44, 1)
+    struct.pack_into("<I", header, 48, dir_sector_idx)
+    struct.pack_into("<I", header, 56, 4096)
+    struct.pack_into("<i", header, 60, endofchain)
+    struct.pack_into("<i", header, 68, endofchain)
+    difat = [freesect] * 109
+    difat[0] = fat_sector_idx
+    for i, v in enumerate(difat):
+        struct.pack_into("<i", header, 76 + i * 4, v)
+
+    file_bytes = bytes(header) + fat_sector_bytes + dir_sector_bytes + workbook_stream
+    assert len(file_bytes) == 512 + sec * total_sectors, (
+        len(file_bytes), 512 + sec * total_sectors)
+    path.write_bytes(file_bytes)
+
+    # Round-trip self-check: prove every cell this wrote is actually there.
+    book = xlrd.open_workbook(str(path))
+    sheet = book.sheet_by_index(0)
+    expected = {
+        (0, 0): "RAVENXLS",
+        (0, 1): float(serial),
+        (0, 2): 1,
+        (0, 3): 0x07,
+        (0, 4): 5.0,
+        (2, 0): "SWIFT",
+    }
+    for (r, c), want in expected.items():
+        got = sheet.cell_value(r, c)
+        if got != want:
+            raise AssertionError(
+                f"legacy_workbook self-check failed: cell ({r},{c}) read "
+                f"back as {got!r}, expected {want!r} -- the fixture writer "
+                f"produced bytes xlrd cannot read the way it was written")
+
+
 def csv_file(path: Path) -> None:
     buf = io.StringIO(newline="")
     w = csv.writer(buf, lineterminator="\n")
@@ -501,6 +717,11 @@ def _build_corpus(src: Path) -> Path:
                 src / "13_legacy.doc"])
     # Same bytes as 07 under a second path — the duplicate-by-hash case.
     (sub / "12_ncr_log_copy.csv").write_bytes((src / "07_ncr_log.csv").read_bytes())
+    # 2026-09-10 spreadsheet-fidelity sweep (stage 1 of 2): fixtures only.
+    # NOT added to dociq.selftest._EXPECTED -- their page counts change once
+    # stage 2's fix (e.g. the chartsheet getting its own page) lands.
+    workbook_constructs(src / "18_workbook_constructs.xlsx")
+    legacy_workbook(src / "19_legacy_workbook.xls")
     return src
 
 

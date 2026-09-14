@@ -91,6 +91,10 @@ _EXPECTED = {
     # routing, the way D-46 made it prove reduction -- a fixture the
     # selftest extracts but never checks is a feature it cannot vouch for.
     "15_mixed_content_page.pdf": (1, {PageKind.MIXED}),
+    # Spreadsheet fidelity package (2026-09-10 sweep), stage 2: one page per
+    # tab, chartsheets included (E6) -- Register, Chart1, Later.
+    "18_workbook_constructs.xlsx": (3, {PageKind.SYNTHETIC}),
+    "19_legacy_workbook.xls": (1, {PageKind.SYNTHETIC}),
 }
 
 
