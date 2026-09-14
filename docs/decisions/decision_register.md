@@ -120,6 +120,29 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-58 — region OCR may read typed text twice; it must never lose it (2026-09-14)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-58 | What to do when typed text lies on top of a picture that region OCR reads, after the standing non-convergence rule tripped on the picture-reading code | **Remove the text-layer mask and disclose the duplication.** Region OCR reads the whole image region again, so typed text lying on a picture can appear twice in a page's text (once from the text layer, once from OCR); that loses no evidence. The claim that region OCR makes duplication "impossible by construction" (D-48, "What shipped") is withdrawn wherever it is asserted, and duplication is recorded as a known limitation with its corpus exposure. The rest of D-51's second fix round stays: every image draw counted and inline images seen. The silent-loss findings that do not involve the mask (an image whose geometry cannot be measured, image regions past the 24-region cap) are fixed, and the package is reviewed again as D-55 rules. Ruled by Alex (the recommended option) over two alternatives: keep the mask and make it precise (each glyph's rotated shape, never invisible OCR text, a note when masking removes picture content), then review again; and mask only invisible OCR text layers, with a separate check for a garbled one. | 2026-09-14 |
+
+**What the ruling was made on.** D-51's second review found typed text over a picture read twice
+(searchable scans, letters on full-page stationery, a stamped scan), contradicting D-48's claim; D-54
+had brought such pages into the default run. The second fix round (`61baefd`) masked the text layer's
+word boxes out of the rendering before OCR. The third review (on `61baefd`) confirmed 1 A and 4 B: a
+diagonal text-layer watermark over a scan is masked as axis-aligned word boxes covering about 22% of
+the page, so the scan read 1 of 17 lines where `0a29e30` read 8, with no marker; a garbled invisible
+OCR layer over a legible scan masked every scanned word and the page was reported as an image that
+"contained no text"; an image whose geometry cannot be interpreted is now silently NATIVE where it
+used to carry `M_IMAGE_UNREAD`; image regions past the 24-region cap drop without a marker whenever
+another region reads (predating the package); and six mutants of the mask and image-count logic pass
+every non-GUI test. Corpus exposure of the overlap (the census under D-54): 379 MIXED pages have 90%
+or more of their text-layer word area inside image regions, and 2,403 have none. The standing rule
+tripped because rounds 2 and 3 on this code each found a new case of one class: picture content
+duplicated or lost by region OCR.
+
+**Status: ruled, not yet built.** Built in D-51's third fix round.
+
 ## D-57 — the Word package follows D-55: fix and review until a round finds nothing serious (2026-09-14)
 
 | # | Decision | Ruling | Date |
