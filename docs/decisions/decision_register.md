@@ -224,7 +224,7 @@ that fix's own `extract.py`, first reproduced the figures above under the old co
 under the new count: **3,574 MIXED pages (+1) and 433 pages at 0.90 or more, in 33 documents (+27
 pages, +2 documents)**; none dropped below either threshold, and the share changed on 737 pages in 153
 documents. The table above is the old count and is kept as the first measurement. The same
-fix makes D-49's claim that region OCR cannot duplicate a text layer true (it had not been, for text
+fix makes the claim under D-48's "What shipped" that region OCR cannot duplicate a text layer true (it had not been, for text
 drawn over an image): the text layer's word boxes are masked out before recognition. Overlap of text
 layer with image regions on the corpus's MIXED pages: none on 2,403; under 10% on 706; 10% to under 50%
 on 59; 50% to under 90% on 27; 90% or more on 379, of which 375 are at image share 0.90 or more and
