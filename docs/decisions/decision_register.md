@@ -139,6 +139,27 @@ re-verified; the mechanism was checked against the code before the question was 
 
 **Status: ruled, not yet built.** It is built in D-51's review-fix round, before D-51 merges.
 
+**Measured the same day: what the threshold reaches on the acceptance corpus** (counts only; a
+delegated census, no OCR run). The counter called the product's own `_page_image_share`,
+`_NATIVE_TEXT_FLOOR` and `PHOTO_MIN_IMAGE_AREA_SHARE` and was validated first on eight built pages
+with known answers (text 39 and 40 characters; image share 0.20, 0.30, 0.89, 0.91; four images
+summing to 0.92), all matched. Over the corpus it read all 298 PDFs with zero read errors and
+reproduced D-48's figures exactly (17,732 pages; 3,573 MIXED pages in 290 documents), which is
+what establishes it counted the same thing.
+
+| MIXED pages by image share | pages |
+|---|---|
+| 0.90 or more (read under D-54 even in the quick pass) | **406**, in 31 documents |
+| 0.95 or more | 390 |
+| 0.80 or more | 419 |
+| 0.85 to under 0.90 | 5 |
+
+The distribution is bimodal: 3,081 MIXED pages sit between 0.25 and 0.65, and 390 at 0.95 or
+above, so the result does not depend closely on where between 0.80 and 0.95 the line is drawn.
+**Not measured:** the reading time those 406 pages add to a quick pass. Scaling A-24's timed
+7.14 s per MIXED page gives about 48 minutes of serial extraction, a projection from a
+12-document sample, reduced by parallel extraction by an unmeasured amount.
+
 ## D-53 — Sprint 5's first increment: extraction fidelity and the review documents (ruled 2026-09-10, recorded 2026-09-11)
 
 | # | Decision | Ruling | Date |
