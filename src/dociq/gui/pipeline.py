@@ -81,17 +81,22 @@ class FolderPreview:
     what they are starting. Zero means "no estimate" and the screen says nothing
     rather than inventing a number.
 
-    **For a run that skips the images on text pages** (A-25). The rates it comes
-    from were timed before DocIQ read any, so that is the run they describe."""
+    **For a run that skips the images on text pages** (A-25), the closest of
+    the two runs to the ones timed. Those read no image on any page with a text
+    layer; a quick first pass still reads a scan whose image content covers
+    nearly the whole page (D-54), so over a production of stamped scans this
+    figure may be low, by an amount not measured."""
 
     estimated_minutes_reading_images: int = 0
     """The same estimate for a run that READS the images on text pages (A-25).
 
-    Zero, "no estimate", until such a run is measured: on a timed sample of 12
-    documents the reading made extraction 3.44 times as long, and the
-    whole-corpus cost is not known. The setup screen shows whichever figure its
-    checkbox describes, so which rate belongs to which run stays the pipeline's
-    rule."""
+    With OCR on it is zero, "no estimate", until such a run is measured: on a
+    timed sample of 12 documents reading every such image made extraction 3.44
+    times as long as reading none, and the whole-corpus cost is not known.
+    **With OCR off it is the OCR-off rate, the same as** ``estimated_minutes``:
+    no image is read either way, so there is nothing unmeasured to refuse. The
+    setup screen shows whichever figure its checkbox describes, so which rate
+    belongs to which run stays the pipeline's rule."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,6 +626,22 @@ class OmissionApproval:
     silently widened nor silently voided.
     """
 
+    skip_images_on_text_pages: bool | None = None
+    """The picture setting of the run this approval was REVIEWED under (A-25),
+    as :func:`dociq.contracts.recognition_fingerprint` normalizes it.
+
+    ``True`` or ``False`` when that pipeline ran OCR, because then the setting
+    decided what recognition read. ``None`` when it did not: with OCR off no
+    picture is read whichever way the box is set, both settings give one
+    fingerprint, and the same pipeline runs the next run -- so the setting
+    cannot make this approval stale. Recording the skip there instead would
+    have the setup screen warn that pages will be kept, moments before the run
+    drops them under this approval (A-R2-1's shape).
+
+    The fingerprint above decides; this field lets the setup screen SAY which
+    setting an approval needs, beside its project names (D-51 review finding
+    1). Stage 4 never reads it."""
+
 
 @dataclass(frozen=True, slots=True)
 class RunRequest:
@@ -653,7 +674,8 @@ class RunRequest:
 
     skip_images_on_text_pages: bool = SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT
     """The setup screen's quick-pass switch (A-25, D-51): leave unread the
-    pictures on pages that also carry typed text. Ticked unless the operator
+    pictures on pages that also carry typed text, though never a scan whose
+    image content covers nearly the whole page (D-54). Ticked unless the operator
     unticks it. :func:`config_from` copies it into the run configuration, so it
     is hashed into the run identity rather than held by an adapter."""
 
@@ -742,7 +764,8 @@ class PipelineAPI(Protocol):
         the run the operator REVIEWED, read off that run's request and not off
         the setup screen: each changes which pages a family reaches (A-22,
         A-25), and the screen may already be set for the next run. The image
-        setting is required, as it is on the fingerprint it feeds.
+        setting is required, as it is on the fingerprint it feeds, and the
+        returned approval carries it, normalized, for the setup screen's warning.
 
         This is the moment D-34 is about. A template ships unengaged and can
         never drop a page; the instant a human ticks a row, DocIQ writes that

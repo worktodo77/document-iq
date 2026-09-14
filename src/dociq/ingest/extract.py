@@ -113,6 +113,30 @@ UNKNOWN_HINT = "Unrecognized format — inventoried and hashed only"
 # and a scanned page's stray header text does not.
 _NATIVE_TEXT_FLOOR = 40
 
+_SCAN_MIN_IMAGE_SHARE = 0.90
+"""Image content covering at least this share of a page makes it a SCAN, read
+even by a run that skips the images on text pages (D-54).
+
+A text layer of ``_NATIVE_TEXT_FLOOR`` characters keeps a page off whole-page
+OCR, and image content covering ``PHOTO_MIN_IMAGE_AREA_SHARE`` makes it MIXED,
+which a quick first pass (A-25, D-51) leaves unread. Together they let a typed
+stamp decide whether a scan was read: a full-page scan carrying a 52-character
+endorsement came out NATIVE, its text the endorsement alone, while the same scan
+with no stamp -- or one under 40 characters -- was OCR'd whole. That is the
+defect D-48 recorded for protective-order legends, returned under D-51's
+default. Alex ruled D-54: read it. Such a page is read exactly as a reading run
+reads it -- MIXED, its image regions OCR'd, its Bates locator from the text
+layer alone (D-49) -- and only image content beside real typed content is
+skipped. 90% is the figure the ruling proposed; its corpus exposure is not yet
+counted.
+
+**The share is SUMMED.** :func:`_page_image_share` adds the areas of the page's
+images without de-overlapping them, capped at 1.0, so four tiles that each
+cover under a quarter of a page count as a scan when together they reach this.
+It measures each image OBJECT once: one image placed twice on a page counts at
+its first placement only, which is how a PDF writer that reuses identical image
+bytes stores them."""
+
 # ---------------------------------------------------------------------------
 # Degradation markers — the one list of "this document did not read cleanly"
 # ---------------------------------------------------------------------------
@@ -343,9 +367,11 @@ class ExtractOptions:
 
     A-24's region OCR, skipped: such a page stays NATIVE, carries
     :data:`M_IMAGE_SKIPPED`, and the document note names it. A page with no
-    usable text layer is still OCR'd whole. The walk sets it from ``RunConfig``
-    and never from ``WalkOptions``: one setting with two sources is how a resume
-    journal replays a page read under the other one."""
+    usable text layer is still OCR'd whole, and a page whose image content
+    covers :data:`_SCAN_MIN_IMAGE_SHARE` of it -- a scan carrying a typed stamp
+    -- is still read as a reading run reads it (D-54). The walk sets it from
+    ``RunConfig`` and never from ``WalkOptions``: one setting with two sources is
+    how a resume journal replays a page read under the other one."""
 
     project_tokens: tuple[str, ...] = ()
     """Matter-specific tokens stripped from a section label before a template
@@ -1561,6 +1587,7 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     region_by_page: dict[int, _OcrPage] = {}
     routed = set(need)
     mixed: list[int] = []
+    scans: set[int] = set()
     try:
         import fitz  # pymupdf
 
@@ -1571,6 +1598,8 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                 share, has_image = _page_image_share(_geom[i])
                 if has_image and share >= PHOTO_MIN_IMAGE_AREA_SHARE:
                     mixed.append(i)
+                    if share >= _SCAN_MIN_IMAGE_SHARE:
+                        scans.add(i)  # D-54: a scan, whatever its stamp says
     except Exception as exc:
         # Geometry is how this page class is FOUND. If it cannot be measured we
         # do not know whether any page carries unread image content, and saying
@@ -1579,33 +1608,44 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                      f"({sanitize_message(str(exc))})")
     skipped: frozenset[int] = frozenset()
     if mixed:
+        # "image content covering", not "an image covering": the share is the
+        # SUM over the page's images (`_page_image_share`).
         if not opt.ocr_enabled:
-            notes.append(f"{M_IMAGE_UNREAD}: {len(mixed)} page(s) carry an image "
-                         f"covering {PHOTO_MIN_IMAGE_AREA_SHARE:.0%} or more of "
-                         f"the page beside their text layer; OCR disabled")
-        elif opt.skip_images_on_text_pages:
-            # A-25 (D-51): a quick first pass leaves these images unread ON
-            # PURPOSE. After "OCR disabled", the wider reason, which keeps its
-            # own sentence; before the engine check, because a run that reads
-            # nothing needs no engine to say so. The pages are named here since
-            # page notes never reach the processing log, and the setup screen
-            # promises that every page skipped is listed.
-            skipped = frozenset(mixed)
-            notes.append(f"{M_IMAGE_UNREAD}: {len(mixed)} page(s) carry an image "
-                         f"covering {PHOTO_MIN_IMAGE_AREA_SHARE:.0%} or more of "
-                         f"the page beside their text layer, left unread because "
-                         f"this run skips images on pages that have a text "
-                         f"layer: page(s) "
-                         + ", ".join(str(i + 1) for i in mixed))
-        elif not ocr_available():
-            notes.append(f"{M_IMAGE_UNREAD}: {len(mixed)} page(s) carry an image "
-                         f"beside their text layer and OCR is unavailable: "
-                         f"{ocr_models_present()[1]}")
+            notes.append(f"{M_IMAGE_UNREAD}: {len(mixed)} page(s) carry image "
+                         f"content covering {PHOTO_MIN_IMAGE_AREA_SHARE:.0%} or "
+                         f"more of the page beside their text layer; OCR disabled")
         else:
-            try:
-                region_by_page = _ocr_pdf_regions(raw, mixed)
-            except Exception as exc:
-                notes.append(f"{M_IMAGE_UNREAD}: {sanitize_message(str(exc))}")
+            if opt.skip_images_on_text_pages:
+                # A-25 (D-51): a quick first pass leaves these images unread ON
+                # PURPOSE. After "OCR disabled", the wider reason, which keeps
+                # its own sentence; before the engine check, because a run that
+                # reads nothing needs no engine to say so. The pages are named
+                # here since page notes never reach the processing log, and the
+                # setup screen promises that every page skipped is listed.
+                #
+                # Except a scan (D-54): image content covering nearly the whole
+                # page is read below exactly as a reading run reads it, so a
+                # typed stamp in its text layer cannot decide that it is not.
+                skipped = frozenset(i for i in mixed if i not in scans)
+                if skipped:
+                    notes.append(
+                        f"{M_IMAGE_UNREAD}: {len(skipped)} page(s) carry image "
+                        f"content covering {PHOTO_MIN_IMAGE_AREA_SHARE:.0%} or "
+                        f"more of the page beside their text layer, left unread "
+                        f"because this run skips pictures beside a text layer "
+                        f"(image content covering {_SCAN_MIN_IMAGE_SHARE:.0%} or "
+                        f"more of a page is read as a scan): page(s) "
+                        + ", ".join(str(i + 1) for i in sorted(skipped)))
+            read = [i for i in mixed if i not in skipped]
+            if read and not ocr_available():
+                notes.append(f"{M_IMAGE_UNREAD}: {len(read)} page(s) carry an image "
+                             f"beside their text layer and OCR is unavailable: "
+                             f"{ocr_models_present()[1]}")
+            elif read:
+                try:
+                    region_by_page = _ocr_pdf_regions(raw, read)
+                except Exception as exc:
+                    notes.append(f"{M_IMAGE_UNREAD}: {sanitize_message(str(exc))}")
 
     # --- D-25: the stamp gets its own recognition, where it can help --------
     # Only pages DocIQ actually OCR'd, and only those whose ordinary reading

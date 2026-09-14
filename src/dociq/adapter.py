@@ -165,8 +165,12 @@ def seconds_per_gb(ocr_enabled: bool) -> float:
     use, so the branch cannot drift from the run.
 
     **Neither timed run read the images on pages that also carry a text layer**:
-    both predate A-24. Each rate is therefore the rate for a run that SKIPS them
+    both predate A-24. Each rate is therefore closest to a run that SKIPS them
     (A-25), and :func:`_minutes_for` gives no figure for a run that reads them.
+    Closest, not the same: a run that skips them still reads a scan whose image
+    content covers nearly the whole page even when it carries a typed stamp
+    (D-54), which the timed runs did not, so over stamped scans the rate may
+    understate the wait by an amount not measured.
     """
     return SECONDS_PER_GB_OCR_ON if ocr_enabled else SECONDS_PER_GB_OCR_OFF
 
@@ -179,9 +183,11 @@ def measured_basis(ocr_enabled: bool) -> str:
             "from scratch through RealPipeline — 6,182.4 s for 2.6 GB "
             "(decision register, §10 measured again 2026-08-02). The machine was "
             "under load throughout, so this corroborates the ≈100-minute upper "
-            "bound rather than establishing an idle-machine rate. No picture on "
-            "a page that also carries typed text was read in that run, so it "
-            "times a run that skips them."
+            "bound rather than establishing an idle-machine rate. That run "
+            "predates DocIQ reading the images on pages that have a text layer: "
+            "it read none of them, including full-page scans that carry a typed "
+            "stamp. A quick first pass still reads those scans, so for one this "
+            "rate may be low, by an amount not measured."
         )
     return (
         "one measured run: the full MODEC/Petrobras corpus, OCR disabled, from "
@@ -236,9 +242,11 @@ def _minutes_for(total_bytes: int, sized: dict[str, int], *,
     think about it the estimate for some other run.
 
     **0 for a run that reads the images on text pages.** Both rates were timed
-    before A-24 read any, so they describe a run that skips them. On a timed
-    sample of 12 documents the reading made extraction 3.44 times as long, and
-    the whole-corpus cost is not measured, so there is no rate to scale.
+    before A-24 read any, so they are closest to a run that skips them (see
+    :func:`seconds_per_gb` for why not exactly). On a timed sample of 12
+    documents reading every such image made extraction 3.44 times as long as
+    reading none, and the whole-corpus cost is not measured, so there is no rate
+    to scale.
 
     Zero is the seam's documented "no estimate", and it is returned for every
     folder neither rate was measured on. See :data:`SECONDS_PER_GB_OCR_ON` for
@@ -722,6 +730,12 @@ class RealPipeline:
                 ocr_ran=self._ocr_enabled,
                 skip_images_on_text_pages=skip_images_on_text_pages,
             ),
+            # The same setting, for the setup screen to compare with its box
+            # (D-51 review finding 1). Normalized as the fingerprint is: with
+            # OCR off nothing is read either way, so no box position can make
+            # this approval stale, and it says so with None.
+            skip_images_on_text_pages=(skip_images_on_text_pages
+                                       if self._ocr_enabled else None),
         )
 
     def template_families(

@@ -13,7 +13,9 @@ client matter:
 3. normalization is idempotent on every page that came out of the corpus;
 4. the §4 Stage-6 accounting gate reconciles to zero discrepancy;
 5. OCR ran from bundled models with no network call available;
-6. the outputs are byte-identical across repeated runs with varied hash seeds;
+6. the outputs are byte-identical across repeated runs with varied hash seeds,
+   each run reading the images on pages that also carry a text layer (A-25), so
+   the repetition covers A-24's region OCR;
 7. every §7 deliverable is produced, container members carry a remapped
    ``parent_doc_id``, and the amended ``RunResult`` fields are populated;
 8. the document index carries the WHOLE inventory — unsupported files included,
@@ -25,8 +27,9 @@ client matter:
    and therefore cannot live in an end-to-end gate over a good corpus;
 10. a run given no setting skips the images on pages that also carry a text
     layer (A-25, D-51): fixture 15's page stays NATIVE with the skip note, and
-    the dead-engine alarm stays quiet. The main run opts in to the reading, so
-    item 1 still proves A-24's MIXED routing.
+    the dead-engine alarm stays quiet. The main run and the determinism
+    repetitions opt in to the reading, so items 1 and 6 still prove A-24's MIXED
+    routing.
 
 Output is deliberately verbose about what passed. A gate whose green output is
 one word is a gate nobody can debug when it goes red.

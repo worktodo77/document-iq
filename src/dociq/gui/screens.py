@@ -224,9 +224,10 @@ class SetupScreen(QWidget):
         """The retained-approval status (Codex B-1). Separate from the
         proposal hint because they share one label and each used to overwrite
         the other (A-R3-2)."""
-        self._retained_scopes: tuple[tuple[str, ...], ...] = ()
-        """One token scope per approval carried from a previous run of this
-        matter (Codex B-1, corrected per A-R2-1)."""
+        self._retained_scopes: tuple[tuple[tuple[str, ...], bool | None], ...] = ()
+        """One scope per approval carried from a previous run of this matter:
+        its project names and its picture setting (Codex B-1, corrected per
+        A-R2-1; the setting per the D-51 review)."""
         self._tokens.textChanged.connect(lambda _t: self._warn_if_stale())
         self._tokens_hint.setWordWrap(True)
         tok_holder = QWidget()
@@ -298,22 +299,31 @@ class SetupScreen(QWidget):
         right = QVBoxLayout()
         right.setSpacing(UNIT // 2)
         # A-25 (D-51). The quick-pass switch sits with the time because the time
-        # depends on it: the estimate describes a run that skips these pictures,
-        # and no run that reads them has been measured.
+        # depends on it: the estimate comes from runs that read no picture on a
+        # typed page, closest to a run that skips them, and no run that reads
+        # them has been measured.
         self._preview: FolderPreview | None = None
         self._skip_images = QCheckBox(
             "Quick first pass: skip pictures on pages that also have typed text")
         self._skip_images.setFont(theme.body(9))
         self._skip_images.setChecked(SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT)
         self._skip_images.toggled.connect(lambda _on: self._render_scope())
+        # The box is part of the recognition a retained approval was reviewed
+        # under, so flipping it can make one stale (D-51 review finding 1).
+        self._skip_images.toggled.connect(lambda _on: self._warn_if_stale())
         right.addWidget(self._skip_images)
+        # Not overstated (D-51 review): a scan carrying a typed stamp is read
+        # (D-54), and the 12-document timing compared reading every such picture
+        # with reading none, which is not what ticking the box saves.
         skip_help = _muted(
-            "When ticked, DocIQ does not read words inside pictures, charts or "
-            "pasted-in scans on pages that also carry typed text, and lists "
-            "every page it skipped as not read. Scanned pages with no typed text "
-            "are still read. On a timed sample of 12 documents, reading those "
-            "pictures made extraction about 3.4 times as long. Untick it for the "
-            "full reading before relying on the results.", theme, 8)
+            "When ticked, DocIQ skips the words inside pictures, charts and "
+            "pasted-in images that sit beside typed text on a page, and lists "
+            "every page it skipped as not read. Scanned pages are still read, "
+            "including scans that carry a typed stamp. On a timed sample of 12 "
+            "documents, reading every such picture made extraction about 3.4 "
+            "times as long as reading none; the saving on a whole matter has not "
+            "been measured. Untick it for the full reading before relying on the "
+            "results.", theme, 8)
         skip_help.setMaximumWidth(UNIT * 48)
         right.addWidget(skip_help)
         self._scope = _muted("", theme, 9)
@@ -364,9 +374,10 @@ class SetupScreen(QWidget):
         describes (A-25).
 
         The screen PICKS between the pipeline's two figures and computes neither:
-        which rate belongs to which run is the pipeline's rule. A run that reads
-        the pictures has no measured figure, so unticking the box removes the
-        time rather than keeping one that describes a different run."""
+        which rate belongs to which run is the pipeline's rule. With OCR on, a
+        run that reads the pictures has no measured figure, so unticking the box
+        removes the time rather than keeping one that describes a different run;
+        with OCR off the two figures are the same, and the time stays."""
         preview = self._preview
         if preview is None:
             return
@@ -429,9 +440,12 @@ class SetupScreen(QWidget):
         self._render_hint()
 
     def set_retained_scopes(
-        self, scopes: tuple[tuple[str, ...], ...]
+        self, scopes: tuple[tuple[tuple[str, ...], bool | None], ...]
     ) -> None:
-        """One entry per approval carried into the next run of this matter.
+        """One entry per approval carried into the next run of this matter:
+        ``(project names, picture setting)``, the picture setting as the
+        pipeline recorded it (``None`` when no box position could change what
+        that approval's recognition read).
 
         **Scopes, not a count and one exemplar.** The first version took a count
         plus the first approval's tokens, which describes a mixed set as though
@@ -440,22 +454,34 @@ class SetupScreen(QWidget):
         family under B. Depending on insertion order the message then claimed
         all of them still applied or none did (Codex round 2, A-R2-1).
 
-        The setup screen is where the operator edits the names, so it is where
-        they must learn what the edit costs. Stage 4 refuses a mismatched
-        approval either way; without this the first they hear of it is after the
-        run (Alex's ruling, 2026-08-19).
+        **The names and the picture setting travel together, per approval**,
+        for the same reason: two parallel lists can be paired wrongly, and a
+        pairing error is A-R2-1 again.
+
+        The setup screen is where the operator edits the names and the box, so
+        it is where they must learn what the edit costs. Stage 4 refuses a
+        mismatched approval either way; without this the first they hear of it
+        is after the run (Alex's ruling, 2026-08-19).
         """
-        self._retained_scopes = tuple(tuple(s) for s in scopes)
+        self._retained_scopes = tuple((tuple(tokens), skip)
+                                      for tokens, skip in scopes)
         self._warn_if_stale()
 
     def _warn_if_stale(self) -> None:
-        """Say which retained approvals the current field still applies to.
+        """Say which retained approvals the current field and box still apply to.
 
         **Compared with the SAME canonical rule Stage 4 uses.** Comparing the
         raw field against a canonical scope made `MV32, BOMESC` look like a
         change from `("BOMESC","MV32")` — so the screen announced that pages
         would be kept pending re-review, moments before the run dropped them
         under that very approval (A-R2-1).
+
+        **The picture setting too** (D-51 review finding 1). It is part of the
+        recognition an approval was reviewed under, so Stage 4 refuses an
+        approval once the box no longer matches; comparing the names alone left
+        "still apply" on screen for an approval the run then refused. An
+        approval whose setting is ``None`` was captured by a pipeline that reads
+        no picture either way, and no box position makes it stale.
 
         **The empty case sets the status to nothing and re-renders**, rather
         than returning early. Returning early left the previous message on
@@ -469,25 +495,38 @@ class SetupScreen(QWidget):
             self._render_hint()
             return
         current = canonical_tokens(self.project_tokens())
-        applies = sum(1 for s in self._retained_scopes
-                      if canonical_tokens(s) == current)
+        skip_now = self._skip_images.isChecked()
+        names_differ = pictures_differ = False
+        applies = 0
+        for tokens, skip in self._retained_scopes:
+            names = canonical_tokens(tokens) != current
+            pictures = skip is not None and skip != skip_now
+            names_differ = names_differ or names
+            pictures_differ = pictures_differ or pictures
+            applies += not (names or pictures)
         total = len(self._retained_scopes)
         stale = total - applies
+        changed = " and ".join(
+            what for what, differs in (
+                ("the project names", names_differ),
+                ("the quick first pass setting (skip pictures on pages that "
+                 "also have typed text)", pictures_differ))
+            if differs)
         if stale == 0:
             self._approval_hint = (
                 f"{total} approval(s) carried from your last run of this "
                 "matter still apply.")
         elif applies == 0:
             self._approval_hint = (
-                f"Changing the project names means the {total} approval(s) "
+                f"Changing {changed} means the {total} approval(s) "
                 "from your last run of this matter NO LONGER APPLY — those "
                 "sections will be kept until you review and approve them "
                 "again. Nothing is dropped that you have not approved.")
         else:
             self._approval_hint = (
                 f"{applies} of {total} approval(s) from your last run still "
-                f"apply under these names; {stale} NO LONGER APPLY and those "
-                "sections will be kept until you review and approve them "
+                f"apply; {stale} NO LONGER APPLY because {changed} changed, and "
+                "those sections will be kept until you review and approve them "
                 "again. Nothing is dropped that you have not approved.")
         self._render_hint()
 

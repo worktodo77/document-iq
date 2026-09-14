@@ -1743,6 +1743,14 @@ it as a REQUIRED argument. `CONTRACT_VERSION` stays **2.3.0**: A-25 is folded in
 it, as D-49's field was, because 2.3.0 has not left the branch, and a 2.4.0 would
 record a contract nothing shipped.
 
+The field is additive with a default. **The fingerprint argument is not
+additive:** it has no default, so every caller of the earlier signature fails
+loudly with a `TypeError` instead of running on. That is intended. A default
+would let a call site that never considered the setting mint the fingerprint of
+some other run, and an approval would then be refused, or applied, for a reason
+nobody chose. `set_omission`'s new keyword on the GUI seam is required for the
+same reason.
+
 ### The case the contract could not express
 
 A-24 reads the image regions of a page that also carries a text layer. On a timed
@@ -1762,12 +1770,26 @@ identifies a run could say which one it was.
   run.
 * **The effective value.** `pipeline.run` stamps `skip or not ocr_ran` on the
   walk's configuration, the way it stamps the OCR engine: a run with OCR off reads
-  no image and records the skip.
-* **Extraction.** `ExtractOptions` carries it, set by the walk from the config. A
-  skipped page stays NATIVE and carries `M_IMAGE_SKIPPED`, which begins with
-  `M_IMAGE_UNREAD`. The document note names every skipped page, because page notes
-  do not reach the processing log. It is a different sentence from "OCR disabled"
-  and from "OCR unavailable", because the three remedies differ.
+  no image and records the skip. Like the engine fields it is stamped from the
+  OCR setting, so a run whose enabled engine is found missing records `False`
+  while reading no image, and its notes say OCR was unavailable.
+* **Extraction.** `ExtractOptions` carries it, set by the walk from the config.
+  What a skipping run skips: image content covering `PHOTO_MIN_IMAGE_AREA_SHARE`
+  (25%) or more of a page, summed over the page's images, beside a text layer.
+  **Except a scan (D-54, 2026-09-14):** a page whose image content covers
+  `_SCAN_MIN_IMAGE_SHARE` (90%) or more is read exactly as a reading run reads it,
+  MIXED, its locator from the text layer alone (D-49), whatever typed stamp its
+  text layer carries. Without the exception a full-page scan with a 52-character
+  endorsement came out NATIVE, its text the endorsement alone, while the same scan
+  with no stamp was OCR'd whole: a stamp decided whether a page was read, the
+  defect D-48 recorded. The threshold is tested at its boundary and on four tiles
+  that each cover under 25%; its corpus exposure is not yet counted. D-54 needs no
+  new contract input: the setting is unchanged, and what it skips changed inside
+  the unreleased 2.3.0. A skipped page stays NATIVE and carries `M_IMAGE_SKIPPED`,
+  which begins with `M_IMAGE_UNREAD`. The document note counts and names every
+  skipped page, because page notes do not reach the processing log. It is a
+  different sentence from "OCR disabled" and from "OCR unavailable", because the
+  three remedies differ, and the skip is decided before the engine is looked for.
 * **The dead-engine alarm.** `ocr_yield` counted every page note carrying
   `M_IMAGE_UNREAD` as a failed OCR attempt. A skipped page was never attempted, so
   it is excluded, and at the default the alarm would otherwise fire on any run
@@ -1780,20 +1802,32 @@ identifies a run could say which one it was.
   which is reserved for what the code reads, but the added part moved every
   fingerprint once, so every earlier approval is refused and reviewed again.
   `set_omission` takes the setting of the run the operator reviewed, read off that
-  run's request.
+  run's request. Stage 4's refusal names the setting among what can differ.
 * **The seam and the screen.** `RunRequest` carries it and `config_from` copies
   it. `MockPipeline.run` rebuilt the config from two fields when given a master
   index and dropped it; it now uses `replace`. The setup screen has the switch,
-  ticked, beside the time. `FolderPreview` gains `estimated_minutes_reading_images`,
-  0 until a reading run is measured, and `_minutes_for` requires both settings.
+  ticked, beside the time. `FolderPreview` gains `estimated_minutes_reading_images`:
+  with OCR on 0 until a reading run is measured, with OCR off the OCR-off rate.
+  `_minutes_for` requires both settings. `OmissionApproval` gains
+  `skip_images_on_text_pages`, the reviewed setting normalized as the fingerprint
+  is (`None` when OCR was off, since no box position changes what was read), and
+  the setup screen's retained-approval warning compares it with the box beside
+  the project names and says which of the two changed. Comparing the names alone
+  left "still apply" on screen for an approval the run then refused.
 * **The record.** The processing log's `content.config` and the manifest's
   identity note name the setting.
-* **Keeping A-24 exercised.** The selftest's main run and
+* **Keeping A-24 exercised.** The selftest's main run, the determinism runner
+  (which the selftest and the packaged launcher both execute) and
   `tools/bates_acceptance.py` opt in to reading. The selftest adds a default run
   over fixture 15 that checks the skip.
 
 ### Bounds, disclosed
 
-The time estimate describes a run that skips the images; a run that reads them
-gets none. The determinism probe and the packaged offline probe take the default,
-so both now exercise a run that skips the images, not A-24's reading.
+The time estimate comes from runs that read no image on any page with a text
+layer. That is closest to a run that skips them, but not the same: the quick pass
+still reads stamped scans (D-54), so over a production of them the estimate may be
+low, by an amount not measured. A run that reads the images gets no estimate with
+OCR on. The determinism proof repeats a READING run only; the skipping default is
+checked once by the selftest, not repeated. The packaged offline probe takes the
+default, so it exercises a run that skips the images on text pages, not A-24's
+region OCR.

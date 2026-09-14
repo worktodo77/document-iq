@@ -220,8 +220,11 @@ ROUTES: dict[str, str] = {
     "approvals": "RealPipeline.run -> PipelineOptions.approvals (D-34)",
     "skip_images_on_text_pages": (
         "config_from -> RunConfig -> pipeline.run's walk_config -> walker.run "
-        "-> ExtractOptions -> _extract_pdf; and the reviewed request -> "
-        "MainWindow._capture_approval -> set_omission's fingerprint (A-25)"),
+        "-> ExtractOptions -> _extract_pdf; walk_config -> Stage 4's "
+        "recognition_fingerprint; and the reviewed request -> "
+        "MainWindow._capture_approval -> set_omission's fingerprint and "
+        "OmissionApproval.skip_images_on_text_pages -> "
+        "SetupScreen._warn_if_stale (A-25)"),
 }
 """Where every field of :class:`RunRequest` goes after the screen builds it.
 
@@ -401,6 +404,81 @@ def test_hop_reviewed_request_to_the_approval(app, skip) -> None:
         assert seen.get("skip") is skip
     finally:
         window.close()
+
+
+def test_hop_walk_config_to_the_stage4_fingerprint(tmp_path) -> None:
+    """The hop from the effective setting to the fingerprint Stage 4 compares.
+
+    ``pipeline.run`` hands Stage 4 ``walk_config.skip_images_on_text_pages``.
+    Hard-coded to ``True`` there, every test and the selftest stayed green (D-51
+    review finding 2): it only matters when an approval carries a fingerprint,
+    OCR is on and the run READS the pictures, and nothing set that up. So this
+    does, over fixture 15 alone -- the page that is both -- and checks both
+    halves: an approval reviewed while the pictures were skipped is refused, and
+    one reviewed while they were read is applied.
+    """
+    import shutil
+
+    from dociq import pipeline as core
+    from dociq.contracts import (
+        Disposition,
+        RunConfig,
+        matter_key,
+        recognition_fingerprint,
+    )
+    from dociq.ingest import extract as ex
+    from dociq.ingest import walker
+    from dociq.sections.model import ApprovedOmission
+    from dociq.sections.templates import PROGRESS_REPORT
+
+    from .conftest import FIXTURES
+
+    src = tmp_path / "src"
+    src.mkdir()
+    shutil.copyfile(FIXTURES / "15_mixed_content_page.pdf",
+                    src / "15_mixed_content_page.pdf")
+
+    def reading_run(reviewed_skip: bool):
+        approval = ApprovedOmission(
+            family_id="progress-photographs", approved_by="abachowski",
+            approved_at="2026-09-14T12:00:00Z", matter="src",
+            matter_root=matter_key(str(src)),
+            template_id=PROGRESS_REPORT.template_id,
+            template_version=PROGRESS_REPORT.version,
+            recognition=recognition_fingerprint(
+                project_tokens=(), template_id=PROGRESS_REPORT.template_id,
+                template_version=PROGRESS_REPORT.version, ocr_ran=True,
+                skip_images_on_text_pages=reviewed_skip))
+        return core.run(
+            RunConfig(source_root=str(src),
+                      output_root=str(tmp_path / f"out-{reviewed_skip}"),
+                      ocr_engine_version=ex.ocr_engine_version(),
+                      skip_images_on_text_pages=False),
+            core.PipelineOptions(
+                walk=walker.WalkOptions(ocr_enabled=True, resume=False),
+                template=PROGRESS_REPORT, approvals=(approval,),
+                matter_name="src")).result
+
+    def dropped(result):
+        return [(d.rel_path, p.page_no) for d in result.documents
+                for p in d.pages if p.disposition is not Disposition.KEEP]
+
+    applied = reading_run(reviewed_skip=False)
+    assert applied.config.skip_images_on_text_pages is False
+    assert applied.documents[0].pages[0].kind.value == "mixed"
+    assert dropped(applied) == [("15_mixed_content_page.pdf", 1)], (
+        "an approval reviewed while the pictures were read was not applied to a "
+        f"run that read them: {applied.warnings}")
+
+    refused = reading_run(reviewed_skip=True)
+    assert dropped(refused) == [], (
+        "an approval reviewed while the pictures were skipped dropped a page in "
+        "a run that read them")
+    warning = [w for w in refused.warnings if "recognition configuration" in w]
+    assert warning, refused.warnings
+    assert "quick first pass" in warning[0], (
+        "the refusal does not name the picture setting among what can differ: "
+        + warning[0])
 
 
 # ---------------------------------------------------------------------------

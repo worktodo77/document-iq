@@ -253,10 +253,11 @@ def test_the_scope_and_the_time_sit_beside_the_action(window) -> None:
 
 
 def test_the_time_beside_the_action_follows_the_image_setting(window) -> None:
-    """A-25 (D-51). The estimate is the rate for a run that SKIPS pictures on
-    text pages, because that is the only run it timed. Untick the box and the
-    run is a different, unmeasured one, so the screen stops quoting a time for
-    it -- and quotes it again when the box is ticked back.
+    """A-25 (D-51). The estimate comes from runs that read no picture on a text
+    page, which is closest to a run that SKIPS them (not the same: the quick
+    pass still reads stamped scans, D-54). Untick the box and the run is a
+    different, unmeasured one, so the screen stops quoting a time for it -- and
+    quotes it again when the box is ticked back.
 
     FAIL-BEFORE: the preview carried one figure, shown whatever the run would do.
     """
@@ -272,12 +273,22 @@ def test_the_time_beside_the_action_follows_the_image_setting(window) -> None:
     box = boxes[0]
     assert box.isChecked(), "a run skips pictures on text pages unless told otherwise"
     assert "about 40 minutes" in window.setup._scope.text()
-    help_text = "\n".join(lab.text() for lab in window.setup.findChildren(QLabel))
-    for sentence in ("lists every page it skipped as not read",
-                     "Scanned pages with no typed text are still read.",
-                     "about 3.4 times as long",
+    help_text = " ".join(lab.text() for lab in window.setup.findChildren(QLabel))
+    # D-54 and the review's wording findings. A scan carrying a typed stamp is
+    # still read, so the sentence that said only scans with NO typed text are
+    # read is withdrawn; and the 12-document timing compared reading every such
+    # picture with reading none, which is not what ticking the box saves.
+    for sentence in ("sit beside typed text on a page",
+                     "lists every page it skipped as not read",
+                     "Scanned pages are still read, including scans that carry "
+                     "a typed stamp.",
+                     "On a timed sample of 12 documents",
+                     "about 3.4 times as long as reading none",
+                     "the saving on a whole matter has not been measured",
                      "Untick it for the full reading before relying on the results."):
         assert sentence in help_text, sentence
+    assert "no typed text" not in help_text, (
+        "the help text still says a scan is read only when it has no typed text")
 
     box.setChecked(False)
     assert "minutes" not in window.setup._scope.text()
@@ -286,6 +297,85 @@ def test_the_time_beside_the_action_follows_the_image_setting(window) -> None:
     box.setChecked(True)
     assert "about 40 minutes" in window.setup._scope.text()
     assert window.setup.request().skip_images_on_text_pages is True
+
+
+@pytest.mark.parametrize("reviewed_skip", [True, False],
+                         ids=["reviewed-skipping", "reviewed-reading"])
+def test_the_retained_approval_hint_follows_the_picture_setting(
+        app, reviewed_skip) -> None:
+    """D-51 review finding 1. The picture setting is part of the recognition an
+    approval was reviewed under, so Stage 4 refuses a retained approval when the
+    box no longer matches. The setup screen compared only the project names and
+    went on saying the approval "still applies" -- then the run refused it.
+
+    Driven through the real capture point, so the setting the hint compares is
+    the one the pipeline recorded, and toggled both ways from each reviewed value.
+
+    FAIL-BEFORE: flipping the box left "still apply" on screen.
+    """
+    from dociq import adapter
+
+    from .conftest import FIXTURES
+
+    window = MainWindow(adapter.RealPipeline())
+    try:
+        window._request = RunRequest(str(FIXTURES), str(FIXTURES / "out"),
+                                     skip_images_on_text_pages=reviewed_skip)
+        window._capture_approval("progress-photographs", True)
+        assert len(window._approvals) == 1, "no approval was captured"
+        box = window.setup._skip_images
+
+        def hint() -> str:
+            return window.setup._tokens_hint.text()
+
+        box.setChecked(reviewed_skip)
+        assert "still apply" in hint() and "NO LONGER APPLY" not in hint(), hint()
+
+        box.setChecked(not reviewed_skip)
+        assert "NO LONGER APPLY" in hint(), hint()
+        assert "still apply" not in hint(), hint()
+        assert "quick first pass" in hint(), (
+            "the stale message does not say it was the picture setting: " + hint())
+        assert "kept" in hint().lower(), hint()
+
+        box.setChecked(reviewed_skip)
+        assert "still apply" in hint() and "NO LONGER APPLY" not in hint(), hint()
+    finally:
+        window.close()
+
+
+def test_a_picture_setting_that_read_nothing_cannot_make_an_approval_stale(
+        app) -> None:
+    """The comparison is normalized the way ``recognition_fingerprint`` is. With
+    OCR off no picture is read whichever way the box is set, both settings give
+    one fingerprint, and Stage 4 applies the approval either way -- so the screen
+    must not warn that it no longer applies. Warning there would be A-R2-1 again:
+    telling the operator pages will be kept, moments before the run drops them.
+    """
+    from dociq import adapter
+    from dociq.contracts import recognition_fingerprint
+    from dociq.sections.templates import PROGRESS_REPORT
+
+    from .conftest import FIXTURES
+
+    window = MainWindow(adapter.RealPipeline(ocr_enabled=False))
+    try:
+        window._request = RunRequest(str(FIXTURES), str(FIXTURES / "out"),
+                                     skip_images_on_text_pages=True)
+        window._capture_approval("progress-photographs", True)
+        (approval,) = window._approvals
+        # Stage 4's side of the same question: the run with the box unticked
+        # computes this fingerprint, and it is the approval's.
+        assert approval.recognition == recognition_fingerprint(
+            project_tokens=(), template_id=PROGRESS_REPORT.template_id,
+            template_version=PROGRESS_REPORT.version, ocr_ran=False,
+            skip_images_on_text_pages=False)
+
+        window.setup._skip_images.setChecked(False)
+        hint = window.setup._tokens_hint.text()
+        assert "still apply" in hint and "NO LONGER APPLY" not in hint, hint
+    finally:
+        window.close()
 
 
 def _no_horizontal_overflow(screen) -> bool:

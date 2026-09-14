@@ -442,9 +442,15 @@ class MainWindow(QMainWindow):
         Every scope, not a count and the first one: a retained set can hold
         approvals reviewed under different token sets, and describing them all
         as the first one's scope is A-R2-1.
+
+        A scope is the project names AND the picture setting each approval was
+        reviewed under (A-25), as the pipeline recorded it. Publishing the names
+        alone let the screen say an approval "still applies" after the picture
+        box was flipped, and the run then refused it (D-51 review finding 1).
         """
         self.setup.set_retained_scopes(
-            tuple(tuple(a.project_tokens) for a in self._approvals))
+            tuple((tuple(a.project_tokens), a.skip_images_on_text_pages)
+                  for a in self._approvals))
 
     def start_run(self, request: RunRequest) -> None:
         if self.thread_running():

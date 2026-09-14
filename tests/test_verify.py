@@ -244,6 +244,37 @@ def test_the_determinism_report_says_which_REGIME_produced_it():
     assert '"concurrency": 4' in determinism.prove_json(con)
 
 
+def test_the_determinism_repetition_reads_the_images_on_text_pages(tmp_path):
+    """D-51 review finding 3. A run skips the pictures on pages that also carry
+    a text layer unless told otherwise (A-25), and the determinism runner took
+    that default -- so no repeated run ever routed a page MIXED, and A-24's
+    region OCR had no repeat-run proof. Injected nondeterminism in the image
+    merge passed the proof as shipped.
+
+    One real repetition, through the runner the selftest and the packaged
+    launcher both execute, over the page that is both. Its own processing log
+    must say it read the pictures, and the page must be MIXED.
+
+    FAIL-BEFORE: the log recorded ``skip_images_on_text_pages: true`` and the
+    page was NATIVE.
+    """
+    import shutil
+
+    from dociq.verify import determinism
+
+    src = tmp_path / "src"
+    src.mkdir()
+    shutil.copyfile(FIXTURES / "15_mixed_content_page.pdf", src / "mixed.pdf")
+    out = tmp_path / "run00"
+    err = determinism._one_run(src, out, "1")
+    assert err is None, err
+
+    log = json.loads((out / "processing_log.json").read_text(encoding="utf-8"))
+    assert log["content"]["config"]["skip_images_on_text_pages"] is False
+    (doc,) = log["content"]["documents"]
+    assert doc["page_kinds"] == {"mixed": 1}, doc["page_kinds"]
+
+
 def test_concurrency_is_carried_into_the_report_not_silently_dropped(
     tmp_path, monkeypatch
 ):

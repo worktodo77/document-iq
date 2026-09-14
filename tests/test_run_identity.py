@@ -234,6 +234,32 @@ def test_the_processing_log_records_whether_images_on_text_pages_were_read(outco
     assert recorded is True
 
 
+def test_a_reading_run_logs_that_it_read_the_images_on_text_pages(tmp_path):
+    """D-51 review finding 5. The test above runs with OCR off, where the true
+    value is ``True`` whatever the code does, so a log that hard-coded ``True``
+    passed it. A run that READS the pictures -- OCR on, the setting off -- is
+    the one run whose correct entry is ``False``.
+    """
+    import shutil
+
+    src = tmp_path / "src"
+    src.mkdir()
+    shutil.copyfile(FIXTURES / "15_mixed_content_page.pdf", src / "mixed.pdf")
+    outcome = pipeline.run(
+        RunConfig(source_root=str(src), output_root=str(tmp_path / "out"),
+                  ocr_engine_version=ex.ocr_engine_version(),
+                  skip_images_on_text_pages=False),
+        pipeline.PipelineOptions(
+            walk=walker.WalkOptions(ocr_enabled=True, resume=False),
+            matter_name="reading run", stamp=STAMP),
+    )
+    assert outcome.result.documents[0].pages[0].kind.value == "mixed"
+    data = json.loads(
+        outcome.layout.processing_log.read_text(encoding="utf-8")
+    )
+    assert data["content"]["config"]["skip_images_on_text_pages"] is False
+
+
 # ---------------------------------------------------------------------------
 # The OCR model identity is the bytes, not just the version
 # ---------------------------------------------------------------------------

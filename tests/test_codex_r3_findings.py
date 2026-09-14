@@ -99,12 +99,17 @@ def test_a_r3_1_the_default_path_also_completes_with_an_approval():
         shutil.rmtree(out, ignore_errors=True)
 
 
+_ONE_MV32_SCOPE = ((("MV32",), True),)
+"""One retained approval: reviewed under ``MV32`` with the picture box ticked,
+as the box stands (A-25 made a scope the names AND the picture setting)."""
+
+
 def test_a_r3_2_withdrawing_the_last_approval_clears_the_message(app):
     """The empty case returned early without clearing what it had written, so
     the screen went on claiming an approval after the collection was empty."""
     window = MainWindow(MockPipeline())
     try:
-        window.setup.set_retained_scopes((("MV32",),))
+        window.setup.set_retained_scopes(_ONE_MV32_SCOPE)
         window.setup._tokens.setText("MV32")
         assert "still apply" in window.setup._tokens_hint.text()
 
@@ -120,7 +125,7 @@ def test_a_r3_2_the_stale_message_is_cleared_from_either_prior_state(app):
     approvals still applied or that they no longer did."""
     window = MainWindow(MockPipeline())
     try:
-        window.setup.set_retained_scopes((("MV32",),))
+        window.setup.set_retained_scopes(_ONE_MV32_SCOPE)
         window.setup._tokens.setText("BOMESC")
         assert "NO LONGER APPLY" in window.setup._tokens_hint.text()
 
@@ -140,7 +145,7 @@ def test_a_r3_2_clearing_approvals_does_not_erase_the_proposal_guidance(app):
         proposal_hint = window.setup._tokens_hint.text()
         assert "No project names found" in proposal_hint
 
-        window.setup.set_retained_scopes((("MV32",),))
+        window.setup.set_retained_scopes(_ONE_MV32_SCOPE)
         assert "approval" in window.setup._tokens_hint.text().lower()
 
         window.setup.set_retained_scopes(())

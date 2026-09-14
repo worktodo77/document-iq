@@ -179,8 +179,19 @@ def test_b_r2_1_behaviorally_identical_spellings_still_mint_one_identity():
 # --- A-R2-1 ----------------------------------------------------------------
 
 def _window_with(approvals):
+    """The window holds the SEAM's approval record, so the Stage-4 records are
+    converted, every field the two share; the picture setting stays unrecorded
+    (None), so these tests remain about the project names alone. Handing the
+    window the Stage-4 record worked only while the window read nothing the two
+    records do not share."""
+    from dociq.gui.pipeline import OmissionApproval  # noqa: PLC0415
+
+    shared = ({f.name for f in dataclasses.fields(OmissionApproval)}
+              & {f.name for f in dataclasses.fields(ApprovedOmission)})
     window = MainWindow(MockPipeline())
-    window._approvals = tuple(approvals)
+    window._approvals = tuple(
+        OmissionApproval(**{name: getattr(a, name) for name in shared})
+        for a in approvals)
     window._publish_retained_approvals()
     return window
 
@@ -359,9 +370,17 @@ def test_an_approval_given_against_pre_a24_recognition_is_refused():
     v1 -> v2, and an approval carrying a v1 fingerprint is refused rather than
     applied to pages it was never reviewed against.
 
-    The v1 value is rebuilt here from the v1 recipe, independently of the
+    The reference is rebuilt here from the recipe, independently of the
     function under test. A test that asked the function for "the old value" would
     pass whatever the function did.
+
+    **It is the CURRENT recipe with the version set to v1**, so the version is
+    the only part in which it differs from this run's fingerprint. A-25 added a
+    part to the recipe, and a reference built from the pre-A-25 recipe then
+    differed in two parts: with the version reverted to v1 it still differed,
+    and the test passed a change it exists to catch (D-51 review, M20). The
+    same recipe with v2 must reproduce the function's value, or "only the
+    version differs" is an assumption rather than a fact.
     """
     import hashlib
 
@@ -375,14 +394,19 @@ def test_an_approval_given_against_pre_a24_recognition_is_refused():
     from dociq.sections.normalize import family_key  # noqa: PLC0415
     from tests.test_codex_r1_findings import _document  # noqa: PLC0415
 
-    v1_parts = ("v1", ",".join(canonical_tokens(())), PROGRESS_REPORT.template_id,
-                PROGRESS_REPORT.version, "ocr")
-    reviewed_before_a24 = hashlib.sha256(
-        "\x1f".join(v1_parts).encode("utf-8")).hexdigest()[:32]
+    def recipe(version: str) -> str:
+        parts = (version, ",".join(canonical_tokens(())),
+                 PROGRESS_REPORT.template_id, PROGRESS_REPORT.version,
+                 "ocr", "images")
+        return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:32]
+
     run_now = recognition_fingerprint(
         project_tokens=(), template_id=PROGRESS_REPORT.template_id,
         template_version=PROGRESS_REPORT.version, ocr_ran=True,
         skip_images_on_text_pages=False)
+    assert recipe("v2") == run_now, (
+        "the test's recipe is not the function's, so it isolates nothing")
+    reviewed_before_a24 = recipe("v1")
     assert reviewed_before_a24 != run_now, (
         "the fingerprint did not move when A-24 changed what recognition reads")
 

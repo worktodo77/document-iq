@@ -198,13 +198,20 @@ def apply_sections(
                 if run_recognition else
                 "a recorded recognition configuration and this run states none"
             )
+            # What can differ is named, the picture setting among it (D-51
+            # review finding 1): the fingerprint alone cannot say which input
+            # moved, and an operator told only "a different recognition
+            # configuration" cannot find the box that moved it.
             warnings.append(
                 f"omission of {approval.family_id!r} was approved against "
                 f"{approved_under} — it was NOT applied and no page was "
                 "dropped for it. What a section is recognized as decides which "
-                "pages an approval reaches, so an approval given under one "
-                "recognition is not an approval under another: re-run and "
-                "review the sections again before approving."
+                "pages an approval reaches, and it changes with the project "
+                "names, the template, whether OCR ran, and the quick first pass "
+                "setting (whether pictures on pages that also have typed text "
+                "were skipped), so an approval given under one recognition is "
+                "not an approval under another: re-run and review the sections "
+                "again before approving."
             )
             continue
         if canonical_tokens(approval.project_tokens) != canon_tokens:

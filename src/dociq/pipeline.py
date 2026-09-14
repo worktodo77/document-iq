@@ -1283,10 +1283,13 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
         limits=walker.effective_limits(opts.walk, ocr_enabled=ocr_ran),
         ocr_engine=config.ocr_engine if ocr_ran else OCR_DISABLED,
         ocr_engine_version=config.ocr_engine_version if ocr_ran else "",
-        # A-25 (D-51). Stamped the way the engine is, as what the run DID: a run
+        # A-25 (D-51). Stamped the way the engine is, from the OCR SETTING: a run
         # with OCR off reads no image on any page, so it records the skip
         # whatever it was asked, and two runs that read the same text do not
-        # present two configurations. Set here and only here; the walk reads it
+        # present two configurations. Like the engine fields, it cannot see an
+        # engine that is enabled and then found missing: that run records the
+        # setting it was given, and its notes say OCR was unavailable. Set here
+        # and only here; the walk reads it
         # from this config. A second source on `WalkOptions` is the shape the
         # comment above had to unpick for OCR itself.
         skip_images_on_text_pages=config.skip_images_on_text_pages or not ocr_ran,
@@ -1488,7 +1491,9 @@ def run(config: RunConfig, options: PipelineOptions | None = None) -> PipelineOu
                 # failed to use it.
                 ocr_ran=ocr_ran,
                 # A-25. The effective value stamped on walk_config, for the
-                # same reason: it is what the walk actually did.
+                # same reason: it is the setting the walk ran under. Hard-coded
+                # here, every test stayed green until one ran OCR on, reading
+                # on, with an approval (D-51 review finding 2).
                 skip_images_on_text_pages=walk_config.skip_images_on_text_pages,
             ),
             # The matter this run is FOR, so Stage 4 can refuse an approval

@@ -25,6 +25,10 @@ the boundary is worth stating precisely rather than discovering later.
 * The **fixture corpus**, whose OCR pages are synthetic and whose text layer is
   authored — every byte of every deliverable, over ``runs`` repetitions with a
   varied ``PYTHONHASHSEED`` each, compared through :mod:`dociq.verify.manifest`.
+* **Reading the images on text pages** (A-24's region OCR and merge): each
+  repetition turns the reading on explicitly, because a run skips those images
+  unless told otherwise (A-25). A run that SKIPS them is not repeated here; the
+  selftest checks its routing and disclosure once.
 * **Concurrency**, when the caller asks for it: ``prove(..., concurrency=N)``
   runs the repetitions simultaneously, so the pipeline meets the regime the
   2026-08-02 acceptance run documented as behaving differently — 2 per-file
@@ -112,8 +116,14 @@ from dociq import pipeline
 from dociq.operator import OperatorStamp
 
 src, out = sys.argv[1], sys.argv[2]
+# READING the images on text pages, stated rather than defaulted (A-25). The
+# default skips them, and a proof that took it never routed a page MIXED: A-24's
+# region OCR and its merge had no repeat-run proof, and nondeterminism injected
+# there passed (D-51 review finding 3). The skipping default keeps its own
+# checks in the selftest.
 cfg = RunConfig(source_root=src, output_root=out,
-                ocr_engine_version=ex.ocr_engine_version())
+                ocr_engine_version=ex.ocr_engine_version(),
+                skip_images_on_text_pages=False)
 # A FIXED operator stamp. The stamp reaches only the log's `run` section, the
 # summary PDF and the profile copy — none of which are inside the claim — but
 # pinning it means a diff anywhere in the deterministic set is unambiguously a

@@ -275,6 +275,12 @@ def test_a_skipped_image_is_disclosed_apart_from_a_disabled_or_missing_engine(
                                         skip_images_on_text_pages=False))
     monkeypatch.setattr(ex, "ocr_available", lambda: False)
     unavailable = _pages("15_mixed_content_page.pdf", _reading())
+    # The skip is decided BEFORE the engine check: a run that reads nothing
+    # needs no engine to say so. Gated on the engine instead, an install
+    # without its models would report "unavailable" for a page the operator
+    # chose to skip, and point them at the wrong remedy (D-51 review, M11).
+    skipped_no_engine = _pages("15_mixed_content_page.pdf",
+                               ex.ExtractOptions(skip_images_on_text_pages=True))
 
     sentences = [unread(g) for g in (skipped, disabled, unavailable)]
     assert all(len(s) == 1 for s in sentences), sentences
@@ -282,6 +288,15 @@ def test_a_skipped_image_is_disclosed_apart_from_a_disabled_or_missing_engine(
         "a skipped image, OCR disabled and a missing engine read as one "
         f"disclosure: {sentences}")
     assert "page(s) 1" in sentences[0][0], sentences[0][0]
+    assert unread(skipped_no_engine) == sentences[0], (
+        "with no OCR engine, a skipping run did not say it skipped: "
+        f"{skipped_no_engine.notes}")
+    assert skipped_no_engine.pages[0].notes == (ex.M_IMAGE_SKIPPED,)
+    # `_page_image_share` SUMS a page's images, so the sentences say "image
+    # content covering"; "an image covering" claimed one image did (D-51 review).
+    for sentence in (sentences[0][0], sentences[1][0]):
+        assert "image content covering 25% or more" in sentence, sentence
+        assert "an image covering" not in sentence, sentence
 
     page = skipped.pages[0]
     assert page.kind is PageKind.NATIVE
@@ -289,6 +304,206 @@ def test_a_skipped_image_is_disclosed_apart_from_a_disabled_or_missing_engine(
     assert "NOTICEOFDELAYNo14" not in page.text
     for other in (disabled, unavailable):
         assert ex.M_IMAGE_SKIPPED not in other.pages[0].notes
+
+
+def _mixed_page(c, words: str) -> None:
+    """A letterhead in the text layer beside a chart-sized image (~32% of the
+    page) carrying ``words`` -- fixture 15's page, as one page of a longer file."""
+    from PIL import Image, ImageDraw
+    from reportlab.lib.utils import ImageReader
+
+    y = 760
+    for line in ["CONFIDENTIALITY LEGEND: FOR INTERNAL USE ONLY",
+                 "SYNTHETIC CONTRACTOR LTD MONTHLY REPORT LETTERHEAD"]:
+        c.drawString(60, y, line)
+        y -= 18
+    img = Image.new("L", (1240, 700), 255)
+    tile = Image.new("L", (620, 40), 255)
+    ImageDraw.Draw(tile).text((4, 8), words, fill=0)
+    img.paste(tile.resize((1116, 72), Image.LANCZOS), (60, 80))
+    c.drawImage(ImageReader(img), 40, 40, width=530, height=300)
+    c.showPage()
+
+
+def test_the_skip_notes_name_exactly_the_skipped_pages_of_a_longer_pdf(tmp_path):
+    """D-51 review finding 4. Every skip-note test used fixture 15, one page, so
+    a note stamped on every page of the document and a page list cut to its first
+    entry both survived the whole suite. Four pages, in the order a production
+    has them: a typed transmittal, a letterhead over a chart, a scan, another
+    letterhead over a chart.
+    """
+    import make_fixtures as mf
+
+    path = tmp_path / "four_pages.pdf"
+    c = mf._pdf_canvas(path)
+    mf._text_page(c, ["TRANSMITTAL 2024-07-16",
+                      "Attached: one scanned instruction sheet and two reports."])
+    _mixed_page(c, "NOTICE OF DELAY No 14")
+    mf._image_page(c, ["SITE INSTRUCTION 015", "DATED 2024-07-17"])
+    _mixed_page(c, "NOTICE OF DELAY No 15")
+    c.save()
+
+    got = ex.extract(path.name, path.read_bytes())
+    assert [p.kind for p in got.pages] == [
+        PageKind.NATIVE, PageKind.NATIVE, PageKind.OCR, PageKind.NATIVE]
+    marked = [p.page_no for p in got.pages if ex.M_IMAGE_SKIPPED in p.notes]
+    assert marked == [2, 4], marked
+    (note,) = [n for n in got.notes if n.startswith(ex.M_IMAGE_UNREAD)]
+    assert note.startswith(f"{ex.M_IMAGE_UNREAD}: 2 page(s) "), note
+    assert note.endswith("page(s) 2, 4"), note
+
+
+# ---------------------------------------------------------------------------
+# D-54: a scan that carries a typed stamp is still read in the quick pass
+# ---------------------------------------------------------------------------
+
+_STAMP = "HIGHLY CONFIDENTIAL - ATTORNEYS EYES ONLY  ABC 000123"
+"""A 52-character electronic endorsement: over ``_NATIVE_TEXT_FLOOR``, so the
+page is not OCR'd whole, which is what made a stamp decide whether it was read."""
+
+_A4 = (595.0, 842.0)
+
+
+def _stamped_pdf(path, pages) -> None:
+    """One PDF page per entry of ``pages``: each entry is a list of image rects
+    ``(x, y, w, h)`` in points, every image carrying its OWN words (identical
+    image bytes are stored once and measured once), and the stamp in the text
+    layer."""
+    import make_fixtures as mf
+    from PIL import Image, ImageDraw
+    from reportlab.lib.utils import ImageReader
+
+    c = mf._pdf_canvas(path)
+    n = 0
+    for rects in pages:
+        c.setPageSize(_A4)
+        for x, y, w, h in rects:
+            img = Image.new("L", (1240, max(200, int(1240 * h / w))), 255)
+            tile = Image.new("L", (620, 40), 255)
+            ImageDraw.Draw(tile).text((4, 8), f"SITE INSTRUCTION 0{n:02d}", fill=0)
+            img.paste(tile.resize((1116, 72), Image.LANCZOS), (40, 60))
+            c.drawImage(ImageReader(img), x, y, width=w, height=h)
+            n += 1
+        c.drawString(40, 20, _STAMP)
+        c.showPage()
+    c.save()
+
+
+def _share(raw: bytes, index: int = 0) -> float:
+    import fitz  # pymupdf
+
+    with fitz.open(stream=raw, filetype="pdf") as doc:
+        return ex._page_image_share(doc[index])[0]
+
+
+def _read_as_a_reading_run(name: str, raw: bytes):
+    """Extract with the default (skipping) options, and assert the result is
+    byte-for-byte what a reading run produces: same pages, same notes. D-54
+    reads the page "exactly as a reading run reads it", D-49's locator rule
+    included, so anything short of equality is a second reading path."""
+    default = ex.extract(name, raw)
+    reading = ex.extract(name, raw, _reading())
+    assert default.pages == reading.pages
+    assert default.notes == reading.notes
+    return default
+
+
+def test_the_scan_threshold_is_named_and_is_d54s():
+    """D-54 proposed 90% and required it be stated in code; the MIXED threshold
+    it sits above is Tier 3's 25%."""
+    assert ex._SCAN_MIN_IMAGE_SHARE == 0.90
+    assert ex._SCAN_MIN_IMAGE_SHARE > ex.PHOTO_MIN_IMAGE_AREA_SHARE
+
+
+def test_a_full_page_scan_with_a_typed_stamp_is_read_on_a_default_run(tmp_path):
+    """The review's ``endorsed_long.pdf`` shape. A full-page scan with a 52-
+    character endorsement in its text layer came out NATIVE on a default run,
+    its text the endorsement alone -- while the same scan with no stamp, or a
+    stamp under 40 characters, is OCR'd whole. D-54: read it.
+
+    FAIL-BEFORE: NATIVE, the skip note, and none of the scan's words.
+    """
+    path = tmp_path / "endorsed_long.pdf"
+    _stamped_pdf(path, [[(0, 0, *_A4)]])
+    raw = path.read_bytes()
+    assert _share(raw) == 1.0
+
+    got = _read_as_a_reading_run(path.name, raw)
+    page = got.pages[0]
+    assert page.kind is PageKind.MIXED, (page.kind, page.notes, got.notes)
+    assert "SITEINSTRUCTION" in page.text.replace(" ", ""), page.text
+    assert ex.M_IMAGE_SKIPPED not in page.notes
+    # D-49, unchanged: the locator comes from the text layer alone.
+    assert page.image_line_span is not None
+    assert page.locator_text.strip() == _STAMP
+    assert not any("skips images" in n for n in got.notes), got.notes
+
+
+@pytest.mark.parametrize("offset, read", [(-0.005, False), (0.0, True)],
+                         ids=["just-below", "at"])
+def test_the_scan_threshold_boundary(tmp_path, offset, read):
+    """Built from the constant, so each page sits where its name says; the share
+    is measured before the extraction is asserted, so a builder that misses the
+    boundary fails as a builder rather than passing as a test."""
+    share_wanted = ex._SCAN_MIN_IMAGE_SHARE + offset
+    path = tmp_path / "boundary.pdf"
+    _stamped_pdf(path, [[(0, 0, _A4[0] * share_wanted, _A4[1])]])
+    raw = path.read_bytes()
+    share = _share(raw)
+    assert share == pytest.approx(share_wanted)
+    assert (share >= ex._SCAN_MIN_IMAGE_SHARE) is read
+    assert share >= ex.PHOTO_MIN_IMAGE_AREA_SHARE
+
+    if read:
+        page = _read_as_a_reading_run(path.name, raw).pages[0]
+        assert page.kind is PageKind.MIXED, (page.kind, page.notes)
+    else:
+        got = ex.extract(path.name, raw)
+        page = got.pages[0]
+        assert page.kind is PageKind.NATIVE
+        assert page.notes == (ex.M_IMAGE_SKIPPED,)
+        assert page.text.strip() == _STAMP
+
+
+def test_image_content_summed_from_several_images_counts_as_a_scan(tmp_path):
+    """``_page_image_share`` SUMS the page's images. Four images, none covering
+    even the 25% that makes a page MIXED on its own, together cover 95% of the
+    page -- a scan assembled from tiles -- and the page is read.
+
+    FAIL-BEFORE: skipped, NATIVE.
+    """
+    import fitz  # pymupdf
+
+    w, h = _A4[0] / 2 * 0.975, _A4[1] / 2 * 0.975
+    tiles = [(0, 0, w, h), (_A4[0] / 2, 0, w, h),
+             (0, _A4[1] / 2, w, h), (_A4[0] / 2, _A4[1] / 2, w, h)]
+    path = tmp_path / "tiled_scan.pdf"
+    _stamped_pdf(path, [tiles])
+    raw = path.read_bytes()
+    with fitz.open(stream=raw, filetype="pdf") as doc:
+        page0 = doc[0]
+        own = [abs(page0.get_image_bbox(info).get_area()) / abs(page0.rect.get_area())
+               for info in page0.get_images(full=True)]
+    assert len(own) == 4 and all(s < ex.PHOTO_MIN_IMAGE_AREA_SHARE for s in own), own
+    assert _share(raw) >= ex._SCAN_MIN_IMAGE_SHARE
+
+    page = _read_as_a_reading_run(path.name, raw).pages[0]
+    assert page.kind is PageKind.MIXED, (page.kind, page.notes)
+
+
+def test_in_one_document_the_scan_is_read_and_only_the_chart_page_is_skipped(
+        tmp_path):
+    """The rule is per page. A stamped scan and a letterhead over a chart in one
+    file: the scan is read, the chart page is skipped, and the document note
+    counts and names the chart page alone."""
+    path = tmp_path / "scan_and_chart.pdf"
+    _stamped_pdf(path, [[(0, 0, *_A4)], [(40, 40, 530, 300)]])
+    got = ex.extract(path.name, path.read_bytes())
+    assert [p.kind for p in got.pages] == [PageKind.MIXED, PageKind.NATIVE]
+    assert [p.page_no for p in got.pages if ex.M_IMAGE_SKIPPED in p.notes] == [2]
+    (note,) = [n for n in got.notes if n.startswith(ex.M_IMAGE_UNREAD)]
+    assert note.startswith(f"{ex.M_IMAGE_UNREAD}: 1 page(s) "), note
+    assert note.endswith("page(s) 2"), note
 
 
 def test_empty_page_is_still_a_page():

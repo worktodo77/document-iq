@@ -281,10 +281,16 @@ def test_the_estimate_is_absent_for_the_fixture_corpus():
 
 def test_no_estimate_for_a_run_that_reads_images_on_text_pages():
     """A-25 (D-51). Both measured rates were timed before A-24 read a single
-    image on a text page, so they describe a run that SKIPS those images. On a
-    timed sample of 12 documents reading them made extraction 3.44 times as long,
-    and the whole-corpus cost is not measured -- so a run that reads them gets
-    the seam's documented "no estimate" rather than the old figure.
+    image on a text page. On a timed sample of 12 documents reading every such
+    image made extraction 3.44 times as long as reading none, and the
+    whole-corpus cost is not measured -- so a run that reads them gets the
+    seam's documented "no estimate" rather than the old figure.
+
+    The rates are NOT exactly a quick first pass's either: D-54 has the quick
+    pass read a full-page scan that carries a typed stamp, and the timed runs
+    read none. The basis sentence said the OCR-on rate "times a run that skips
+    them"; it now says what the run read and that the difference is unmeasured
+    (D-51 review wording finding).
 
     FAIL-BEFORE: the helper had no such setting and answered 79 for this folder
     whatever the run was about to do.
@@ -298,7 +304,10 @@ def test_no_estimate_for_a_run_that_reads_images_on_text_pages():
     # With OCR off no image is read either way, so the OCR-off rate stands.
     assert adapter._minutes_for(two_gb, sized, ocr_enabled=False,
                                 skip_images_on_text_pages=False) == 39
-    assert "skips them" in adapter.measured_basis(True)
+    basis = adapter.measured_basis(True)
+    assert "times a run that skips them" not in basis, basis
+    assert "full-page scans that carry a typed stamp" in basis, basis
+    assert "not measured" in basis, basis
 
 
 @pytest.mark.parametrize("ocr, expected", [(True, (40, 0)), (False, (20, 20))])

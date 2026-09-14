@@ -312,8 +312,9 @@ def test_b1_editing_the_tokens_warns_that_retained_approvals_no_longer_apply(app
         window.setup._tokens.setText("MV32")
         # Three approvals, all reviewed under the same scope. The API takes one
         # scope PER APPROVAL rather than a count and an exemplar: describing a
-        # mixed set by its first member was Codex round 2, A-R2-1.
-        window.setup.set_retained_scopes((("MV32",),) * 3)
+        # mixed set by its first member was Codex round 2, A-R2-1. A scope is
+        # the names and the picture setting (A-25); True matches the box.
+        window.setup.set_retained_scopes(((("MV32",), True),) * 3)
         assert "still apply" in window.setup._tokens_hint.text()
 
         window.setup._tokens.setText("MV32, BOMESC")
