@@ -84,7 +84,7 @@ class FolderPreview:
     **For a run that skips the images on text pages** (A-25), the closest of
     the two runs to the ones timed. Those read no image on any page with a text
     layer; a quick first pass still reads a scan whose image content covers
-    nearly the whole page (D-54), so over a production of stamped scans this
+    90% or more of the page (D-54), so over a production of stamped scans this
     figure may be low, by an amount not measured."""
 
     estimated_minutes_reading_images: int = 0
@@ -92,7 +92,8 @@ class FolderPreview:
 
     With OCR on it is zero, "no estimate", until such a run is measured: on a
     timed sample of 12 documents reading every such image made extraction 3.44
-    times as long as reading none, and the whole-corpus cost is not known.
+    times as long as reading none (measured under D-49 in the decision
+    register), and the whole-corpus cost is not known.
     **With OCR off it is the OCR-off rate, the same as** ``estimated_minutes``:
     no image is read either way, so there is nothing unmeasured to refuse. The
     setup screen shows whichever figure its checkbox describes, so which rate
@@ -575,10 +576,11 @@ class OmissionApproval:
 
     A seam record rather than :class:`dociq.sections.model.ApprovedOmission`
     itself, because the freeze forbids the GUI reaching into the pipeline's
-    packages — the adapter converts. The fields are the same fields, and they
-    are all of them: an approval that reached a screen without its approver, or
-    without the matter it was given on, would be exactly the half-record D-34
-    says must not exist.
+    packages — the adapter converts. Every field of that record is here: an
+    approval that reached a screen without its approver, or without the matter
+    it was given on, would be exactly the half-record D-34 says must not exist.
+    One field is here that it lacks, :attr:`skip_images_on_text_pages`, which is
+    for the setup screen and is not carried to Stage 4.
 
     **The GUI never constructs one.** It asks the pipeline to record an approval
     and is handed this back. That is what keeps ``approved_by`` and
@@ -673,11 +675,12 @@ class RunRequest:
     produce different corpora. It is an input; it travels with the inputs."""
 
     skip_images_on_text_pages: bool = SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT
-    """The setup screen's quick-pass switch (A-25, D-51): leave unread the
-    pictures on pages that also carry typed text, though never a scan whose
-    image content covers nearly the whole page (D-54). Ticked unless the operator
-    unticks it. :func:`config_from` copies it into the run configuration, so it
-    is hashed into the run identity rather than held by an adapter."""
+    """The setup screen's quick-pass switch (A-25, D-51): leave unread image
+    content covering 25% or more of a page that also carries typed text, though
+    not image content covering 90% or more, which is read as a scan (D-54).
+    Ticked unless the operator unticks it. :func:`config_from` copies it into
+    the run configuration, so it is hashed into the run identity rather than
+    held by an adapter."""
 
 
 @dataclass(frozen=True, slots=True)

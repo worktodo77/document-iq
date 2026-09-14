@@ -290,7 +290,8 @@ Also under 2.3.0, amendment A-25, from Alex's ruling D-51 on 2026-09-11:
 :data:`SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT` to SKIP, and
 :func:`recognition_fingerprint` gains it as a required argument. A-24 made DocIQ
 read the images on pages that also carry a text layer, and on a timed sample of
-12 documents that made extraction 3.44 times as long; the switch lets a run skip
+12 documents that made extraction 3.44 times as long (measured under D-49 in the
+decision register); the switch lets a run skip
 the reading, and a run skips it unless told otherwise. Folded into 2.3.0 rather
 than bumped to 2.4.0, as D-49's field was, because 2.3.0 has not left the
 branch: no released build wrote an identity under it, and a 2.4.0 would record a
@@ -307,13 +308,23 @@ chose. The same holds for ``set_omission`` on the GUI seam.
 
 What the setting skips, as built after Alex's ruling D-54 of 2026-09-14: image
 content covering ``PHOTO_MIN_IMAGE_AREA_SHARE`` (25%) or more of a page, summed
-over its images, beside a text layer -- EXCEPT a page whose image content covers
-90% or more (``_SCAN_MIN_IMAGE_SHARE`` in the extractor). That page is a scan,
-and it is read exactly as a reading run reads it, MIXED with D-49's locator rule,
-however long the typed stamp in its text layer is. Without the exception a
-52-character endorsement decided that a full-page scan went unread. D-54 needed
-no new contract input: the setting is the same field with the same meaning, and
-what it skips changed inside this unreleased 2.3.0.
+over every image the page draws, beside a text layer -- EXCEPT a page whose image
+content covers 90% or more (``_SCAN_MIN_IMAGE_SHARE`` in the extractor). That
+page is a scan, and it is read exactly as a reading run reads it, MIXED with
+D-49's locator rule, however long the typed stamp in its text layer is. Without
+the exception an endorsement over the text floor decided that a full-page scan
+went unread. D-54 needed no new contract input: the setting is the same field
+with the same meaning, and what it skips changed inside this unreleased 2.3.0.
+Neither setting reads image content covering less than 25% of a page that has a
+text layer; that is A-24's threshold, and no note names such a page.
+
+Also inside the unreleased 2.3.0, from D-51's second review round: A-24's
+region OCR read a text layer twice wherever an image lay UNDER it (a letter on
+full-page stationery, a stamp typed over a scan, a searchable scan's OCR layer),
+and measured an image drawn twice, or stored inline, as a thumbnail or as
+nothing. The extractor now paints the text layer's own word boxes out of the
+rendering before cutting any crop, and measures and crops every draw. No field
+changes; what a page's text holds does, which is why it is recorded here.
 
 1.9.0 — amendment A-19, extended, from Codex review r2's finding B-2. :class:`OmissionSnapshot`
 gains ``matter_root`` and :func:`matter_key` is added.
@@ -1188,11 +1199,14 @@ SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT = True
 when nobody said (amendment A-25, from D-51).
 
 **Skip, by Alex's clarification of D-51.** A-24 made DocIQ read those images, and
-on a timed sample of 12 documents (645 pages, 144 of them MIXED) extraction took
-3.44 times as long with the reading on; the whole-corpus cost is not measured. A
-run therefore takes a quick first pass unless the operator turns the reading on,
-and every page it leaves unread says so. A scan is not left unread: image content
-covering nearly the whole page is read even in the quick pass (D-54).
+on a timed sample of 12 documents (645 pages, 144 of them MIXED; measured under
+D-49 in the decision register) extraction took 3.44 times as long with the
+reading on; the whole-corpus cost is not measured. A run therefore takes a quick
+first pass unless the operator turns the reading on, and every page this setting
+leaves unread says so. Image content covering 90% or more of a page -- a scan,
+even one carrying a typed stamp -- is read even in the quick pass (D-54). Image
+content covering less than 25% of a page with a text layer is under A-24's
+threshold and is read, and named, by neither setting.
 
 **One constant, read by every record that declares a default.** :class:`RunConfig`,
 ``dociq.ingest.extract.ExtractOptions`` and the GUI's ``RunRequest`` each take
@@ -1306,16 +1320,18 @@ class RunConfig:
     unread in one run and MIXED with the chart's words in the other, and
     recognition can place it in a different family. It is a
     :func:`recognition_fingerprint` input for the reason whether OCR ran is.
-    ``True`` never skips a scan: image content covering nearly the whole page is
-    read either way (D-54).
+    ``True`` does not skip image content covering 90% or more of a page
+    (``_SCAN_MIN_IMAGE_SHARE`` in the extractor, D-54): that page is read either
+    way. Neither value reads image content covering less than 25% of a page
+    that has a text layer.
 
     **What** ``dociq.pipeline.run`` **records** is the value the run was given,
     forced to ``True`` when OCR is DISABLED, as it stamps the OCR engine: a run
     with OCR off reads no image either way. It is not a report of what was
     read. An enabled OCR whose engine turns out to be unavailable -- models
-    missing -- records ``False`` while reading no image, exactly as it records
-    the OCR engine it could not load; the document notes say the engine was
-    unavailable.
+    missing -- records the value it was given (``False`` for a run told to
+    read) while reading no image, exactly as it records the OCR engine it could
+    not load; the document notes say the engine was unavailable.
     Serialized like every other field, so adding it moved the run identity of
     every run, including runs that never set it, and a resume journal written
     before it is refused once."""

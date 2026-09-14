@@ -120,22 +120,22 @@ even by a run that skips the images on text pages (D-54).
 A text layer of ``_NATIVE_TEXT_FLOOR`` characters keeps a page off whole-page
 OCR, and image content covering ``PHOTO_MIN_IMAGE_AREA_SHARE`` makes it MIXED,
 which a quick first pass (A-25, D-51) leaves unread. Together they let a typed
-stamp decide whether a scan was read: a full-page scan carrying a 52-character
-endorsement came out NATIVE, its text the endorsement alone, while the same scan
-with no stamp -- or one under 40 characters -- was OCR'd whole. That is the
-defect D-48 recorded for protective-order legends, returned under D-51's
+stamp decide whether a scan was read: a full-page scan carrying an endorsement
+over the text floor came out NATIVE, its text the endorsement alone, while the
+same scan with no stamp -- or one under the floor -- was OCR'd whole. That is
+the defect D-48 recorded for protective-order legends, returned under D-51's
 default. Alex ruled D-54: read it. Such a page is read exactly as a reading run
 reads it -- MIXED, its image regions OCR'd, its Bates locator from the text
 layer alone (D-49) -- and only image content beside real typed content is
-skipped. 90% is the figure the ruling proposed; its corpus exposure is not yet
-counted.
+skipped. 90% is the figure the ruling proposed; what it reaches on the
+acceptance corpus is D-54's census, in the decision register, not a copy here.
 
-**The share is SUMMED.** :func:`_page_image_share` adds the areas of the page's
-images without de-overlapping them, capped at 1.0, so four tiles that each
-cover under a quarter of a page count as a scan when together they reach this.
-It measures each image OBJECT once: one image placed twice on a page counts at
-its first placement only, which is how a PDF writer that reuses identical image
-bytes stores them."""
+**The share is SUMMED.** :func:`_page_image_share` adds the areas of every image
+the page draws without de-overlapping them, capped at 1.0, so four tiles that
+each cover under a quarter of a page count as a scan when together they reach
+this. Every DRAW counts, not every image object: one image drawn twice (a
+thumbnail and the full page) counts at both placements, and a scan stored inline
+in the content stream counts like one stored as an object."""
 
 # ---------------------------------------------------------------------------
 # Degradation markers — the one list of "this document did not read cleanly"
@@ -780,36 +780,114 @@ def _ocr_pdf_pages(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
     return out
 
 
-def _pdf_image_rects(page) -> list[tuple[float, float, float, float]]:
-    """Every embedded raster image's box on one page, merged and in reading order.
+def _content_textpage(page, flags: int):
+    """The page's CONTENT STREAM, through MuPDF's text device, in the
+    coordinates of the page as rendered (rotation and CropBox applied).
 
-    Returns plain ``(x0, y0, x1, y1)`` tuples in PDF user space.
+    Content stream only, annotations excluded: the text layer the routing reads
+    is pypdf's, which reads no annotation, and the images A-24 has always
+    measured are the page's own. A display list built from the contents is
+    what gives both, in the same space :func:`_page_array` renders.
+    """
+    import fitz  # pymupdf
+
+    return fitz.TextPage(page.get_displaylist(annots=False).get_textpage(flags))
+
+
+def _image_placements(page) -> list[tuple[float, float, float, float]]:
+    """One box per image DRAWN on the page, in the rendered page's coordinates.
+
+    **Every draw, not every image object** (D-51 round-2 review). The earlier
+    enumeration listed the image objects in the page's resources and took each
+    one's FIRST placement, so an image drawn as a thumbnail and then as the full
+    page measured as a thumbnail, and its full-page scan went unread with no
+    note on either setting. It also could not see a scan written inline in the
+    content stream (``BI ... ID ... EI``), which is in no resource list: a page
+    like that measured as carrying no image at all. The text device reports each
+    draw -- inline images, images inside form XObjects and stencil masks included
+    -- and an image that is listed but never drawn, which puts nothing on the
+    page, is not reported. Raises when the page cannot be interpreted; each
+    caller decides what that discloses.
+    """
+    import fitz  # pymupdf
+
+    boxes: list[tuple[float, float, float, float]] = []
+    for info in _content_textpage(page, fitz.TEXT_PRESERVE_IMAGES).extractIMGINFO():
+        x0, y0, x1, y1 = info["bbox"]
+        boxes.append((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
+    return boxes
+
+
+def _text_layer_boxes(page) -> list[tuple[float, float, float, float]]:
+    """The box of every word of the page's text layer, visible or not, in the
+    rendered page's coordinates. See :func:`_mask_text_layer`."""
+    return [tuple(w[:4]) for w in _content_textpage(page, 0).extractWORDS()]
+
+
+def _mask_text_layer(page, arr, scale: float = 200.0 / 72.0) -> None:
+    """Paint the text layer's own word boxes white in ``arr``, a rendering of
+    ``page`` at ``scale`` pixels per point, in place (A-24, D-49).
+
+    Region OCR exists to read what the text layer does NOT already carry. A crop
+    is an image's box, and when the image lies UNDER the text layer that box
+    holds the text layer's own glyphs: a typed letter on full-page stationery,
+    a stamp typed over a scan, or a searchable scan whose OCR layer transcribes
+    the pixels beneath it. Read as they were, those glyphs came back twice, and
+    D-54 put that on the default run. Painting the boxes out before any crop is
+    cut is what makes the duplication impossible by construction rather than
+    filtered afterwards.
+
+    **Visible and invisible text are masked alike.** Visible text (any render
+    mode that paints) puts its own glyphs in the rendering, and the box removes
+    them. Invisible text (render mode 3) paints nothing; what lies under its box
+    is the image it transcribes, and the box removes that. Either way the words
+    come from the text layer once, and image content outside every box is still
+    read. **The bound, stated:** the text layer is trusted where it lies. Image
+    content under a word box is not read even if the word does not match it --
+    a searchable scan whose OCR layer is wrong or misplaced keeps the layer's
+    reading there -- and a glyph drawn outside its own box is read again. Box
+    edges round outward, so a partly covered pixel is covered.
+    """
+    import math
+
+    h, w = arr.shape[:2]
+    ox, oy = page.rect.x0, page.rect.y0
+    for x0, y0, x1, y1 in _text_layer_boxes(page):
+        c0 = max(0, math.floor((x0 - ox) * scale))
+        r0 = max(0, math.floor((y0 - oy) * scale))
+        c1 = min(w, math.ceil((x1 - ox) * scale))
+        r1 = min(h, math.ceil((y1 - oy) * scale))
+        if c1 > c0 and r1 > r0:
+            arr[r0:r1, c0:c1] = 255
+
+
+def _pdf_image_rects(page) -> list[tuple[float, float, float, float]]:
+    """Every image placement's box on one page, merged and in reading order.
+
+    Returns plain ``(x0, y0, x1, y1)`` tuples in the rendered page's
+    coordinates, one per :func:`_image_placements` draw before merging.
 
     **Overlaps are unioned, and that is load-bearing rather than tidy.**
     :func:`_page_image_share` records that overlapping images are deliberately
-    NOT de-overlapped there, because its number has to keep agreeing with a
-    published measurement. Here the consequence is different: two overlapping
-    images cropped separately hand the same glyphs to OCR twice, and the page
-    would carry the text twice. Merging first is what actually makes the
-    duplication A-24 exists to avoid impossible, rather than merely unlikely.
+    NOT de-overlapped there, because its number is an upper bound Tier 3 was
+    measured with. Here the consequence is different: two overlapping images
+    cropped separately hand the same pixels to OCR twice, and the page would
+    carry the text twice. Merging first is what keeps an image from being read
+    twice; :func:`_mask_text_layer` is what keeps the text layer from being read
+    again.
 
     **The order is total.** Sorting on ``(y0, x0)`` alone leaves ties broken by
-    the order PyMuPDF enumerated the page's resources in, which is not a reading
-    order and is not promised to be stable — and an unstable order here would
-    reorder text inside a page between runs, which is a determinism defect in
-    the one product whose headline claim is byte-identical repeat runs. The full
-    box is in the key, so two distinct boxes can never tie.
+    the order the draws were enumerated in, which is not a reading order — and
+    an unstable order here would reorder text inside a page between runs, which
+    is a determinism defect in the one product whose headline claim is
+    byte-identical repeat runs. The full box is in the key, so two distinct
+    boxes can never tie.
     """
     try:
-        raw_rects = [page.get_image_bbox(info) for info in page.get_images(full=True)]
+        placements = _image_placements(page)
     except Exception:
         return []
-    boxes: list[tuple[float, float, float, float]] = []
-    for r in raw_rects:
-        if r is None or abs(r.get_area()) <= 0:
-            continue
-        boxes.append((min(r.x0, r.x1), min(r.y0, r.y1),
-                      max(r.x0, r.x1), max(r.y0, r.y1)))
+    boxes = [b for b in placements if b[2] > b[0] and b[3] > b[1]]
 
     # Union every pair that overlaps, repeatedly, until nothing else merges.
     merged = True
@@ -894,7 +972,11 @@ def _ocr_pdf_regions(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
     is exactly the kind of bound this codebase is trying to stop shipping.
 
     Reading only the area the text layer does not cover makes the duplication
-    impossible by construction instead of filtered afterwards.
+    impossible by construction instead of filtered afterwards. Cropping to the
+    image regions alone did not do that: an image UNDER the text layer puts the
+    layer's glyphs inside its own crop. The rendering therefore has the text
+    layer's word boxes painted out first (:func:`_mask_text_layer`, which states
+    what that trusts), and the crops are cut from what is left.
 
     **The page is rendered ONCE and sliced**, for the reason ``_band_tiles``
     records: a per-region ``get_pixmap`` clip re-decodes the page's embedded
@@ -920,6 +1002,7 @@ def _ocr_pdf_regions(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
                         continue
                     dropped = max(0, len(rects) - _MIXED_MAX_REGIONS)
                     arr = _page_array(page)
+                    _mask_text_layer(page, arr, scale)
                     h, w = arr.shape[:2]
                     tiles = []
                     for r in rects[:_MIXED_MAX_REGIONS]:
@@ -1433,8 +1516,8 @@ def _photo_block(raw: bytes, n_pages: int,
 
 
 def _page_image_share(page) -> tuple[float, bool]:
-    """Share of one page covered by embedded raster images, and whether any
-    exist.
+    """Share of one page covered by the raster images it draws, and whether it
+    draws any.
 
     Transcribed from `tools/measure_sections.py`, deliberately including its
     limitation: overlapping images are not de-overlapped, so the share is an
@@ -1442,17 +1525,25 @@ def _page_image_share(page) -> tuple[float, bool]:
     the shipped engine has to agree with the measurement that justified it — a
     tidier implementation here would silently invalidate 1,308 pages of
     published number.
+
+    **Where it no longer agrees with that tool, on purpose** (D-51 round-2
+    review): it sums every DRAW (:func:`_image_placements`), where the tool took
+    each image object's first placement and saw no inline image. The tool's
+    reading left a full-page scan drawn after its own thumbnail, or stored
+    inline, measured as a thumbnail or as nothing, and unread with no note. The
+    acceptance-corpus pages the change moves were counted when it was made;
+    those figures belong to the decision register, not to this docstring.
     """
     try:
-        rects = [page.get_image_bbox(info) for info in page.get_images(full=True)]
+        boxes = _image_placements(page)
     except Exception:
         return 0.0, False
-    if not rects:
+    if not boxes:
         return 0.0, False
     page_area = abs(page.rect.get_area())
     if page_area <= 0:
         return 0.0, True
-    covered = sum(abs(r.get_area()) for r in rects if r is not None)
+    covered = sum((x1 - x0) * (y1 - y0) for x0, y0, x1, y1 in boxes)
     return min(covered / page_area, 1.0), True
 
 

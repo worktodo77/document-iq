@@ -255,9 +255,10 @@ def test_the_scope_and_the_time_sit_beside_the_action(window) -> None:
 def test_the_time_beside_the_action_follows_the_image_setting(window) -> None:
     """A-25 (D-51). The estimate comes from runs that read no picture on a text
     page, which is closest to a run that SKIPS them (not the same: the quick
-    pass still reads stamped scans, D-54). Untick the box and the run is a
-    different, unmeasured one, so the screen stops quoting a time for it -- and
-    quotes it again when the box is ticked back.
+    pass still reads a stamped scan whose image covers 90% or more of the page,
+    D-54). Untick the box and the run is a different, unmeasured one, so the
+    screen stops quoting a time for it -- and quotes it again when the box is
+    ticked back.
 
     FAIL-BEFORE: the preview carried one figure, shown whatever the run would do.
     """
@@ -274,21 +275,28 @@ def test_the_time_beside_the_action_follows_the_image_setting(window) -> None:
     assert box.isChecked(), "a run skips pictures on text pages unless told otherwise"
     assert "about 40 minutes" in window.setup._scope.text()
     help_text = " ".join(lab.text() for lab in window.setup.findChildren(QLabel))
-    # D-54 and the review's wording findings. A scan carrying a typed stamp is
+    # D-54 and the reviews' wording findings. A scan carrying a typed stamp is
     # still read, so the sentence that said only scans with NO typed text are
-    # read is withdrawn; and the 12-document timing compared reading every such
-    # picture with reading none, which is not what ticking the box saves.
-    for sentence in ("sit beside typed text on a page",
+    # read is withdrawn; the thresholds are stated, because "scanned pages are
+    # still read" was false for a stamped scan just under 90% and "the full
+    # reading" was false for a picture under a quarter of the page, which
+    # neither setting reads; and the 12-document timing (D-49) compared reading
+    # every such picture with reading none, which is not what ticking the box
+    # saves.
+    for sentence in ("cover a quarter or more of a page that also has typed text",
                      "lists every page it skipped as not read",
-                     "Scanned pages are still read, including scans that carry "
-                     "a typed stamp.",
+                     "A scan whose image covers 90% or more of its page is still "
+                     "read, even with a typed stamp.",
+                     "Pictures covering less than a quarter of a typed page are not "
+                     "read whether the box is ticked or not.",
                      "On a timed sample of 12 documents",
                      "about 3.4 times as long as reading none",
                      "the saving on a whole matter has not been measured",
-                     "Untick it for the full reading before relying on the results."):
+                     "Untick it to read those pictures before relying on the results."):
         assert sentence in help_text, sentence
-    assert "no typed text" not in help_text, (
-        "the help text still says a scan is read only when it has no typed text")
+    for withdrawn in ("no typed text", "Scanned pages are still read",
+                      "for the full reading"):
+        assert withdrawn not in help_text, withdrawn
 
     box.setChecked(False)
     assert "minutes" not in window.setup._scope.text()
@@ -374,6 +382,72 @@ def test_a_picture_setting_that_read_nothing_cannot_make_an_approval_stale(
         window.setup._skip_images.setChecked(False)
         hint = window.setup._tokens_hint.text()
         assert "still apply" in hint and "NO LONGER APPLY" not in hint, hint
+    finally:
+        window.close()
+
+
+_NAMES = "the project names"
+_PICTURES = "the quick first pass setting"
+
+
+@pytest.mark.parametrize(
+    "reviewed, field, box, applies, names_named, pictures_named",
+    [
+        ([(("ALPHA7",), True)], "ALPHA7, HARBOR2", True, 0, True, False),
+        ([(("ALPHA7",), True)], "ALPHA7", False, 0, False, True),
+        ([(("ALPHA7",), True)], "ALPHA7, HARBOR2", False, 0, True, True),
+        ([(("ALPHA7",), False), (("HARBOR2",), True)], "ALPHA7", True, 0, True, True),
+        ([(("HARBOR2",), True), (("ALPHA7",), False)], "ALPHA7", True, 0, True, True),
+        ([(("ALPHA7",), True), (("HARBOR2",), True)], "HARBOR2", True, 1, True, False),
+        ([(("ALPHA7",), False), (("ALPHA7",), True)], "ALPHA7", True, 1, False, True),
+        ([(("ALPHA7",), False), (("HARBOR2",), True), (("ALPHA7",), True)],
+         "ALPHA7", True, 1, True, True),
+        ([(("ALPHA7",), True), (("HARBOR2",), True), (("ALPHA7",), False)],
+         "ALPHA7", True, 1, True, True),
+        ([(("ALPHA7",), True), (("ALPHA7",), True)], "alpha7", True, 2, False, False),
+    ],
+    ids=["one-names-only", "one-box-only", "one-names-and-box",
+         "two-stale-pictures-first", "two-stale-names-first",
+         "partial-names", "partial-pictures",
+         "partial-pictures-names-applies", "partial-applies-names-pictures",
+         "all-apply"])
+def test_the_retained_approval_hint_names_exactly_the_reasons_that_are_true(
+        app, reviewed, field, box, applies, names_named, pictures_named) -> None:
+    """D-51 round-2 review, finding 3. The hint names why approvals went stale,
+    and no test checked WHICH reason it named: the last approval deciding a
+    reason (O1, O2), the picture reason named whatever changed (O3), and the
+    partial message dropping its reason (O5) all survived. The review's states:
+    several approvals with different settings in both orders, the partial
+    branch, names alone, box alone, both. Each reason phrase must appear
+    exactly when it is a reason for some stale approval; the expectation is
+    written out per state, not recomputed by the rule under test.
+    """
+    from dociq import adapter
+
+    root = r"D:\matter-A"
+    window = MainWindow(adapter.RealPipeline())
+    try:
+        for n, (tokens, skip) in enumerate(reviewed):
+            window._request = RunRequest(root, root + r"\out", project_tokens=tokens,
+                                         skip_images_on_text_pages=skip)
+            window._capture_approval(("progress-photographs", "cover-page",
+                                      "blank-page")[n], True)
+        assert len(window._approvals) == len(reviewed), window._approvals
+        window.setup._tokens.setText(field)
+        window.setup._skip_images.setChecked(box)
+        hint = window.setup._tokens_hint.text()
+
+        total = len(reviewed)
+        if applies == total:
+            assert f"{total} approval(s) carried" in hint and "still apply" in hint, hint
+        elif applies == 0:
+            assert hint.startswith("Changing "), hint
+            assert f"the {total} approval(s)" in hint and "NO LONGER APPLY" in hint, hint
+        else:
+            assert f"{applies} of {total} approval(s)" in hint, hint
+            assert f"{total - applies} NO LONGER APPLY because " in hint, hint
+        assert (_NAMES in hint) is names_named, hint
+        assert (_PICTURES in hint) is pictures_named, hint
     finally:
         window.close()
 

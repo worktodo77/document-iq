@@ -312,18 +312,23 @@ class SetupScreen(QWidget):
         # under, so flipping it can make one stale (D-51 review finding 1).
         self._skip_images.toggled.connect(lambda _on: self._warn_if_stale())
         right.addWidget(self._skip_images)
-        # Not overstated (D-51 review): a scan carrying a typed stamp is read
-        # (D-54), and the 12-document timing compared reading every such picture
-        # with reading none, which is not what ticking the box saves.
+        # Not overstated (D-51 reviews): the thresholds are stated, because each
+        # sentence was false at an input within reach when it spoke absolutely.
+        # A picture under a quarter of the page is read by neither setting (A-24's
+        # threshold); a stamped scan is read only when its image covers 90% or
+        # more (D-54); and the 12-document timing (D-49) compared reading every
+        # such picture with reading none, which is not what ticking the box saves.
         skip_help = _muted(
             "When ticked, DocIQ skips the words inside pictures, charts and "
-            "pasted-in images that sit beside typed text on a page, and lists "
-            "every page it skipped as not read. Scanned pages are still read, "
-            "including scans that carry a typed stamp. On a timed sample of 12 "
-            "documents, reading every such picture made extraction about 3.4 "
+            "pasted-in images that cover a quarter or more of a page that also "
+            "has typed text, and lists every page it skipped as not read. A scan "
+            "whose image covers 90% or more of its page is still read, even with "
+            "a typed stamp. Pictures covering less than a quarter of a typed page "
+            "are not read whether the box is ticked or not. On a timed sample of "
+            "12 documents, reading every such picture made extraction about 3.4 "
             "times as long as reading none; the saving on a whole matter has not "
-            "been measured. Untick it for the full reading before relying on the "
-            "results.", theme, 8)
+            "been measured. Untick it to read those pictures before relying on "
+            "the results.", theme, 8)
         skip_help.setMaximumWidth(UNIT * 48)
         right.addWidget(skip_help)
         self._scope = _muted("", theme, 9)

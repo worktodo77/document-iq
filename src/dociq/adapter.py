@@ -168,9 +168,10 @@ def seconds_per_gb(ocr_enabled: bool) -> float:
     both predate A-24. Each rate is therefore closest to a run that SKIPS them
     (A-25), and :func:`_minutes_for` gives no figure for a run that reads them.
     Closest, not the same: a run that skips them still reads a scan whose image
-    content covers nearly the whole page even when it carries a typed stamp
-    (D-54), which the timed runs did not, so over stamped scans the rate may
-    understate the wait by an amount not measured.
+    content covers 90% or more of the page even when it carries a typed stamp
+    (D-54), which the timed runs did not when the stamp was 40 characters or
+    more, so over stamped scans the rate may understate the wait by an amount
+    not measured.
     """
     return SECONDS_PER_GB_OCR_ON if ocr_enabled else SECONDS_PER_GB_OCR_OFF
 
@@ -185,9 +186,10 @@ def measured_basis(ocr_enabled: bool) -> str:
             "under load throughout, so this corroborates the ≈100-minute upper "
             "bound rather than establishing an idle-machine rate. That run "
             "predates DocIQ reading the images on pages that have a text layer: "
-            "it read none of them, including full-page scans that carry a typed "
-            "stamp. A quick first pass still reads those scans, so for one this "
-            "rate may be low, by an amount not measured."
+            "it read none of them, including full-page scans whose typed stamp is "
+            "40 characters or more (a scan with a shorter stamp was read whole). A "
+            "quick first pass still reads those scans, so for one this rate may be "
+            "low, by an amount not measured."
         )
     return (
         "one measured run: the full MODEC/Petrobras corpus, OCR disabled, from "
@@ -245,8 +247,8 @@ def _minutes_for(total_bytes: int, sized: dict[str, int], *,
     before A-24 read any, so they are closest to a run that skips them (see
     :func:`seconds_per_gb` for why not exactly). On a timed sample of 12
     documents reading every such image made extraction 3.44 times as long as
-    reading none, and the whole-corpus cost is not measured, so there is no rate
-    to scale.
+    reading none (measured under D-49 in the decision register), and the
+    whole-corpus cost is not measured, so there is no rate to scale.
 
     Zero is the seam's documented "no estimate", and it is returned for every
     folder neither rate was measured on. See :data:`SECONDS_PER_GB_OCR_ON` for
@@ -925,9 +927,12 @@ class RealPipeline:
         matter = Path(request.source_root).name
         template = self._template
         # The seam records become the pipeline's own, here and nowhere else.
-        # Every field travels: an approval that reached Stage 4 without its
-        # approver would be the half-record D-34 forbids, and
+        # Every Stage-4 field travels: an approval that reached Stage 4 without
+        # its approver would be the half-record D-34 forbids, and
         # `ApprovedOmission.validate()` refuses it rather than defaulting one.
+        # The seam record's reviewed picture setting does not: it is for the
+        # setup screen's warning, and Stage 4 reads the setting through the
+        # `recognition` fingerprint instead.
         approvals = tuple(
             ApprovedOmission(
                 family_id=a.family_id,

@@ -282,13 +282,14 @@ def test_the_estimate_is_absent_for_the_fixture_corpus():
 def test_no_estimate_for_a_run_that_reads_images_on_text_pages():
     """A-25 (D-51). Both measured rates were timed before A-24 read a single
     image on a text page. On a timed sample of 12 documents reading every such
-    image made extraction 3.44 times as long as reading none, and the
+    image made extraction 3.44 times as long as reading none (D-49), and the
     whole-corpus cost is not measured -- so a run that reads them gets the
     seam's documented "no estimate" rather than the old figure.
 
     The rates are NOT exactly a quick first pass's either: D-54 has the quick
     pass read a full-page scan that carries a typed stamp, and the timed runs
-    read none. The basis sentence said the OCR-on rate "times a run that skips
+    read none whose stamp was over the text floor. The basis sentence said the
+    OCR-on rate "times a run that skips
     them"; it now says what the run read and that the difference is unmeasured
     (D-51 review wording finding).
 
@@ -306,7 +307,13 @@ def test_no_estimate_for_a_run_that_reads_images_on_text_pages():
                                 skip_images_on_text_pages=False) == 39
     basis = adapter.measured_basis(True)
     assert "times a run that skips them" not in basis, basis
-    assert "full-page scans that carry a typed stamp" in basis, basis
+    # Not "full-page scans that carry a typed stamp" (D-51 round-2 review): that
+    # run OCR'd a scan whole when its stamp was under the text floor.
+    from dociq.ingest import extract
+
+    assert "full-page scans that carry a typed stamp" not in basis, basis
+    assert (f"full-page scans whose typed stamp is {extract._NATIVE_TEXT_FLOOR} "
+            "characters or more") in basis, basis
     assert "not measured" in basis, basis
 
 

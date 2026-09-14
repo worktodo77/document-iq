@@ -1695,7 +1695,15 @@ because the page was counted. Counted is not read.
 
 * **Routing** reads image geometry against Tier 3's own
   `PHOTO_MIN_IMAGE_AREA_SHARE`, not a second bound, and OCRs only the image
-  regions, so a text layer is never read twice.
+  regions, so a text layer is never read twice. **Corrected 2026-09-14 (D-51's
+  second review round, inside the unreleased 2.3.0):** the image regions alone did
+  not guarantee that. An image lying UNDER the text layer (a letter on full-page
+  stationery, a stamp typed over a scan, a searchable scan's OCR layer) holds the
+  layer's glyphs inside its own crop, and they were read twice. The rendering now
+  has the text layer's word boxes painted out before any crop is cut
+  (`_mask_text_layer`). The geometry, measured and cropped, is every image the
+  page draws (`_image_placements`): an image drawn twice was measured and cropped
+  at its first placement only, and a scan stored inline was not seen at all.
 * **Placement.** Image text sits after the text layer's opening lines. Appended
   after the text layer, it pushed a page's own footer stamp out of the Bates zone,
   and from eight image lines up it left a stamp from an embedded exhibit as the
@@ -1755,7 +1763,8 @@ same reason.
 
 A-24 reads the image regions of a page that also carries a text layer. On a timed
 sample of 12 corpus documents (645 pages, 144 MIXED) extraction took 3.44 times as
-long with that reading on, and the whole-corpus cost is not measured. D-51 rules a
+long with that reading on (measured under D-49 in the decision register), and the
+whole-corpus cost is not measured. D-51 rules a
 run option that skips the reading, and Alex's clarification makes skipping the
 default. Two runs over one folder, one reading those images and one skipping
 them, produce different text, and until this amendment nothing in the record that
@@ -1771,21 +1780,25 @@ identifies a run could say which one it was.
 * **The effective value.** `pipeline.run` stamps `skip or not ocr_ran` on the
   walk's configuration, the way it stamps the OCR engine: a run with OCR off reads
   no image and records the skip. Like the engine fields it is stamped from the
-  OCR setting, so a run whose enabled engine is found missing records `False`
-  while reading no image, and its notes say OCR was unavailable.
+  OCR setting, so a run whose enabled engine is found missing records the setting
+  it was given (`False` for a run told to read) while reading no image, and its
+  notes say OCR was unavailable.
 * **Extraction.** `ExtractOptions` carries it, set by the walk from the config.
   What a skipping run skips: image content covering `PHOTO_MIN_IMAGE_AREA_SHARE`
-  (25%) or more of a page, summed over the page's images, beside a text layer.
-  **Except a scan (D-54, 2026-09-14):** a page whose image content covers
+  (25%) or more of a page, summed over every image the page draws, beside a text
+  layer. **Except a scan (D-54, 2026-09-14):** a page whose image content covers
   `_SCAN_MIN_IMAGE_SHARE` (90%) or more is read exactly as a reading run reads it,
   MIXED, its locator from the text layer alone (D-49), whatever typed stamp its
-  text layer carries. Without the exception a full-page scan with a 52-character
-  endorsement came out NATIVE, its text the endorsement alone, while the same scan
-  with no stamp was OCR'd whole: a stamp decided whether a page was read, the
-  defect D-48 recorded. The threshold is tested at its boundary and on four tiles
-  that each cover under 25%; its corpus exposure is not yet counted. D-54 needs no
-  new contract input: the setting is unchanged, and what it skips changed inside
-  the unreleased 2.3.0. A skipped page stays NATIVE and carries `M_IMAGE_SKIPPED`,
+  text layer carries. Without the exception a full-page scan with an endorsement
+  over the text floor came out NATIVE, its text the endorsement alone, while the
+  same scan with no stamp was OCR'd whole: a stamp decided whether a page was
+  read, the defect D-48 recorded. The threshold is tested at its boundary, on four
+  tiles that each cover under 25%, and with text layers under, at and far over the
+  text floor; what it reaches on the acceptance corpus is D-54's census in the
+  decision register. D-54 needs no new contract input: the setting is unchanged,
+  and what it skips changed inside the unreleased 2.3.0. Image content under 25%
+  of a page with a text layer is read by neither setting and named by no note.
+  A skipped page stays NATIVE and carries `M_IMAGE_SKIPPED`,
   which begins with `M_IMAGE_UNREAD`. The document note counts and names every
   skipped page, because page notes do not reach the processing log. It is a
   different sentence from "OCR disabled" and from "OCR unavailable", because the
@@ -1825,9 +1838,13 @@ identifies a run could say which one it was.
 
 The time estimate comes from runs that read no image on any page with a text
 layer. That is closest to a run that skips them, but not the same: the quick pass
-still reads stamped scans (D-54), so over a production of them the estimate may be
-low, by an amount not measured. A run that reads the images gets no estimate with
-OCR on. The determinism proof repeats a READING run only; the skipping default is
+still reads stamped scans whose image covers 90% or more of the page (D-54), so
+over a production of them the estimate may be low, by an amount not measured.
+Region OCR trusts the text layer where it lies: image content under a word box of
+the text layer is not read, even where the word does not match it (a searchable
+scan whose OCR layer is wrong or misplaced keeps the layer's reading there), and a
+glyph drawn outside its own box is read again. A run that reads the images gets no
+estimate with OCR on. The determinism proof repeats a READING run only; the skipping default is
 checked once by the selftest, not repeated. The packaged offline probe takes the
 default, so it exercises a run that skips the images on text pages, not A-24's
 region OCR.
