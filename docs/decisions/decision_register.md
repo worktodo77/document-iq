@@ -740,6 +740,14 @@ member of that set. The machinery is reused, not reinvented.
   the native text and never equal to it. Reading only what the text layer does
   not cover makes duplication **impossible by construction** rather than
   filtered by a tuned threshold.
+
+  **Withdrawn 2026-09-14 (D-58): this claim was false.** Image regions are
+  image rectangles, not the parts of the page the text layer leaves uncovered,
+  so typed text lying on a picture (a letter on full-page stationery, a
+  searchable scan, a stamp on a scan) is read twice: once from the text layer
+  and once by OCR. A mask that removed it lost scan content, and Alex ruled that
+  duplication, which loses nothing, is the accepted limitation. Corpus exposure
+  is under D-54 and D-58.
 * The page is rendered **once and sliced**, for the reason `_band_tiles`
   records: a per-region `get_pixmap` clip re-decodes the page's embedded image
   every time, and on this corpus a page can be a 230 MB photograph. An earlier
