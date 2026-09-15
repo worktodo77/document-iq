@@ -1039,10 +1039,13 @@ def test_e12_print_header_and_footer_bound_the_sheets_page():
     raw = _patch(_xlsx(build), {"xl/worksheets/sheet1.xml": lambda t: _set_header_footer(
         t, header_footer)})
     doc = _extract("stamps.xlsx", raw)
+    # The even header's &G places a picture: its code leaves no letter, and
+    # the picture is named in a FINAL note (review-fix round 3), not dropped.
     _assert_doc(doc,
                 ["[sheet: Stamps]\nLEFTWORD\nMID&WORD\nRIGHTWORD\nEVENWORD\nSTAMPROW\n"
                  "QXZ 000123\nPage\nFIRSTFOOTWORD"],
-                [PAGE_NOTE_XLSX])
+                [f"sheet 'Stamps': 1 picture(s) in its print header or footer were not "
+                 f"read ({UNREAD})", PAGE_NOTE_XLSX])
     parsed = bates._parse_line("QXZ 000123")
     assert (parsed.prefix, parsed.number) == ("QXZ", 123), parsed
 
@@ -1179,7 +1182,8 @@ def test_hidden_rows_columns_and_sheets_are_read_and_disclosed():
             '<row r="2" ht="0" customHeight="1">' + _is("A2", "FLATROWWORD") + "</row>")
     folded = ["[sheet: Folded]\nFIRSTSEEN\t\t\t\t\tNARROWWORD\nFLATROWWORD"]
     folded_note = ("sheet 'Folded' marks 1 row(s) and 4 column(s) hidden, and hides every "
-                   "other row by default; hidden cells are not skipped for being hidden")
+                   "row not given a height of its own; hidden cells are not skipped for "
+                   "being hidden")
     _assert_doc(_extract("folded.xlsx", _rows_xlsx(rows, "A1:F2", name="Folded", head=head)),
                 folded, [folded_note, PAGE_NOTE_XLSX])
     raw = make_fixtures.xls_bytes([
@@ -1234,14 +1238,16 @@ def test_sheet_extras_read_failure_is_a_marked_note(monkeypatch):
     monkeypatch.setattr(ET, "fromstring", failing_fromstring)
     monkeypatch.setattr(ET, "iterparse", failing_iterparse)
     doc = _pages("18_workbook_constructs.xlsx")
-    extras_note = ("its print header/footer, hyperlinks, hidden rows and columns and "
-                   "true extent could not be read (MemoryError), so a cell or row written "
-                   f"out of order may be missing with no note of its own ({PART_UNREAD})")
+    extras_note = ("its print header/footer, hyperlinks, hidden rows and columns, drawings "
+                   "and true extent could not be read (MemoryError), so a cell or row "
+                   "written out of order, or a text box, chart or picture, may be missing "
+                   f"with no note of its own ({PART_UNREAD})")
     raw_note = ("sheet 'Register': its own cell XML could not be read (MemoryError), so a "
                 "formula whose stored result is empty may be shown as its formula and "
                 "counted as having no stored value, a date-formatted number that is no "
-                "date may show as #VALUE!, and a time-only cell may show the number "
-                f"openpyxl converted rather than the one stored ({PART_UNREAD})")
+                "date may show as #VALUE!, a time-only cell may show the number openpyxl "
+                "converted rather than the one stored, and a date, time or duration may "
+                f"be a millisecond off Excel's rounding ({PART_UNREAD})")
     _assert_doc(doc,
                 ["[sheet: Register]\nRef\tAmount\tNote\n\t10\t15%\n\t20\t15.00%\n"
                  "HOLLY ¶ IVY\t=SUM(B2:B3)\t\tTAB STOP\n[blank rows 5-6]\nJUNIPER\nKESTREL\n"
@@ -1432,8 +1438,8 @@ def test_every_read_that_raised_is_a_transient_note_saying_what_it_cost(monkeypa
     with monkeypatch.context() as m:
         m.setattr(ex, "_xlsx_rels", failing(ex._xlsx_rels, lambda z, part: "worksheets" in part))
         check("[sheet: Ledger]\nHERONHEAD\nALDER\nREEDROW",
-              "sheet 'Ledger': its relationships, so its hyperlinks and comments, could "
-              f"not be read (MemoryError) ({PART_UNREAD})")
+              "sheet 'Ledger': its relationships, so its hyperlinks, comments and drawings, "
+              f"could not be read (MemoryError) ({PART_UNREAD})")
     with monkeypatch.context() as m:
         m.setattr(ex, "_xlsx_threaded_comments", failing(ex._xlsx_threaded_comments))
         check("[sheet: Ledger]\nHERONHEAD\nALDER\nREEDROW <https://example.invalid/REEDLINK>\n"
@@ -1515,8 +1521,11 @@ def test_every_read_that_raised_is_a_transient_note_saying_what_it_cost(monkeypa
     with monkeypatch.context() as m:
         m.setattr(ex, "_xls_sheet_records", failing(ex._xls_sheet_records))
         doc = _extract("tabs.xls", xls)
-        records_note = ("sheet 'Legacy': its print header/footer and dialog flag could not "
-                        f"be read (MemoryError) ({PART_UNREAD})")
+        records_note = ("sheet 'Legacy': its own records could not be read (MemoryError): "
+                        "its print header and footer and dialog flag, and so a cell written "
+                        "twice, a comment missing its text, and a text box, shape, chart, "
+                        "picture or control, may be lost with no note of its own "
+                        f"({PART_UNREAD})")
         _assert_doc(doc, ["[sheet: Legacy]\nWOODLARK", "[chartsheet: Plot]"],
                     [records_note, PLOT_NOTE, PAGE_NOTE_XLS])
         assert ex.has_transient_marker(records_note)
@@ -1525,7 +1534,10 @@ def test_every_read_that_raised_is_a_transient_note_saying_what_it_cost(monkeypa
         doc = _extract("tabs.xls", xls)
         tabs_note = ("the workbook's own tab records could not be read (MemoryError); a "
                      "tab that is not a worksheet is named by its position, and no sheet's "
-                     f"print header/footer or dialog flag was read ({PART_UNREAD})")
+                     "own records were read: its print header and footer and dialog flag, "
+                     "and so a cell written twice, a comment missing its text, and a text "
+                     "box, shape, chart, picture or control, may be lost with no note of "
+                     f"its own ({PART_UNREAD})")
         _assert_doc(doc, ["[sheet: Legacy]\nWOODLARK",
                           "[sheet: tab 2]\n[not read: a sheet of an unrecognized kind]"],
                     [tabs_note, "sheet 'tab 2': a sheet of an unrecognized kind; its content "
@@ -1785,13 +1797,26 @@ def test_xls_formats_unread_never_render_a_date_the_formats_cannot_vouch_for(tmp
         (0, 0, "SHIFTXLS", 0), (0, 1, 1.5, 46), (0, 2, 0.15, 9), (0, 3, 45489.0, 14),
         (0, 4, 0.5, 20)]}], globals_extra=palette)
     note = ("the workbook's number formats could not be read (XLRDError); 3 cell(s) "
-            "formatted as a date, time or duration are shown as the number stored, a "
-            "percentage format is not applied, and hidden rows and columns are not "
-            f"counted ({PART_UNREAD})")
+            "whose format marks them a date or time are shown as the number stored, no "
+            "duration or percentage format is applied to any other number, and hidden "
+            f"rows and columns are not counted ({PART_UNREAD})")
     doc = _extract("clocks.xls", raw)
     _assert_doc(doc, ["[sheet: Clocks]\nSHIFTXLS\t1.5\t0.15\t45489\t0.5"], [note, PAGE_NOTE_XLS])
     assert ex.has_transient_marker(note) and not ex.has_final_marker(note)
     assert walker._dated(doc.pages) == ((), ()), walker._dated(doc.pages)
+
+    # Review r3 (C): the count said "formatted as a date, time or duration"
+    # and left out a bare [h] cell, which xlrd types a plain number. The note
+    # counts what xlrd types a date and names every other number's formats.
+    raw = make_fixtures.xls_bytes([{"name": "Spans", "cells": [
+        (0, 0, "GOLDCRESTXLS", 0), (0, 1, 1.5, 164), (0, 2, 1.5, 165), (0, 3, 0.75, 166)]}],
+        formats={164: "[h]:mm:ss", 165: "[h]", 166: "[mm]:ss"}, globals_extra=palette)
+    note = ("the workbook's number formats could not be read (XLRDError); 2 cell(s) "
+            "whose format marks them a date or time are shown as the number stored, no "
+            "duration or percentage format is applied to any other number, and hidden "
+            f"rows and columns are not counted ({PART_UNREAD})")
+    _assert_doc(_extract("spans.xls", raw), ["[sheet: Spans]\nGOLDCRESTXLS\t1.5\t1.5\t0.75"],
+                [note, PAGE_NOTE_XLS])
 
 
 def test_hidden_notes_say_read_only_for_what_was_read(monkeypatch):
@@ -1871,32 +1896,45 @@ def test_the_streamed_sheet_read_holds_memory_flat():
     never cleared passed every gate while its peak grew about 300 times.
     Traced peak around the extras stream (which now also measures the sheet's
     extent) and the raw-cell stream read to its last row stays under a small
-    absolute bound on a sheet of 25,000 rows."""
+    absolute bound, and stays FLAT against the sheet's size (review r3 C): a
+    reader that clears each row but not ``sheetData``'s hold on it still
+    passes a single-size bound, while its peak grows about 80 bytes a row --
+    so the peak at 100,000 rows may exceed the peak at 25,000 by under
+    0.5 MB."""
     import tracemalloc
 
-    rows = "".join(f'<row r="{r}"><c r="A{r}"><v>{r}</v></c>'
-                   f'<c r="B{r}" t="inlineStr"><is><t>ROWTEXT{r}</t></is></c></row>'
-                   for r in range(1, 25_001))
-    sheet = (f'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-             f"<sheetData>{rows}</sheetData><headerFooter><oddHeader>&amp;CBIGHEADWORD"
-             f"</oddHeader></headerFooter></worksheet>").encode()
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("xl/worksheets/sheet1.xml", sheet)
-    with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as z:
-        ex._xlsx_sheet_extras(z, "xl/worksheets/sheet1.xml", {})  # warm-up
-        raw_cells = ex._XlsxRawCells(z, "xl/worksheets/sheet1.xml")
-        tracemalloc.start()
-        try:
-            extras = ex._xlsx_sheet_extras(z, "xl/worksheets/sheet1.xml", {})
-            last = raw_cells.get(25_000, 1)
-            _current, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-            raw_cells.close()
-    assert extras.header_lines == ["BIGHEADWORD"] and extras.max_col == 2, extras
-    assert last is not None and last.v_text == "25000", last
-    assert peak < 5 * 1024 * 1024, f"peak traced memory {peak / 1e6:.1f} MB on 25,000 rows"
+    def traced_peak(n_rows: int) -> int:
+        rows = "".join(f'<row r="{r}"><c r="A{r}"><v>{r}</v></c>'
+                       f'<c r="B{r}" t="inlineStr"><is><t>ROWTEXT{r}</t></is></c></row>'
+                       for r in range(1, n_rows + 1))
+        sheet = (f'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                 f"<sheetData>{rows}</sheetData><headerFooter><oddHeader>&amp;CBIGHEADWORD"
+                 f"</oddHeader></headerFooter></worksheet>").encode()
+        del rows
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("xl/worksheets/sheet1.xml", sheet)
+        del sheet
+        with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as z:
+            ex._xlsx_sheet_extras(z, "xl/worksheets/sheet1.xml", {})  # warm-up
+            raw_cells = ex._XlsxRawCells(z, "xl/worksheets/sheet1.xml")
+            tracemalloc.start()
+            try:
+                extras = ex._xlsx_sheet_extras(z, "xl/worksheets/sheet1.xml", {})
+                last = raw_cells.get(n_rows, 1)
+                _current, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+                raw_cells.close()
+        assert extras.header_lines == ["BIGHEADWORD"] and extras.max_col == 2, extras
+        assert last is not None and last.v_text == str(n_rows), last
+        return peak
+
+    small, large = traced_peak(25_000), traced_peak(100_000)
+    assert small < 5 * 1024 * 1024, f"peak traced memory {small / 1e6:.2f} MB on 25,000 rows"
+    assert large - small < 500_000, (
+        f"peak traced memory grew with the sheet: {small / 1e6:.2f} MB on 25,000 rows, "
+        f"{large / 1e6:.2f} MB on 100,000")
 
 
 def test_xlsx_and_xls_render_booleans_whole_numbers_and_elapsed_time_alike():
@@ -1960,8 +1998,8 @@ def test_extras_failure_part_way_keeps_nothing_the_note_calls_unread(monkeypatch
     real = ex._xlsx_iter_rows
 
     def failing_after_hyperlinks(z, part):
-        for row_no, el in real(z, part):
-            yield row_no, el
+        for row_no, el, path in real(z, part):
+            yield row_no, el, path
             if ex._local(el.tag) == "hyperlinks":
                 raise MemoryError()
 
@@ -1973,9 +2011,10 @@ def test_extras_failure_part_way_keeps_nothing_the_note_calls_unread(monkeypatch
         return failing_after_hyperlinks(z, part) if calls["n"] == 1 else real(z, part)
 
     monkeypatch.setattr(ex, "_xlsx_iter_rows", first_call_fails)
-    note = ("sheet 'Ledger': its print header/footer, hyperlinks, hidden rows and columns "
-            "and true extent could not be read (MemoryError), so a cell or row written out "
-            f"of order may be missing with no note of its own ({PART_UNREAD})")
+    note = ("sheet 'Ledger': its print header/footer, hyperlinks, hidden rows and columns, "
+            "drawings and true extent could not be read (MemoryError), so a cell or row "
+            "written out of order, or a text box, chart or picture, may be missing with no "
+            f"note of its own ({PART_UNREAD})")
     _assert_doc(_extract("threads.xlsx", raw),
                 ["[sheet: Ledger]\nALDER\nREEDROW\n[comment on A1 by NIGHTJAR] MAGPIE\n"
                  "[comment on A2 by CRAKE] BITTERN"],
@@ -1997,8 +2036,24 @@ def test_the_accounting_line_does_not_say_the_bytes_are_missing():
     report = accounting.check(RunResult(config=RunConfig(source_root="s", output_root="o"),
                                         documents=(lost,)))
     assert report.evidence_line == (
-        "EVIDENCE GAPS — 1 document(s) name content that was NOT read and will not be "
-        "recovered by re-reading"), report.evidence_line
+        "EVIDENCE GAPS — 1 document(s) carry a disclosed evidence gap that re-reading "
+        "will not change"), report.evidence_line
+
+    # Review r3 (C): the line said the gap was "content that was NOT read",
+    # false for a FINAL marker that loses nothing -- section recognition
+    # failing keeps every page. The line is true for every FINAL marker.
+    kept = DocumentRecord(
+        doc_id="", rel_path="memo.pdf", filename="memo.pdf", sha256="4" * 64,
+        size_bytes=1, ext=".pdf", status=ProcessingStatus.FULL,
+        pages=(PageRecord(page_no=1, text="MEMOWORD", kind=PageKind.NATIVE),),
+        notes=(f"{ex.M_SECTIONS}: IndexError; every page is kept",))
+    report = accounting.check(RunResult(config=RunConfig(source_root="s", output_root="o"),
+                                        documents=(kept,)))
+    assert report.documents_evidence_lost == 1, report
+    assert report.evidence_line == (
+        "EVIDENCE GAPS — 1 document(s) carry a disclosed evidence gap that re-reading "
+        "will not change"), report.evidence_line
+    assert "NOT read" not in report.render(), report.render()
 
 
 # ---------------------------------------------------------------------------
@@ -2080,3 +2135,731 @@ def test_every_shared_or_inline_string_cell_survives_extraction():
             'vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>'),
     })
     assert _assert_every_string_survives("shared.xlsx", raw) == 3
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 3 (D-55): a number at every magnitude, Excel's rounding,
+# Custom Views, and what a worksheet shows beside its cells.
+# ---------------------------------------------------------------------------
+
+
+def _one_sheet_both(name: str, rows: list[list[tuple[float, str]]],
+                    customs: dict[str, int] | None = None) -> dict[str, bytes]:
+    """The same cells as an ``.xlsx`` and an ``.xls``
+    (:func:`make_fixtures.xls_bytes`): row ``n`` is ``R<n>`` then each
+    ``(value, number format)``. ``customs`` maps a format string to the
+    ``.xls`` format index it is declared under (built-ins need none).
+
+    Each ``.xlsx`` ``<v>`` holds the value's shortest round-trip spelling, as
+    Excel writes it: openpyxl writes 16 significant digits, which would make
+    ``1.1270833333333334`` a different double."""
+    builtin = {"General": 0, "0": 1, "0.00": 2, "0%": 9, "0.00%": 10, "mm-dd-yy": 14,
+               "h:mm": 20, "[h]:mm:ss": 46}
+    index = dict(builtin, **(customs or {}))
+    stand_in = {}
+
+    def build(wb):
+        ws = wb.active
+        ws.title = name
+        for r, row in enumerate(rows, start=1):
+            ws.cell(r, 1, f"R{r}")
+            for c, (value, fmt) in enumerate(row, start=2):
+                placeholder = 7_000_000 + len(stand_in)
+                stand_in[f"<v>{placeholder}</v>"] = f"<v>{value!r}</v>"
+                ws.cell(r, c, placeholder).number_format = fmt
+
+    def exact(xml: str) -> str:
+        return re.sub(r"<v>7\d{6}</v>", lambda m: stand_in[m.group(0)], xml)
+
+    raw = _xlsx(build)
+    cells = []
+    for r, row in enumerate(rows):
+        cells.append((r, 0, f"R{r + 1}", 0))
+        cells.extend((r, c, value, index[fmt]) for c, (value, fmt) in enumerate(row, start=1))
+    formats = {i: f for f, i in (customs or {}).items()}
+    return {"xlsx": _patch(raw, {"xl/worksheets/sheet1.xml": exact}),
+            "xls": make_fixtures.xls_bytes([{"name": name, "cells": cells}], formats=formats)}
+
+
+def test_a_number_reads_as_stored_at_every_magnitude():
+    """Review r3 (B1): a whole-valued double printed as ``str(int(value))``
+    spelled out its binary expansion -- ``1.23456789012346E+18`` read
+    ``1234567890123460096`` and ``1E+30`` a 31-digit number, digits the file
+    does not hold and Excel never shows -- and a percentage of one
+    (``123456789012346011648%``, ``1E+308`` as ``inf%``) likewise, in both
+    formats, status FULL, no note.
+
+    The class (the format table, excel_fix3/formats_fixed.md): at 1E+15,
+    2**53, 1.23456789012346E+18, 6.02E+23, 1E+30, 1E+308, 5E-324, 1E-20,
+    negative zero, the largest and smallest integers Excel stores (15 digits,
+    the typed extremes, an RK record's 30 bits) and a 17-digit time, every
+    format family shows the stored value exactly -- its shortest spelling --
+    or, where a format rounds, Excel's 15 significant digits. Never an
+    invented digit, never ``-0``."""
+    big = "0" * 295
+    table = [  # stored, General and 0, 0%, date, time only, duration
+        (1e15, "1000000000000000", "100000000000000000%", None, None, None),
+        (2.0 ** 53, "9007199254740992", "900719925474099000%", None, None, None),
+        (1.23456789012346e18, "1.23456789012346e+18", "123456789012346000000%", None, None, None),
+        (6.02e23, "6.02e+23", "602" + "0" * 23 + "%", None, None, None),
+        (1e30, "1e+30", "1" + "0" * 32 + "%", None, None, None),
+        (1e308, "1e+308", "1" + "0" * 310 + "%", None, None, None),
+        (5e-324, "5e-324", "0%", "00:00:00", "00:00:00", "0:00:00"),
+        (1e-20, "1e-20", "0%", "00:00:00", "00:00:00", "0:00:00"),
+        (-0.0, "0", "0%", "00:00:00", "00:00:00", "0:00:00"),
+        (999999999999999.0, "999999999999999", "99999999999999900%", None, None, None),
+        (-999999999999999.0, "-999999999999999", "-99999999999999900%", None, None, None),
+        (9.99999999999999e307, "9.99999999999999e+307", "999999999999999" + big + "%",
+         None, None, None),
+        (-9.99999999999999e307, "-9.99999999999999e+307", "-999999999999999" + big + "%",
+         None, None, None),
+        (536870911.0, "536870911", "53687091100%", None, None, "12884901864:00:00"),
+        (-536870912.0, "-536870912", "-53687091200%", None, None, "-12884901888:00:00"),
+        (1.1270833333333334, "1.1270833333333334", "113%", "1900-01-01 03:03:00", None,
+         "27:03:00"),
+    ]
+    rows, lines = [], []
+    for value, stored, pct, date, clock, span in table:
+        shown = [stored, stored, pct, date or stored, clock or stored, span or stored]
+        rows.append([(value, f) for f in ("General", "0", "0%", "mm-dd-yy", "h:mm",
+                                          "[h]:mm:ss")])
+        lines.append("\t".join([f"R{len(lines) + 1}"] + shown))
+    page = "[sheet: Sizes]\n" + "\n".join(lines)
+    notes = [_not_a_date_note_text(25),
+             "10 cell(s) formatted as a time with no date held a value of a day or more; "
+             "the number is shown as stored"]
+    books = _one_sheet_both("Sizes", rows)
+    with pytest.warns(UserWarning, match="outside the limits for dates"):
+        _assert_doc(_extract("sizes.xlsx", books["xlsx"]), [page], notes + [PAGE_NOTE_XLSX])
+    _assert_doc(_extract("sizes.xls", books["xls"]), [page], notes + [PAGE_NOTE_XLS])
+
+
+def _not_a_date_note_text(count: int) -> str:
+    return (f"{count} cell(s) formatted as a date or time held a number that is no date in "
+            "Excel's calendar (negative, past 9999-12-31, or not a number); the number is "
+            "shown as stored")
+
+
+# What real Excel 16 displayed for each (value, format): its own Range.Text,
+# recorded through COM (review_excel_r3/verify_2/v01_excel_display.tsv and
+# excel_fix3/excel_real/x01_numbers.tsv). Invented numbers only.
+EXCEL_SHOWN = [
+    (0.125, "0%", "13%"), (0.145, "0%", "15%"), (0.005, "0%", "1%"), (0.285, "0%", "29%"),
+    (-0.125, "0%", "-13%"), (-0.001, "0%", "0%"), (0.0125, "0.0%", "1.3%"),
+    (0.375, "0%", "38%"), (0.625, "0%", "63%"), (0.875, "0%", "88%"), (0.025, "0%", "3%"),
+    (0.135, "0%", "14%"), (0.115, "0%", "12%"), (0.155, "0%", "16%"), (0.165, "0%", "17%"),
+    (0.335, "0.0%", "33.5%"), (0.00125, "0.00%", "0.13%"), (0.12, "0%", "12%"),
+    (0.1249, "0%", "12%"), (0.1251, "0%", "13%"), (0.15, "0%", "15%"),
+    (0.15, "0.00%", "15.00%"), (-0.004, "0%", "0%"), (-1e-05, "0.0%", "0.0%"),
+    (0.5, "0%", "50%"), (1.005, "0%", "101%"),
+    (1e15, "0%", "100000000000000000%"), (2.0 ** 53, "0%", "900719925474099000%"),
+    (1.23456789012346e18, "0.00%", "123456789012346000000.00%"),
+    (999999999999999.0, "0%", "99999999999999900%"),
+    (100000000000000.5, "0%", "10000000000000000%"),
+    (-2.5e20, "0%", "-25000000000000000000000%"),
+    (1234567890123450.0, "0.00%", "123456789012345000.00%"),
+    (123456789012345678.0, "0%", "12345678901234600000%"),
+    (0.000123456789012345678, "0.00%", "0.01%"), (45489.354166666664, "0.00%", "4548935.42%"),
+    (0.123456789012345678, "0.0000000000000000000%", "12.3456789012346000000%"),
+    (-1e-20, "0%", "0%"), (-0.004, "0.0%", "-0.4%"), (0.30000000000000004, "0%", "30%"),
+    (5e-324, "0.00%", "0.00%"),
+    (0.00146484375, "hh:mm:ss.000", "00:02:06.563"),
+    (0.00341796875, "hh:mm:ss.000", "00:04:55.313"),
+    (0.00048828125, "hh:mm:ss.000", "00:00:42.188"),
+    (0.00244140625, "hh:mm:ss.000", "00:03:30.938"),
+    (4.6875e-07, "hh:mm:ss.000", "00:00:00.041"), (1.5625e-07, "hh:mm:ss.000", "00:00:00.014"),
+    (0.123456789, "hh:mm:ss.000", "02:57:46.667"), (0.99999999999, "hh:mm:ss.000", "00:00:00.000"),
+    (1.00146484375, "[h]:mm:ss.000", "24:02:06.563"),
+    (0.00341796875, "[h]:mm:ss.000", "0:04:55.313"),
+    (2.00048828125, "[h]:mm:ss.000", "48:00:42.188"),
+    (45489.00146484375, "[h]:mm:ss.000", "1091736:02:06.562"),
+    (1.1270833333333334, "[h]:mm:ss.000", "27:03:00.000"),
+    (45489.00146484375, "yyyy-mm-dd hh:mm:ss.000", "2024-07-16 00:02:06.562"),
+    (45489.00341796875, "yyyy-mm-dd hh:mm:ss.000", "2024-07-16 00:04:55.312"),
+    (45489.00048828125, "yyyy-mm-dd hh:mm:ss.000", "2024-07-16 00:00:42.187"),
+    (100.00146484375, "yyyy-mm-dd hh:mm:ss.000", "1900-04-09 00:02:06.563"),
+    (45489.354166666664, "yyyy-mm-dd hh:mm:ss.000", "2024-07-16 08:30:00.000"),
+]
+
+
+def _as_the_page_spells(fmt: str, excel_text: str) -> str:
+    """Real Excel's display of a cell, in the page's own spelling: a
+    percentage as it is; a time or date-time as ISO with its millisecond as
+    microseconds (none when it is zero, no time at all at midnight); a
+    duration's millisecond only when there is one."""
+    if fmt.endswith("%"):
+        return excel_text
+    head, ms = excel_text.rsplit(".", 1)
+    if fmt.startswith("[h]"):
+        return head if ms == "000" else excel_text
+    if fmt.startswith("yyyy") and head.endswith(" 00:00:00") and ms == "000":
+        return head[:-9]
+    return head if ms == "000" else f"{excel_text}000"
+
+
+def test_percentages_times_and_durations_round_as_real_excel_shows_them():
+    """Review r3 (B3): a percentage was rounded half to even on the binary
+    product -- 0.125 under ``0%`` read ``12%`` where Excel shows ``13%``,
+    -0.001 read ``-0%`` -- 14 of 26 real-Excel cells disagreed, in both
+    formats. The class: EVERY place the package rounds a number to fewer
+    digits goes through Excel's one rule (15 significant digits, a binary tie
+    at the 16th toward zero; then half away from zero; never a negative
+    zero): a percentage's decimals, and a time's, date-time's or duration's
+    millisecond, which rounded half to even too (0.00146484375 of a day read
+    ``00:02:06.562``; Excel shows ``.563``). Every cell here is one real Excel
+    displayed, and both formats must show exactly that."""
+    customs = {}
+    for _v, fmt, _t in EXCEL_SHOWN:
+        if fmt not in ("0%", "0.00%") and fmt not in customs:
+            customs[fmt] = 164 + len(customs)
+    rows = [[(value, fmt)] for value, fmt, _t in EXCEL_SHOWN]
+    page = "[sheet: Shown]\n" + "\n".join(
+        f"R{n}\t{_as_the_page_spells(fmt, text)}"
+        for n, (_v, fmt, text) in enumerate(EXCEL_SHOWN, start=1))
+    books = _one_sheet_both("Shown", rows, customs)
+    _assert_doc(_extract("shown.xlsx", books["xlsx"]), [page], [PAGE_NOTE_XLSX])
+    _assert_doc(_extract("shown.xls", books["xls"]), [page], [PAGE_NOTE_XLS])
+
+
+# The records real Excel 16 wrote for a Custom View saved with print settings
+# and no header or footer (review_excel_r3/verify_1/real/vB_late.xls, the
+# worksheet substream from USERSVIEWBEGIN to USERSVIEWEND, byte for byte).
+_EXCEL_VIEW_BLOCK = bytes.fromhex(
+    "aa0140000c6419fefb79414faeba12099ea8c464010000006400000040000000030000003c0000200000300000001900"
+    "00000000000000000000000000000000ffffffff1d000f00030000000000000100000000000000140000001500000083"
+    "000200000084000200000026000800666666666666e63f27000800666666666666e63f28000800000000000000e83f29"
+    "000800000000000000e83fa100220000000000010001000100040000000064333333333333d33f333333333333d33f3c"
+    "009c0826009c08000000000000000000000c6419fefb79414faeba12099ea8c4643c330000000000000000ab01020001"
+    "00")
+
+
+def _xls_record(opcode: int, data: bytes) -> bytes:
+    import struct
+
+    return struct.pack("<HH", opcode, len(data)) + data
+
+
+def _xls_hf(opcode: int, text: str) -> bytes:
+    """A HEADER or FOOTER record as Excel writes it: empty, or a 16-bit
+    character count, a flags byte and the characters."""
+    import struct
+
+    return _xls_record(opcode, struct.pack("<HB", len(text), 0) + text.encode("latin-1")
+                       if text else b"")
+
+
+def _xls_view_block(header: str, footer: str, inside: bytes = b"") -> bytes:
+    """Excel's Custom View records (:data:`_EXCEL_VIEW_BLOCK`) holding the
+    view's own ``header`` and ``footer``, and ``inside`` after them."""
+    empty = _xls_hf(0x0014, "") + _xls_hf(0x0015, "")
+    assert _EXCEL_VIEW_BLOCK.count(empty) == 1
+    return _EXCEL_VIEW_BLOCK.replace(
+        empty, _xls_hf(0x0014, header) + _xls_hf(0x0015, footer) + inside)
+
+
+def _xls_shape(ot: int, obj_id: int, text: str = "", extra: bytes = b"") -> bytes:
+    """A drawing object as Excel writes one: an OBJ record (ftCmo with the
+    object's type and id, ``extra`` subrecords, ftEnd) and, for ``text``, a
+    TXO record with the text and its formatting runs in CONTINUE records."""
+    import struct
+
+    obj = _xls_record(0x005D, struct.pack("<HHHHH", 0x15, 0x12, ot, obj_id, 0x6011)
+                      + b"\0" * 12 + extra + b"\0" * 4)
+    if not text:
+        return obj
+    encoded = text.encode("latin-1")
+    return (obj + _xls_record(0x00EC, bytes.fromhex("00000df000000000"))
+            + _xls_record(0x01B6, struct.pack("<HH6sHHH", 0x0212, 0, b"\0" * 6,
+                                              len(text), 16, 0) + b"\0\0")
+            + _xls_record(0x003C, b"\x00" + encoded)
+            + _xls_record(0x003C, struct.pack("<HH4xHH4x", 0, 0, len(text), 0)))
+
+
+_PICTURE = bytes.fromhex("07000200ffff080002000000")          # ftCf, ftPioGrbit
+_EMBEDDED = bytes.fromhex("07000200ffff0800020000000900040000000000")  # + ftPictFmla
+
+
+def _viewed_xlsx(own: str, view: str, view_extra: str = "", parts=None) -> bytes:
+    """The reviewer's real-Excel Custom View workbook as an ``.xlsx``: sheet
+    ``Sheet9`` holding ``BODYTOKEN``, its own ``headerFooter`` markup
+    ``own``, and a Custom View (the element real Excel wrote, less its
+    printer-settings reference) holding ``view`` and ``view_extra``."""
+    def build(wb):
+        ws = wb.active
+        ws.title = "Sheet9"
+        ws["A1"] = "BODYTOKEN"
+
+    views = ('<customSheetViews><customSheetView guid="{A3A9A64A-183C-48B5-B352-33619E42677F}" '
+             'showPageBreaks="1"><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" '
+             f'header="0.3" footer="0.3"/>{view_extra}{view}</customSheetView></customSheetViews>')
+
+    def sheet(xml: str) -> str:
+        xml = re.sub(r"<headerFooter>.*?</headerFooter>|<headerFooter/>", "", xml, flags=re.S)
+        xml = xml.replace("<pageMargins", views + "<pageMargins", 1)
+        return xml.replace("</worksheet>", own + "</worksheet>")
+
+    return _patch(_xlsx(build), dict({"xl/worksheets/sheet1.xml": sheet}, **(parts or {})))
+
+
+def test_a_custom_views_print_header_is_never_the_sheets():
+    """Review r3 (B2): a Custom View keeps its own copy of the print header
+    and footer. ``.xls`` read whichever HEADER/FOOTER record came last, and
+    Excel writes the view's after the sheet's, so the view's stale text
+    replaced the sheet's or erased it; ``.xlsx`` took a header inside
+    ``customSheetView`` as the sheet's when the sheet had none. Pinned on the
+    reviewer's three real-Excel pairs rebuilt byte-equivalently (the view's
+    records and element as Excel 16 wrote them), against what Excel itself
+    reads back: header changed after the view (BRAVO, not ALPHA), set after
+    it (CHARLIE, not the view's empty one), cleared after it (none, not
+    DELTA).
+
+    The class: everything else the readers take from a sheet that a view
+    could also hold is taken from the sheet's own state only. ``.xls``:
+    every record in the view's block is skipped -- a dialog flag, a text box,
+    a background picture put there are not the sheet's -- and a block that
+    never ends is named, not swallowed. ``.xlsx``: a hidden column, rows
+    hidden by default, a drawing and a header picture inside the view are
+    not the sheet's."""
+    import struct
+
+    body = [(0, 0, "BODYTOKEN", 0)]
+    cases = [
+        ("changed", "&CBRAVOHEAD", "&CBRAVOFOOT", "&CALPHAHEAD", "&CALPHAFOOT",
+         "[sheet: Sheet9]\nBRAVOHEAD\nBODYTOKEN\nBRAVOFOOT"),
+        ("late", "&CCHARLIEHEAD", "&CCHARLIEFOOT", "", "",
+         "[sheet: Sheet9]\nCHARLIEHEAD\nBODYTOKEN\nCHARLIEFOOT"),
+        ("cleared", "", "", "&CDELTAHEAD", "&CDELTAFOOT", "[sheet: Sheet9]\nBODYTOKEN"),
+    ]
+    for label, head, foot, view_head, view_foot, page in cases:
+        xls = make_fixtures.xls_bytes([{
+            "name": "Sheet9", "cells": body,
+            "records": [_xls_hf(0x0014, head), _xls_hf(0x0015, foot),
+                        _xls_view_block(view_head, view_foot)]}])
+        _assert_doc(_extract(f"{label}.xls", xls), [page], [PAGE_NOTE_XLS])
+
+        def hf(h, f):
+            inner = "".join(f"<{t}>{html.escape(v)}</{t}>"
+                            for t, v in (("oddHeader", h), ("oddFooter", f)) if v)
+            return f"<headerFooter>{inner}</headerFooter>" if inner else ""
+
+        _assert_doc(_extract(f"{label}.xlsx", _viewed_xlsx(hf(head, foot), hf(view_head, view_foot))),
+                    [page], [PAGE_NOTE_XLSX])
+
+    # .xls: what a view's block holds is never the sheet's, whatever it is.
+    inside = (_xls_record(0x0081, struct.pack("<BB", 0xD1, 0x04))
+              + _xls_shape(0x06, 40, "VIEWBOXWORD") + _xls_record(0x00E9, b"\0" * 8))
+    xls = make_fixtures.xls_bytes([{
+        "name": "Sheet9", "cells": body,
+        "records": [_xls_hf(0x0014, "&CBRAVOHEAD"),
+                    _xls_view_block("&C&GVIEWHEADWORD", "", inside)]}])
+    _assert_doc(_extract("inside.xls", xls), ["[sheet: Sheet9]\nBRAVOHEAD\nBODYTOKEN"],
+                [PAGE_NOTE_XLS])
+    begin_only = _EXCEL_VIEW_BLOCK[:68]      # USERSVIEWBEGIN alone: 4 + 64 bytes
+    xls = make_fixtures.xls_bytes([{
+        "name": "Sheet9", "cells": body,
+        "records": [begin_only, _xls_shape(0x06, 41, "AFTERBOXWORD"),
+                    _xls_hf(0x0014, "&CLATEHEADWORD")]}])
+    _assert_doc(_extract("open.xls", xls), ["[sheet: Sheet9]\nBODYTOKEN"],
+                ["sheet 'Sheet9': a Custom View's records begin and never end, so every "
+                 "record after them was skipped with them: its print header and footer and "
+                 "dialog flag, and so a cell written twice, a comment missing its text, and a "
+                 "text box, shape, chart, picture or control, may be lost with no note of its "
+                 f"own ({UNREAD})", PAGE_NOTE_XLS])
+
+    # .xlsx: the same, element by element.
+    drawing_rels = {
+        "xl/worksheets/_rels/sheet1.xml.rels": lambda t: (
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rIdV" Type="http://schemas.openxmlformats.org/officeDocument/'
+            '2006/relationships/drawing" Target="../drawings/drawing9.xml"/></Relationships>'),
+        "xl/drawings/drawing9.xml": lambda t: _drawing_xml(_sp("VIEWBOXWORD", 2, box=True)),
+    }
+    view_extra = ('<sheetFormatPr defaultRowHeight="15" zeroHeight="1"/>'
+                  '<cols><col min="1" max="1" width="0" hidden="1"/></cols>'
+                  '<drawing xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/'
+                  'relationships" r:id="rIdV"/>')
+    raw = _viewed_xlsx("<headerFooter><oddHeader>&amp;CBRAVOHEAD</oddHeader></headerFooter>",
+                       "<headerFooter><oddHeader>&amp;C&amp;GVIEWHEADWORD</oddHeader>"
+                       "</headerFooter>", view_extra, drawing_rels)
+    _assert_doc(_extract("inside.xlsx", raw), ["[sheet: Sheet9]\nBRAVOHEAD\nBODYTOKEN"],
+                [PAGE_NOTE_XLSX])
+
+
+_XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+
+def _drawing_xml(*anchored: str) -> str:
+    return (f'<xdr:wsDr xmlns:xdr="{_XDR}" xmlns:a="{_A}" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+            'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+            + "".join(anchored) + "</xdr:wsDr>")
+
+
+def _anchor(inner: str) -> str:
+    return ("<xdr:twoCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff>"
+            "<xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>5"
+            "</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff>"
+            f"</xdr:to>{inner}<xdr:clientData/></xdr:twoCellAnchor>")
+
+
+def _sp(text: str, shape_id: int, box: bool = False, hidden: bool = False) -> str:
+    """A DrawingML shape as Excel writes one: each ``\\n`` in ``text`` a new
+    paragraph."""
+    paragraphs = "".join(f'<a:p><a:r><a:rPr lang="en-US" sz="1100"/><a:t>{html.escape(p)}</a:t>'
+                         "</a:r></a:p>" if p else '<a:p><a:endParaRPr lang="en-US"/></a:p>'
+                         for p in text.split("\n"))
+    hidden_attr = ' hidden="1"' if hidden else ""
+    box_attr = ' txBox="1"' if box else ""
+    return (f'<xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="{shape_id}" '
+            f'name="Shape {shape_id}"{hidden_attr}/><xdr:cNvSpPr{box_attr}/></xdr:nvSpPr>'
+            '<xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody>'
+            f'<a:bodyPr/><a:lstStyle/>{paragraphs}</xdr:txBody></xdr:sp>')
+
+
+def _frame(uri: str, shape_id: int) -> str:
+    return (f'<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="{shape_id}" '
+            f'name="Frame {shape_id}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>'
+            '<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic>'
+            f'<a:graphicData uri="{uri}"/></a:graphic></xdr:graphicFrame>')
+
+
+def _choice(inner: str, fallback: str = "") -> str:
+    return ('<mc:AlternateContent><mc:Choice xmlns:a14="http://schemas.microsoft.com/office/'
+            f'drawing/2010/main" Requires="a14">{inner}</mc:Choice>'
+            f"<mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>")
+
+
+def _board_xlsx(sheet_edit=None, parts_edit=None) -> bytes:
+    """Excel's worksheet drawing constructs (as real Excel 16 wrote them in
+    excel_fix3/excel_real/x04_drawings.xlsx): a two-paragraph text box, a
+    shape with text, a group of two shapes with text, a shape with no text, a
+    connector, WordArt, a picture, a chart, a SmartArt diagram, a form button
+    and check box and an embedded object (each with Excel's hidden drawn copy
+    in an mc:Choice, and in the legacy VML drawing), a comment's VML shape, a
+    slicer's graphic frame whose mc:Fallback says it is one, and a picture in
+    the print header."""
+    def build(wb):
+        ws = wb.active
+        ws.title = "Board"
+        ws["A1"], ws["A2"], ws["A3"] = "KITEROW", 5, 7
+
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    drawing = _drawing_xml(
+        _anchor(_sp("LOONBOX first line\nLOONSECOND line", 2, box=True)),
+        _anchor(_sp("GREBESHAPE", 3)),
+        _anchor('<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="6" name="Group 5"/><xdr:cNvGrpSpPr/>'
+                "</xdr:nvGrpSpPr><xdr:grpSpPr/>" + _sp("COOTGROUPA", 4) + _sp("COOTGROUPB", 5)
+                + "</xdr:grpSp>"),
+        _anchor(_sp("", 7)),
+        _anchor('<xdr:cxnSp macro=""><xdr:nvCxnSpPr><xdr:cNvPr id="8" name="Connector 7"/>'
+                "<xdr:cNvCxnSpPr/></xdr:nvCxnSpPr><xdr:spPr/></xdr:cxnSp>"),
+        _anchor(_sp("SCAUPART", 9)),
+        _anchor('<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="11" name="Picture 10"/><xdr:cNvPicPr/>'
+                '</xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill>'
+                "<xdr:spPr/></xdr:pic>"),
+        _anchor(_frame("http://schemas.openxmlformats.org/drawingml/2006/chart", 12)),
+        _anchor(_frame("http://schemas.openxmlformats.org/drawingml/2006/diagram", 13)),
+        _choice(_anchor(_sp("GADWALLBUTTON", 1025, hidden=True))),
+        _choice(_anchor(_sp("WIGEONCHECK", 1026, hidden=True))),
+        _choice(_anchor(_sp("", 1027, hidden=True))),
+        _choice(_anchor(_frame("http://schemas.microsoft.com/office/drawing/2010/slicer", 14)),
+                _anchor(_sp("FALLBACKSLICERWORD", 15))),
+    )
+    vml = ('<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:'
+           'office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">'
+           '<v:shape id="_x0000_s1025" type="#_x0000_t201"><v:textbox><div>GADWALLBUTTON</div>'
+           '</v:textbox><x:ClientData ObjectType="Button"><x:Anchor>7, 56, 14, 0, 9, 18, 15, 8'
+           '</x:Anchor></x:ClientData></v:shape>'
+           '<v:shape id="_x0000_s1026" type="#_x0000_t201"><x:ClientData ObjectType="Checkbox">'
+           '</x:ClientData></v:shape>'
+           '<v:shape id="_x0000_s1027" type="#_x0000_t75"><v:imagedata o:relid="rId1"/>'
+           '<x:ClientData ObjectType="Pict"><x:CF>Pict</x:CF></x:ClientData></v:shape>'
+           '<v:shape id="_x0000_s1028" o:spid="_x0000_s1028" type="#_x0000_t202"><v:textbox>'
+           '<div>NOTEVMLWORD</div></v:textbox><x:ClientData ObjectType="Note"><x:Row>1</x:Row>'
+           '<x:Column>0</x:Column></x:ClientData></v:shape></xml>')
+    tail = (f'<drawing xmlns:r="{rel}" r:id="rIdDr"/><legacyDrawing xmlns:r="{rel}" r:id="rIdVml"/>'
+            f'<oleObjects xmlns:r="{rel}" xmlns:mc="http://schemas.openxmlformats.org/'
+            'markup-compatibility/2006"><mc:AlternateContent><mc:Choice Requires="x14">'
+            '<oleObject progId="Packager Shell Object" shapeId="1027" r:id="rIdOle"/></mc:Choice>'
+            '<mc:Fallback><oleObject progId="Packager Shell Object" shapeId="1027" r:id="rIdOle"/>'
+            '</mc:Fallback></mc:AlternateContent></oleObjects>'
+            '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility'
+            f'/2006"><mc:Choice Requires="x14"><controls xmlns:r="{rel}">'
+            '<mc:AlternateContent><mc:Choice Requires="x14"><control shapeId="1025" r:id="rIdC1" '
+            'name="Button 1"/></mc:Choice></mc:AlternateContent>'
+            '<mc:AlternateContent><mc:Choice Requires="x14"><control shapeId="1026" r:id="rIdC2" '
+            'name="Check Box 2"/></mc:Choice></mc:AlternateContent></controls></mc:Choice>'
+            "</mc:AlternateContent>")
+    rels = (f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rIdDr" Type="{rel}/drawing" Target="../drawings/drawing1.xml"/>'
+            f'<Relationship Id="rIdVml" Type="{rel}/vmlDrawing" Target="../drawings/vmlDrawing1.vml"/>'
+            f'<Relationship Id="rIdOle" Type="{rel}/oleObject" Target="../embeddings/oleObject1.bin"/>'
+            f'<Relationship Id="rIdC1" Type="{rel}/ctrlProp" Target="../ctrlProps/ctrlProp1.xml"/>'
+            f'<Relationship Id="rIdC2" Type="{rel}/ctrlProp" Target="../ctrlProps/ctrlProp2.xml"/>'
+            "</Relationships>")
+
+    def sheet(xml: str) -> str:
+        xml = re.sub(r"<headerFooter>.*?</headerFooter>|<headerFooter/>", "", xml, flags=re.S)
+        xml = xml.replace("</worksheet>", "<headerFooter><oddHeader>&amp;C&amp;G&amp;LSHOVELERHEAD"
+                          "</oddHeader></headerFooter>" + tail + "</worksheet>")
+        return sheet_edit(xml) if sheet_edit else xml
+
+    parts = {"xl/worksheets/sheet1.xml": sheet,
+             "xl/worksheets/_rels/sheet1.xml.rels": lambda t: rels,
+             "xl/drawings/drawing1.xml": lambda t: drawing,
+             "xl/drawings/vmlDrawing1.vml": lambda t: vml}
+    parts.update(parts_edit or {})
+    return _patch(_xlsx(build), parts)
+
+
+def _board_xls(records=None) -> bytes:
+    """:func:`_board_xlsx`'s constructs as real Excel 16 saved them to
+    ``.xls`` (excel_fix3/excel_real/x04_drawings.xls): each an OBJ record of
+    its type (a text box 0x06, a rectangle 0x02, an oval 0x03, a group 0x00,
+    a connector 0x1E, a picture 0x08, a chart 0x05 with its own chart
+    substream, a button 0x07, a check box 0x0B, an embedded object -- a
+    picture with an ftPictFmla), the text in a TXO record. Excel saves a
+    SmartArt diagram to ``.xls`` as a picture, and so does this."""
+    import struct
+
+    chart = (_xls_shape(0x05, 11)
+             + _xls_record(0x0809, struct.pack("<HHHHII", 0x0600, 0x0020, 0, 0, 0, 0))
+             + _xls_hf(0x0014, "&CCHARTHEADWORD")
+             + _xls_record(0x0203, struct.pack("<HHHd", 0, 0, 0, 99.0))
+             + _xls_record(0x000A, b""))
+    board = [
+        _xls_shape(0x06, 4, "LOONBOX first line\nLOONSECOND line"),
+        _xls_shape(0x02, 5, "GREBESHAPE"),
+        _xls_shape(0x00, 6), _xls_shape(0x03, 13, "COOTGROUPA"), _xls_shape(0x02, 14, "COOTGROUPB"),
+        _xls_shape(0x02, 7), _xls_shape(0x1E, 8), _xls_shape(0x02, 9, "SCAUPART"),
+        _xls_shape(0x08, 10, extra=_PICTURE), chart, _xls_shape(0x08, 12, extra=_PICTURE),
+        _xls_shape(0x07, 1, "GADWALLBUTTON"), _xls_shape(0x0B, 2, "WIGEONCHECK"),
+        _xls_shape(0x08, 3, extra=_EMBEDDED),
+    ]
+    return make_fixtures.xls_bytes([{
+        "name": "Board", "header": "&C&G&LSHOVELERHEAD",
+        "cells": [(0, 0, "KITEROW", 0), (1, 0, 5.0, 0), (2, 0, 7.0, 0)],
+        "records": board if records is None else records}])
+
+
+BOARD_PAGE = ("[sheet: Board]\nSHOVELERHEAD\nKITEROW\n5\n7\n"
+              "[text box] LOONBOX first line ¶ LOONSECOND line\n[shape] GREBESHAPE\n"
+              "[shape] COOTGROUPA\n[shape] COOTGROUPB\n[shape] SCAUPART")
+
+
+def test_worksheet_drawings_are_read_or_named_in_both_formats(monkeypatch):
+    """Review r3 (B4): a text box, a shape with text or a chart on an
+    ordinary worksheet vanished with status FULL and no word, in both
+    formats, while the same chart on its own tab was disclosed. A text box's
+    or shape's text is READ -- one line per shape, ``[text box]`` or
+    ``[shape]``, after the sheet's rows (and after a row-cap line) and before
+    its comments, in the drawing's own order, a paragraph break as a cell's
+    line break -- and what has no text to take is COUNTED in one FINAL note:
+    charts, pictures, SmartArt, form or ActiveX controls, embedded objects,
+    header pictures. A control's or object's drawn copy is not read as a
+    shape; a comment's VML shape and a slicer's fallback text are not read
+    at all; an embedded chart's own header and cells are not the sheet's.
+
+    Pages are identical in both formats (the real-Excel pair is too,
+    excel_fix3/x06); the notes differ only where the formats do: ``.xls``
+    keeps no SmartArt (Excel saves the diagram as a picture) and has no
+    slicer (counted in ``.xlsx`` as a drawing object of another kind). A
+    drawing part missing from the file is FINAL, a drawing read that raised
+    TRANSIENT."""
+    counts = ("1 chart(s), {pictures}, {smartart}2 form or ActiveX control(s), 1 embedded "
+              "or linked object(s){last}1 picture(s) in its print header or footer{other} "
+              f"were not read ({UNREAD})")
+    xlsx_note = "sheet 'Board': " + counts.format(
+        pictures="1 picture(s)", smartart="1 SmartArt diagram(s), ", last=", ",
+        other=" and 1 drawing object(s) of another kind")
+    xls_note = "sheet 'Board': " + counts.format(pictures="2 picture(s)", smartart="",
+                                                 last=" and ", other="")
+    _assert_doc(_extract("board.xlsx", _board_xlsx()), [BOARD_PAGE], [xlsx_note, PAGE_NOTE_XLSX])
+    _assert_doc(_extract("board.xls", _board_xls()), [BOARD_PAGE], [xls_note, PAGE_NOTE_XLS])
+    assert ex.has_final_marker(xlsx_note) and not ex.has_transient_marker(xlsx_note)
+
+    no_drawing_page = "[sheet: Board]\nSHOVELERHEAD\nKITEROW\n5\n7"
+    missing = _board_xlsx(parts_edit={"xl/drawings/drawing1.xml": lambda t: None})
+    note = ("sheet 'Board': its drawing part is missing from the file; a text box, shape, "
+            f"chart, picture or control on it was not read ({UNREAD})")
+    rest = ("sheet 'Board': 2 form or ActiveX control(s), 1 embedded or linked object(s) and 1 "
+            f"picture(s) in its print header or footer were not read ({UNREAD})")
+    _assert_doc(_extract("missing.xlsx", missing), [no_drawing_page], [note, rest, PAGE_NOTE_XLSX])
+
+    real = ex._xlsx_drawing
+
+    def raising(z, member, mirrored):
+        raise MemoryError()
+
+    monkeypatch.setattr(ex, "_xlsx_drawing", raising)
+    note = ("sheet 'Board': its drawing could not be read (MemoryError), so a text box, "
+            f"shape, chart, picture or control on it is not on its page or counted ({PART_UNREAD})")
+    _assert_doc(_extract("raised.xlsx", _board_xlsx()), [no_drawing_page],
+                [note, rest, PAGE_NOTE_XLSX])
+    assert ex.has_transient_marker(note)
+    monkeypatch.setattr(ex, "_xlsx_drawing", real)
+
+    # The shapes follow the rows and a row-cap line, and precede the comments.
+    def commented(wb):
+        ws = wb.active
+        ws.title = "Board"
+        for r in range(1, 4):
+            ws[f"A{r}"] = f"CAPROW{r - 1}"
+        ws["B1"].comment = openpyxl.comments.Comment("NOTEWORD", "AUTHORWORD")
+
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    raw = _patch(_xlsx(commented), {
+        "xl/worksheets/sheet1.xml": lambda t: t.replace(
+            "<legacyDrawing", f'<drawing xmlns:r="{rel}" r:id="rIdBox"/><legacyDrawing', 1),
+        "xl/worksheets/_rels/sheet1.xml.rels": lambda t: t.replace(
+            "</Relationships>", f'<Relationship Id="rIdBox" Type="{rel}/drawing" '
+            'Target="../drawings/drawing7.xml"/></Relationships>'),
+        "xl/drawings/drawing7.xml": lambda t: _drawing_xml(_anchor(_sp("BOXAFTERCAP", 2, box=True))),
+    })
+    monkeypatch.setattr(ex, "_XLSX_MAX_ROWS", 2)
+    _assert_doc(_extract("capped.xlsx", raw),
+                ["[sheet: Board]\nCAPROW0\nCAPROW1\n[... workbook truncated at 2 rows]\n"
+                 "[text box] BOXAFTERCAP\n[comment on B1 by AUTHORWORD] NOTEWORD"],
+                ["workbook truncated at 2 rows while reading 'Board'; the rest of that sheet "
+                 f"was not read ({UNREAD})", PAGE_NOTE_XLSX])
+    capped = make_fixtures.xls_bytes([{
+        "name": "Board", "cells": [(r, 0, f"CAPROW{r}", 0) for r in range(3)],
+        "notes": [(0, 1, "AUTHORWORD", "NOTEWORD")],
+        "records": [_xls_shape(0x06, 7, "BOXAFTERCAP")]}])
+    _assert_doc(_extract("capped.xls", capped),
+                ["[sheet: Board]\nCAPROW0\nCAPROW1\n[... workbook truncated at 2 rows]\n"
+                 "[text box] BOXAFTERCAP\n[comment on B1 by AUTHORWORD] NOTEWORD"],
+                ["workbook truncated at 2 rows while reading 'Board'; the rest of that sheet "
+                 f"was not read ({UNREAD})", PAGE_NOTE_XLS])
+
+
+def test_a_raw_cell_failure_keeps_openpyxls_dates_times_and_durations(monkeypatch):
+    """Review-fix round 3: dates, times and durations are now read from the
+    cell's own ``<v>``. When that stream raises, openpyxl's converted value
+    is shown under the rules it had -- a duration still ``30:00:00``, never
+    Python's ``1 day, 6:00:00``; a time-only format's day count still the
+    number, never a date -- and the transient note says what that costs."""
+    def build(wb):
+        ws = wb.active
+        ws.title = "Clock"
+        for c, (value, fmt) in enumerate(((1.25, "[h]:mm:ss"), (0.25, "h:mm"),
+                                          (45489.25, "yyyy-mm-dd h:mm"), (1.5, "h:mm")), start=1):
+            ws.cell(1, c, value).number_format = fmt
+
+    real = ex._xlsx_iter_rows
+    calls = {"n": 0}
+
+    def raw_stream_fails(z, part):
+        calls["n"] += 1
+        if calls["n"] == 2:            # the extras stream first, then the raw cells
+            raise MemoryError()
+        return real(z, part)
+
+    monkeypatch.setattr(ex, "_xlsx_iter_rows", raw_stream_fails)
+    note = ("sheet 'Clock': its own cell XML could not be read (MemoryError), so a formula "
+            "whose stored result is empty may be shown as its formula and counted as having no "
+            "stored value, a date-formatted number that is no date may show as #VALUE!, a "
+            "time-only cell may show the number openpyxl converted rather than the one stored, "
+            "and a date, time or duration may be a millisecond off Excel's rounding "
+            f"({PART_UNREAD})")
+    _assert_doc(_extract("clock.xlsx", _xlsx(build)),
+                ["[sheet: Clock]\n30:00:00\t06:00:00\t2024-07-16 06:00:00\t1.5"],
+                [note, "1 cell(s) formatted as a time with no date held a value of a day or "
+                 "more; the number is shown as stored", PAGE_NOTE_XLSX])
+
+
+def test_a_hidden_sheet_is_said_read_only_when_its_rows_were():
+    """Review r3 (C): the hidden-sheet note was settled before the rows were
+    read, so a hidden sheet whose first row could not be read (a NaN value),
+    or whose first row the row cap discarded, was said to be "read like any
+    other sheet" beside the note saying it was not."""
+    def build(wb):
+        wb.active.title = "Shown"
+        wb.active["A1"] = "SHOWNWORD"
+        hid = wb.create_sheet("Hid")
+        hid["A1"] = 1.5
+        hid.sheet_state = "hidden"
+
+    raw = _patch(_xlsx(build), {"xl/worksheets/sheet2.xml": lambda t: t.replace(
+        "<v>1.5</v>", "<v>NaN</v>")})
+    _assert_doc(_extract("nan.xlsx", raw), ["[sheet: Shown]\nSHOWNWORD", "[sheet: Hid]"],
+                ["sheet 'Hid' is hidden in the workbook",
+                 "sheet 'Hid': its rows from row 1 on could not be read (ValueError), so they "
+                 f"are not on its page ({PART_UNREAD})", PAGE_NOTE_XLSX])
+
+
+def test_a_hidden_sheet_the_cap_cut_before_its_first_row_is_not_said_read(monkeypatch):
+    """Review r3 (C), the row-cap boundary: the first sheet holds exactly the
+    cap, so the hidden second sheet is opened (its header shows) and its
+    first row discarded -- none of its rows was read."""
+    monkeypatch.setattr(ex, "_XLSX_MAX_ROWS", 2)
+
+    def build(wb):
+        wb.active.title = "Full"
+        wb.active["A1"], wb.active["A2"] = "FULLONE", "FULLTWO"
+        hid = wb.create_sheet("Hid")
+        hid["A1"] = "HIDROW"
+        hid.oddHeader.center.text = "TWITEHEAD"
+        hid.sheet_state = "hidden"
+
+    truncation = (f"workbook truncated at 2 rows while reading 'Hid'; the rest of that sheet "
+                  f"was not read ({UNREAD})")
+    page = ["[sheet: Full]\nFULLONE\nFULLTWO",
+            "[sheet: Hid]\nTWITEHEAD\n[... workbook truncated at 2 rows]"]
+    _assert_doc(_extract("cap.xlsx", _xlsx(build)), page,
+                ["sheet 'Hid' is hidden in the workbook", truncation, PAGE_NOTE_XLSX])
+    xls = make_fixtures.xls_bytes([
+        {"name": "Full", "cells": [(0, 0, "FULLONE", 0), (1, 0, "FULLTWO", 0)]},
+        {"name": "Hid", "visibility": 1, "header": "&CTWITEHEAD",
+         "cells": [(0, 0, "HIDROW", 0)]}])
+    _assert_doc(_extract("cap.xls", xls), page,
+                ["sheet 'Hid' is hidden in the workbook", truncation, PAGE_NOTE_XLS])
+
+
+def test_an_iso_date_cell_keeps_its_date_under_any_format():
+    """Review r3 (C, a regression from round 2): a cell storing an ISO
+    date-time (``t="d"``, which openpyxl writes with ``iso_dates``) under a
+    number or time-only format read as a serial number, under a note saying
+    the number was "shown as stored" -- the file stores the ISO text. It
+    reads as stored, whatever the format, with no note."""
+    def build(wb):
+        wb.iso_dates = True
+        ws = wb.active
+        ws.title = "Iso"
+        for c, fmt in enumerate(("General", "0.00", "h:mm", "yyyy-mm-dd"), start=1):
+            ws.cell(1, c, datetime.datetime(2024, 7, 16, 8, 30)).number_format = fmt
+
+    raw = _xlsx(build)
+    sheet = zipfile.ZipFile(io.BytesIO(raw)).read("xl/worksheets/sheet1.xml").decode()
+    assert sheet.count('t="d"') == 4, sheet
+    _assert_doc(_extract("iso.xlsx", raw), ["[sheet: Iso]\n" + "\t".join(["2024-07-16 08:30:00"] * 4)],
+                [PAGE_NOTE_XLSX])
+
+
+def test_an_xls_cell_typed_a_date_with_no_format_found_says_so():
+    """Review r3 (C): note 40 was listed as unreachable. An ``.xls`` cell
+    whose format index is a CJK built-in date xlrd knows (57) but whose
+    workbook declares no FORMAT for it reads as the number stored, under
+    that note."""
+    xls = make_fixtures.xls_bytes([{"name": "Dated", "cells": [(0, 0, 45489.0, 57)]}])
+    _assert_doc(_extract("dated.xls", xls), ["[sheet: Dated]\n45489"],
+                ["1 cell(s) typed as a date carry no number format this reader could find; "
+                 "the number is shown as stored", PAGE_NOTE_XLS])
+
+
+def test_the_persons_note_when_the_workbook_part_is_not_found(monkeypatch):
+    """Review r3 (C, mutants U01/U03): when the workbook part itself cannot
+    be found, threaded comments are credited to person ids under a TRANSIENT
+    note -- never FINAL, never unsaid."""
+    def not_found(z):
+        raise MemoryError()
+
+    monkeypatch.setattr(ex, "_xlsx_workbook_part", not_found)
+    doc = _extract("threads.xlsx", _threads_workbook())
+    persons = ("the workbook part was not found (MemoryError), so its persons part was not "
+               "read; 1 threaded comment(s) are credited to person ids, not names "
+               f"({PART_UNREAD})")
+    assert persons in doc.notes, doc.notes
+    assert ex.has_transient_marker(persons) and not ex.has_final_marker(persons)
+    assert "[comment on A1 by {P1}] MAGPIE" in doc.pages[0].text, doc.pages[0].text

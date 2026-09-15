@@ -53,9 +53,10 @@ class AccountingReport:
     accounting"."""
 
     documents_evidence_lost: int = 0
-    """Documents carrying a FINAL evidence gap — content named in the record
-    that was not read and will not be recovered by re-reading (its bytes may
-    still be in the file: a chartsheet's chart, rows past a row cap)."""
+    """Documents carrying a FINAL evidence gap — one a re-read will not change,
+    each named in the document's own notes: content not read (its bytes may
+    still be in the file: a chartsheet's chart, rows past a row cap), or a
+    step that failed with every page kept (section recognition)."""
 
     @property
     def ok(self) -> bool:
@@ -74,9 +75,11 @@ class AccountingReport:
             parts.append(f"{self.documents_degraded} document(s) read with a "
                          "disclosed, retryable evidence gap")
         if self.documents_evidence_lost:
-            parts.append(f"{self.documents_evidence_lost} document(s) name "
-                         "content that was NOT read and will not be recovered "
-                         "by re-reading")
+            # True for every FINAL marker (review r3 C): section recognition
+            # failing keeps every page, so "content that was NOT read"
+            # overclaimed for it; each note says what its gap is.
+            parts.append(f"{self.documents_evidence_lost} document(s) carry a "
+                         "disclosed evidence gap that re-reading will not change")
         return "EVIDENCE GAPS — " + "; ".join(parts) if parts else ""
 
     def render(self) -> str:

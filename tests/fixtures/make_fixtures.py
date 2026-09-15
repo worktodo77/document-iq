@@ -374,6 +374,9 @@ def xls_bytes(sheets, *, datemode: int = 0,
       location)`` HLINK records: ``kind`` is ``"url"``, ``"file"``,
       ``"internal"`` (a location only) or ``"unknown"`` (a moniker class no
       reader knows).
+    * ``records`` -- raw records written last, in order, before the sheet's
+      EOF: an ``(opcode, data)`` pair, or bytes already framed (a Custom View
+      block copied from a file Excel wrote, drawing objects).
 
     ``globals_extra`` -- raw ``(opcode, data)`` records appended to the
     workbook globals after the XF records (e.g. a malformed PALETTE).
@@ -522,6 +525,8 @@ def xls_bytes(sheets, *, datemode: int = 0,
             body += objects + bare_objects + notes + bare_notes
             for link in sheet.get("links", ()):
                 body += hlink(*link)
+            for record in sheet.get("records", ()):
+                body += (rec(*record) if isinstance(record, tuple) else record)
         substreams.append(body + eof)
 
     offsets, pos = [], globals_len
