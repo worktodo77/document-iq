@@ -306,25 +306,33 @@ call site that never considered the setting mint the fingerprint of some other
 run, and an approval would then be refused, or applied, for a reason nobody
 chose. The same holds for ``set_omission`` on the GUI seam.
 
-What the setting skips, as built after Alex's ruling D-54 of 2026-09-14: image
-content covering ``PHOTO_MIN_IMAGE_AREA_SHARE`` (25%) or more of a page, summed
-over every image the page draws, beside a text layer -- EXCEPT a page whose image
-content covers 90% or more (``_SCAN_MIN_IMAGE_SHARE`` in the extractor). That
-page is a scan, and it is read exactly as a reading run reads it, MIXED with
-D-49's locator rule, however long the typed stamp in its text layer is. Without
-the exception an endorsement over the text floor decided that a full-page scan
-went unread. D-54 needed no new contract input: the setting is the same field
-with the same meaning, and what it skips changed inside this unreleased 2.3.0.
-Neither setting reads image content covering less than 25% of a page that has a
-text layer; that is A-24's threshold, and no note names such a page.
+What the setting skips, as built after Alex's ruling D-54 of 2026-09-14: images
+whose drawn areas add up to ``PHOTO_MIN_IMAGE_AREA_SHARE`` (25%) or more of a
+page, summed over every image the page draws (an upper bound: overlaps and
+repeated draws add up), beside a text layer of at least the extractor's text
+floor -- EXCEPT a page whose drawn image areas add up to 90% or more
+(``_SCAN_MIN_IMAGE_SHARE`` in the extractor). That page is a scan, and it is
+read exactly as a reading run reads it, MIXED with D-49's locator rule, however
+long the typed stamp in its text layer is. Without the exception an endorsement
+over the text floor decided that a full-page scan went unread. D-54 needed no
+new contract input: the setting is the same field with the same meaning, and
+what it skips changed inside this unreleased 2.3.0. Neither setting reads images
+adding up to less than 25% of a page whose text layer reaches the text floor;
+that is A-24's threshold, and no note names such a page. (A page under the
+floor is OCR'd whole by either setting, pictures included.)
 
-Also inside the unreleased 2.3.0, from D-51's second review round: A-24's
-region OCR read a text layer twice wherever an image lay UNDER it (a letter on
-full-page stationery, a stamp typed over a scan, a searchable scan's OCR layer),
-and measured an image drawn twice, or stored inline, as a thumbnail or as
-nothing. The extractor now paints the text layer's own word boxes out of the
-rendering before cutting any crop, and measures and crops every draw. No field
-changes; what a page's text holds does, which is why it is recorded here.
+Also inside the unreleased 2.3.0, from D-51's second and third review rounds
+and Alex's ruling D-58: A-24's region OCR reads each image region whole, so
+typed text lying on an image (a letter on full-page stationery, a stamp typed
+over a scan, a searchable scan's OCR layer) is read twice, once from the text
+layer and once from the image. That loses nothing and is accepted; the pages
+where it may happen are named in a document note. A mask that painted the text
+layer out before cropping was built in the second round and removed after the
+third, because it lost scan content with no marker. The image geometry now
+counts every draw (inline images and repeated placements included), clipped to
+the page, leaves out images used only as soft masks, and measures a tiling
+pattern by the area it fills. No field changes; what a page's text holds does,
+which is why it is recorded here.
 
 1.9.0 — amendment A-19, extended, from Codex review r2's finding B-2. :class:`OmissionSnapshot`
 gains ``matter_root`` and :func:`matter_key` is added.
@@ -1203,10 +1211,11 @@ on a timed sample of 12 documents (645 pages, 144 of them MIXED; measured under
 D-49 in the decision register) extraction took 3.44 times as long with the
 reading on; the whole-corpus cost is not measured. A run therefore takes a quick
 first pass unless the operator turns the reading on, and every page this setting
-leaves unread says so. Image content covering 90% or more of a page -- a scan,
-even one carrying a typed stamp -- is read even in the quick pass (D-54). Image
-content covering less than 25% of a page with a text layer is under A-24's
-threshold and is read, and named, by neither setting.
+leaves unread says so. A page whose drawn image areas add up to 90% or more --
+a scan, even one carrying a typed stamp -- is read even in the quick pass
+(D-54). Images adding up to less than 25% of a page whose text layer reaches
+the extractor's text floor are under A-24's threshold and are read, and named,
+by neither setting.
 
 **One constant, read by every record that declares a default.** :class:`RunConfig`,
 ``dociq.ingest.extract.ExtractOptions`` and the GUI's ``RunRequest`` each take
@@ -1320,10 +1329,10 @@ class RunConfig:
     unread in one run and MIXED with the chart's words in the other, and
     recognition can place it in a different family. It is a
     :func:`recognition_fingerprint` input for the reason whether OCR ran is.
-    ``True`` does not skip image content covering 90% or more of a page
+    ``True`` does not skip a page whose drawn image areas add up to 90% or more
     (``_SCAN_MIN_IMAGE_SHARE`` in the extractor, D-54): that page is read either
-    way. Neither value reads image content covering less than 25% of a page
-    that has a text layer.
+    way. Neither value reads images adding up to less than 25% of a page whose
+    text layer reaches the extractor's text floor.
 
     **What** ``dociq.pipeline.run`` **records** is the value the run was given,
     forced to ``True`` when OCR is DISABLED, as it stamps the OCR engine: a run

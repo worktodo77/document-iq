@@ -210,7 +210,9 @@ def test_a_page_that_is_both_text_and_image_reads_both():
     assert "CONFIDENTIALITY LEGEND: FOR INTERNAL USE ONLY" in page.text
     assert letterhead in page.text
 
-    # 4. The native text is NOT duplicated by the OCR-region merge.
+    # 4. The letterhead lies BESIDE the image, so the region merge does not
+    # repeat it. (Typed text lying ON an image is read again, D-58; that case
+    # is held further down.)
     assert page.text.count(letterhead) == 1, (
         "the native letterhead was duplicated by the image-region merge: "
         + repr(page.text))
@@ -292,11 +294,15 @@ def test_a_skipped_image_is_disclosed_apart_from_a_disabled_or_missing_engine(
         "with no OCR engine, a skipping run did not say it skipped: "
         f"{skipped_no_engine.notes}")
     assert skipped_no_engine.pages[0].notes == (ex.M_IMAGE_SKIPPED,)
-    # `_page_image_share` SUMS a page's images, so the sentences say "image
-    # content covering"; "an image covering" claimed one image did (D-51 review).
+    # `_page_image_share` SUMS every draw, overlaps and repeats included, so the
+    # sentences say the drawn areas ADD UP to the share. "an image covering"
+    # claimed one image did (D-51 review), and "image content covering" claimed
+    # the page showed that much, which a picture drawn twice does not (D-51
+    # round-3 review).
     for sentence in (sentences[0][0], sentences[1][0]):
-        assert "image content covering 25% or more" in sentence, sentence
+        assert "images whose drawn areas add up to 25% or more" in sentence, sentence
         assert "an image covering" not in sentence, sentence
+        assert "content covering" not in sentence, sentence
 
     page = skipped.pages[0]
     assert page.kind is PageKind.NATIVE
@@ -683,7 +689,11 @@ def test_a_scan_first_drawn_as_a_thumbnail_is_measured_at_every_placement(tmp_pa
     for opt in (ex.ExtractOptions(), _reading()):
         page = ex.extract(path.name, raw, opt).pages[0]
         assert page.kind is PageKind.MIXED, (page.kind, page.notes)
-        assert "SITEINSTRUCTION015" in _flat(page.text), page.text
+        # The scan's words, matched without its digit 0: with the stamp no
+        # longer masked out of the crop (D-58) the engine reads this rendering
+        # of "015" as "O15", which says nothing about the placement measured.
+        flat = _flat(page.text)
+        assert "SITEINSTRUCTION" in flat and "2024-07-17" in flat, page.text
 
 
 def test_every_placement_of_a_reused_image_is_read(tmp_path):
@@ -747,14 +757,21 @@ def test_a_scan_stored_as_an_inline_image_is_read(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# A-24 / D-49: region OCR reads what the text layer does NOT cover
+# A-24 / D-58: region OCR reads every image region whole. Typed text lying on
+# an image may be read twice; nothing under it may be lost.
 # ---------------------------------------------------------------------------
 #
-# D-49's register text says reading only what the text layer does not cover
-# makes duplication impossible by construction. The crop was the image's box,
-# and when the image lies UNDER the text layer that box holds the text layer's
-# own glyphs, so they were read twice. D-54 put that on the default run. The
-# scans below are made the way a scanner makes one: a page of real type is
+# D-48's "What shipped" said that reading only the image regions made
+# duplication impossible by construction. It did not: an image lying under the
+# text layer holds the layer's own glyphs inside its crop, and they were read
+# twice. D-51's second fix round painted the text layer's word boxes out of the
+# rendering, and its third review found that mask erasing scan content with no
+# marker (a diagonal watermark's word boxes; a wrong OCR layer). Alex ruled
+# D-58: remove the mask, accept the duplication, disclose it. These tests hold
+# both halves: every word of such a page is there at least once, including the
+# scan under a wrong text layer, and the page is named in the document note.
+#
+# The scans are made the way a scanner makes one: a page of real type is
 # rendered to pixels, and the pixels become the page's image, so a text layer
 # typed at the same points lies exactly over the scanned glyphs.
 
@@ -787,15 +804,28 @@ def _image_lines(page) -> str:
     return "\n".join(page.text.split("\n")[start:start + count])
 
 
+def _repeat_notes(got) -> list[str]:
+    """The document note naming pages whose text may repeat typed words (D-58)."""
+    return [n for n in got.notes if ex.IMAGE_TEXT_MAY_REPEAT in n]
+
+
+def _assert_named_as_repeating(got, pages: str) -> None:
+    (note,) = _repeat_notes(got)
+    assert note.endswith(f"page(s) {pages}"), note
+    # Disclosed, not marked: nothing is missing from the page (D-58).
+    assert not ex.has_evidence_marker(note), note
+
+
 @pytest.mark.parametrize("layout", ["invisible-text-layer", "text-under-the-image"])
-def test_a_searchable_scan_yields_its_text_layer_once(layout):
+def test_a_searchable_scan_keeps_every_word_and_is_named_as_possibly_repeating(layout):
     """A searchable scan: the scan as a full-page image, its OCR text layer
     either invisible over it (render mode 3) or drawn first and hidden under it.
-    The layer transcribes the scan, so reading the scan's pixels where the layer
-    lies reads the same words a second time. The page keeps its text layer, and
-    the scan adds nothing the layer does not already say.
+    The layer transcribes the scan, so reading the scan reads the same words a
+    second time (D-58 accepts that). Every word is there at least once, and the
+    document note names the page as one whose text may repeat.
 
-    FAIL-BEFORE: MIXED, every line of the body twice.
+    FAIL-BEFORE (the mask, 61baefd): NATIVE, the note "read and contained no
+    text", and no page named as repeating.
     """
     import fitz  # pymupdf
 
@@ -817,21 +847,52 @@ def test_a_searchable_scan_yields_its_text_layer_once(layout):
     got = ex.extract("searchable.pdf", raw)
     page = got.pages[0]
     flat = _flat(page.text)
-    assert {t: flat.count(t) for t in _BODY_TOKENS} == dict.fromkeys(_BODY_TOKENS, 1), (
-        page.kind, page.text)
-    assert page.kind is PageKind.NATIVE, (page.kind, page.text)
-    assert any("read and contained no text" in n for n in got.notes), got.notes
+    assert all(flat.count(t) >= 1 for t in _BODY_TOKENS), (page.kind, page.text)
+    assert page.kind is PageKind.MIXED, (page.kind, page.text, got.notes)
+    assert not any("read and contained no text" in n for n in got.notes), got.notes
+    _assert_named_as_repeating(got, "1")
+
+
+def test_a_searchable_scan_whose_ocr_layer_is_wrong_still_has_its_scan_read():
+    """The loss D-58 rules out. An invisible OCR layer at the scan's positions
+    whose words are wrong: the scan beneath it is still read, so its words are
+    in the page. The mask erased the scan wherever the layer lay and reported
+    the page as an image that "contained no text" (D-51 round-3 review).
+
+    FAIL-BEFORE (61baefd): NATIVE, none of the scan's words.
+    """
+    import fitz  # pymupdf
+
+    doc = fitz.open()
+    page = doc.new_page(width=_A4[0], height=_A4[1])
+    page.insert_image(fitz.Rect(0, 0, *_A4), stream=_typeset_png(_BODY))
+    for k, (x, y, _text) in enumerate(_BODY):
+        page.insert_text((x, y), f"LOREM IPSUM DOLOR SIT AMET {k:02d}", fontsize=20,
+                         render_mode=3)
+    raw = doc.tobytes()
+    assert "SITEINSTRUCTION" not in _flat(_text_layer_text(raw))
+
+    got = ex.extract("wrong_layer.pdf", raw)
+    page = got.pages[0]
+    flat = _flat(page.text)
+    assert page.kind is PageKind.MIXED, (page.kind, page.text, got.notes)
+    assert all(t in flat for t in _BODY_TOKENS), page.text
+    assert "LOREMIPSUM" in flat, page.text  # the text layer is kept as it is
+    _assert_named_as_repeating(got, "1")
 
 
 @pytest.mark.parametrize("letterhead", [True, False],
                          ids=["letterhead-in-the-picture", "blank-stationery"])
-def test_a_letter_typed_on_full_page_stationery_is_read_once(letterhead):
+def test_a_letter_typed_on_full_page_stationery_loses_nothing_and_is_named(letterhead):
     """A typed letter on stationery exported as one page-sized background
-    image. The typed paragraphs are the text layer and are read once; the
-    stationery adds only what is printed on it and nowhere in the text layer --
-    the letterhead, present exactly once (D-49's exhibit property), or nothing.
+    image. The typed paragraphs are the text layer, and the stationery is read
+    whole, so the paragraphs may come back a second time from the image (D-58).
+    Every paragraph is there at least once, the letterhead printed on the
+    stationery is read, it stays out of the locator (D-49), and the page is
+    named as one whose text may repeat.
 
-    FAIL-BEFORE: MIXED, the typed paragraphs twice.
+    FAIL-BEFORE (61baefd): no page named as repeating (and, on blank
+    stationery, NATIVE).
     """
     import fitz  # pymupdf
 
@@ -844,26 +905,27 @@ def test_a_letter_typed_on_full_page_stationery_is_read_once(letterhead):
     raw = doc.tobytes()
     assert _share(raw) >= ex._SCAN_MIN_IMAGE_SHARE
 
-    page = ex.extract("letter.pdf", raw).pages[0]
+    got = ex.extract("letter.pdf", raw)
+    page = got.pages[0]
     flat = _flat(page.text)
-    assert [flat.count(f"PARAGRAPH{k:02d}") for k in range(1, 9)] == [1] * 8, (
+    assert all(flat.count(f"PARAGRAPH{k:02d}") >= 1 for k in range(1, 9)), (
         page.kind, page.text)
-    assert "PARAGRAPH" not in _flat(_image_lines(page))
+    assert page.kind is PageKind.MIXED, (page.kind, page.text)
+    for k in range(1, 9):
+        assert f"PARAGRAPH {k:02d}" in page.locator_text  # the text layer, whole
     if letterhead:
-        assert page.kind is PageKind.MIXED, (page.kind, page.text)
-        assert flat.count("NORTHWINDFABRICATORS") == 1, page.text
+        assert "NORTHWINDFABRICATORS" in flat, page.text
         assert "NORTHWIND" not in _flat(page.locator_text)
-    else:
-        assert page.kind is PageKind.NATIVE, (page.kind, page.text)
-        assert page.image_line_span is None
+    _assert_named_as_repeating(got, "1")
 
 
-def test_a_stamped_scan_adds_its_body_without_its_stamp(tmp_path):
+def test_a_stamped_scan_adds_its_body_and_keeps_its_stamp_as_its_locator(tmp_path):
     """A scan whose only text layer is a visible typed endorsement over it: the
-    scan's body is read, and the endorsement is in the page once, from the text
-    layer, where D-49 takes the locator from.
+    scan's body is read, the endorsement is in the page at least once, D-49
+    takes the locator from the text layer alone, and the page is named as one
+    whose text may repeat (the endorsement lies on the scan).
 
-    FAIL-BEFORE: the endorsement twice, once among the image lines.
+    FAIL-BEFORE (61baefd): no page named as repeating.
     """
     import fitz  # pymupdf
 
@@ -873,33 +935,59 @@ def test_a_stamped_scan_adds_its_body_without_its_stamp(tmp_path):
     page.insert_text((40, 822), _STAMP, fontsize=16)
     raw = doc.tobytes()
 
-    page = ex.extract("stamped.pdf", raw).pages[0]
+    got = ex.extract("stamped.pdf", raw)
+    page = got.pages[0]
     flat = _flat(page.text)
     assert page.kind is PageKind.MIXED, (page.kind, page.text)
-    assert {t: flat.count(t) for t in _BODY_TOKENS} == dict.fromkeys(_BODY_TOKENS, 1), page.text
-    assert flat.count("ATTORNEYSEYESONLY") == 1, page.text
-    assert "ATTORNEYS" not in _flat(_image_lines(page))
+    assert all(flat.count(t) >= 1 for t in _BODY_TOKENS), page.text
+    assert flat.count("ATTORNEYSEYESONLY") >= 1, page.text
     assert page.locator_text.strip() == _STAMP
+    _assert_named_as_repeating(got, "1")
 
 
-def test_a_picture_beside_the_text_layer_reads_the_same_with_or_without_the_mask(
-        monkeypatch):
-    """The mask removes only the text layer's own boxes. Fixture 15's chart
-    lies beside its letterhead, not under it, so no box reaches the chart's crop
-    and the page reads exactly as it did before the mask existed."""
-    masked = _pages("15_mixed_content_page.pdf", _reading())
-    monkeypatch.setattr(ex, "_text_layer_boxes", lambda page: [])
-    unmasked = _pages("15_mixed_content_page.pdf", _reading())
-    assert masked.pages[0].kind is PageKind.MIXED
-    assert masked.pages == unmasked.pages
-    assert masked.notes == unmasked.notes
+def test_a_picture_beside_the_text_layer_is_not_named_as_repeating():
+    """The control. Fixture 15's chart lies beside its letterhead, not under
+    it, so no word of the text layer is inside the chart's region: the page is
+    MIXED, its letterhead appears once, and no note says its text may repeat. A
+    note that fired on every MIXED page would say nothing."""
+    got = _pages("15_mixed_content_page.pdf", _reading())
+    page = got.pages[0]
+    assert page.kind is PageKind.MIXED
+    assert page.text.count("SYNTHETIC CONTRACTOR LTD MONTHLY REPORT LETTERHEAD") == 1
+    assert _repeat_notes(got) == [], got.notes
 
 
-def test_an_annotations_words_over_a_scan_are_read_not_masked():
+def test_only_the_pages_whose_text_lies_on_a_read_image_are_named(tmp_path):
+    """Per page, in page order, in one document: a stamped scan (named), a
+    letterhead beside a chart (not named), and another stamped scan (named).
+    Counts only pages whose image regions were read into the text."""
+    import make_fixtures as mf
+    from reportlab.lib.utils import ImageReader
+
+    path = tmp_path / "scan_chart_scan.pdf"
+    c = mf._pdf_canvas(path)
+    for words in ("SITE INSTRUCTION 021", None, "SITE INSTRUCTION 022"):
+        if words is None:
+            _mixed_page(c, "NOTICE OF DELAY No 21")
+            continue
+        c.setPageSize(_A4)
+        c.drawImage(ImageReader(_words_picture([words])), 0, 0, width=_A4[0], height=_A4[1])
+        c.drawString(40, 20, _STAMP)
+        c.showPage()
+    c.save()
+
+    got = ex.extract(path.name, path.read_bytes(), _reading())
+    assert [p.kind for p in got.pages] == [PageKind.MIXED] * 3, got.notes
+    (note,) = _repeat_notes(got)
+    assert note.startswith("2 page(s) "), note
+    _assert_named_as_repeating(got, "1, 3")
+
+
+def test_an_annotations_words_over_a_scan_are_read():
     """The text layer is the page's content stream, which is what the routing's
     text layer (pypdf) reads. An annotation's words are rendered onto the page
-    but are in no text layer, so masking them would drop them from the page
-    altogether; they are read from the image once instead."""
+    but are in no text layer, so they reach the page only by being read from
+    the rendering, and they do."""
     import fitz  # pymupdf
 
     doc = fitz.open()
@@ -914,37 +1002,13 @@ def test_an_annotations_words_over_a_scan_are_read_not_masked():
 
     page = ex.extract("annotated.pdf", raw).pages[0]
     # The date alone: the engine reads this rendering of RECEIVED as "RECEVED".
-    assert _flat(page.text).count("19JULY2024") == 1, page.text
+    assert _flat(page.text).count("19JULY2024") >= 1, page.text
 
 
 def _text_layer_text(raw: bytes) -> str:
     from pypdf import PdfReader
 
     return PdfReader(io.BytesIO(raw)).pages[0].extract_text() or ""
-
-
-@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
-def test_the_mask_covers_every_rendered_glyph_of_the_text_layer(rotation):
-    """Geometry, without OCR: a page carrying only typed text, rendered as
-    region OCR renders it, has no ink left once the text layer's boxes are
-    painted out -- on a rotated page and with a CropBox away from the MediaBox
-    origin, where the text's own coordinates and the rendering's differ."""
-    import fitz  # pymupdf
-
-    doc = fitz.open()
-    page = doc.new_page(width=700, height=900)
-    for k in range(6):
-        page.insert_text((80, 120 + 110 * k), f"TYPED LINE {k} gjpqy WMW {k * 7}",
-                         fontsize=10 + 4 * k)
-    page.set_cropbox(fitz.Rect(40, 20, 660, 880))
-    page.set_rotation(rotation)
-    raw = doc.tobytes()
-    with fitz.open(stream=raw, filetype="pdf") as d:
-        pg = d[0]
-        arr = ex._page_array(pg)
-        assert (arr < 128).any(), "nothing rendered"
-        ex._mask_text_layer(pg, arr)
-        assert not (arr < 250).any(), f"ink left outside the mask at rotation {rotation}"
 
 
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
@@ -967,6 +1031,471 @@ def test_image_placements_are_boxes_on_the_rendered_page(rotation):
         (got,) = ex._image_placements(pg)
         assert tuple(got) == pytest.approx(want, abs=0.5), (got, want)
         assert ex._pdf_image_rects(pg) == [tuple(got)]
+
+
+# ---------------------------------------------------------------------------
+# What a draw is, and every image region not read is marked (D-51 round 3)
+# ---------------------------------------------------------------------------
+
+_TYPED = b"BT /F1 12 Tf 40 20 Td (" + _STAMP.encode() + b") Tj ET\n"
+"""A text layer over ``_NATIVE_TEXT_FLOOR`` at the foot of the page."""
+
+
+def _pdf_stream(dict_body: bytes, data: bytes) -> bytes:
+    import zlib
+
+    data = zlib.compress(data)
+    return (b"<< " + dict_body + b" /Filter /FlateDecode /Length %d >>\nstream\n" % len(data)
+            + data + b"\nendstream")
+
+
+def _raw_pdf(content: bytes, resources: bytes, extra: dict[int, bytes] | None = None) -> bytes:
+    """One A4 page with an EXACT content stream, for constructs no PDF library
+    here writes on request (soft masks, tiling patterns, deep nesting).
+    Objects: 1 catalog, 2 pages, 3 page, 4 contents, 5 Helvetica, 6 up extra."""
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources "
+           + resources + b" /Contents 4 0 R >>",
+        4: _pdf_stream(b"", content),
+        5: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        **(extra or {}),
+    }
+    out = bytearray(b"%PDF-1.7\n")
+    offsets = {}
+    for num in sorted(objects):
+        offsets[num] = len(out)
+        out += b"%d 0 obj\n" % num + objects[num] + b"\nendobj\n"
+    xref = len(out)
+    top = max(objects)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (top + 1)
+    for num in range(1, top + 1):
+        out += (b"%010d 00000 n \n" % offsets[num]) if num in offsets else b"0000000000 65535 f \n"
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (top + 1, xref)
+    return bytes(out)
+
+
+def _gray_image(fill: int | None = None, size: int = 16) -> bytes:
+    """An image XObject: a checkerboard, or one flat gray."""
+    samples = (bytes([fill]) * (size * size) if fill is not None else
+               bytes(((x // 2 + y // 2) % 2) * 255 for y in range(size) for x in range(size)))
+    return _pdf_stream(b"/Type /XObject /Subtype /Image /Width %d /Height %d "
+                       b"/ColorSpace /DeviceGray /BitsPerComponent 8" % (size, size), samples)
+
+
+_IM0 = b"<< /Font << /F1 5 0 R >> /XObject << /Im0 6 0 R >> >>"
+
+
+def _page_notes_and_doc_notes(raw: bytes, opt):
+    got = ex.extract("probe.pdf", raw, opt)
+    return got, got.pages[0]
+
+
+def test_a_page_whose_image_geometry_cannot_be_interpreted_is_marked():
+    """An image drawn inside 2,047 nested graphics states: MuPDF refuses to
+    interpret the page (2,046 is its limit), so its image draws cannot be
+    measured. The share swallowed the error and answered "no image", and the
+    page came out NATIVE with no note on either setting; before the every-draw
+    count it had carried ``M_IMAGE_UNREAD`` (D-51 round-3 review). The page is
+    marked, named in the document note, and not counted as an OCR attempt.
+
+    FAIL-BEFORE (61baefd): NATIVE, no page note, no document note.
+    """
+    def nested(depth: int) -> bytes:
+        return _raw_pdf(b"q " * depth + b"400 0 0 400 100 200 cm /Im0 Do " + b"Q " * depth
+                        + b"\n" + _TYPED, _IM0, {6: _gray_image()})
+
+    import fitz  # pymupdf
+
+    with fitz.open(stream=nested(2046), filetype="pdf") as doc:
+        assert ex._page_image_share(doc[0]) == (pytest.approx(400 * 400 / (595 * 842)), True)
+    raw = nested(2047)
+    with fitz.open(stream=raw, filetype="pdf") as doc, pytest.raises(Exception):
+        ex._page_image_share(doc[0])
+
+    for opt in (ex.ExtractOptions(), _reading()):
+        got, page = _page_notes_and_doc_notes(raw, opt)
+        assert ex.has_evidence_marker(" ".join(page.notes)), (page.notes, got.notes)
+        assert page.kind is PageKind.NATIVE
+        assert page.notes == (ex.M_IMAGE_UNMEASURED,)
+        (note,) = [n for n in got.notes if n.startswith(ex.M_IMAGE_UNREAD)]
+        assert note.startswith(ex.M_IMAGE_UNMEASURED) and note.endswith("page(s) 1"), note
+        assert ex.ocr_yield([got]) == (0, 0), "no OCR was attempted on the page"
+
+
+def test_one_unmeasurable_page_leaves_the_other_pages_measured(tmp_path, monkeypatch):
+    """Per page: the second of three pages cannot be measured, and the third, a
+    letterhead over a chart, is still measured and skip-noted by the quick pass.
+    Every exception the measure can raise reaches the same branch; the review's
+    nested graphics states are one, a page MuPDF cannot load is another.
+
+    FAIL-BEFORE (61baefd): page 2 silent, NATIVE, no note.
+    """
+    import make_fixtures as mf
+
+    path = tmp_path / "three_pages.pdf"
+    c = mf._pdf_canvas(path)
+    mf._text_page(c, ["TRANSMITTAL 2024-07-16",
+                      "Attached: two reports with charts, for the record."])
+    _mixed_page(c, "NOTICE OF DELAY No 31")
+    _mixed_page(c, "NOTICE OF DELAY No 32")
+    c.save()
+
+    original = ex._image_placements
+
+    def placements(page):
+        if page.number == 1:
+            raise RuntimeError("cannot interpret this page")
+        return original(page)
+
+    monkeypatch.setattr(ex, "_image_placements", placements)
+    got = ex.extract(path.name, path.read_bytes())
+    assert ex.has_evidence_marker(" ".join(got.pages[1].notes)), got.notes
+    assert [p.notes for p in got.pages] == [(), (ex.M_IMAGE_UNMEASURED,), (ex.M_IMAGE_SKIPPED,)]
+    (unmeasured,) = [n for n in got.notes if n.startswith(ex.M_IMAGE_UNMEASURED)]
+    assert unmeasured.endswith("page(s) 2"), unmeasured
+    (skip,) = [n for n in got.notes if "left unread because" in n]
+    assert skip.endswith("page(s) 3"), skip
+
+
+def test_region_ocr_that_cannot_measure_the_page_again_marks_it(monkeypatch):
+    """Region OCR measures the page a second time to cut its crops. When that
+    raised, the crop list came back empty and the page was dropped from region
+    OCR: NATIVE, no note, although the routing had found its chart."""
+    calls: dict[int, int] = {}
+    original = ex._image_placements
+
+    def placements(page):
+        calls[page.number] = calls.get(page.number, 0) + 1
+        if calls[page.number] > 1:
+            raise RuntimeError("the second reading failed")
+        return original(page)
+
+    monkeypatch.setattr(ex, "_image_placements", placements)
+    got = _pages("15_mixed_content_page.pdf", _reading())
+    page = got.pages[0]
+    assert ex.M_IMAGE_UNREAD in page.notes, (page.kind, page.notes, got.notes)
+    assert page.kind is PageKind.NATIVE
+    assert any("could not be rasterized or read" in n for n in got.notes), got.notes
+
+
+def _two_pictures_page(path) -> bytes:
+    """A text layer at the foot and two separate pictures, each carrying words,
+    adding up to about 62% of the page: MIXED, read only by a reading run."""
+    _stamped_pdf(path, [[(40, 460, 515, 300), (40, 100, 515, 300)]])
+    raw = path.read_bytes()
+    assert ex.PHOTO_MIN_IMAGE_AREA_SHARE <= _share(raw) < ex._SCAN_MIN_IMAGE_SHARE
+    return raw
+
+
+def test_image_regions_past_the_region_cap_are_marked_even_when_another_reads(
+        tmp_path, monkeypatch):
+    """The cap at one region, two pictures: the first is read, the second is
+    not. The page loop looked at the failure only when nothing had been read, so
+    the page was MIXED under a clean status (D-51 round-3 review: 30 pictures,
+    24 read, 6 lost with no marker, on both settings).
+
+    FAIL-BEFORE (61baefd): MIXED, no page note, no marker anywhere.
+    """
+    raw = _two_pictures_page(tmp_path / "two_pictures.pdf")
+    monkeypatch.setattr(ex, "_MIXED_MAX_REGIONS", 1)
+    got = ex.extract("two_pictures.pdf", raw, _reading())
+    page = got.pages[0]
+    assert page.kind is PageKind.MIXED, (page.kind, page.notes, got.notes)
+    assert ex.has_evidence_marker(" ".join(page.notes)), (page.notes, got.notes)
+    assert page.notes == (f"{ex.M_IMAGE_UNREAD}: 1 of 2 image region(s) of this page",)
+    (note,) = [n for n in got.notes if "could not be rasterized or read" in n]
+    assert note.startswith(f"{ex.M_IMAGE_UNREAD}: 1 page(s) "), note
+
+
+def test_one_regions_ocr_raising_is_marked_even_when_another_reads(tmp_path, monkeypatch):
+    """The same gap by its other road: OCR raises on one of the page's two
+    regions and reads the other.
+
+    FAIL-BEFORE (61baefd): MIXED, no page note, no marker anywhere.
+    """
+    import threading
+
+    raw = _two_pictures_page(tmp_path / "two_pictures.pdf")
+    lock = threading.Lock()
+    seen = []
+    original = ex._ocr_array
+
+    def ocr(arr):
+        with lock:
+            seen.append(1)
+            first = len(seen) == 1
+        if first:
+            raise RuntimeError("the engine failed on this region")
+        return original(arr)
+
+    monkeypatch.setattr(ex, "_ocr_array", ocr)
+    got = ex.extract("two_pictures.pdf", raw, _reading())
+    page = got.pages[0]
+    assert page.kind is PageKind.MIXED, (page.kind, page.notes, got.notes)
+    assert ex.has_evidence_marker(" ".join(page.notes)), (page.notes, got.notes)
+    assert page.notes == (f"{ex.M_IMAGE_UNREAD}: 1 of 2 image region(s) of this page",)
+
+
+def test_many_small_pictures_that_add_up_are_skip_noted_and_read():
+    """36 pictures, each under 1% of the page, in six overlapping rows beside a
+    short text layer: together about a third of the page, under the 90% scan
+    share. The quick pass leaves them unread and says so on the page and in the
+    document; a reading run reads them. A measure that dropped small draws (the
+    review's R7) left the page NATIVE with no note on both settings.
+    """
+    import fitz  # pymupdf
+    from PIL import Image, ImageDraw
+
+    doc = fitz.open()
+    page = doc.new_page(width=_A4[0], height=_A4[1])
+    page.insert_text((40, 40), "PHOTO RECORD SHEET FOR THE SYNTHETIC SITE VISIT", fontsize=12)
+    side = 68.0
+    for k in range(36):
+        tile = Image.new("L", (60, 20), 255)
+        ImageDraw.Draw(tile).text((4, 4), f"T{k:02d}", fill=0)
+        img = Image.new("L", (400, 400), 255)
+        img.paste(tile.resize((360, 120), Image.LANCZOS), (20, 140))
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        x, y = 40 + (k % 6) * (side - 1), 80 + (k // 6) * (side + 20)
+        page.insert_image(fitz.Rect(x, y, x + side, y + side), stream=buf.getvalue())
+    raw = doc.tobytes()
+    with fitz.open(stream=raw, filetype="pdf") as d:
+        draws = ex._image_placements(d[0])
+        assert len(draws) == 36
+        area = _A4[0] * _A4[1]
+        assert all((b[2] - b[0]) * (b[3] - b[1]) < 0.01 * area for b in draws)
+        assert len(ex._pdf_image_rects(d[0])) == 6
+    share = _share(raw)
+    assert ex.PHOTO_MIN_IMAGE_AREA_SHARE <= share < ex._SCAN_MIN_IMAGE_SHARE, share
+
+    quick = ex.extract("sheet.pdf", raw)
+    assert quick.pages[0].kind is PageKind.NATIVE
+    assert quick.pages[0].notes == (ex.M_IMAGE_SKIPPED,), quick.notes
+    (skip,) = [n for n in quick.notes if "left unread because" in n]
+    assert skip.endswith("page(s) 1"), skip
+
+    reading = ex.extract("sheet.pdf", raw, _reading()).pages[0]
+    assert reading.kind is PageKind.MIXED, (reading.kind, reading.notes)
+    assert any(f"T{k:02d}" in _flat(reading.text) for k in range(36)), reading.text
+
+
+def test_every_draw_counts_even_the_same_image_drawn_twice_at_one_place():
+    """What "every draw" means for identical overlapping placements: each one
+    counts. The share is a SUM and an upper bound, so the same picture painted
+    twice at one place adds its area twice -- the error that makes is to read a
+    page, never to leave one unread without a note -- and the notes that quote
+    it say the drawn areas add up, not that the page shows them. Two different
+    images at one box (a background and a foreground layer) add up the same
+    way. The review's R6 (identical boxes counted once) halved both.
+    """
+    import fitz  # pymupdf
+
+    box = b"300 0 0 280 100 300 cm"
+    twice = _raw_pdf(b"q " + box + b" /Im0 Do Q q " + box + b" /Im0 Do Q\n" + _TYPED,
+                     _IM0, {6: _gray_image()})
+    once = _raw_pdf(b"q " + box + b" /Im0 Do Q\n" + _TYPED, _IM0, {6: _gray_image()})
+    with fitz.open(stream=twice, filetype="pdf") as d:
+        a, b = ex._image_placements(d[0])
+        assert a == b
+    single = 300 * 280 / (_A4[0] * _A4[1])
+    assert single < ex.PHOTO_MIN_IMAGE_AREA_SHARE <= 2 * single
+    assert _share(once) == pytest.approx(single)
+    assert _share(twice) == pytest.approx(2 * single)
+
+    page = ex.extract("twice.pdf", twice).pages[0]
+    assert page.notes == (ex.M_IMAGE_SKIPPED,)
+    assert ex.extract("once.pdf", once).pages[0].notes == ()
+
+    layers = _raw_pdf(b"q 290 0 0 800 150 21 cm /Im0 Do Q q 290 0 0 800 150 21 cm /Im1 Do Q\n"
+                      + _TYPED,
+                      b"<< /Font << /F1 5 0 R >> /XObject << /Im0 6 0 R /Im1 7 0 R >> >>",
+                      {6: _gray_image(230), 7: _gray_image()})
+    assert _share(layers) == pytest.approx(2 * 290 * 800 / (_A4[0] * _A4[1]))
+    assert _share(layers) >= ex._SCAN_MIN_IMAGE_SHARE
+
+
+_SOFT_MASK_OBJECTS = {
+    6: _gray_image(),
+    7: _pdf_stream(b"/Type /XObject /Subtype /Form /BBox [0 0 595 842] "
+                   b"/Group << /S /Transparency /CS /DeviceGray >> "
+                   b"/Resources << /XObject << /M 6 0 R >> >>",
+                   b"q 595 0 0 842 0 0 cm /M Do Q"),
+    8: b"<< /Type /ExtGState /SMask << /Type /Mask /S /Luminosity /G 7 0 R >> >>",
+}
+
+
+def test_an_image_used_only_as_a_soft_mask_is_not_a_drawn_image():
+    """A typed letter over a background faded by a luminosity soft mask whose
+    group draws a page-sized image. The image shapes the background's
+    transparency and paints nothing, but the text device reported it, so the
+    letter measured as a full-page scan: read on the quick pass, noted as an
+    image that "contained no text" (D-51 round-3 review). An image carrying its
+    own transparency mask still counts, once.
+
+    FAIL-BEFORE (61baefd): share 1.0, and the page routed as a scan.
+    """
+    body = b"".join(b"BT /F1 11 Tf 60 %d Td (PARAGRAPH %02d THE CONTRACTOR GIVES NOTICE) Tj ET\n"
+                    % (760 - 20 * k, k) for k in range(20))
+    raw = _raw_pdf(b"q /GS0 gs 0.9 0.9 1 rg 0 0 595 842 re f Q\n" + body,
+                   b"<< /Font << /F1 5 0 R >> /ExtGState << /GS0 8 0 R >> >>",
+                   _SOFT_MASK_OBJECTS)
+    assert _share(raw) == 0.0
+    import fitz  # pymupdf
+
+    with fitz.open(stream=raw, filetype="pdf") as d:
+        assert ex._image_placements(d[0]) == []
+        assert ex._page_image_share(d[0]) == (0.0, False)
+    for opt in (ex.ExtractOptions(), _reading()):
+        got = ex.extract("letter.pdf", raw, opt)
+        assert got.pages[0].kind is PageKind.NATIVE
+        assert got.pages[0].notes == () and got.notes == (), got.notes
+
+    photo = _pdf_stream(b"/Type /XObject /Subtype /Image /Width 16 /Height 16 "
+                        b"/ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 7 0 R",
+                        bytes(range(256)))
+    with_alpha = _raw_pdf(b"q 595 0 0 421 0 421 cm /Im0 Do Q\n" + _TYPED, _IM0,
+                          {6: photo, 7: _gray_image()})
+    assert _share(with_alpha) == pytest.approx(0.5)
+
+
+def test_an_image_painted_through_a_tiling_pattern_counts_the_area_it_fills():
+    """A pattern whose 20-point cell draws an image fills 515 x 400 points. The
+    text device reported the cell once, so the page measured as a sliver and
+    went unread with no note on either setting. The area the pattern fills is
+    the image content the page shows.
+
+    FAIL-BEFORE (61baefd): one 20 x 20 box, NATIVE, no note.
+    """
+    import fitz  # pymupdf
+
+    pattern = _pdf_stream(b"/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 "
+                          b"/BBox [0 0 20 20] /XStep 20 /YStep 20 "
+                          b"/Resources << /XObject << /Im0 6 0 R >> >>",
+                          b"q 20 0 0 20 0 0 cm /Im0 Do Q")
+    raw = _raw_pdf(b"q /Pattern cs /P0 scn 40 100 515 400 re f Q\n" + _TYPED,
+                   b"<< /Font << /F1 5 0 R >> /Pattern << /P0 7 0 R >> >>",
+                   {6: _gray_image(), 7: pattern})
+    with fitz.open(stream=raw, filetype="pdf") as d:
+        (box,) = ex._image_placements(d[0])
+    assert box == pytest.approx((40, 842 - 500, 555, 842 - 100), abs=0.5)
+    assert _share(raw) == pytest.approx(515 * 400 / (_A4[0] * _A4[1]), abs=0.002)
+
+    got = ex.extract("pattern.pdf", raw)
+    assert got.pages[0].notes == (ex.M_IMAGE_SKIPPED,), got.notes
+
+
+def test_an_image_drawn_off_the_page_is_not_measured_and_one_half_off_is_clipped():
+    """Unclipped, an image placed entirely below the page measured as full
+    coverage, and a reading run then reported image content that "could not be
+    rasterized or read" -- a loss that did not happen. Half off, it measured as
+    the whole page.
+
+    FAIL-BEFORE (61baefd): share 1.0 for both, and the loss note on the first.
+    """
+    import fitz  # pymupdf
+
+    off = _raw_pdf(b"q 595 0 0 842 0 -2000 cm /Im0 Do Q\n" + _TYPED, _IM0, {6: _gray_image()})
+    half = _raw_pdf(b"q 595 0 0 842 297 0 cm /Im0 Do Q\n" + _TYPED, _IM0, {6: _gray_image()})
+    with fitz.open(stream=off, filetype="pdf") as d:
+        assert ex._image_placements(d[0]) == []
+    with fitz.open(stream=half, filetype="pdf") as d:
+        (box,) = ex._image_placements(d[0])
+    assert box == pytest.approx((297, 0, 595, 842))
+    assert _share(half) == pytest.approx(298 / 595)
+
+    got = ex.extract("off.pdf", off, _reading())
+    assert got.pages[0].kind is PageKind.NATIVE
+    assert got.pages[0].notes == () and got.notes == (), got.notes
+
+
+def _pairwise_union(boxes):
+    """61baefd's merge, verbatim in effect: the reference the sweep must equal."""
+    boxes = [b for b in boxes if b[2] > b[0] and b[3] > b[1]]
+    merged = True
+    while merged and len(boxes) > 1:
+        merged = False
+        out = []
+        for b in boxes:
+            for i, a in enumerate(out):
+                if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
+                    out[i] = (min(a[0], b[0]), min(a[1], b[1]),
+                              max(a[2], b[2]), max(a[3], b[3]))
+                    merged = True
+                    break
+            else:
+                out.append(b)
+        boxes = out
+    boxes.sort(key=lambda b: (b[1], b[0], b[3], b[2]))
+    return boxes
+
+
+def test_merging_image_boxes_gives_the_pairwise_union_on_random_layouts():
+    """The merge's result does not depend on the order boxes are merged in, so
+    the sweep that replaced the quadratic loop must give exactly its regions:
+    random layouts of every density, repeated and zero-area boxes included."""
+    import random
+
+    rng = random.Random(20260914)
+    for _ in range(600):
+        boxes = []
+        for _ in range(rng.randint(0, 50)):
+            x, y = rng.uniform(0, 595), rng.uniform(0, 842)
+            size = rng.choice([4, 30, 150, 400])
+            w = 0.0 if rng.random() < 0.05 else rng.uniform(0.5, size)
+            boxes.append((x, y, x + w, y + rng.uniform(0.5, size)))
+        if boxes and rng.random() < 0.3:
+            boxes += rng.sample(boxes, min(5, len(boxes)))
+        assert ex._merge_boxes(boxes, (0, 0, 595, 842)) == _pairwise_union(boxes)
+
+
+def test_merging_one_image_drawn_14400_times_is_bounded():
+    """The review's page: one 16-pixel image drawn on a 120 x 120 grid with
+    1-point gaps. The pairwise merge took 16 s on it (D-51 round-3 review). The
+    bound is generous, for a loaded machine; every draw still lies in a region.
+
+    FAIL-BEFORE (61baefd): over the bound.
+    """
+    import time
+
+    import fitz  # pymupdf
+
+    n, w, h = 120, 595.0 / 120, 842.0 / 120
+    content = b"".join(b"q %.3f 0 0 %.3f %.3f %.3f cm /Im0 Do Q\n"
+                       % (w - 1, h - 1, c * w, r * h) for r in range(n) for c in range(n))
+    raw = _raw_pdf(content + _TYPED, _IM0, {6: _gray_image()})
+    with fitz.open(stream=raw, filetype="pdf") as d:
+        start = time.perf_counter()
+        regions = ex._pdf_image_rects(d[0])
+        seconds = time.perf_counter() - start
+        draws = ex._image_placements(d[0])
+    assert len(draws) == n * n
+    assert seconds < 5.0, seconds
+    for x0, y0, x1, y1 in draws:
+        assert any(r[0] <= x0 and r[1] <= y0 and x1 <= r[2] and y1 <= r[3] for r in regions)
+
+
+def test_past_the_exact_limit_boxes_are_merged_on_the_coarse_grid():
+    """Above ``_MERGE_EXACT_MAX_DRAWS`` distinct boxes the merge widens each to
+    the coarse grid first, which is what bounds its work whatever the layout.
+    Every box still lies inside a region, and every region's edges are on the
+    grid (a hair past the far edge)."""
+    page = (0.0, 0.0, 595.0, 842.0)
+    cw, ch = 595.0 / ex._MERGE_COARSE_CELLS, 842.0 / ex._MERGE_COARSE_CELLS
+    n = ex._MERGE_EXACT_MAX_DRAWS + 1
+    boxes = [(0.5 + (k % 200) * 2.9, 0.5 + (k // 200) * 70.0,
+              0.5 + (k % 200) * 2.9 + 1.0, 0.5 + (k // 200) * 70.0 + 1.0) for k in range(n)]
+    regions = ex._merge_boxes(boxes, page)
+    assert 0 < len(regions) <= ex._MERGE_COARSE_CELLS ** 2
+    for b in boxes:
+        assert any(r[0] <= b[0] and r[1] <= b[1] and b[2] <= r[2] and b[3] <= r[3]
+                   for r in regions), b
+    for r in regions:
+        assert r[0] / cw == pytest.approx(round(r[0] / cw), abs=1e-6), r
+        assert r[1] / ch == pytest.approx(round(r[1] / ch), abs=1e-6), r
+    assert ex._merge_boxes(boxes[:-1], page) == _pairwise_union(boxes[:-1])
 
 
 def test_empty_page_is_still_a_page():

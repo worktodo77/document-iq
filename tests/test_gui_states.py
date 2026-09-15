@@ -255,8 +255,8 @@ def test_the_scope_and_the_time_sit_beside_the_action(window) -> None:
 def test_the_time_beside_the_action_follows_the_image_setting(window) -> None:
     """A-25 (D-51). The estimate comes from runs that read no picture on a text
     page, which is closest to a run that SKIPS them (not the same: the quick
-    pass still reads a stamped scan whose image covers 90% or more of the page,
-    D-54). Untick the box and the run is a different, unmeasured one, so the
+    pass still reads a stamped scan whose drawn image areas add up to 90% or more
+    of the page, D-54). Untick the box and the run is a different, unmeasured one, so the
     screen stops quoting a time for it -- and quotes it again when the box is
     ticked back.
 
@@ -282,20 +282,29 @@ def test_the_time_beside_the_action_follows_the_image_setting(window) -> None:
     # reading" was false for a picture under a quarter of the page, which
     # neither setting reads; and the 12-document timing (D-49) compared reading
     # every such picture with reading none, which is not what ticking the box
-    # saves.
-    for sentence in ("cover a quarter or more of a page that also has typed text",
+    # saves. D-51 round 3: picture areas are ADDED UP as drawn, so "cover" was
+    # false for a picture drawn twice, and "a typed page" did not say that a
+    # page under the text floor is OCR'd whole. D-58: typed text on a picture
+    # that is read can appear twice, and the screen says so.
+    for sentence in ("on a page that also has 40 or more characters of typed text, "
+                     "when the pictures add up to a quarter or more of the page",
                      "lists every page it skipped as not read",
-                     "A scan whose image covers 90% or more of its page is still "
+                     "Picture areas are added up as drawn, so a picture drawn twice "
+                     "counts twice.",
+                     "A scan whose pictures add up to 90% or more of its page is still "
                      "read, even with a typed stamp.",
-                     "Pictures covering less than a quarter of a typed page are not "
+                     "Pictures adding up to less than a quarter of such a page are not "
                      "read whether the box is ticked or not.",
+                     "Where typed text lies on a picture that is read, its words can "
+                     "appear twice in the text; nothing is left out.",
                      "On a timed sample of 12 documents",
                      "about 3.4 times as long as reading none",
                      "the saving on a whole matter has not been measured",
                      "Untick it to read those pictures before relying on the results."):
         assert sentence in help_text, sentence
     for withdrawn in ("no typed text", "Scanned pages are still read",
-                      "for the full reading"):
+                      "for the full reading", "cover a quarter", "image covers 90%",
+                      "Pictures covering"):
         assert withdrawn not in help_text, withdrawn
 
     box.setChecked(False)

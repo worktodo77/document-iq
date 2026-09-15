@@ -114,11 +114,11 @@ UNKNOWN_HINT = "Unrecognized format — inventoried and hashed only"
 _NATIVE_TEXT_FLOOR = 40
 
 _SCAN_MIN_IMAGE_SHARE = 0.90
-"""Image content covering at least this share of a page makes it a SCAN, read
-even by a run that skips the images on text pages (D-54).
+"""Images whose drawn areas add up to at least this share of a page make it a
+SCAN, read even by a run that skips the images on text pages (D-54).
 
 A text layer of ``_NATIVE_TEXT_FLOOR`` characters keeps a page off whole-page
-OCR, and image content covering ``PHOTO_MIN_IMAGE_AREA_SHARE`` makes it MIXED,
+OCR, and images adding up to ``PHOTO_MIN_IMAGE_AREA_SHARE`` make it MIXED,
 which a quick first pass (A-25, D-51) leaves unread. Together they let a typed
 stamp decide whether a scan was read: a full-page scan carrying an endorsement
 over the text floor came out NATIVE, its text the endorsement alone, while the
@@ -134,8 +134,11 @@ acceptance corpus is D-54's census, in the decision register, not a copy here.
 the page draws without de-overlapping them, capped at 1.0, so four tiles that
 each cover under a quarter of a page count as a scan when together they reach
 this. Every DRAW counts, not every image object: one image drawn twice (a
-thumbnail and the full page) counts at both placements, and a scan stored inline
-in the content stream counts like one stored as an object."""
+thumbnail and the full page, or twice at one place) counts at both placements,
+and a scan stored inline in the content stream counts like one stored as an
+object. It is an upper bound on what the page shows, so notes quoting it say
+the drawn areas add up to a share, never that they cover it.
+:func:`_image_placements` says what a draw is."""
 
 # ---------------------------------------------------------------------------
 # Degradation markers — the one list of "this document did not read cleanly"
@@ -215,6 +218,32 @@ consumer that must tell the two apart is :func:`ocr_yield`: a skipped page was
 never attempted, and counting it as a failed attempt raises the dead-engine
 alarm on the default run over any production of letterhead-and-chart pages."""
 
+M_IMAGE_UNMEASURED = f"{M_IMAGE_UNREAD}: image geometry could not be measured"
+"""The page note on a page whose image draws could not be interpreted (D-51's
+third review round).
+
+Geometry is how a page carrying image content beside its text layer is FOUND.
+A page whose content stream MuPDF refuses to interpret (the review's case: an
+image drawn inside 2,047 nested graphics states) measured as carrying no image,
+and came out NATIVE with no note on either setting; before the every-draw count
+the same page had carried :data:`M_IMAGE_UNREAD`. Whether its image holds words
+is not known, so the page says so. It keeps the prefix, so accounting counts it
+as evidence not in the corpus, and :func:`ocr_yield` leaves it out, because no
+OCR was attempted on it."""
+
+IMAGE_TEXT_MAY_REPEAT = ("may repeat typed words of their text layer, read again "
+                         "from image content under or over that text")
+"""The phrase of the document note naming MIXED pages whose text layer overlaps
+the image regions that were read (D-58).
+
+Region OCR reads each image region whole. Typed text lying on a picture (a
+letter on full-page stationery, a stamp on a scan, a searchable scan's OCR
+layer) is therefore read twice: once from the text layer and once from the
+image. Alex ruled D-58 that this is accepted, because it loses nothing, and
+that it is disclosed. NOT an evidence marker: nothing is missing, and a marker
+that fires on every searchable scan would teach an operator to stop reading
+markers."""
+
 FINAL_MARKERS: tuple[str, ...] = (
     M_EML_PARSE,
     M_ATTACH_SKIPPED,
@@ -247,6 +276,9 @@ FINAL_MARKERS: tuple[str, ...] = (
     # Left unlisted, the class assertion in the extraction tests cannot tell a
     # classified marker from a forgotten one -- which is how it was caught.
     M_IMAGE_SKIPPED,
+    # D-51 round 3. FINAL for the same reason as M_IMAGE_UNREAD: the same bytes
+    # reach the same interpreter limit.
+    M_IMAGE_UNMEASURED,
 )
 
 
@@ -287,9 +319,21 @@ def has_evidence_marker(text: str | None) -> bool:
 # _MIXED_MIN_REGION_PX on either side is smaller than a legible glyph at 200 dpi.
 # Neither bound is silent: whatever they skip sets the page's evidence marker,
 # because "we knew there was image content and did not read it" is the exact
-# condition this amendment exists to disclose.
+# condition this amendment exists to disclose. The marker is set whether or not
+# another region of the page read: until D-51's third review round the page loop
+# looked at the failure only when nothing at all had been read, so a page with
+# 30 pictures read 24 of them and lost 6 under a clean MIXED status.
 _MIXED_MAX_REGIONS = int(os.environ.get("DOCIQ_MIXED_MAX_REGIONS", "24"))
 _MIXED_MIN_REGION_PX = 8
+
+# Merging image boxes into regions is exact up to this many distinct draws on a
+# page, and beyond it each box is first widened to a grid of
+# _MERGE_COARSE_CELLS x _MERGE_COARSE_CELLS cells over the page (D-51 round 3).
+# The pairwise merge was quadratic: one image drawn 14,400 times took 16 s to
+# merge on one page. Widening only ever makes a region LARGER, so no image
+# pixel leaves every crop; a pathological page is read in coarser pieces.
+_MERGE_EXACT_MAX_DRAWS = 2048
+_MERGE_COARSE_CELLS = 64
 
 _XLSX_MAX_ROWS = int(os.environ.get("DOCIQ_XLSX_MAX_ROWS", "50000"))
 _CSV_MAX_ROWS = int(os.environ.get("DOCIQ_CSV_MAX_ROWS", "50000"))
@@ -533,6 +577,9 @@ def ocr_yield(documents) -> tuple[int, int]:
     page the run's setting skipped was never sent to OCR, so it is no attempt at
     all. Counted as a failed one, the default run over any production of
     letterhead-and-chart pages would report a dead engine.
+
+    **Nor** :data:`M_IMAGE_UNMEASURED`: a page whose image geometry could not be
+    interpreted was never sent to OCR either.
     """
     attempted = recovered = 0
     for doc in documents:
@@ -540,7 +587,8 @@ def ocr_yield(documents) -> tuple[int, int]:
             worked = page.read_by_ocr and page.text.strip()
             blank = any(n.startswith(M_OCR_BLANK) or n.startswith(M_OCR_PAGE)
                         or (n.startswith(M_IMAGE_UNREAD)
-                            and not n.startswith(M_IMAGE_SKIPPED))
+                            and not n.startswith(M_IMAGE_SKIPPED)
+                            and not n.startswith(M_IMAGE_UNMEASURED))
                         for n in page.notes)
             if not (worked or blank):
                 continue
@@ -713,6 +761,14 @@ class _OcrPage:
     text: str = ""
     confs: tuple[float, ...] = ()
     failed: bool = False
+    # Region OCR only (A-24). ``regions`` is how many image regions the page
+    # has, ``unread`` how many of them were not read (past the region cap,
+    # under the size floor, or their OCR raised); ``failed`` is set whenever
+    # ``unread`` is, and on a page that could not be read at all.
+    regions: int = 0
+    unread: int = 0
+    # The page's text layer overlaps a region that was cropped (D-58).
+    text_on_image: bool = False
 
 
 def _page_array(page):
@@ -785,96 +841,255 @@ def _content_textpage(page, flags: int):
     coordinates of the page as rendered (rotation and CropBox applied).
 
     Content stream only, annotations excluded: the text layer the routing reads
-    is pypdf's, which reads no annotation, and the images A-24 has always
-    measured are the page's own. A display list built from the contents is
-    what gives both, in the same space :func:`_page_array` renders.
+    is pypdf's, which reads no annotation. A display list built from the
+    contents gives it in the same space :func:`_page_array` renders and
+    :func:`_image_placements` measures.
     """
     import fitz  # pymupdf
 
     return fitz.TextPage(page.get_displaylist(annots=False).get_textpage(flags))
 
 
+_IMAGE_DRAWS_DEVICE = None
+
+
+def _image_draws_device():
+    """The MuPDF device class :func:`_image_placements` runs a page through,
+    built on first use so importing this module does not import MuPDF."""
+    global _IMAGE_DRAWS_DEVICE
+    if _IMAGE_DRAWS_DEVICE is not None:
+        return _IMAGE_DRAWS_DEVICE
+    import pymupdf.mupdf as mupdf
+
+    class _ImageDraws(mupdf.FzDevice2):
+        """Records the device-space box of every image the page PAINTS.
+
+        * ``fill_image`` and ``fill_image_mask`` (a stencil mask paints its
+          color through the image) are draws.
+        * Between ``begin_mask`` and ``end_mask`` the content is a SOFT MASK:
+          it shapes another object's transparency and paints nothing itself,
+          so an image drawn there is not a draw.
+        * Inside a tiling pattern the tile's content is replayed over the
+          pattern's filled area, so an image in a tile is measured as that
+          AREA, once per pattern fill, not as one tile.
+        """
+
+        def __init__(self):
+            super().__init__()
+            self.boxes: list[tuple[float, float, float, float]] = []
+            self._mask_depth = 0
+            self._tiles: list[list] = []
+            self._unit = mupdf.FzRect(mupdf.FzRect.Fixed_UNIT)
+            self.use_virtual_fill_image()
+            self.use_virtual_fill_image_mask()
+            self.use_virtual_begin_mask()
+            self.use_virtual_end_mask()
+            self.use_virtual_begin_tile()
+            self.use_virtual_end_tile()
+
+        def _draw(self, ctm):
+            if self._mask_depth:
+                return
+            if self._tiles:
+                self._tiles[0][1] = True  # the outermost pattern's area counts
+                return
+            r = mupdf.ll_fz_transform_rect(self._unit.internal(), ctm)
+            self.boxes.append((min(r.x0, r.x1), min(r.y0, r.y1),
+                               max(r.x0, r.x1), max(r.y0, r.y1)))
+
+        def fill_image(self, ctx, image, ctm, alpha, color_params):
+            self._draw(ctm)
+
+        def fill_image_mask(self, ctx, image, ctm, colorspace, color, alpha,
+                            color_params):
+            self._draw(ctm)
+
+        def begin_mask(self, ctx, area, luminosity, colorspace, bc, color_params):
+            self._mask_depth += 1
+
+        def end_mask(self, ctx, fn):
+            self._mask_depth -= 1
+
+        def begin_tile(self, ctx, area, view, xstep, ystep, ctm, id, doc_id):
+            # `area` is in pattern space; the tile's ctm takes it to the page.
+            r = mupdf.ll_fz_transform_rect(area, ctm)
+            self._tiles.append([(min(r.x0, r.x1), min(r.y0, r.y1),
+                                 max(r.x0, r.x1), max(r.y0, r.y1)), False])
+            return 0  # not cached: run the tile's content once, so it is seen
+
+        def end_tile(self, ctx):
+            area, drew = self._tiles.pop()
+            if not drew:
+                return
+            if self._tiles:
+                self._tiles[0][1] = True
+            elif not self._mask_depth:
+                self.boxes.append(area)
+
+    _IMAGE_DRAWS_DEVICE = _ImageDraws
+    return _ImageDraws
+
+
 def _image_placements(page) -> list[tuple[float, float, float, float]]:
-    """One box per image DRAWN on the page, in the rendered page's coordinates.
+    """One box per image DRAWN on the page, in the rendered page's coordinates,
+    clipped to the page.
 
     **Every draw, not every image object** (D-51 round-2 review). The earlier
     enumeration listed the image objects in the page's resources and took each
     one's FIRST placement, so an image drawn as a thumbnail and then as the full
     page measured as a thumbnail, and its full-page scan went unread with no
     note on either setting. It also could not see a scan written inline in the
-    content stream (``BI ... ID ... EI``), which is in no resource list: a page
-    like that measured as carrying no image at all. The text device reports each
-    draw -- inline images, images inside form XObjects and stencil masks included
-    -- and an image that is listed but never drawn, which puts nothing on the
-    page, is not reported. Raises when the page cannot be interpreted; each
-    caller decides what that discloses.
-    """
-    import fitz  # pymupdf
+    content stream (``BI ... ID ... EI``), which is in no resource list.
 
+    **What a draw is** (D-51 round-3 review), measured by running the page's
+    content stream through :func:`_image_draws_device`, annotations excluded:
+
+    * every image painted, inline images, images inside form XObjects and
+      stencil masks included, and the same image painted twice at the same place
+      is two draws -- the share that sums them is an upper bound on purpose;
+    * NOT an image used only inside a soft mask, which paints nothing: counted,
+      it made a typed letter over a faded background measure as a full-page
+      scan;
+    * an image inside a tiling pattern counts as the area the pattern fills,
+      not as one tile: counted as a tile, a page painted with a scan through a
+      pattern measured as a sliver and went unread with no note;
+    * each box is clipped to the page, and a draw with no area on the page is
+      dropped: unclipped, an image placed off the page measured as full
+      coverage and was reported as content that could not be read.
+
+    An image that is listed but never painted puts nothing on the page and is
+    not reported. **Raises** when MuPDF cannot interpret the page (for example
+    more than 2,046 nested graphics states); each caller decides what that
+    discloses, and the routing discloses it as :data:`M_IMAGE_UNMEASURED`.
+    """
+    import pymupdf.mupdf as mupdf
+
+    device = _image_draws_device()()
+    mupdf.fz_run_page_contents(mupdf.FzPage(page.this), device, mupdf.FzMatrix(),
+                               mupdf.FzCookie())
+    mupdf.fz_close_device(device)
+    px0, py0, px1, py1 = page.rect
     boxes: list[tuple[float, float, float, float]] = []
-    for info in _content_textpage(page, fitz.TEXT_PRESERVE_IMAGES).extractIMGINFO():
-        x0, y0, x1, y1 = info["bbox"]
-        boxes.append((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
+    for x0, y0, x1, y1 in device.boxes:
+        x0, y0, x1, y1 = max(x0, px0), max(y0, py0), min(x1, px1), min(y1, py1)
+        if x1 > x0 and y1 > y0:
+            boxes.append((x0, y0, x1, y1))
     return boxes
 
 
-def _text_layer_boxes(page) -> list[tuple[float, float, float, float]]:
-    """The box of every word of the page's text layer, visible or not, in the
-    rendered page's coordinates. See :func:`_mask_text_layer`."""
-    return [tuple(w[:4]) for w in _content_textpage(page, 0).extractWORDS()]
+def _merge_boxes(boxes, page_rect) -> list[tuple[float, float, float, float]]:
+    """Union overlapping boxes until no two overlap, in reading order.
 
+    The result is the finest partition whose bounding boxes are pairwise
+    disjoint, which does not depend on the order boxes are merged in, so any
+    algorithm that reaches it gives the same regions. The pairwise loop this
+    replaces reached it in time quadratic in the number of draws (16 s for one
+    image drawn 14,400 times on one page, D-51 round-3 review). This sweeps the
+    boxes along one axis, merging each into the regions still open across it,
+    and repeats until a sweep merges nothing.
 
-def _mask_text_layer(page, arr, scale: float = 200.0 / 72.0) -> None:
-    """Paint the text layer's own word boxes white in ``arr``, a rendering of
-    ``page`` at ``scale`` pixels per point, in place (A-24, D-49).
-
-    Region OCR exists to read what the text layer does NOT already carry. A crop
-    is an image's box, and when the image lies UNDER the text layer that box
-    holds the text layer's own glyphs: a typed letter on full-page stationery,
-    a stamp typed over a scan, or a searchable scan whose OCR layer transcribes
-    the pixels beneath it. Read as they were, those glyphs came back twice, and
-    D-54 put that on the default run. Painting the boxes out before any crop is
-    cut is what makes the duplication impossible by construction rather than
-    filtered afterwards.
-
-    **Visible and invisible text are masked alike.** Visible text (any render
-    mode that paints) puts its own glyphs in the rendering, and the box removes
-    them. Invisible text (render mode 3) paints nothing; what lies under its box
-    is the image it transcribes, and the box removes that. Either way the words
-    come from the text layer once, and image content outside every box is still
-    read. **The bound, stated:** the text layer is trusted where it lies. Image
-    content under a word box is not read even if the word does not match it --
-    a searchable scan whose OCR layer is wrong or misplaced keeps the layer's
-    reading there -- and a glyph drawn outside its own box is read again. Box
-    edges round outward, so a partly covered pixel is covered.
+    Identical boxes are one region. Above :data:`_MERGE_EXACT_MAX_DRAWS`
+    distinct boxes, each is first widened outward to the
+    :data:`_MERGE_COARSE_CELLS` grid over ``page_rect``, and a hair past it so
+    that boxes in neighboring cells merge, which bounds the work: two widened
+    boxes that do not overlap cannot share a cell, so at most one region per
+    cell comes out. Widening never shrinks a region,
+    so every drawn pixel still lies in one; such a page is read in larger
+    pieces.
     """
     import math
 
-    h, w = arr.shape[:2]
-    ox, oy = page.rect.x0, page.rect.y0
-    for x0, y0, x1, y1 in _text_layer_boxes(page):
-        c0 = max(0, math.floor((x0 - ox) * scale))
-        r0 = max(0, math.floor((y0 - oy) * scale))
-        c1 = min(w, math.ceil((x1 - ox) * scale))
-        r1 = min(h, math.ceil((y1 - oy) * scale))
-        if c1 > c0 and r1 > r0:
-            arr[r0:r1, c0:c1] = 255
+    uniq = list(dict.fromkeys(b for b in boxes if b[2] > b[0] and b[3] > b[1]))
+    if len(uniq) > _MERGE_EXACT_MAX_DRAWS:
+        px0, py0, px1, py1 = page_rect
+        cw = (px1 - px0) / _MERGE_COARSE_CELLS
+        ch = (py1 - py0) / _MERGE_COARSE_CELLS
+        if cw > 0 and ch > 0:
+            uniq = list(dict.fromkeys(
+                (px0 + math.floor((x0 - px0) / cw) * cw,
+                 py0 + math.floor((y0 - py0) / ch) * ch,
+                 px0 + (math.ceil((x1 - px0) / cw) + 1e-3) * cw,
+                 py0 + (math.ceil((y1 - py0) / ch) + 1e-3) * ch)
+                for x0, y0, x1, y1 in uniq))
+    if len(uniq) > 1:
+        axis = 0 if sum(b[2] - b[0] for b in uniq) <= sum(b[3] - b[1] for b in uniq) else 1
+        while True:
+            uniq, merges = _sweep_merge(uniq, axis)
+            if not merges:
+                break
+    uniq.sort(key=lambda b: (b[1], b[0], b[3], b[2]))
+    return uniq
+
+
+def _sweep_merge(boxes, axis: int):
+    """One sweep of :func:`_merge_boxes` along ``axis`` (0 = x, 1 = y):
+    ``(regions, merges made)``. A region leaves the open list once the sweep
+    has passed its far edge; one that grew afterwards can still overlap it,
+    which is why the caller sweeps again until a sweep makes no merge."""
+    lo, hi = axis, axis + 2
+    open_: list[tuple[float, float, float, float]] = []
+    closed: list[tuple[float, float, float, float]] = []
+    merges = 0
+    for b in sorted(boxes, key=lambda q: q[lo]):
+        if open_:
+            still = []
+            for a in open_:
+                (still if a[hi] > b[lo] else closed).append(a)
+            open_ = still
+        cur = b
+        grew = True
+        while grew:
+            grew = False
+            for k, a in enumerate(open_):
+                if a[0] < cur[2] and cur[0] < a[2] and a[1] < cur[3] and cur[1] < a[3]:
+                    cur = (min(a[0], cur[0]), min(a[1], cur[1]),
+                           max(a[2], cur[2]), max(a[3], cur[3]))
+                    del open_[k]
+                    merges += 1
+                    grew = True
+                    break
+        open_.append(cur)
+    return closed + open_, merges
+
+
+def _text_on_images(page, rects) -> bool:
+    """Whether any word of the page's text layer overlaps one of ``rects``
+    (D-58): region OCR reads such a region whole, typed words included, so the
+    page's text may carry those words twice.
+
+    Visible and invisible (render mode 3) text alike: an invisible OCR layer
+    lies over the scan it transcribes, so reading the scan reads its words.
+    When the words cannot be read the answer is True, so the page is named
+    rather than silently left out of the disclosure."""
+    try:
+        words = _content_textpage(page, 0).extractWORDS()
+    except Exception:
+        return True
+    for w in words:
+        x0, y0, x1, y1 = w[:4]
+        for r in rects:
+            if x0 < r[2] and r[0] < x1 and y0 < r[3] and r[1] < y1:
+                return True
+    return False
 
 
 def _pdf_image_rects(page) -> list[tuple[float, float, float, float]]:
     """Every image placement's box on one page, merged and in reading order.
 
     Returns plain ``(x0, y0, x1, y1)`` tuples in the rendered page's
-    coordinates, one per :func:`_image_placements` draw before merging.
+    coordinates, from the :func:`_image_placements` draws. **Raises** when the
+    page cannot be interpreted, so the caller marks the page rather than
+    reading it as a page with no image (D-51 round-3 review: returning an empty
+    list here dropped the page from region OCR with no note).
 
     **Overlaps are unioned, and that is load-bearing rather than tidy.**
     :func:`_page_image_share` records that overlapping images are deliberately
     NOT de-overlapped there, because its number is an upper bound Tier 3 was
     measured with. Here the consequence is different: two overlapping images
     cropped separately hand the same pixels to OCR twice, and the page would
-    carry the text twice. Merging first is what keeps an image from being read
-    twice; :func:`_mask_text_layer` is what keeps the text layer from being read
-    again.
+    carry the image's text twice. Merging first is what keeps an image from
+    being read twice. It does not keep the text layer from being read again:
+    typed text lying on an image is inside that image's crop (D-58).
 
     **The order is total.** Sorting on ``(y0, x0)`` alone leaves ties broken by
     the order the draws were enumerated in, which is not a reading order — and
@@ -883,30 +1098,7 @@ def _pdf_image_rects(page) -> list[tuple[float, float, float, float]]:
     byte-identical repeat runs. The full box is in the key, so two distinct
     boxes can never tie.
     """
-    try:
-        placements = _image_placements(page)
-    except Exception:
-        return []
-    boxes = [b for b in placements if b[2] > b[0] and b[3] > b[1]]
-
-    # Union every pair that overlaps, repeatedly, until nothing else merges.
-    merged = True
-    while merged and len(boxes) > 1:
-        merged = False
-        out: list[tuple[float, float, float, float]] = []
-        for b in boxes:
-            for i, a in enumerate(out):
-                if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
-                    out[i] = (min(a[0], b[0]), min(a[1], b[1]),
-                              max(a[2], b[2]), max(a[3], b[3]))
-                    merged = True
-                    break
-            else:
-                out.append(b)
-        boxes = out
-
-    boxes.sort(key=lambda b: (b[1], b[0], b[3], b[2]))
-    return boxes
+    return _merge_boxes(_image_placements(page), tuple(page.rect))
 
 
 def _merge_image_text(native: str, image: str) -> str:
@@ -971,12 +1163,20 @@ def _ocr_pdf_regions(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
     is *nearly* the native text, never equal to it — and a hand-tuned threshold
     is exactly the kind of bound this codebase is trying to stop shipping.
 
-    Reading only the area the text layer does not cover makes the duplication
-    impossible by construction instead of filtered afterwards. Cropping to the
-    image regions alone did not do that: an image UNDER the text layer puts the
-    layer's glyphs inside its own crop. The rendering therefore has the text
-    layer's word boxes painted out first (:func:`_mask_text_layer`, which states
-    what that trusts), and the crops are cut from what is left.
+    Reading only the image regions keeps the text layer's own lines off OCR
+    wherever the text layer lies beside its images. **It does not where typed
+    text lies ON an image** -- a letter on full-page stationery, a stamp typed
+    over a scan, a searchable scan's OCR layer: those words are inside the
+    image's crop and are read a second time. Alex ruled D-58 that this stays:
+    a mask that painted the text layer out before cropping lost scan content
+    under a diagonal watermark and under a wrong OCR layer, with no marker, and
+    duplication loses nothing. The page is named in a document note instead
+    (:data:`IMAGE_TEXT_MAY_REPEAT`), from ``text_on_image``.
+
+    **Every region not read is counted** in ``unread`` and sets ``failed``,
+    whether or not another region of the page read: past the region cap, under
+    the size floor, or its OCR raised. A page the routing measured image content
+    on whose regions cannot be found again is failed too, rather than skipped.
 
     **The page is rendered ONCE and sliced**, for the reason ``_band_tiles``
     records: a per-region ``get_pixmap`` clip re-decodes the page's embedded
@@ -994,17 +1194,23 @@ def _ocr_pdf_regions(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
         for c0 in range(0, len(idxs), chunk_n):
             crops: dict[int, list] = {}
             skipped: dict[int, int] = {}
+            regions: dict[int, int] = {}
+            on_image: dict[int, bool] = {}
             for i in idxs[c0:c0 + chunk_n]:
                 try:
                     page = doc[i]
                     rects = _pdf_image_rects(page)
                     if not rects:
+                        # The routing measured image content here. Finding none
+                        # now is a disagreement between two readings, not a
+                        # page without pictures, and it is marked as one.
+                        out[i] = _OcrPage(failed=True)
                         continue
                     dropped = max(0, len(rects) - _MIXED_MAX_REGIONS)
                     arr = _page_array(page)
-                    _mask_text_layer(page, arr, scale)
                     h, w = arr.shape[:2]
                     tiles = []
+                    cut = []
                     for r in rects[:_MIXED_MAX_REGIONS]:
                         x0 = max(0, min(w, int(round((r[0] - page.rect.x0) * scale))))
                         y0 = max(0, min(h, int(round((r[1] - page.rect.y0) * scale))))
@@ -1014,9 +1220,11 @@ def _ocr_pdf_regions(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
                             dropped += 1  # smaller than a legible glyph
                             continue
                         tiles.append(np.ascontiguousarray(arr[y0:y1, x0:x1]))
-                    if tiles or dropped:
-                        crops[i] = tiles
-                        skipped[i] = dropped
+                        cut.append(r)
+                    crops[i] = tiles
+                    skipped[i] = dropped
+                    regions[i] = len(rects)
+                    on_image[i] = _text_on_images(page, cut) if cut else False
                 except Exception:
                     out[i] = _OcrPage(failed=True)  # one bad page must not sink the doc
             futs = {i: [pool.submit(_ocr_array, t) for t in tiles]
@@ -1024,7 +1232,7 @@ def _ocr_pdf_regions(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
             for i, fs in futs.items():
                 texts: list[str] = []
                 confs: list[float] = []
-                failed = False
+                raised = 0
                 for f in fs:
                     try:
                         text, cs = f.result()
@@ -1032,7 +1240,7 @@ def _ocr_pdf_regions(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
                             texts.append(text)
                         confs.extend(cs)
                     except Exception:
-                        failed = True
+                        raised += 1
                 # `failed` is set when ANY region of the page could not be read,
                 # even if other regions on the same page read fine. An earlier
                 # draft wrote `failed and not texts`, which reported success
@@ -1041,9 +1249,14 @@ def _ocr_pdf_regions(raw: bytes, pages: list[int]) -> dict[int, _OcrPage]:
                 # clean status. That is precisely the defect class A-24 exists
                 # to close, reintroduced one layer down, and it is recorded
                 # rather than quietly corrected because the first draft of the
-                # fix made the same mistake as the code it was fixing.
+                # fix made the same mistake as the code it was fixing. The page
+                # loop in `_extract_pdf` then made the same mistake one layer up
+                # (it looked at `failed` only when no text came back), found by
+                # D-51's third review round.
+                unread = raised + skipped.get(i, 0)
                 out[i] = _OcrPage(text="\n".join(texts), confs=tuple(confs),
-                                  failed=failed or skipped.get(i, 0) > 0)
+                                  failed=unread > 0, regions=regions.get(i, 0),
+                                  unread=unread, text_on_image=on_image.get(i, False))
     return out
 
 
@@ -1526,18 +1739,29 @@ def _page_image_share(page) -> tuple[float, bool]:
     tidier implementation here would silently invalidate 1,308 pages of
     published number.
 
-    **Where it no longer agrees with that tool, on purpose** (D-51 round-2
-    review): it sums every DRAW (:func:`_image_placements`), where the tool took
-    each image object's first placement and saw no inline image. The tool's
-    reading left a full-page scan drawn after its own thumbnail, or stored
-    inline, measured as a thumbnail or as nothing, and unread with no note. The
-    acceptance-corpus pages the change moves were counted when it was made;
-    those figures belong to the decision register, not to this docstring.
+    **Where it no longer agrees with that tool, on purpose** (D-51 round-2 and
+    round-3 reviews): it sums every DRAW (:func:`_image_placements`, which says
+    what a draw is), where the tool took each image object's first placement and
+    saw no inline image. The tool's reading left a full-page scan drawn after its
+    own thumbnail, or stored inline, measured as a thumbnail or as nothing, and
+    unread with no note. Each draw is clipped to the page, an image used only
+    in a soft mask is not a draw, and a tiling pattern counts the area it fills.
+    The acceptance-corpus pages these changes move were counted when they were
+    made; those figures belong to the decision register, not to this docstring.
+
+    **It is a SUM, not the area the page shows.** The same image drawn twice at
+    one place counts twice, and so do overlapping images. That is the upper
+    bound this measure has always been, kept because the error it makes is to
+    read a page, never to leave one unread without a note. So a note or a
+    screen that quotes it says the drawn areas ADD UP to a share of the page,
+    not that they cover it.
+
+    **Raises** when the page cannot be interpreted, as
+    :func:`_image_placements` does, rather than answering "no image": the
+    routing marks such a page :data:`M_IMAGE_UNMEASURED`, and :func:`pdf_spans`
+    decides for Tier 3.
     """
-    try:
-        boxes = _image_placements(page)
-    except Exception:
-        return 0.0, False
+    boxes = _image_placements(page)
     if not boxes:
         return 0.0, False
     page_area = abs(page.rect.get_area())
@@ -1604,7 +1828,15 @@ def pdf_spans(
             page_no = index + 1
             if page_no in covered:
                 continue
-            share, has_image = _page_image_share(doc[index])
+            try:
+                share, has_image = _page_image_share(doc[index])
+            except Exception:
+                # Not measurable (D-51 round 3). Tier 3 has no note to write;
+                # extraction has already marked this page M_IMAGE_UNMEASURED, or
+                # OCR'd it whole. "No image" would let Tier 3 call a page it
+                # could not read a blank page, so the answer is "an image of
+                # unknown size": never Blank, never Photograph.
+                share, has_image = 0.0, True
             signals.append(PageSignals(
                 page_no=page_no,
                 text=texts.get(page_no, ""),
@@ -1679,14 +1911,26 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     routed = set(need)
     mixed: list[int] = []
     scans: set[int] = set()
+    unmeasured: list[int] = []
     try:
         import fitz  # pymupdf
 
         with fitz.open(stream=raw, filetype="pdf") as _geom:
-            for i in range(min(n, _geom.page_count)):
+            for i in range(n):
                 if i in routed:
                     continue  # already going to OCR whole-page
-                share, has_image = _page_image_share(_geom[i])
+                # PER PAGE (D-51 round 3). `_page_image_share` used to swallow
+                # an interpreter error and answer "no image", so a page MuPDF
+                # could not interpret came out NATIVE with no note; and one bad
+                # page raising here would have left every later page unmeasured.
+                # A page MuPDF does not have at all is unmeasured too.
+                try:
+                    if i >= _geom.page_count:
+                        raise IndexError(i)
+                    share, has_image = _page_image_share(_geom[i])
+                except Exception:
+                    unmeasured.append(i)
+                    continue
                 if has_image and share >= PHOTO_MIN_IMAGE_AREA_SHARE:
                     mixed.append(i)
                     if share >= _SCAN_MIN_IMAGE_SHARE:
@@ -1697,14 +1941,21 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
         # nothing is the failure mode this amendment exists to close.
         notes.append(f"{M_IMAGE_UNREAD}: image geometry could not be measured "
                      f"({sanitize_message(str(exc))})")
+    if unmeasured:
+        notes.append(f"{M_IMAGE_UNMEASURED} on {len(unmeasured)} page(s) beside "
+                     f"their text layer, so whether they carry image content "
+                     f"that was not read is not known: page(s) "
+                     + ", ".join(str(i + 1) for i in unmeasured))
     skipped: frozenset[int] = frozenset()
     if mixed:
-        # "image content covering", not "an image covering": the share is the
-        # SUM over the page's images (`_page_image_share`).
+        # "images whose drawn areas add up to", not "image content covering":
+        # the share is the SUM over every image the page draws, overlaps and
+        # repeated draws included (`_page_image_share`), not the area it shows.
         if not opt.ocr_enabled:
-            notes.append(f"{M_IMAGE_UNREAD}: {len(mixed)} page(s) carry image "
-                         f"content covering {PHOTO_MIN_IMAGE_AREA_SHARE:.0%} or "
-                         f"more of the page beside their text layer; OCR disabled")
+            notes.append(f"{M_IMAGE_UNREAD}: {len(mixed)} page(s) carry images "
+                         f"whose drawn areas add up to "
+                         f"{PHOTO_MIN_IMAGE_AREA_SHARE:.0%} or more of the page "
+                         f"beside their text layer; OCR disabled")
         else:
             if opt.skip_images_on_text_pages:
                 # A-25 (D-51): a quick first pass leaves these images unread ON
@@ -1714,18 +1965,19 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                 # here since page notes never reach the processing log, and the
                 # setup screen promises that every page skipped is listed.
                 #
-                # Except a scan (D-54): image content covering nearly the whole
-                # page is read below exactly as a reading run reads it, so a
+                # Except a scan (D-54): images adding up to nearly the whole
+                # page are read below exactly as a reading run reads them, so a
                 # typed stamp in its text layer cannot decide that it is not.
                 skipped = frozenset(i for i in mixed if i not in scans)
                 if skipped:
                     notes.append(
-                        f"{M_IMAGE_UNREAD}: {len(skipped)} page(s) carry image "
-                        f"content covering {PHOTO_MIN_IMAGE_AREA_SHARE:.0%} or "
-                        f"more of the page beside their text layer, left unread "
-                        f"because this run skips pictures beside a text layer "
-                        f"(image content covering {_SCAN_MIN_IMAGE_SHARE:.0%} or "
-                        f"more of a page is read as a scan): page(s) "
+                        f"{M_IMAGE_UNREAD}: {len(skipped)} page(s) carry images "
+                        f"whose drawn areas add up to "
+                        f"{PHOTO_MIN_IMAGE_AREA_SHARE:.0%} or more of the page "
+                        f"beside their text layer, left unread because this run "
+                        f"skips pictures beside a text layer (a page whose drawn "
+                        f"image areas add up to {_SCAN_MIN_IMAGE_SHARE:.0%} or "
+                        f"more is read as a scan): page(s) "
                         + ", ".join(str(i + 1) for i in sorted(skipped)))
             read = [i for i in mixed if i not in skipped]
             if read and not ocr_available():
@@ -1764,9 +2016,13 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     n_mixed = 0
     n_region_failed = 0
     n_region_blank = 0
+    may_repeat: list[int] = []
+    unmeasured_pages = frozenset(unmeasured)
     for i in range(n):  # strictly by index — never by OCR completion order
         text, kind, confs = native[i], PageKind.NATIVE, None
         page_notes: tuple[str, ...] = ()
+        if i in unmeasured_pages:
+            page_notes = (M_IMAGE_UNMEASURED,)
         image_span: tuple[int, int] | None = None
         got = ocr_by_page.get(i)
         if got is not None:
@@ -1795,11 +2051,12 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                     confs = (confs or []) + [c for t, c in zip(extra, extra_confs)
                                              if t in keep]
                     n_footer_recovered += 1
-        # --- A-24: merge the image regions this page's text layer did not
-        # account for. Placed after the text layer's opening lines, NOT appended
-        # after it: appending moved the page's own Bates stamp out of the zone
-        # and could leave a foreign stamp from the image as the only one there.
-        # The measurement is on :func:`_merge_image_text`.
+        # --- A-24: merge the text read from the page's image regions. Placed
+        # after the text layer's opening lines, NOT appended after it: appending
+        # moved the page's own Bates stamp out of the zone and could leave a
+        # foreign stamp from the image as the only one there. The measurement is
+        # on :func:`_merge_image_text`. Typed text lying on an image is in the
+        # image's region and comes back here a second time (D-58).
         region = region_by_page.get(i)
         if region is not None:
             if region.text.strip():
@@ -1807,6 +2064,17 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                 kind = PageKind.MIXED
                 confs = (confs or []) + list(region.confs)
                 n_mixed += 1
+                if region.text_on_image:
+                    may_repeat.append(i)
+                if region.failed:
+                    # Some regions read and some did not (past the region cap,
+                    # under the size floor, or their OCR raised). Looked at on
+                    # its own: behind the branch above, the lost regions went
+                    # unmarked whenever another region read (D-51 round 3).
+                    page_notes = page_notes + (
+                        f"{M_IMAGE_UNREAD}: {region.unread} of {region.regions} "
+                        f"image region(s) of this page",)
+                    n_region_failed += 1
             elif region.failed:
                 # We knew there was image content, tried to read it, and could
                 # not. That is an evidence gap and it says so on the page.
@@ -1865,9 +2133,15 @@ def _extract_pdf(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                      f"text layer; the image regions were read separately and "
                      f"placed after the text layer's opening lines, and are never "
                      f"read for Bates stamps (page kind 'mixed')")
+    if may_repeat:
+        # D-58: disclosed, not marked. Nothing is missing from these pages.
+        notes.append(f"{len(may_repeat)} page(s) {IMAGE_TEXT_MAY_REPEAT} "
+                     f"(nothing is left out; D-58): page(s) "
+                     + ", ".join(str(i + 1) for i in may_repeat))
     if n_region_failed:
         notes.append(f"{M_IMAGE_UNREAD}: {n_region_failed} page(s) carry image "
-                     f"content that could not be rasterized or read")
+                     f"content that could not be rasterized or read, in whole or "
+                     f"in part")
     if n_region_blank:
         notes.append(f"{n_region_blank} page(s) carried image content that was "
                      f"read and contained no text")

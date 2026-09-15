@@ -314,17 +314,26 @@ class SetupScreen(QWidget):
         right.addWidget(self._skip_images)
         # Not overstated (D-51 reviews): the thresholds are stated, because each
         # sentence was false at an input within reach when it spoke absolutely.
-        # A picture under a quarter of the page is read by neither setting (A-24's
-        # threshold); a stamped scan is read only when its image covers 90% or
-        # more (D-54); and the 12-document timing (D-49) compared reading every
-        # such picture with reading none, which is not what ticking the box saves.
+        # Pictures adding up to under a quarter of a page with 40 or more
+        # characters of typed text (the extractor's text floor) are read by
+        # neither setting (A-24's threshold; a page with less typed text is
+        # OCR'd whole); a stamped scan is read only when its
+        # pictures add up to 90% or more (D-54); the areas are ADDED UP as drawn,
+        # so a picture drawn twice counts twice and "cover" was false (round 3);
+        # typed text lying on a picture that is read can appear twice (D-58);
+        # and the 12-document timing (D-49) compared reading every such picture
+        # with reading none, which is not what ticking the box saves.
         skip_help = _muted(
             "When ticked, DocIQ skips the words inside pictures, charts and "
-            "pasted-in images that cover a quarter or more of a page that also "
-            "has typed text, and lists every page it skipped as not read. A scan "
-            "whose image covers 90% or more of its page is still read, even with "
-            "a typed stamp. Pictures covering less than a quarter of a typed page "
-            "are not read whether the box is ticked or not. On a timed sample of "
+            "pasted-in images on a page that also has 40 or more characters of "
+            "typed text, when the pictures add up to a quarter or more of the page, "
+            "and lists every page it skipped as not read. Picture areas are "
+            "added up as drawn, so a picture drawn twice counts twice. A scan "
+            "whose pictures add up to 90% or more of its page is still read, "
+            "even with a typed stamp. Pictures adding up to less than a quarter "
+            "of such a page are not read whether the box is ticked or not. "
+            "Where typed text lies on a picture that is read, its words can "
+            "appear twice in the text; nothing is left out. On a timed sample of "
             "12 documents, reading every such picture made extraction about 3.4 "
             "times as long as reading none; the saving on a whole matter has not "
             "been measured. Untick it to read those pictures before relying on "

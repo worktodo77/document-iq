@@ -675,9 +675,10 @@ class RunRequest:
     produce different corpora. It is an input; it travels with the inputs."""
 
     skip_images_on_text_pages: bool = SKIP_IMAGES_ON_TEXT_PAGES_DEFAULT
-    """The setup screen's quick-pass switch (A-25, D-51): leave unread image
-    content covering 25% or more of a page that also carries typed text, though
-    not image content covering 90% or more, which is read as a scan (D-54).
+    """The setup screen's quick-pass switch (A-25, D-51): leave unread the images
+    on a page that also carries typed text when their drawn areas add up to 25%
+    or more of it, though not when they add up to 90% or more, which is read as
+    a scan (D-54).
     Ticked unless the operator unticks it. :func:`config_from` copies it into
     the run configuration, so it is hashed into the run identity rather than
     held by an adapter."""

@@ -167,8 +167,8 @@ def seconds_per_gb(ocr_enabled: bool) -> float:
     **Neither timed run read the images on pages that also carry a text layer**:
     both predate A-24. Each rate is therefore closest to a run that SKIPS them
     (A-25), and :func:`_minutes_for` gives no figure for a run that reads them.
-    Closest, not the same: a run that skips them still reads a scan whose image
-    content covers 90% or more of the page even when it carries a typed stamp
+    Closest, not the same: a run that skips them still reads a scan whose drawn
+    image areas add up to 90% or more of the page even when it carries a typed stamp
     (D-54), which the timed runs did not when the stamp was 40 characters or
     more, so over stamped scans the rate may understate the wait by an amount
     not measured.
