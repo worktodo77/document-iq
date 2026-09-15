@@ -141,7 +141,32 @@ or more of their text-layer word area inside image regions, and 2,403 have none.
 tripped because rounds 2 and 3 on this code each found a new case of one class: picture content
 duplicated or lost by region OCR.
 
-**Status: ruled, not yet built.** Built in D-51's third fix round.
+**Status: built on `build/sprint-5-d51` at `4105aac`, not yet merged, under review.** The line that stood
+here read "ruled, not yet built", which was true when written.
+
+**What the build did, and what it measured (counts only, no OCR, validated counter, 2026-09-14).** The
+mask is gone and region OCR reads image regions whole. Duplication is disclosed by an unmarked document
+note (`IMAGE_TEXT_MAY_REPEAT`) naming each MIXED page where a text-layer word overlaps an image region
+that was read and yielded text; the setup screen's help text says the same. The non-mask silent losses
+are marked: a page whose image geometry cannot be interpreted carries `M_IMAGE_UNMEASURED`, and image
+regions dropped by the 24-region cap, the 8-pixel floor or an OCR exception are counted on the page even
+when another region read. What counts as a draw was corrected at the same time: soft-mask images are not
+draws, tiling patterns count the area they fill, and every draw is clipped to the page. Over the
+acceptance corpus (298 PDFs, 17,732 pages, zero read errors), after the counter first reproduced the
+previous figures:
+
+| measure | before this build (`61baefd`) | after |
+|---|---|---|
+| MIXED pages | 3,574 | **3,579** (+5, none lost; all 5 paint images through tiling patterns) |
+| MIXED documents | 290 | 290 |
+| pages at image share 0.90 or more | 433 | 433, in 33 documents |
+| pages whose share changed | | 425 |
+
+Upper bounds, since whether OCR yields text is not known without running it: the duplication note can
+fire on 427 scan pages plus 709 other MIXED pages, in 106 documents; on a reading run 77 pages in 58
+documents exceed the 24-region cap and 10 more have only regions under 8 pixels unread (none of them
+scans, so a default run is unaffected). No corpus page is unmeasurable. The time region OCR costs is
+unchanged from A-24's measurement; the geometry pass's own time on the corpus is not separately timed.
 
 ## D-57 — the Word package follows D-55: fix and review until a round finds nothing serious (2026-09-14)
 
@@ -247,12 +272,12 @@ that fix's own `extract.py`, first reproduced the figures above under the old co
 under the new count: **3,574 MIXED pages (+1) and 433 pages at 0.90 or more, in 33 documents (+27
 pages, +2 documents)**; none dropped below either threshold, and the share changed on 737 pages in 153
 documents. The table above is the old count and is kept as the first measurement. The same
-fix makes the claim under D-48's "What shipped" that region OCR cannot duplicate a text layer true (it had not been, for text
-drawn over an image): the text layer's word boxes are masked out before recognition. Overlap of text
-layer with image regions on the corpus's MIXED pages: none on 2,403; under 10% on 706; 10% to under 50%
-on 59; 50% to under 90% on 27; 90% or more on 379, of which 375 are at image share 0.90 or more and
-almost all carry visible text, so the exposure is typed text over images rather than searchable scans.
-The time the mask adds is not measured. **Correction:** the ruling's evidence paragraph above says the
+fix masked the text layer's word boxes out before recognition, to make the claim under D-48's "What
+shipped" true; **that mask lost scan content and was removed under D-58** (see D-58, where the claim
+is withdrawn). Overlap of text layer with image regions on the corpus's MIXED pages, measured then:
+none on 2,403; under 10% on 706; 10% to under 50% on 59; 50% to under 90% on 27; 90% or more on 379,
+of which 375 are at image share 0.90 or more and almost all carry visible text, so the exposure is
+typed text over images rather than searchable scans. **Correction:** the ruling's evidence paragraph above says the
 review's page carried a 52-character endorsement; the fixture's stamp measures 53 characters.
 
 **The recognition fingerprint's version was not moved for the new count.** Tier 3 reads the image
