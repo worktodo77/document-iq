@@ -120,6 +120,25 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-60 — region OCR reads a page only when it accounts for every picture; otherwise the whole page is read (2026-09-23)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-60 | How D-51's picture reading ends, after the standing non-convergence rule tripped a second time on it | **Whole-page fallback by construction.** Region OCR is used on a page only when every image draw's area is covered by regions it actually read. When any draw is left uncovered for any reason (the region cap, the size floor, a draw it cannot measure, a band edge, a fill it does not recognize, an OCR error), the page is OCR'd whole, as a scan is, and a note says so. A new way of drawing a picture then costs reading time, never evidence. Review round 4's seven findings are fixed on top, the loosened exact-count tests are restored, and the package is reviewed again as D-58 rules. Ruled by Alex (the recommended option) over two alternatives: fix the seven one by one and review again; and fix the seven and close without a further review, recording any remainder as known limitations. | 2026-09-23 |
+
+**What the ruling was made on.** D-51 review round 4 (on `4105aac`, after D-58's build) confirmed 0 A and
+7 B. The B counts by round were 5, 2, 5 (with 1 A), then 7. Each round found another way region OCR drops
+or miscounts part of a picture. Round 4's seven: regions dropped by the 24-region cap or the 8-pixel floor
+reported as OCR failures, with no page named, and a floor-only page raising the dead-engine alarm; a scan
+stored as touching horizontal bands losing every line that crosses a band edge while the D-58 note says
+nothing is left out; a region-OCR exception filed as a permanent loss and never retried, where whole-page
+OCR retries; `IMAGE_TEXT_MAY_REPEAT` firing on a caption below a chart (the word box, not the ink) and per
+page rather than per region; a stencil-mask scan filled with a shading or tiling pattern unmeasured and
+unread with no note (a regression against `0a29e30`); exact-count tests loosened to `>= 1`, so a mutant
+that reads every region twice passes; and four new behaviours no test holds.
+
+**Status: ruled, not yet built.** D-51 fix round 4 builds it on `build/sprint-5-d51`.
+
 ## D-59 — the Bates zone skips the Word deletion list by position, not by what a line says (2026-09-23)
 
 | # | Decision | Ruling | Date |
