@@ -2549,3 +2549,288 @@ def test_two_inner_archives_with_one_name_in_one_archive_are_filed_apart():
                                                       ("inner__2.zip/a.txt", b"INNER-TWO")], exp
     assert exp.notes == ("archive 'inner.zip' has the name of one already listed; its members "
                          "are listed under 'inner__2.zip'",), exp.notes
+
+
+# ---------------------------------------------------------------------------
+# 34. Review-fix round 3: a document embedded in content tracked changes
+# removed says so
+# ---------------------------------------------------------------------------
+
+_W_REV = 'w:date="2018-05-06T00:00:00Z"'
+_OBJ_NS = _MIN_NS + ' xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+
+
+def _object_run(rid: str) -> str:
+    return (f'<w:r><w:object><o:OLEObject Type="Embed" ProgID="Package" r:id="{rid}"/>'
+            "</w:object></w:r>")
+
+
+def _docx_body(body: str, rels, parts) -> bytes:
+    """A .docx whose body is ``body`` as written, with main-part relationships
+    ``(id, type, target)`` and stored ``parts``."""
+    doc_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               f'<w:document {_OBJ_NS}><w:body>{body}'
+               '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", _OBJ_CT)
+        zf.writestr("_rels/.rels", _MIN_ROOT_RELS)
+        zf.writestr("word/document.xml", doc_xml)
+        zf.writestr("word/_rels/document.xml.rels", _rels_xml(*rels))
+        for name, data in parts.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_a_document_embedded_in_removed_content_says_so_and_a_shown_one_does_not(tmp_path):
+    """Review round 3: an object inside a tracked deletion was recovered as a
+    child that looked exactly like a live one, while the Word record's note
+    said its text was listed with the deletions. Each child now opens with a
+    plain note naming the removal and its author: deleted text, moved-from
+    text with no destination, a deleted row and a deleted cell are deletions;
+    moved-from text whose move has a destination is the copy Word shows only
+    where it went. A part any shown object also references is shown, and
+    says nothing, whether the shown reference comes first or last; a
+    deleted archive's every member carries the note."""
+    pkg = lambda name: _package(f"{name}.txt", f"INVENTED-{name}".encode())  # noqa: E731
+    cell = lambda inner, pr="": f"<w:tc>{pr}<w:p>{inner}</w:p></w:tc>"  # noqa: E731
+    body = (
+        f'<w:p><w:del w:id="10" w:author="Gus" {_W_REV}>' + _object_run("rIdLateB1")
+        + "</w:del></w:p>"
+        + "<w:p>" + _object_run("rIdLive") + "</w:p>"
+        + f'<w:p><w:del w:id="1" w:author="Ann" {_W_REV}>' + _object_run("rIdDel") + "</w:del></w:p>"
+        + f'<w:p><w:moveFrom w:id="2" w:author="Bob&#10;Two" {_W_REV}>' + _object_run("rIdOrphan")
+        + "</w:moveFrom></w:p>"
+        + f'<w:moveFromRangeStart w:id="3" w:name="m1" w:author="Cy" {_W_REV}/>'
+        + f'<w:p><w:moveFrom w:id="4" w:author="Cy" {_W_REV}>' + _object_run("rIdFrom")
+        + "</w:moveFrom></w:p>" + '<w:moveFromRangeEnd w:id="3"/>'
+        + f'<w:moveToRangeStart w:id="5" w:name="m1" w:author="Cy" {_W_REV}/>'
+        + f'<w:p><w:moveTo w:id="6" w:author="Cy" {_W_REV}>' + _object_run("rIdTo")
+        + "</w:moveTo></w:p>" + '<w:moveToRangeEnd w:id="5"/>'
+        + "<w:tbl>"
+        + f'<w:tr><w:trPr><w:del w:id="7" w:author="Dee" {_W_REV}/></w:trPr>'
+        + cell(_object_run("rIdRow")) + "</w:tr>"
+        + "<w:tr>" + cell(_object_run("rIdShared"))
+        + cell(_object_run("rIdCell"), f'<w:tcPr><w:cellDel w:id="8" w:author="Eve" {_W_REV}/></w:tcPr>')
+        + "</w:tr></w:tbl>"
+        + f'<w:p><w:del w:id="9" w:author="Fay" {_W_REV}>' + _object_run("rIdShared2")
+        + _object_run("rIdZip") + "</w:del></w:p>"
+        + "<w:p>" + _object_run("rIdLateB2") + "</w:p>")
+    rels = [(rid, "oleObject", f"embeddings/{target}.bin") for rid, target in (
+        ("rIdLive", "live"), ("rIdDel", "del"), ("rIdOrphan", "orphan"), ("rIdFrom", "from"),
+        ("rIdTo", "to"), ("rIdRow", "row"), ("rIdShared", "shared"), ("rIdCell", "cell"),
+        ("rIdShared2", "shared"), ("rIdZip", "zip"), ("rIdLateB1", "late"),
+        ("rIdLateB2", "late"))]
+    parts = {f"word/embeddings/{name}.bin": pkg(name.upper())
+             for name in ("live", "del", "orphan", "from", "to", "row", "shared", "cell",
+                          "late")}
+    parts["word/embeddings/zip.bin"] = _package("bundle.zip", _zip_of(
+        [("a.txt", b"INVENTED-ZIP-A"), ("b.txt", b"INVENTED-ZIP-B")]))
+    r = _walk_files(tmp_path, {"memo.docx": _docx_body(body, rels, parts)})
+    deleted = lambda who: (f"embedded in content deleted under tracked changes by {who}; "  # noqa: E731
+                           "Word, showing the document with its changes accepted, does not show it")
+    moved = ("embedded in content moved under tracked changes by 'Cy'; this is the copy that "
+             "stood where the content was moved from, and Word shows the object only where it "
+             "was moved to")
+    got = {d.rel_path: [n for n in d.notes if n.startswith("embedded in content")]
+           for d in r.documents if d.parent_doc_id == "memo.docx"}
+    assert got == {
+        "memo.docx/LIVE.txt": [], "memo.docx/DEL.txt": [deleted("'Ann'")],
+        "memo.docx/ORPHAN.txt": [deleted("'Bob Two'")], "memo.docx/FROM.txt": [moved],
+        "memo.docx/TO.txt": [], "memo.docx/ROW.txt": [deleted("'Dee'")],
+        "memo.docx/SHARED.txt": [], "memo.docx/CELL.txt": [deleted("'Eve'")],
+        "memo.docx/LATE.txt": [],
+        "memo.docx/bundle.zip/a.txt": [deleted("'Fay'")],
+        "memo.docx/bundle.zip/b.txt": [deleted("'Fay'")]}, got
+    assert not any(ex.has_evidence_marker(n) for d in r.documents if d.parent_doc_id
+                   for n in d.notes), [d.notes for d in r.documents]
+    word = next(d for d in r.documents if d.rel_path == "memo.docx")
+    counted = [n for n in word.notes if n.startswith(ex.M_WORD_TRACKED_DELETION)]
+    assert len(counted) == 1 and counted[0].startswith(
+        f"{ex.M_WORD_TRACKED_DELETION}: 7 deleted drawing(s), picture(s) or object(s); "), word.notes
+
+
+def test_an_object_target_written_unescaped_finds_a_part_stored_escaped():
+    """A part name compares as OPC compares it, a target's percent-escapes
+    read either way: ``Sheet 1.xlsx`` written plainly names the part stored as
+    ``Sheet%201.xlsx``, with no false "not in the package" note."""
+    raw = _docx_objects([("Embed", "Package", "embeddings/Sheet 1.bin", None)],
+                        extra_parts={"word/embeddings/Sheet%201.bin": _package("s.txt", b"INVENTED")})
+    exp = ex.expand_docx_embeddings(raw)
+    assert [m.name for m in exp.members] == ["s.txt"] and exp.notes == (), (exp.members, exp.notes)
+
+
+# ---------------------------------------------------------------------------
+# 35. Review-fix round 3: a value from the file is never read as a marker
+# ---------------------------------------------------------------------------
+
+
+def test_a_marker_phrase_inside_a_quoted_value_is_not_a_marker():
+    """A note quotes stored names, part names, fonts and authors. The marker
+    test matched phrases anywhere in a note, so a member named
+    ``archive member unreadable: index.txt``, read in full, marked its
+    record's name note as a retryable evidence gap and the accounting line
+    reported two losses that never happened. A quoted value, escapes and all,
+    is not read; a marker DocIQ writes is, before a quoted value or after one."""
+    assert not ex.has_evidence_marker(
+        "stored name 'archive member unreadable: index.txt' is recorded as "
+        "'archive member unreadable_ index.txt': ':' was replaced by '_'")
+    assert not ex.has_evidence_marker(ex.quoted("it's \"attachment content was not brought in\""))
+    assert not ex.has_transient_marker(
+        f"{ex.M_ATTACH_SKIPPED}: attachment {ex.quoted('archive member unreadable.pdf')} had no "
+        "decodable payload")
+    assert ex.has_final_marker(
+        f"{ex.M_ATTACH_SKIPPED}: attachment {ex.quoted('archive member unreadable.pdf')} had no "
+        "decodable payload")
+    assert ex.has_transient_marker(
+        f"{ex.quoted('bundle.zip')}: {ex.M_ZIP_MEMBER}: {ex.quoted('a.txt')}: Bad CRC-32")
+    assert ex.has_evidence_marker("the archive's own note: " + ex.M_ZIP_MEMBER)
+    # A path cut to its last part keeps a quoted value's escapes whole: cut
+    # with its escape, the name below left a stray quote that paired with the
+    # next quoted value and hid the marker between them.
+    name = "C:/d/a" + chr(39) + 'b "c"'
+    note = f"{ex.quoted(name)}: {ex.M_ZIP_MEMBER}: {ex.quoted('a.txt')}: Bad CRC-32"
+    assert ex.sanitize_message(note) == (
+        "'a\\'b \"c\"': " + ex.M_ZIP_MEMBER + ": 'a.txt': Bad CRC-32"), ex.sanitize_message(note)
+    assert ex.has_transient_marker(ex.sanitize_message(note)), ex.sanitize_message(note)
+
+
+def test_an_archive_name_heading_its_members_notes_is_quoted(monkeypatch):
+    """An archive inside an archive, or attached to an email, heads each of its
+    own notes with its name. Unquoted, a name holding a marker phrase turned
+    a plain note (a member cap) into an evidence gap."""
+    monkeypatch.setattr(ex, "_ZIP_MAX_MEMBERS", 2)
+    inner = _zip_of([("a.txt", b"INVENTED-A"), ("b.txt", b"INVENTED-B"), ("c.txt", b"INVENTED-C")])
+    name = "attachment content was not brought in.zip"
+    for exp in (ex.expand_zip(_zip_of([(name, inner)])),
+                ex.expand_eml_attachments(_eml_attaching(name, inner))):
+        assert exp.notes == (f"'{name}': archive truncated at 2 members; later members were "
+                             "not read",), exp.notes
+        assert not any(ex.has_evidence_marker(n) for n in exp.notes), exp.notes
+
+
+def test_stored_names_holding_marker_phrases_leave_the_accounting_clean(tmp_path):
+    from dociq.verify import accounting
+
+    bundle = _zip_of([("archive member unreadable: index.txt", b"INVENTED-FULLY-READ"),
+                      ("attachment content was not brought in/x.txt", b"INVENTED-ALSO-READ")])
+    r = _walk_files(tmp_path, {"bundle.zip": bundle, "mail.eml": _eml_attaching(
+        "archive member unreadable.txt", b"INVENTED-ATTACHED")})
+    children = [d for d in r.documents if d.parent_doc_id]
+    assert len(children) == 3 and all(d.status is ProcessingStatus.FULL for d in children), (
+        [(d.rel_path, d.status) for d in children])
+    assert walker._degradations(r.documents) == []
+    assert accounting.check(r).evidence_line == ""
+
+
+# ---------------------------------------------------------------------------
+# 36. Review-fix round 3: nothing in a file is lost for want of a note
+# ---------------------------------------------------------------------------
+
+
+def test_a_zip_read_as_the_office_document_at_its_root_names_its_other_members(tmp_path):
+    """A ``.zip`` holding a Word package's parts at its root is read as the
+    Word file. Its other members, which that document does not contain, were
+    in no record and no note. They are named in a marked note, wherever the
+    zip arrives."""
+    word = (FIXTURES / "17_word_embeddings.docx").read_bytes()
+    zin = zipfile.ZipFile(io.BytesIO(word))
+    mixed = _zip_of([(n, zin.read(n)) for n in zin.namelist()]
+                    + [("Schedule 2019.txt", b"INVENTED-OSPREY"), ("sub/Letter.txt", b"INVENTED-WALRUS")])
+    r = _walk_files(tmp_path, {"archive.zip": mixed, "mail.eml": _eml_attaching("archive.zip", mixed),
+                               "plain.zip": _zip_of([("inner.zip", word)])})
+    by_rel = {d.rel_path: d for d in r.documents}
+    note = (f"{ex.M_ATTACH_SKIPPED}: this .zip is read as the Office document at its root, and "
+            "2 member(s) that are not part of that document were not read: "
+            "'Schedule 2019.txt', 'sub/Letter.txt'")
+    for route in ("archive.zip", "mail.eml/archive.zip"):
+        assert "This sentence opens the fixture" in _text(by_rel[route]), route
+        assert [n for n in by_rel[route].notes if "this .zip is read as" in n] == [note], (
+            route, by_rel[route].notes)
+    assert not any("this .zip is read as" in n for n in by_rel["plain.zip/inner.zip"].notes), (
+        by_rel["plain.zip/inner.zip"].notes)
+
+
+@pytest.mark.parametrize("name,kind,content", [
+    ("bundle.txt", "a zip-family container", "zip"),
+    ("legacy.log", "a legacy OLE container", "ole"),
+    ("broken.csv", "PDF", "pdf")])
+def test_bytes_no_reader_can_read_under_a_text_name_are_read_as_text_with_a_marker(
+        tmp_path, name, kind, content):
+    """A zip, compound file or PDF under a name whose reader never fails is
+    tried by content first. When that fails too, the text reader's page is
+    the raw bytes: reported FULL with no marker, though what the file holds
+    was never read."""
+    raw = {"zip": _zip_of([("a.txt", b"INVENTED-MEMBER")]),
+           "ole": make_fixtures._write_compound_file({"Invented": b"INVENTED-STREAM"}),
+           "pdf": b"%PDF-1.4\nINVENTED BROKEN PDF"}[content]
+    got = ex.extract(name, raw)
+    ext = name[name.rfind("."):]
+    tried = {"zip": "Word, Excel, PowerPoint", "ole": "Outlook .msg, legacy Excel",
+             "pdf": "PDF"}[content]
+    assert got.pages and [n for n in got.notes if ex.has_evidence_marker(n)] == [
+        f"content was not read as the format it is: extension {ext} but content is {kind}, "
+        f"which the {tried} reader(s) could not read; the file's bytes were read as text "
+        "instead"], got.notes
+    assert ex.has_final_marker(got.notes[-1]) and not ex.has_transient_marker(got.notes[-1])
+    assert ex.M_CONTENT_UNREAD == "content was not read as the format it is"
+
+
+# ---------------------------------------------------------------------------
+# 37. Review-fix round 3: a set in a library's message is written sorted
+# ---------------------------------------------------------------------------
+
+
+def _bad_view_xlsx() -> bytes:
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "INVENTED-CELL"
+    buf = io.BytesIO()
+    wb.save(buf)
+    src = zipfile.ZipFile(io.BytesIO(buf.getvalue()))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zf:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                data = data.replace(b"<sheetView ", b'<sheetView view="bogusView" ', 1)
+            zf.writestr(zipfile.ZipInfo(info.filename, date_time=(2021, 3, 4, 5, 6, 8)), data)
+    return out.getvalue()
+
+
+def test_sanitize_message_writes_a_set_of_strings_in_sorted_order():
+    assert ex.sanitize_message("Value must be one of {'normal', 'pageLayout', 'pageBreakPreview'}") == (
+        "Value must be one of {'normal', 'pageBreakPreview', 'pageLayout'}")
+    assert ex.sanitize_message("frozenset({\"b'x\", 'a'})") == "frozenset({\"b'x\", 'a'})"
+    assert ex.sanitize_message("{'k': 1, 'j': 2} {'only'}") == "{'k': 1, 'j': 2} {'only'}"
+
+
+def test_an_embedded_workbooks_error_hashes_identically_in_two_interpreters(tmp_path):
+    """openpyxl names the values a sheet view accepts as a Python set, whose
+    order follows the hash seed; that text reached a child's error, and two
+    runs of one Word file hashed differently."""
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "memo.docx").write_bytes(_docx_objects(
+        [("Embed", "Excel.Sheet.12", "embeddings/Microsoft_Excel_Worksheet1.xlsx", _bad_view_xlsx())]))
+    script = tmp_path / "pipeline_child.py"
+    script.write_text(_PIPELINE_CHILD, encoding="utf-8")
+    repo_src = str(Path(__file__).resolve().parents[1] / "src")
+    runs = []
+    for seed in (1, 2, 3):
+        env = dict(os.environ, PYTHONHASHSEED=str(seed), PYTHONPATH=repo_src)
+        done = subprocess.run([sys.executable, str(script), str(src), str(tmp_path / f"out{seed}")],
+                              capture_output=True, text=True, env=env, timeout=600)
+        assert done.returncode == 0, done.stderr[-2000:]
+        runs.append(json.loads(done.stdout.strip().splitlines()[-1]))
+    child = next(row for row in runs[0][1] if row[0] == "memo.docx/Microsoft_Excel_Worksheet1.xlsx")
+    assert child[1] == "failed" and "{'normal', 'pageBreakPreview', 'pageLayout'}" in child[2], child
+    assert runs[0][0] == runs[1][0] == runs[2][0], [
+        row[2] for run in runs for row in run[1] if row[1] == "failed"]

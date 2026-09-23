@@ -1527,10 +1527,19 @@ def test_a_date_or_a_stamp_in_deleted_text_is_never_the_documents_own():
     assert apply_bates((bare_doc,), decision)[0].pages[0].bates is None
 
 
+_DELETED_GRAPHIC_NOTE = (
+    "{n} deleted drawing(s), picture(s) or object(s); the text of a text box or watermark "
+    "in one is listed with the deletions, the text of a chart or SmartArt drawing is not "
+    "read, and a document embedded in one is recovered, where it can be, as a child "
+    "document whose note names the deletion")
+
+
 def test_a_deleted_chart_is_counted_as_a_deletion_not_as_an_unread_chart():
     """A deleted picture, chart or object holds nothing to list. It is counted
     under the deletion marker, once per outermost graphic, and never as an
-    unread chart the document shows."""
+    unread chart the document shows. The note said any text inside them was
+    listed with the deletions, which was false for a chart's own text, for
+    SmartArt and for an embedded document; it says what happens to each."""
     chart = ('<w:r><w:drawing><wp:inline><wp:extent cx="1828800" cy="1828800"/>'
              '<wp:docPr id="1" name="c"/><a:graphic><a:graphicData '
              'uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
@@ -1538,8 +1547,7 @@ def test_a_deleted_chart_is_counted_as_a_deletion_not_as_an_unread_chart():
     text, notes = _read(_raw_docx(_p(_t("KEPT"), _del("Ann", chart))))
     assert text == "KEPT", text
     marked = [n for n in notes if ex.has_evidence_marker(n)]
-    assert marked == [f"{ex.M_WORD_TRACKED_DELETION}: 1 deleted drawing(s), picture(s) or "
-                      "object(s); any text inside them is listed with the deletions"], notes
+    assert marked == [f"{ex.M_WORD_TRACKED_DELETION}: " + _DELETED_GRAPHIC_NOTE.format(n=1)], notes
 
 
 # ---------------------------------------------------------------------------
@@ -1669,7 +1677,7 @@ def test_an_unmapped_symbol_keeps_its_place_and_is_disclosed():
     assert text.split("\n") == ["ITEM\ufffdDONE\ufffdX\ufffdY\ufffdZ", "SHOWN"], repr(text)
     marked = [n for n in notes if ex.has_evidence_marker(n) and "symbol" in n.lower()]
     assert marked == [f"{ex.M_WORD_UNREAD}: 4 symbol character(s) with no standard text "
-                      "mapping (font(s): Invented Font, Symbol, Wingdings), each shown as "
+                      "mapping (font(s): 'Invented Font', 'Symbol', 'Wingdings'), each shown as "
                       "U+FFFD"], notes
 
 
@@ -1809,8 +1817,9 @@ def test_a_field_code_running_on_past_a_paragraph_mark_stays_code():
                    '<w:r><w:instrText xml:space="preserve"> TOC </w:instrText></w:r>') + _p(_t("LOST"))
     _text, notes = _read(_raw_docx(_p(_t("BEFORE")) + open_code))
     assert [n for n in notes if ex.has_evidence_marker(n)] == [
-        f"{ex.M_WORD_UNREAD}: 1 field code(s) never ended; the text after each in its "
-        "part was read as field code and left out"], notes
+        f"{ex.M_WORD_UNREAD}: 1 field code(s) never ended; the text after each, to the end "
+        "of its story (the body, a table cell, a text box, a header or footer, a note or a "
+        "comment), was read as field code and left out"], notes
 
 
 # ---------------------------------------------------------------------------
@@ -1923,3 +1932,433 @@ def test_the_true_page_note_is_on_every_word_record_and_carries_no_marker():
     assert got.notes[0] == ex.WORD_LAYOUT_NOTE and got.pages[0].notes[0] == ex.WORD_LAYOUT_NOTE, (
         got.notes)
     assert not ex.has_evidence_marker(ex.WORD_LAYOUT_NOTE)
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 3: characters in ordinary runs drawn in a symbol font
+# (addendum A2.4)
+# ---------------------------------------------------------------------------
+
+_W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+
+def _font_run(text: str, rpr: str = "", tag: str = "t") -> str:
+    return f'<w:r><w:rPr>{rpr}</w:rPr><w:{tag} xml:space="preserve">{text}</w:{tag}></w:r>'
+
+
+def _fonts(**slots) -> str:
+    return "<w:rFonts " + " ".join(f'w:{k}="{v}"' for k, v in slots.items()) + "/>"
+
+
+def _styles(*styles: str, defaults: str = "") -> str:
+    head = (f"<w:docDefaults><w:rPrDefault><w:rPr>{defaults}</w:rPr></w:rPrDefault>"
+            "</w:docDefaults>" if defaults else "")
+    return _part("styles", head + "".join(styles))
+
+
+def _theme(minor_latin: str) -> str:
+    fonts = ('<a:latin typeface="{}"/><a:ea typeface=""/><a:cs typeface=""/>')
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="t">'
+            '<a:themeElements><a:fontScheme name="f"><a:majorFont>' + fonts.format("Arial")
+            + '</a:majorFont><a:minorFont>' + fonts.format(minor_latin)
+            + '</a:minorFont></a:fontScheme></a:themeElements></a:theme>')
+
+
+_DINGS = _fonts(ascii="Wingdings", hAnsi="Wingdings")
+_SYM = _fonts(ascii="Symbol", hAnsi="Symbol")
+_STYLE_RELS = [("rIdS", "styles", "styles.xml"), ("rIdT", "theme", "theme/theme1.xml")]
+_SYMBOL_RUN_CASES = {
+    "symbol_direct_micro": (_p(_t("Coating 250 "), _font_run("m", _SYM), _t("m thick")),
+                            {}, "Coating 250 µm thick", ""),
+    "symbol_private_use_form": (_p(_t("Pressure "), _font_run("&#xF0B3;", _SYM), _t(" 40 bar")),
+                                {}, "Pressure ≥ 40 bar", ""),
+    "wingdings_latin1_arrow": (_p(_t("Next "), _font_run("&#xE0;", _DINGS), _t(" step")),
+                               {}, "Next � step", "1:'Wingdings'"),
+    "wingdings_ascii_slot_only": (_p(_t("Thanks "), _font_run("J", _fonts(ascii="Wingdings"))),
+                                  {}, "Thanks �", "1:'Wingdings'"),
+    "wingdings_private_use_and_spaces": (
+        _p(_t("Passed "), _font_run("&#xF0FC; &#xFC;", _DINGS)), {}, "Passed � �",
+        "2:'Wingdings'"),
+    "zapf_dingbats_tick": (_p(_t("Checked "), _font_run("3", _fonts(ascii="ZapfDingbats"))),
+                           {}, "Checked ✓", ""),
+    "character_style": (_p(_t("Mark "), _font_run("&#xFC;", '<w:rStyle w:val="Dings"/>')),
+                        {"word/styles.xml": _styles(
+                            '<w:style w:type="character" w:styleId="Dings"><w:rPr>'
+                            + _DINGS + '</w:rPr></w:style>')},
+                        "Mark �", "1:'Wingdings'"),
+    "paragraph_style_based_on": (
+        _p(_t("a"), ppr='<w:pPr><w:pStyle w:val="Greek"/></w:pPr>'),
+        {"word/styles.xml": _styles(
+            '<w:style w:type="paragraph" w:styleId="Base"><w:rPr>' + _SYM + '</w:rPr></w:style>'
+            '<w:style w:type="paragraph" w:styleId="Greek"><w:basedOn w:val="Base"/></w:style>')},
+        "α", ""),
+    "document_defaults": (_p(_t("J")), {"word/styles.xml": _styles(defaults=_DINGS)},
+                          "�", "1:'Wingdings'"),
+    "theme_font": (_p(_font_run("J", '<w:rFonts w:asciiTheme="minorHAnsi" w:ascii="Arial"/>')),
+                   {"word/theme/theme1.xml": _theme("Wingdings")}, "�", "1:'Wingdings'"),
+    "complex_script_slot_needs_rtl": (
+        _p(_font_run("J", _fonts(ascii="Arial", cs="Wingdings")),
+           _font_run("J", _fonts(ascii="Arial", cs="Wingdings") + "<w:rtl/>")),
+        {}, "J�", "1:'Wingdings'"),
+    "deleted_text_in_a_symbol_font": (
+        _p(_t("Kept"), _del("Ann", _font_run("&#xE8;", _DINGS, tag="delText"))), {},
+        "Kept\n[deleted by Ann] �", "1:'Wingdings'"),
+    "non_breaking_hyphen_and_drop_down_in_symbol_fonts": (
+        _p(_t("A"), f"<w:r><w:rPr>{_DINGS}</w:rPr><w:noBreakHyphen/></w:r>", _t("B "),
+           f'<w:r><w:rPr>{_SYM}</w:rPr><w:fldChar w:fldCharType="begin"><w:ffData><w:ddList>'
+           '<w:result w:val="0"/><w:listEntry w:val="a"/></w:ddList></w:ffData></w:fldChar></w:r>'
+           '<w:r><w:instrText xml:space="preserve"> FORMDROPDOWN </w:instrText></w:r>'
+           '<w:r><w:fldChar w:fldCharType="end"/></w:r>'),
+        {}, "A�B α", "1:'Wingdings'"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SYMBOL_RUN_CASES))
+def test_ordinary_text_in_a_symbol_font_run_reads_as_the_font_draws_it(case):
+    """Review round 3: a ``w:t`` whose run font is Symbol, Zapf Dingbats,
+    Wingdings or another symbol font, set directly (any of ``w:ascii``,
+    ``w:hAnsi``, ``w:eastAsia``, ``w:cs``, by the character's slot), by a
+    character or paragraph style, by the document defaults or through the
+    theme, was copied through as the Latin letter sharing its code: a
+    Symbol-font ``m`` (a micro sign) read ``mm``, a thousand times the
+    figure, and 125 Wingdings arrows in the corpus read as ``a-grave``. Each
+    character now maps as a ``w:sym`` does, placeholders counted in the same
+    marked note; a space stays a space."""
+    body, parts, expected, disclosed = _SYMBOL_RUN_CASES[case]
+    rels = [rel for rel in _STYLE_RELS if f"word/{rel[2]}" in parts]
+    text, notes = _read(_raw_docx(body, parts=parts, rels=rels))
+    assert text == expected, (case, text)
+    marked = [n for n in notes if ex.has_evidence_marker(n) and "symbol" in n]
+    count, _sep, fonts = disclosed.partition(":")
+    assert marked == ([f"{ex.M_WORD_UNREAD}: {count} symbol character(s) with no standard text "
+                       f"mapping (font(s): {fonts}), each shown as U+FFFD"] if disclosed else []), (
+        case, notes)
+
+
+def test_the_zapf_dingbats_table_matches_reportlabs_codec():
+    """Zapf Dingbats was disclosed as having no standard mapping, though
+    reportlab, a declared dependency, ships one: the table here is held equal
+    to its ``zapfdingbats`` codec, U+FFFD where the codec defines nothing."""
+    import codecs
+
+    import reportlab.pdfbase.rl_codecs as rl
+
+    rl.RL_Codecs.register()
+    codecs.lookup("zapfdingbats")
+    wrong = []
+    for code in range(0x20, 0x100):
+        try:
+            theirs = bytes([code]).decode("zapfdingbats")
+        except UnicodeDecodeError:
+            theirs = ex.SYMBOL_PLACEHOLDER
+        if ex._ZAPF_DINGBATS_TABLE[code - 0x20] != theirs:
+            wrong.append((hex(code), ex._ZAPF_DINGBATS_TABLE[code - 0x20], theirs))
+    assert len(ex._ZAPF_DINGBATS_TABLE) == 224 and not wrong, wrong
+
+
+def test_a_zapf_dingbats_symbol_maps_and_monotype_sorts_stays_disclosed():
+    """``w:sym`` in Zapf Dingbats maps through its table in either code form;
+    Monotype Sorts, which no dependency's table names, stays a counted
+    placeholder, as does a control code, which would otherwise break the
+    line (a ``w:sym`` of ``000A`` split one)."""
+    sym = lambda font, char: f'<w:r><w:sym w:font="{font}" w:char="{char}"/></w:r>'  # noqa: E731
+    text, notes = _read(_raw_docx(_p(
+        _t("A"), sym("ZapfDingbats", "F033"), _t("B"), sym("ITC Zapf Dingbats", "0034"),
+        _t("C"), sym("Monotype Sorts", "0033"), _t("D"), sym("Arial", "000A"), _t("E"))))
+    assert text == "A✓B✔C�D�E", repr(text)
+    assert [n for n in notes if ex.has_evidence_marker(n)] == [
+        f"{ex.M_WORD_UNREAD}: 2 symbol character(s) with no standard text mapping (font(s): "
+        "'Arial', 'Monotype Sorts'), each shown as U+FFFD"], notes
+
+
+def test_a_watermark_set_in_a_symbol_font_reads_as_the_font_draws_it():
+    """A VML watermark's text is drawn in the font its style names; in
+    Wingdings its letters are pictures."""
+    mark = _WATERMARK.format(text="J").replace("font-family:Calibri", "font-family:&quot;Wingdings&quot;")
+    text, notes = _read(_raw_docx(
+        _p(_t("BODYTEXT")), sect='<w:headerReference w:type="default" r:id="rIdH"/>',
+        parts={"word/header1.xml": _part("hdr", _p(_t("HDR"), mark))},
+        rels=[("rIdH", "header", "header1.xml")]))
+    assert text.split("\n") == ["HDR", "�", "BODYTEXT"], text.split("\n")
+    assert [n for n in notes if ex.has_evidence_marker(n)] == [
+        f"{ex.M_WORD_UNREAD}: 1 symbol character(s) with no standard text mapping (font(s): "
+        "'Wingdings'), each shown as U+FFFD"], notes
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 3: values from the file never start a page line
+# ---------------------------------------------------------------------------
+
+
+def test_a_value_the_file_supplies_to_a_label_or_target_never_starts_a_page_line():
+    """Deletion authors had their line breaks read as spaces; a comment's
+    author, a note's id and a hyperlink's target did not, so a file could put
+    a stamp-shaped line of its own choosing on the page, inside the Bates
+    tail zone. Every value DocIQ writes into a label or beside page text is
+    now one line."""
+    from dociq.identify.bates import detect_candidates
+
+    body = (_p(_t("Body."), '<w:r><w:footnoteReference w:id="1"/></w:r>')
+            + _p('<w:hyperlink r:id="rIdL">' + _t("the register") + "</w:hyperlink>")
+            + _p(f'<w:del w:id="1" w:author="Ann&#10;MNFV 000999" {_WHEN}>' + _dt("x") + "</w:del>"))
+    parts = {"word/footnotes.xml": _part("footnotes", '<w:footnote w:id="1&#10;MNFV 000997">'
+                                         + _p(_t("NOTE")) + "</w:footnote>"),
+             "word/comments.xml": _part("comments", '<w:comment w:id="0" '
+                                        'w:author="Rev&#13;&#10;MNFV 000998">'
+                                        + _p(_t("CMT")) + "</w:comment>")}
+    rels = [("rIdFn", "footnotes", "footnotes.xml"), ("rIdC", "comments", "comments.xml"),
+            ("rIdL", "hyperlink", "http://example.com/&#10;MNFV 000996&#10;")]
+    got = ex.extract("labels.docx", _raw_docx(body, parts=parts, rels=rels))
+    lines = got.pages[0].text.split("\n")
+    assert lines == ["Body.", "the register <http://example.com/ MNFV 000996>", "",
+                     "[footnote 1 MNFV 000997] NOTE", "[comment by Rev MNFV 000998] CMT",
+                     "[deleted by Ann MNFV 000999] x"], lines
+    assert detect_candidates((document("labels.docx", got.pages),)) == ()
+
+
+def test_an_email_header_value_never_starts_a_page_line(monkeypatch):
+    """The same class outside Word: an email reader writes ``Subject: `` and
+    the header's value after it, and an encoded word (RFC 2047) can decode to
+    a line break. The value then put a line of the sender's choosing on the
+    page, inside the Bates head zone. A header reads as one line, as a mail
+    client shows it; so does a ``.msg`` header."""
+    import extract_msg
+
+    from dociq.identify.bates import detect_candidates
+
+    raw = (b"From: sender@example.com\r\n"
+           b"Subject: =?utf-8?q?Invented_report=0AMNFV_000777?=\r\n"
+           b"Date: Sun, 03 Mar 2019 09:00:00 +0000\r\n\r\nBody text.\r\n")
+    got = ex.extract("mail.eml", raw)
+    lines = got.pages[0].text.split("\n")
+    assert lines[:3] == ["From: sender@example.com", "Subject: Invented report MNFV 000777",
+                         "Date: Sun, 03 Mar 2019 09:00:00 +0000 (2019-03-03)"], lines
+    assert detect_candidates((document("mail.eml", got.pages),)) == ()
+
+    class _Message:
+        sender = "sender@example.com"
+        to = "a@example.com\r\nMNFV 000778"
+        cc = None
+        subject = "Invented\nMNFV 000779"
+        date = "Sun, 03 Mar 2019 09:00:00 +0000"
+        body = "Body text."
+
+        def __init__(self, _path):
+            pass
+
+    monkeypatch.setattr(extract_msg, "Message", _Message)
+    got = ex.extract("mail.msg", b"not read: the reader is replaced")
+    assert got.pages[0].text.split("\n") == [
+        "From: sender@example.com", "To: a@example.com MNFV 000778",
+        "Subject: Invented MNFV 000779", "Date: Sun, 03 Mar 2019 09:00:00 +0000", "",
+        "Body text."], got.pages[0].text
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 3: D-56 passages, moves and field codes, stated exactly
+# ---------------------------------------------------------------------------
+
+
+def test_deleted_and_moved_from_text_side_by_side_by_one_author_is_one_passage():
+    """Addendum A4: consecutive removed characters by one author in one
+    paragraph are one passage. Deleted text followed at once by moved-from
+    text with no destination, by the same author, was listed as two. Another
+    author, or a kept character, still starts the next passage."""
+    move_from = lambda author, text: (  # noqa: E731
+        f'<w:moveFrom w:id="2" w:author="{author}" {_WHEN}>' + _t(text) + "</w:moveFrom>")
+    body = (_p(_t("P1 "), _del("Ann", _dt("ALPHA ")), move_from("Ann", "BETA"),
+               _del("Ann", _dt(" GAMMA")))
+            + _p(_t("P2 "), _del("Ann", _dt("DELTA")), move_from("Bob", "EPSILON"))
+            + _p(_t("P3 "), move_from("Cy", "ZETA"), _t(" kept "), _del("Cy", _dt("ETA"))))
+    text, notes = _read(_raw_docx(body))
+    assert text.split("\n") == [
+        "P1", "P2", "P3  kept",
+        "[deleted by Ann] ALPHA BETA GAMMA", "[deleted by Ann] DELTA", "[deleted by Bob] EPSILON",
+        "[deleted by Cy] ZETA", "[deleted by Cy] ETA"], text.split("\n")
+    assert not any(ex.has_evidence_marker(n) for n in notes), notes
+
+
+def test_a_deleted_hyperlink_or_ruby_guide_in_several_runs_is_read_as_one_passage():
+    """What a deleted hyperlink shows, and a deleted ruby guide, are read
+    across every run of them since they began: the target follows the display
+    text only when the two differ, and the whole guide stands in brackets.
+    Read from the last run alone, a link whose display text is its target in
+    two runs repeated the target, and a two-run guide bracketed only its end."""
+    link = ('<w:hyperlink r:id="rIdL">' + _dt("http://example.com") + _dt("/invented")
+            + "</w:hyperlink>")
+    ruby = ('<w:r><w:ruby><w:rubyPr/><w:rt>' + _dt("GUIDE") + _dt("TWO") + "</w:rt><w:rubyBase>"
+            + _dt("BASE") + "</w:rubyBase></w:ruby></w:r>")
+    text, _notes = _read(_raw_docx(
+        _p(_t("KEPT "), _del("Ann", link)) + _p(_t("ALSO "), _del("Ann", ruby)),
+        rels=[("rIdL", "hyperlink", "http://example.com/invented")]))
+    assert text.split("\n") == ["KEPT", "ALSO", "[deleted by Ann] http://example.com/invented",
+                                "[deleted by Ann] BASE(GUIDETWO)"], text.split("\n")
+
+
+def test_the_moved_note_counts_passages_and_ranges_inside_paragraphs_pair_moves():
+    """The note said "1 passage(s)" for a move of three paragraphs: it counted
+    move names. It counts passages. Move ranges Word writes inside the
+    paragraphs (its usual shape) pair a move with its destination as well as
+    ranges between blocks do; ignored, the moved sentence was listed a second
+    time as deleted."""
+    mf = lambda text: f'<w:moveFrom w:id="2" w:author="Ann" {_WHEN}>' + _t(text) + "</w:moveFrom>"  # noqa: E731
+    mt = lambda text: f'<w:moveTo w:id="4" w:author="Ann" {_WHEN}>' + _t(text) + "</w:moveTo>"  # noqa: E731
+    body = (f'<w:moveFromRangeStart w:id="1" w:name="move1" w:author="Ann" {_WHEN}/>'
+            + _p(mf("ONE")) + _p(mf("TWO")) + _p(mf("THREE"))
+            + '<w:moveFromRangeEnd w:id="1"/>' + _p(_t("MIDDLE"))
+            + f'<w:moveToRangeStart w:id="3" w:name="move1" w:author="Ann" {_WHEN}/>'
+            + _p(mt("ONE")) + _p(mt("TWO")) + _p(mt("THREE")) + '<w:moveToRangeEnd w:id="3"/>'
+            + _p(_t("P1 "), f'<w:moveFromRangeStart w:id="5" w:name="move2" w:author="Ann" {_WHEN}/>',
+                 mf("MOVED 3 March 2019"), '<w:moveFromRangeEnd w:id="5"/>')
+            + _p(_t("P2 "), f'<w:moveToRangeStart w:id="6" w:name="move2" w:author="Ann" {_WHEN}/>',
+                 mt("MOVED 3 March 2019"), '<w:moveToRangeEnd w:id="6"/>'))
+    text, notes = _read(_raw_docx(body))
+    # The three paragraphs moved away read as blank lines, which normalization
+    # strips from the start of the page.
+    assert text.split("\n") == ["MIDDLE", "ONE", "TWO", "THREE", "P1",
+                                "P2 MOVED 3 March 2019"], text.split("\n")
+    assert [n for n in notes if "moved" in n] == [
+        "4 passage(s) moved under tracked changes are shown only where they were moved to"], notes
+
+
+def test_an_open_field_code_is_counted_only_where_it_swallowed_text_in_its_own_story():
+    """The note said the text after a field that never ended was left out
+    "in its part". A field's state is per story: a field left open in a table
+    cell loses nothing after the table, and one left open at the end of the
+    body with nothing after it loses nothing; neither is counted. One left
+    open in the body before a table swallows the body's later paragraphs but
+    not the cell's text."""
+    open_field = ('<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                  '<w:r><w:instrText xml:space="preserve"> TOC </w:instrText></w:r>')
+    cell = lambda text: f"<w:tbl><w:tr><w:tc>{text}</w:tc></w:tr></w:tbl>"  # noqa: E731
+    cases = {
+        "open_in_a_cell": (_p(_t("FIRST")) + cell(_p(open_field)) + _p(_t("AFTER")),
+                           ["FIRST", "", "AFTER"], 0),
+        "open_at_the_end": (_p(_t("BEFORE")) + _p(open_field), ["BEFORE"], 0),
+        "open_before_a_table": (_p(_t("FIRST"), open_field) + cell(_p(_t("CELLTEXT")))
+                                + _p(_t("LOST")) + _p(_t("LOST TOO")),
+                                ["FIRST", "CELLTEXT"], 1),
+    }
+    for case, (body, expected, swallowed) in cases.items():
+        text, notes = _read(_raw_docx(body))
+        assert text.split("\n") == expected, (case, text.split("\n"))
+        marked = [n for n in notes if ex.has_evidence_marker(n)]
+        assert marked == ([f"{ex.M_WORD_UNREAD}: 1 field code(s) never ended; the text after "
+                           "each, to the end of its story (the body, a table cell, a text box, a "
+                           "header or footer, a note or a comment), was read as field code and "
+                           "left out"] if swallowed else []), (case, notes)
+
+
+def test_run_content_standing_among_the_blocks_is_read():
+    """The schema lets a ``w:del``, ``w:ins`` or math paragraph holding runs
+    stand directly among a story's blocks. Everything there but paragraphs,
+    tables and content controls was dropped with no note: a block-level
+    deletion was not listed and a block-level insertion's text was lost."""
+    body = (_p(_t("BEFORE"))
+            + f'<w:del w:id="1" w:author="Ann" {_WHEN}>' + _dt("BLOCKDEL") + "</w:del>"
+            + f'<w:ins w:id="2" w:author="Bob" {_WHEN}>' + _t("BLOCKINS") + "</w:ins>"
+            + '<w:bookmarkStart w:id="0" w:name="b"/><w:bookmarkEnd w:id="0"/>'
+            + _p(_t("AFTER")))
+    text, notes = _read(_raw_docx(body))
+    assert text.split("\n") == ["BEFORE", "BLOCKINS", "AFTER", "[deleted by Ann] BLOCKDEL"], (
+        text.split("\n"))
+    assert not any(ex.has_evidence_marker(n) for n in notes), notes
+
+
+def test_an_unrelated_word_part_is_counted_by_its_root_whatever_its_content_type():
+    """A part no relationship reaches is counted in the plain note when it
+    holds Word text, found by its root element as well as by content type: a
+    stale footnotes part typed only by the ``xml`` default was not counted. A
+    thumbnail or media part is not a text part and is never counted."""
+    parts = {"word/stale_notes.xml": _part("footnotes", '<w:footnote w:id="4">'
+                                           + _p(_t("STALE-FOOTNOTE")) + "</w:footnote>"),
+             "word/media/image9.png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 64,
+             "docProps/thumbnail.jpeg": b"\xff\xd8\xff\xe0" + b"\x00" * 64}
+    text, notes = _read(_raw_docx(_p(_t("BODY")), parts=parts))
+    assert text == "BODY", text
+    assert [n for n in notes if "no relationship" in n] == [
+        "1 Word part(s) holding text that no relationship in the package reaches were not "
+        "read; Word does not show them"], notes
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 3: three behaviours no test held (review finding 4)
+# ---------------------------------------------------------------------------
+
+
+def test_eight_or_more_deletion_passages_above_a_footer_stamp_leave_it_in_the_zone():
+    """A Word page's Bates zone is the one it would have without its deletion
+    list. With a single deletion line, shorter than the eight-line tail zone,
+    no test could tell a tail bound counted over every line from one counted
+    over the zone's own lines; with twelve listed passages above a two-line
+    footer, the first loses the footer's stamp."""
+    from dociq.identify.bates import BatesDecision, DecisionStatus, apply_bates, propose_format
+
+    body = (_p(_t("Letter of 3 March 2019, invented.")) + _p(_t("Second line."))
+            + _p(_t("Third line.")) + _p(_t("Fourth line."))
+            + "".join(_p(_t(f"W{i} "), _del("Ann", _dt(f"old wording {i}"))) for i in range(12)))
+    got = ex.extract("many.docx", _raw_docx(
+        body, sect='<w:footerReference w:type="default" r:id="rIdF"/>',
+        parts={"word/footer1.xml": _part("ftr", _p(_t("Page footer text")) + _p(_t("MNFV 000777")))},
+        rels=[("rIdF", "footer", "footer1.xml")]))
+    lines = got.pages[0].text.split("\n")
+    assert len(lines) == 30 and lines[-3:] == ["[deleted by Ann] old wording 11",
+                                               "Page footer text", "MNFV 000777"], lines
+    doc = document("many.docx", got.pages)
+    assert [(c.raw, c.line_index) for c in detect_candidates((doc,))] == [("MNFV 000777", 29)]
+    decision = BatesDecision(DecisionStatus.CONFIRMED, propose_format((doc,), min_pages=1).format)
+    assert apply_bates((doc,), decision)[0].pages[0].bates == "MNFV 000777"
+
+
+def test_a_table_inside_a_deleted_text_box_row_or_cell_is_listed():
+    """A table nested in deleted content is deleted content: its text is
+    listed, by the enclosing deletion's author. A table inside a deleted text
+    box, or nested in a deleted row or cell, is reached through the deletion
+    it sits in; losing that inheritance dropped its text from both the body
+    and the list, with no note for the row and the cell."""
+    box = ('<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:inline>'
+           '<wp:extent cx="914400" cy="914400"/><wp:docPr id="7" name="tb"/><a:graphic>'
+           '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+           '<wps:wsp><wps:txbx><w:txbxContent>' + _p(_t("BOXPARA"))
+           + "<w:tbl><w:tr><w:tc>" + _p(_t("BOXCELL 12 May 2017")) + "</w:tc></w:tr></w:tbl>"
+           + '</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline>'
+           '</w:drawing></mc:Choice><mc:Fallback><w:pict/></mc:Fallback></mc:AlternateContent></w:r>')
+    nested = lambda text: "<w:tbl><w:tr><w:tc>" + _p(_t(text)) + "</w:tc></w:tr></w:tbl>" + _p("")  # noqa: E731
+    body = (_p(_t("KEPT"), _del("Ann", box))
+            + "<w:tbl>"
+            + f'<w:tr><w:trPr><w:del w:id="6" w:author="Cal" {_WHEN}/></w:trPr><w:tc>'
+            + nested("NESTINROW 9 Sept 2015") + "</w:tc></w:tr>"
+            + "<w:tr><w:tc>" + _p(_t("ROWKEPT")) + "</w:tc>"
+            + f'<w:tc><w:tcPr><w:cellDel w:id="8" w:author="Dan" {_WHEN}/></w:tcPr>'
+            + nested("NESTINCELL 2 Feb 2014") + "</w:tc></w:tr></w:tbl>")
+    text, notes = _read(_raw_docx(body))
+    assert text.split("\n") == [
+        "KEPT", "ROWKEPT", "[deleted by Ann] BOXPARA", "[deleted by Ann] BOXCELL 12 May 2017",
+        "[deleted by Cal] NESTINROW 9 Sept 2015", "[deleted by Dan] NESTINCELL 2 Feb 2014"], (
+        text.split("\n"))
+    assert [n for n in notes if ex.has_evidence_marker(n)] == [
+        f"{ex.M_WORD_TRACKED_DELETION}: " + _DELETED_GRAPHIC_NOTE.format(n=1)], notes
+
+
+def test_a_hidden_first_page_header_holding_only_a_chart_is_disclosed_once():
+    """A first-page header no section displays, holding nothing but a chart,
+    is a part with content: the one marked note naming it is its only record.
+    Reading it to decide must not leave its chart counted on the document, as
+    if the page showed one."""
+    chart = ('<w:r><w:drawing><wp:inline><wp:extent cx="1828800" cy="1828800"/>'
+             '<wp:docPr id="2" name="c"/><a:graphic><a:graphicData '
+             'uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+             '<c:chart r:id="rIdC"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+    text, notes = _read(_raw_docx(
+        _p(_t("BODYTEXT")),
+        sect=('<w:headerReference w:type="first" r:id="rIdF"/>'
+              '<w:headerReference w:type="default" r:id="rIdH"/>'),
+        parts={"word/header1.xml": _part("hdr", _p(_t("DEFAULTHDR"))),
+               "word/header2.xml": _part("hdr", _p(chart))},
+        rels=[("rIdH", "header", "header1.xml"), ("rIdF", "header", "header2.xml")]))
+    assert text.split("\n") == ["DEFAULTHDR", "BODYTEXT"], text.split("\n")
+    assert [n for n in notes if ex.has_evidence_marker(n)] == [
+        f"{ex.M_WORD_UNREAD}: 1 header/footer part(s) that no section displays (referenced "
+        "under a type the section does not show, such as a first-page part without w:titlePg "
+        "or an even-page part without w:evenAndOddHeaders, or referenced by no section)"], notes

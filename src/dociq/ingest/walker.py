@@ -1256,7 +1256,8 @@ def _child_records(entry: FileEntry, exp: ex.ZipExpansion, config: RunConfig,
                 # any that carries no marker is marked here, because at the
                 # cap everything inside the child goes unread.
                 if child_exp.members:
-                    named = ", ".join(sorted(mm.name for mm in child_exp.members))
+                    named = ", ".join(ex.quoted(name) for name in
+                                      sorted(mm.name for mm in child_exp.members))
                     extra_notes = (
                         f"{ex.M_ATTACH_SKIPPED}: nesting deeper than "
                         f"{ex._ZIP_MAX_DEPTH} container(s) was not expanded "
@@ -1266,8 +1267,11 @@ def _child_records(entry: FileEntry, exp: ex.ZipExpansion, config: RunConfig,
                     else f"{ex.M_ATTACH_SKIPPED}: inside a container at the "
                          f"nesting limit: {n}"
                     for n in child_exp.notes)
+        # m.notes: what the container knows of this member that its bytes
+        # cannot say (a document embedded in content deleted under tracked
+        # changes), first, after the stored-name note.
         out.append(_record(entry, child_filename, child_ext, len(m.raw), child_sha,
-                           replace(got, notes=got.notes + extra_notes),
+                           replace(got, notes=m.notes + got.notes + extra_notes),
                            parent=parent_key, order=m.order,
                            rel_path=child_rel, config=config,
                            verbatim_notes=(name_note,) if name_note else ()))

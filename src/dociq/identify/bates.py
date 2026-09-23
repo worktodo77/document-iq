@@ -144,7 +144,14 @@ class BatesZone:
         document says, and a stamp-shaped number in it would otherwise be read
         as the page's locator, or refuse the real one as ambiguous, whenever
         the footer below it is shorter than the tail zone. Indices stay
-        positions in ``text``."""
+        positions in ``text``.
+
+        Open defect (Word review round 3, finding 1): the skip decides by what
+        a line says, not by who wrote it, so a line any document types that
+        starts with the label (a PDF, an email, a text file, a Word body) is
+        skipped too. Skipping only the lines the Word reader listed needs that
+        knowledge carried on :class:`PageRecord` (a line span like D-49's
+        ``image_line_span``), which is a contract field awaiting a ruling."""
         lines = [ln.strip() for ln in text.split("\n")]
         eligible = [i for i, ln in enumerate(lines)
                     if not ln.startswith(TRACKED_DELETION_LABEL)]

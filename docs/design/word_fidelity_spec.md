@@ -119,7 +119,7 @@ Fixture and red tests: Sonnet, worktree, spec above. Implementation: Sonnet, sam
 gates in order. Adversarial review of the diff: Opus, hunting regressions in Bates and dates.
 Gates, full suite, selftest, register and commit: main session.
 
-## Addendum, 2026-09-14: the reading rules as built (review-fix rounds 1 and 2, D-56)
+## Addendum, 2026-09-14: the reading rules as built (review-fix rounds 1, 2 and 3, D-56)
 
 This addendum does not rewrite the parts above; where it differs from them, it wins. Review round 2
 found this spec behind its own code: the fix round had added reading rules it never recorded, so the
@@ -146,7 +146,9 @@ a note carrying an evidence marker. Excluded by name, with the reason:
 * page numbers and date blocks Word computes at display (`w:pgNum`, `w:dayLong` and the like) store
   no text;
 * a part no relationship chain from the main part reaches: Word neither shows nor keeps it; not
-  read, and counted in a plain note when it holds text.
+  read, and counted in a plain note when it is a Word text part (by its content type, or by its
+  root element: a document, header, footer, notes or comments story) holding content. Fix round 3:
+  a stale footnotes part typed only by the `xml` default was not counted.
 
 The derived class test (`test_every_w_t_fragment_reaches_the_page_text_or_is_excluded_by_name`) now
 finds the parts through the relationships and checks `w:delText` and `v:textpath/@string` as well as
@@ -168,16 +170,35 @@ not disclosed: they are computed, not stored, text; that gap is recorded, not cl
    shape, group, canvas and drawing namespaces, `w16se`, the 2010 DrawingML extension and every chartex
    namespace), else to `mc:Fallback`. A Choice with no `Requires` is taken. Rows of a table are found
    through AlternateContent as through `w:sdt` and `w:customXml`.
-3. **Fields.** A field's state is kept across the paragraphs of one story, so code that runs on past a
-   paragraph mark stays code. A story that ends with a field's code still open is counted in a marked
-   note.
-4. **Symbols.** `w:sym` and `w16se:symEx`: in the Symbol font a code maps through the Adobe Symbol
-   encoding (held equal to reportlab's `symbol` codec by a test; Adobe's private-use code points for the
-   serif and sans-serif (c), (R), TM and the bracket, brace and arrow pieces become the characters they
-   draw). In Wingdings, Webdings and the other symbol-encoded fonts, and for a private-use, surrogate or
-   malformed code in any other font, the character keeps its place as U+FFFD and a marked note counts
-   them and names the fonts. Any other code is the Unicode character. No Wingdings table ships with any
-   dependency, so none is guessed.
+3. **Fields.** A field's state is kept across the paragraphs of one story (the body, a table cell, a
+   text box, a header or footer, a note, a comment), so code that runs on past a paragraph mark stays
+   code. A field whose code is still running when its story ends, after that code swallowed any
+   text, is counted in a marked note (fix round 3: a field left open with nothing after it, or in a
+   cell before more body text, lost nothing and was counted).
+4. **Symbols, wherever a character stands** (fix round 3 widened this from `w:sym` alone). Each
+   character is read in the font it is drawn in: a `w:sym` or `w16se:symEx` names its font (the
+   run's font when it names none); a `w:t`, a `w:delText`, a `w:noBreakHyphen` and a legacy
+   drop-down's shown entry take their run's font for the character's
+   slot (`w:ascii` below 0x80, `w:eastAsia` for the East Asian ranges and, under `w:hint="eastAsia"`,
+   Latin-1, punctuation and private-use codes, `w:cs` for the complex scripts and any run marked
+   `w:rtl` or `w:cs`, else `w:hAnsi`; the ECMA-376 17.3.2.26 rule, approximated), resolved from
+   the run's own `w:rFonts`, its character style, its paragraph style (or the default paragraph
+   style), the enclosing table's style and the document defaults, each style with the styles it
+   is based on, a theme attribute (`w:asciiTheme`) through the theme's major and minor fonts; a
+   VML `v:textpath` takes its style's `font-family`. In Symbol a code (0x20-0xFF, or its F020-F0FF
+   form) maps through the Adobe Symbol encoding (held equal to reportlab's `symbol` codec; Adobe's
+   private-use code points for the serif and sans-serif (c), (R), TM and the bracket, brace and
+   arrow pieces become the characters they draw); in Zapf Dingbats (`ZapfDingbats`,
+   `Zapf Dingbats`, `ITC Zapf Dingbats`) through reportlab's `zapfdingbats` codec, held equal by a
+   test. In Wingdings, Webdings, Marlett, MT Extra and Monotype Sorts (no dependency ships a table
+   naming it, so it is not read through Zapf Dingbats'), and for a private-use, surrogate, control
+   or malformed code in any font, the character keeps its place as U+FFFD and one marked note
+   counts them and names the fonts, quoted. A space is a space in every font; any other character
+   is itself. Measured on the 53 corpus `.docx`, OCR off (2026-09-23, against 2671947): 125
+   characters in ordinary Wingdings runs now stand as U+FFFD (496 placeholders in 49 documents,
+   was 371 in 41; 8 documents' text changed, nothing else in them), and 0 characters were mapped
+   through the Symbol or Zapf Dingbats table: no corpus run text is set in either. Numbering (list-label) fonts are
+   not read, as list labels are not (A1).
 5. **Text kept outside `w:t`.** A VML `v:textpath/@string` (a watermark, WordArt) is a line of its own
    directly after the paragraph that anchors it, as a text box is (part 3). A legacy check box shows
    U+2612 or U+2610 from `w:checked`, else `w:default`; a drop-down shows its `w:result` entry, else its
@@ -192,14 +213,32 @@ not disclosed: they are computed, not stored, text; that gap is recorded, not cl
    times each enclosing group's `ext / chExt`. The page area is the final section's. A picture covering
    at least 25% of it is disclosed; one with no usable extent, or on a page with no usable size, is
    disclosed as unmeasured. `w:subDoc` is disclosed.
+8. **Run content among the blocks** (fix round 3). A `w:del`, `w:ins`, `w:moveFrom` or `w:moveTo`
+   holding runs, or a math paragraph, standing directly in a story's block content (the schema allows
+   it) is read as a line of its own, as a paragraph is; it was dropped with no note. Markup holding no
+   character there (bookmarks, proofing marks) reads as nothing.
+9. **Values from the file beside page text are one line** (fix round 3). A deletion's or comment's
+   author, a footnote's or endnote's id and a hyperlink's target have every line break read as a
+   space: a line break there started a page line of the file's choosing, a stamp line in the Bates
+   tail zone among them. The document's own text keeps its line breaks. The same class outside Word:
+   an `.eml` or `.msg` header's value after its `From: `/`To: `/`Cc: `/`Subject: `/`Date: ` label is one
+   line too (an RFC 2047 encoded word can decode to a line break, which put a stamp line in the Bates
+   head zone). A workbook's sheet name in its `[sheet: ...]` label has the same defect (measured: a
+   name holding `&#10;` splits the label); that reader is the spreadsheet branch's, which replaces it,
+   so it is left to that branch's next fix round.
 
 ### A3. A Word package under any name
 
 A Word, Excel or PowerPoint package is read as the document it is wherever a `.zip` name would
 otherwise have it unpacked as an archive: at the top level, inside an archive, attached to an email or
 `.msg`, and held in a Package object. A PDF, zip or compound file named `.txt`, `.md`, `.log`, `.csv`,
-`.eml` or `.email` is tried by content first, since those readers never fail. A second archive with a
-name already used in one container is listed under a numbered name with a plain note.
+`.eml` or `.email` is tried by content first, since those readers never fail; when no reader reads it
+by content either, its bytes are read as text and a FINAL-marked note (`M_CONTENT_UNREAD`) says so
+(fix round 3: it read FULL with no marker). A second archive with a name already used in one container
+is listed under a numbered name with a plain note. A `.zip` read as the Office document at its root
+names, in a marked note, every member that is not part of that document (no relationship chain from
+the package's `_rels/.rels` reaches it; `[Content_Types].xml` and relationship parts aside): fix round
+3, they were in no record and no note.
 
 ### A4. D-56: tracked deletions
 
@@ -210,14 +249,18 @@ name already used in one container is listed under a numbered name with a plain 
   the file is empty.
 * **Order of the list.** Page-text order: the header parts' deletions, the body's (a table cell's in
   place, a text box's after its anchoring paragraph's own), the notes' and comments', the footer parts'.
-* **Grouping.** Consecutive deleted characters by one author, in one paragraph, form one passage.
-  Formatting that splits a deletion into several `w:del` runs does not split the passage, and neither
-  does markup holding no character (bookmarks, properties). A kept character, another author, or the
-  paragraph's end starts the next passage.
+* **Grouping.** Consecutive removed characters by one author, in one paragraph, form one passage,
+  whatever removed them (fix round 3: deleted text followed at once by moved-from text with no
+  destination, by the same author, was two passages). Formatting that splits a deletion into several
+  `w:del` runs does not split the passage, and neither does markup holding no character (bookmarks,
+  properties). A kept character, another author, the paragraph's end, or a passage between them that
+  is not listed (moved text shown where it went) starts the next passage.
 * **Moved text.** Moved-from text whose move names a `w:moveToRangeStart` of the same name somewhere
   the reader read is not listed: its words stand in the body where they were moved to, and listing them
-  again would put every date and number in them into the output twice; a plain note counts such moves.
-  Moved-from text with no such destination reads, with changes accepted, as deleted, and is listed.
+  again would put every date and number in them into the output twice; a plain note counts such
+  passages (fix round 3: it counted move names, so a three-paragraph move was "1 passage(s)"). Move
+  ranges inside paragraphs pair a move with its destination as ranges between blocks do. Moved-from
+  text with no such destination reads, with changes accepted, as deleted, and is listed.
 * **Nesting.** A deletion inside an insertion, and an insertion inside a deletion, are deleted text by
   the innermost deletion's author.
 * **Fields.** A deleted field result is listed; its code is not.
@@ -225,15 +268,36 @@ name already used in one container is listed under a numbered name with a plain 
   the two paragraphs keep their own lines. A deleted row (`w:trPr/w:del`) or cell (`w:tcPr/w:cellDel`)
   leaves the body and its text is listed once.
 * **Everywhere.** Headers, footers, footnotes, endnotes, comments, tables and text boxes, the same way.
-* **Graphics.** A deleted picture, chart or object has no text to list; it is counted, once per
-  outermost graphic, under `M_WORD_TRACKED_DELETION`, and any text box inside it is listed.
+* **Graphics.** A deleted picture, chart, SmartArt drawing or object is not shown. It is counted,
+  once per outermost graphic, under `M_WORD_TRACKED_DELETION`, in a note that says what became of
+  what it holds: the text of a text box or watermark in it is listed; a chart's or SmartArt drawing's
+  own text (kept in its own part) is not read; a document embedded in it is recovered, where it can
+  be, as a child document. A graphic moved away under a named move whose destination was read is
+  shown there, and is not counted. Fix round 3: the note said "any text inside them is listed with
+  the deletions", which held only for a text box.
+* **Embedded documents in removed content** (fix round 3). A part every object referencing which
+  sits inside a `w:del`, a `w:moveFrom`, a deleted row or a deleted cell is recovered as before, and
+  each child it yields opens with a plain note: `embedded in content deleted under tracked changes by
+  '<author>'; Word, showing the document with its changes accepted, does not show it`, or, for
+  moved-from content whose move has a destination in the same part, `embedded in content moved under
+  tracked changes by '<author>'; this is the copy that stood where the content was moved from, and
+  Word shows the object only where it was moved to`. The nearest enclosing change names the author.
+  A part any shown object references carries no such note. Every member of an archive recovered
+  from one carries it; a grandchild does not repeat it (its parent record carries it).
 * **The count note.** A listed deletion carries no note: it is in the output, not missing, and
   accounting does not count it as lost. `M_WORD_TRACKED_DELETION` remains only for deleted graphics.
 * **Dates and Bates.** A date in the list is found by date detection but, placed after the body, is
-  never the first date while the header, body or notes carry one. No line of the list is ever a Bates
-  zone line: `BatesZone.slice_lines` skips every line starting `[deleted by ` and chooses the head and
-  tail zones from the others, so a Word page's zone is the one it would have without its list, and a
-  stamp-shaped number in deleted text can neither become a locator nor make the real one ambiguous.
+  never the first date while the header, body or notes carry one. A document dated only in its footer
+  can take a date from its list as its first: D-56 accepts a listed date first "unless the body
+  carries none", and the list stays before the footer so the footer still ends the page (review round
+  3, recorded as an accepted limitation). The Bates zone skips the list: `BatesZone.slice_lines`
+  skips every line starting `[deleted by ` and chooses the head and tail zones from the others, so a
+  Word page's zone is the one it would have without its list, and a stamp-shaped number in deleted
+  text can neither become a locator nor make the real one ambiguous. **Open defect (review round 3,
+  finding 1):** the skip decides by what a line says, so on any page, of any format, a typed line
+  starting `[deleted by ` leaves the zone too. Excluding only the lines the Word reader wrote needs
+  that knowledge carried on the page record (a line span like D-49's `image_line_span`), which is a
+  contract field; fix round 3 stopped there for a ruling rather than add one.
 
 ### A5. Stored names of container children
 
@@ -246,6 +310,17 @@ folder is one folder for all its members, and yields to a stored folder already 
 separators, the child's first note quotes the stored name exactly (not scrubbed) and gives the reasons. An
 Ole10Native stored path is cut to its basename in the embedded-object reader first; its folders are the
 author's own path, which the message scrubber would remove from any note.
+
+**Quoted values are never markers** (fix round 3). Every value from a file that a note interpolates
+is quoted with `extract.quoted` (Python's `repr`, so a quote, backslash or line break inside it is
+escaped): stored names, part names, relationship targets and ids, archive and attachment names and
+the prefix naming an archive before its members' notes, font names, authors, the names a depth-capped
+container holds. `has_transient_marker` and `has_final_marker` remove quoted values before looking for
+a marker phrase, so a member named `archive member unreadable: index.txt`, read in full, no longer
+marks its name note as a retryable gap (the accounting line reported two losses that did not happen).
+Every marker phrase DocIQ writes stands outside quotes. `sanitize_message` keeps a quoted value's
+escapes whole when it cuts a path inside one to its last part. An exception's own text, after the
+marker, is the library's.
 
 ### A6. Note table: every note the package emits
 
@@ -261,13 +336,13 @@ tree: every one killed).
 | `disclosure_notes` | N SmartArt drawing(s) | [M] WORD_UNREAD | fidelity `test_unread_constructs_in_footer_endnote_and_comment` |
 | `disclosure_notes` | N picture(s), each covering at least 25% | [M] WORD_UNREAD | fidelity `test_a_large_picture_is_disclosed_and_a_small_one_is_not` |
 | `disclosure_notes` | N picture(s) could not be measured | [M] IMAGE_UNREAD | fidelity `test_an_unmeasurable_picture_is_disclosed_as_unmeasured` |
-| `disclosure_notes` | N symbol character(s) with no standard text mapping (font(s): ...) | [M] WORD_UNREAD | fidelity `test_an_unmapped_symbol_keeps_its_place_and_is_disclosed` |
+| `disclosure_notes` | N symbol character(s) with no standard text mapping (font(s): '...') | [M] WORD_UNREAD | fidelity `test_an_unmapped_symbol_keeps_its_place_and_is_disclosed`, `test_ordinary_text_in_a_symbol_font_run_reads_as_the_font_draws_it` |
 | `disclosure_notes` | N sub-document link(s) | [M] WORD_UNREAD | fidelity `test_ruby_nested_field_codes_block_alternate_content_and_subdocuments` |
-| `disclosure_notes` | N header/footer part(s) that no section displays | [M] WORD_UNREAD | fidelity `test_a_header_part_no_section_displays_is_disclosed`, `test_header_and_footer_parts_no_section_references_are_disclosed` |
-| `disclosure_notes` | N field code(s) never ended | [M] WORD_UNREAD | fidelity `test_a_field_code_running_on_past_a_paragraph_mark_stays_code` |
-| `disclosure_notes` | N deleted drawing(s), picture(s) or object(s) | [M] WORD_TRACKED_DELETION | fidelity `test_a_deleted_chart_is_counted_as_a_deletion_not_as_an_unread_chart` |
-| `disclosure_notes` | N passage(s) moved under tracked changes are shown only where they were moved to | plain | fidelity `test_moved_text_is_listed_only_when_its_destination_is_not_in_the_document` |
-| `disclosure_notes` | N Word part(s) holding text that no relationship ... reaches were not read | plain | fidelity `test_notes_comments_and_settings_are_found_through_the_main_parts_relationships` |
+| `disclosure_notes` | N header/footer part(s) that no section displays | [M] WORD_UNREAD | fidelity `test_a_header_part_no_section_displays_is_disclosed`, `test_header_and_footer_parts_no_section_references_are_disclosed`, `test_a_hidden_first_page_header_holding_only_a_chart_is_disclosed_once` |
+| `disclosure_notes` | N field code(s) never ended; the text after each, to the end of its story (...), was read as field code and left out | [M] WORD_UNREAD | fidelity `test_a_field_code_running_on_past_a_paragraph_mark_stays_code`, `test_an_open_field_code_is_counted_only_where_it_swallowed_text_in_its_own_story` |
+| `disclosure_notes` | N deleted drawing(s), picture(s) or object(s); the text of a text box or watermark in one is listed ..., a chart's or SmartArt drawing's is not read, and a document embedded in one is recovered ... | [M] WORD_TRACKED_DELETION | fidelity `test_a_deleted_chart_is_counted_as_a_deletion_not_as_an_unread_chart`, `test_a_table_inside_a_deleted_text_box_row_or_cell_is_listed` |
+| `disclosure_notes` | N passage(s) moved under tracked changes are shown only where they were moved to | plain | fidelity `test_moved_text_is_listed_only_when_its_destination_is_not_in_the_document`, `test_the_moved_note_counts_passages_and_ranges_inside_paragraphs_pair_moves` |
+| `disclosure_notes` | N Word part(s) holding text that no relationship ... reaches were not read | plain | fidelity `test_notes_comments_and_settings_are_found_through_the_main_parts_relationships`, `test_an_unrelated_word_part_is_counted_by_its_root_whatever_its_content_type` |
 | `_extract_pdf` | OCR disabled / OCR is unavailable (part 10) | [M] | fidelity `test_ocr_disabled_note_carries_an_evidence_marker`, `test_ocr_unavailable_note_carries_an_evidence_marker` |
 | `expand_docx_embeddings` | embedded objects truncated at N members | [M] ATTACH_SKIPPED | embeddings `test_embeddings_member_cap_is_disclosed` |
 | `expand_docx_embeddings` | embedded objects truncated at N MB | [M] ATTACH_SKIPPED | embeddings `test_embeddings_byte_cap_is_disclosed` |
@@ -295,7 +370,15 @@ tree: every one killed).
 | `walker._expansion_failure_note` | the documents embedded in this Word file could not be listed | [M] TRANSIENT ATTACH_ENUM | embeddings `test_walker_marks_the_word_record_when_expansion_raises` |
 | `walker._child_names` | stored name '...' is recorded as '...': <reasons> | plain, unscrubbed | embeddings `test_a_changed_stored_name_loses_as_little_as_possible_and_is_quoted_exactly` |
 | `extract` (content sniff) | extension .X but content is ...; recovered via ... extractor | plain | embeddings `test_a_word_package_under_a_text_name_is_read_as_word` |
+| `extract` (text-name fallback) | extension .X but content is ..., which the ... reader(s) could not read; the file's bytes were read as text instead | [M] CONTENT_UNREAD | embeddings `test_bytes_no_reader_can_read_under_a_text_name_are_read_as_text_with_a_marker` |
+| `_package_extras_notes` | this .zip is read as the Office document at its root, and N member(s) that are not part of that document were not read: '...' | [M] ATTACH_SKIPPED | embeddings `test_a_zip_read_as_the_office_document_at_its_root_names_its_other_members` |
+| `_removal_note` (child's own record, via `ZipMember.notes`) | embedded in content deleted (or moved) under tracked changes by '...'; ... | plain | embeddings `test_a_document_embedded_in_removed_content_says_so_and_a_shown_one_does_not` |
 
-`sanitize_message` now also removes an object repr's memory address and a `tempfile` name
-(`test_sanitize_message_removes_addresses_and_temporary_names`,
-`test_a_rejected_word_main_part_hashes_identically_in_two_interpreters`).
+`sanitize_message` removes an object repr's memory address and a `tempfile` name, and writes a set of
+quoted strings in sorted order (openpyxl names an attribute's accepted values as a set, whose order
+followed the hash seed into a child's error; fix round 3). Those are the run-varying texts known to
+reach a record, each held by a two-interpreter test; the docstring's claim that nothing else varies
+was withdrawn (`test_sanitize_message_removes_addresses_and_temporary_names`,
+`test_sanitize_message_writes_a_set_of_strings_in_sorted_order`,
+`test_a_rejected_word_main_part_hashes_identically_in_two_interpreters`,
+`test_an_embedded_workbooks_error_hashes_identically_in_two_interpreters`).

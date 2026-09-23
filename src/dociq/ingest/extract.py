@@ -187,10 +187,19 @@ M_IMAGE_UNREAD = "page image content was not read"
 # picture), the other is "this was deleted under tracked changes and is not
 # in the output". D-56 lists deleted TEXT after the body, so a listed
 # deletion is no longer missing evidence and carries no note; the deletion
-# marker is left for deleted content that holds no text to list (a deleted
-# picture, chart or object).
+# marker is left for deleted graphics (a picture, chart, SmartArt drawing or
+# object), which the page does not show: a text box's text inside one is
+# listed, a chart's or SmartArt's own text is not read, and an embedded
+# document inside one is recovered as a child whose note names the deletion.
 M_WORD_UNREAD = "Word content was not read"
 M_WORD_TRACKED_DELETION = "tracked deletion(s) were not shown"
+
+# Word fidelity, review-fix round 3. A file whose bytes are a PDF, a zip or a
+# compound file under a name whose reader never fails (.txt, .csv, .eml, ...)
+# is tried by content first; when that fails too it is read as text, which is
+# its raw bytes. The page exists and counts, but what the file holds was not
+# read.
+M_CONTENT_UNREAD = "content was not read as the format it is"
 
 FINAL_MARKERS: tuple[str, ...] = (
     M_EML_PARSE,
@@ -223,7 +232,32 @@ FINAL_MARKERS: tuple[str, ...] = (
     # re-read.
     M_WORD_UNREAD,
     M_WORD_TRACKED_DELETION,
+    # The same bytes under the same name fail by content the same way.
+    M_CONTENT_UNREAD,
 )
+
+
+_QUOTED_VALUE = re.compile(
+    r"""(?<![A-Za-z0-9])(?:'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*")""")
+"""A value a note quotes: a Python string literal, as :func:`quoted` writes one,
+starting where an apostrophe cannot (not straight after a letter or digit)."""
+
+
+def quoted(value: object) -> str:
+    """How a note quotes a value taken from the file: a stored name, a part
+    name, a relationship target, a font or an author. ``repr``, so a quote,
+    backslash, line break or control character inside the value is escaped and
+    the quoted value ends exactly where it seems to; :func:`has_transient_marker`
+    and :func:`has_final_marker` never read inside one."""
+    return repr(str(value))
+
+
+def _outside_quoted_values(text: str) -> str:
+    """``text`` with every quoted value removed, so a marker phrase a file
+    supplied (an attachment named ``archive member unreadable.pdf``) is never
+    read as DocIQ's own marker. Every marker phrase DocIQ writes stands
+    outside quotes, ahead of any value the note quotes."""
+    return _QUOTED_VALUE.sub("''", text)
 
 
 def has_transient_marker(text: str | None) -> bool:
@@ -233,8 +267,14 @@ def has_transient_marker(text: str | None) -> bool:
     "Transient" is the possibility being tested, not a claim: the same phrase
     covers a permanently corrupt page and a page that lost a race under load,
     and telling them apart is exactly what the walker's serial retry does.
+
+    A phrase inside a quoted value (:func:`quoted`) is the file's text, not a
+    marker, and is not read.
     """
-    return bool(text) and any(m in text for m in TRANSIENT_MARKERS)
+    if not text:
+        return False
+    bare = _outside_quoted_values(text)
+    return any(m in bare for m in TRANSIENT_MARKERS)
 
 
 def has_final_marker(text: str | None) -> bool:
@@ -242,9 +282,13 @@ def has_final_marker(text: str | None) -> bool:
 
     Not retried, still audited: :mod:`dociq.verify.accounting` counts these so
     a final gap is a number on the run's own accounting line rather than one
-    sentence inside one document's notes.
+    sentence inside one document's notes. A phrase inside a quoted value is not
+    read (:func:`has_transient_marker`).
     """
-    return bool(text) and any(m in text for m in FINAL_MARKERS)
+    if not text:
+        return False
+    bare = _outside_quoted_values(text)
+    return any(m in bare for m in FINAL_MARKERS)
 
 
 def has_evidence_marker(text: str | None) -> bool:
@@ -1820,21 +1864,126 @@ extenders private-use code points; here each is the ordinary character it
 draws (U+00A9, U+00AE, U+2122, U+239B-U+23AD, U+23AF, U+23D0). U+FFFD marks
 the three codes that draw no character (0x60 radical extender, 0xF0, 0xFF).
 No such table for Wingdings ships with any dependency, so Wingdings and the
-other symbol fonts below are disclosed, not guessed."""
+other fonts of :data:`_SYMBOL_ENCODED_FONTS` are disclosed, not guessed."""
+
+_ZAPF_DINGBATS_TABLE = (
+    " ✁✂✃✄☎✆✇✈✉☛☞"
+    "✌✍✎✏✐✑✒✓✔✕✖✗"
+    "✘✙✚✛✜✝✞✟✠✡✢✣"
+    "✤✥✦✧★✩✪✫✬✭✮✯"
+    "✰✱✲✳✴✵✶✷✸✹✺✻"
+    "✼✽✾✿❀❁❂❃❄❅❆❇"
+    "❈❉❊❋●❍■❏❐❑❒▲"
+    "▼◆❖◗❘❙❚❛❜❝❞\ufffd"
+    "❨❩❪❫❬❭❮❯❰❱❲❳"
+    "❴❵\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd"
+    "\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd❡❢❣"
+    "❤❥❦❧♣♦♥♠①②③④"
+    "⑤⑥⑦⑧⑨⑩❶❷❸❹❺❻"
+    "❼❽❾❿➀➁➂➃➄➅➆➇"
+    "➈➉➊➋➌➍➎➏➐➑➒➓"
+    "➔→↔↕➘➙➚➛➜➝➞➟"
+    "➠➡➢➣➤➥➦➧➨➩➪➫"
+    "➬➭➮➯\ufffd➱➲➳➴➵➶➷"
+    "➸➹➺➻➼➽➾\ufffd"
+)
+"""The Zapf Dingbats font's characters, codes 0x20-0xFF: reportlab's
+``zapfdingbats`` codec (a declared dependency; a test holds the two equal),
+U+FFFD where the codec defines no character. Monotype Sorts is not read
+through it: no table in any dependency names that font, so it stays
+disclosed."""
+
+_SYMBOL_TABLES = {
+    "symbol": None,
+    "zapfdingbats": _ZAPF_DINGBATS_TABLE,
+    "zapf dingbats": _ZAPF_DINGBATS_TABLE,
+    "itc zapf dingbats": _ZAPF_DINGBATS_TABLE,
+}
+"""Symbol fonts with a standard table, by folded name (``None``: the Symbol
+table, stored in two ranges)."""
 
 _SYMBOL_ENCODED_FONTS = frozenset({
     "wingdings", "wingdings 2", "wingdings 3", "webdings", "marlett",
-    "mt extra", "zapfdingbats", "zapf dingbats", "itc zapf dingbats",
-    "monotype sorts",
+    "mt extra", "monotype sorts",
 })
-"""Fonts whose 8-bit codes name pictures, not characters: a code in 0x00-0xFF
-or F000-F0FF in one of these is never read as the Unicode character it
-happens to share a number with (Wingdings' ``00FC`` is a tick, not u-umlaut)."""
+"""Fonts whose 8-bit codes name pictures no standard table maps: a code in
+0x00-0xFF or F000-F0FF in one of these is never read as the Unicode character
+it happens to share a number with (Wingdings' ``00FC`` is a tick, not
+u-umlaut), whether it is stored as a ``w:sym`` or as ordinary text in a run
+set in that font."""
 
 SYMBOL_PLACEHOLDER = "\ufffd"
 """What stands in place of a symbol character with no standard text mapping,
 so the characters either side of it never run together (``10`` and ``2``
 used to become ``102``)."""
+
+
+def _symbol_char(font: str | None, code: int) -> str:
+    """The character code ``code`` draws in ``font`` (Word spec addendum
+    A2.4), or :data:`SYMBOL_PLACEHOLDER` when no standard table maps it.
+
+    * Symbol and Zapf Dingbats: a code in 0x20-0xFF, or the same code in the
+      F020-F0FF private-use form Word also stores, maps through the font's
+      table.
+    * Wingdings and the other fonts of :data:`_SYMBOL_ENCODED_FONTS`: a code
+      in 0x00-0xFF or F000-F0FF is a picture; a space (0x20) is a space.
+    * Any font: a private-use, surrogate, control (C0 or C1) or malformed
+      code is no character; a control code would otherwise break the line.
+    * Anything else is the Unicode character itself."""
+    folded = (font or "").strip().lower()
+    table = _SYMBOL_TABLES.get(folded, SYMBOL_PLACEHOLDER)
+    if table is not SYMBOL_PLACEHOLDER and (0x20 <= code <= 0xFF or 0xF020 <= code <= 0xF0FF):
+        low = code & 0xFF
+        if table is not None:
+            return table[low - 0x20]
+        if 0x20 <= low <= 0x7E:
+            return _SYMBOL_FONT_TABLE[0][low - 0x20]
+        if 0xA0 <= low <= 0xFF:
+            return _SYMBOL_FONT_TABLE[1][low - 0xA0]
+        return SYMBOL_PLACEHOLDER
+    if folded in _SYMBOL_ENCODED_FONTS and (0 <= code <= 0xFF or 0xF000 <= code <= 0xF0FF):
+        return " " if code in (0x20, 0xF020) else SYMBOL_PLACEHOLDER
+    if (0x20 <= code < 0x110000 and not 0x7F <= code <= 0x9F and not 0xD800 <= code <= 0xDFFF
+            and not 0xE000 <= code <= 0xF8FF):
+        return chr(code)
+    return SYMBOL_PLACEHOLDER
+
+
+def _is_symbol_font(font: str | None) -> bool:
+    folded = (font or "").strip().lower()
+    return folded in _SYMBOL_TABLES or folded in _SYMBOL_ENCODED_FONTS
+
+
+_EAST_ASIAN_RANGES = ((0x1100, 0x11FF), (0x2E80, 0x2FDF), (0x2FF0, 0x9FFF), (0xA000, 0xA4CF),
+                      (0xAC00, 0xD7AF), (0xF900, 0xFAFF), (0xFE30, 0xFE4F), (0xFF00, 0xFFEF),
+                      (0x20000, 0x10FFFF))
+_COMPLEX_SCRIPT_RANGES = ((0x0590, 0x08FF), (0x0E00, 0x0E7F), (0xFB1D, 0xFDFF), (0xFE70, 0xFEFF))
+
+
+def _font_slot(code: int, hint: str | None, complex_script: bool) -> str:
+    """Which ``w:rFonts`` attribute sets the font of character ``code``, by
+    the rule ECMA-376 gives (17.3.2.26), in the approximation this reader
+    needs to tell a symbol font from any other: ``cs`` for a run marked
+    ``w:rtl`` or ``w:cs`` and for the complex scripts, ``eastAsia`` for the
+    East Asian ranges (and for Latin-1, general punctuation and private-use
+    codes under ``w:hint="eastAsia"``), ``ascii`` below 0x80, else
+    ``hAnsi``."""
+    if complex_script:
+        return "cs"
+    if code < 0x80:
+        return "ascii"
+    if any(lo <= code <= hi for lo, hi in _COMPLEX_SCRIPT_RANGES):
+        return "cs"
+    if any(lo <= code <= hi for lo, hi in _EAST_ASIAN_RANGES):
+        return "eastAsia"
+    if hint == "eastAsia" and (0xA0 <= code <= 0x4FF or 0x2000 <= code <= 0x2BFF
+                               or 0xE000 <= code <= 0xF8FF):
+        return "eastAsia"
+    return "hAnsi"
+
+
+_FONT_SLOTS = ("ascii", "hAnsi", "eastAsia", "cs")
+_PRIVATE_USE = re.compile("[\ue000-\uf8ff]")
 
 _WORD_GROUP_URIS = (
     "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
@@ -2053,6 +2202,59 @@ def is_office_package(raw: bytes) -> bool:
     return _package_kind(raw) is not None
 
 
+_PACKAGE_EXTRAS_NAMED = 20
+"""How many of a ``.zip``'s members outside its Office document one note
+names before it only counts the rest."""
+
+
+def _package_extras_notes(raw: bytes) -> list[str]:
+    """A marked note for a ``.zip`` read as the Word, Excel or PowerPoint
+    package at its root, when the zip also holds members that are not part of
+    that document: every member no relationship chain from the package's
+    ``_rels/.rels`` reaches, other than ``[Content_Types].xml`` and the
+    relationship parts themselves. Read as the document, those members were
+    otherwise gone without a word (a ``Schedule.txt`` beside ``word/``). Named,
+    quoted, in name order; ``[]`` when there are none or ``raw`` is no
+    package."""
+    import zipfile
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except Exception:
+        return []
+    with zf:
+        names = sorted(n for n in zf.namelist() if not n.endswith("/"))
+        if _opc_main_part(zf) is None:
+            return []
+        parts = _PartNames(names)
+        reached: set[str] = set()
+        queue = [""]
+        while queue:
+            source = queue.pop()
+            try:
+                rels = _docx_rels(zf, source)
+            except Exception:
+                continue
+            for rel in rels.values():
+                if rel.external:
+                    continue
+                target = parts.resolve(_opc_target(source, rel.target))
+                if target is not None and target not in reached:
+                    reached.add(target)
+                    queue.append(target)
+        extras = [n for n in names if n not in reached and n != "[Content_Types].xml"
+                  and not (n.lower().endswith(".rels")
+                           and (n.lower().startswith("_rels/") or "/_rels/" in n.lower()))]
+    if not extras:
+        return []
+    shown = ", ".join(quoted(n) for n in extras[:_PACKAGE_EXTRAS_NAMED])
+    more = (f" and {len(extras) - _PACKAGE_EXTRAS_NAMED} more"
+            if len(extras) > _PACKAGE_EXTRAS_NAMED else "")
+    return [f"{M_ATTACH_SKIPPED}: this .zip is read as the Office document at its root, "
+            f"and {len(extras)} member(s) that are not part of that document were not "
+            f"read: {shown}{more}"]
+
+
 class _Rel(NamedTuple):
     target: str
     external: bool
@@ -2095,6 +2297,16 @@ _WORD_TEXT_PART_TYPES = frozenset(_WORD_MAIN_CONTENT_TYPES) | {
 that no relationship reaches is not part of the document Word shows."""
 
 
+def _one_line(value: str) -> str:
+    """A value from the file that DocIQ writes into a label or beside page text
+    (a deletion's or comment's author, a note's id, a hyperlink's target), with
+    every line break read as a space. Such a value is not the document's text:
+    a line break in it would start a page line of the file's choosing, a stamp
+    line in a Bates zone or a line beginning ``[deleted by``, where the label
+    DocIQ wrote cannot vouch for it."""
+    return " ".join(value.splitlines())
+
+
 class _DelEntry(NamedTuple):
     """One tracked deletion found while reading (D-56), in the order its text
     would stand in the page text."""
@@ -2106,6 +2318,9 @@ class _DelEntry(NamedTuple):
     """The move's name, from its ``w:moveFromRangeStart``, pairing it with the
     ``w:moveToRangeStart`` of the same name; ``None`` outside a named range."""
     text: str
+    adjacent: bool = False
+    """True when no character the accepted text keeps stands between this
+    entry and the one before it in the same paragraph."""
 
 
 class _DocxWalker:
@@ -2144,7 +2359,8 @@ class _DocxWalker:
         self.counters = {"altchunk": 0, "chart": 0, "smartart": 0,
                          "picture": 0, "picture_unmeasured": 0,
                          "symbol": 0, "subdoc": 0, "hidden_hdr_ftr": 0,
-                         "deleted_graphic": 0, "open_field_code": 0}
+                         "deleted_graphic": 0, "moved_graphic": 0, "open_field_code": 0}
+        self._moved_graphics: list[str] = []
         self.symbol_fonts: set[str] = set()
         self._seen_header_parts: set[str] = set()
         self._seen_footer_parts: set[str] = set()
@@ -2155,7 +2371,166 @@ class _DocxWalker:
         self.footer_deletions: list[_DelEntry] = []
         self._move_to_names: set[str] = set()
         self._open_moves: list[tuple[str | None, str | None]] = []
-        self._moved: set[str] = set()
+        self._moved = 0
+        self._table_styles: list[str | None] = []
+        self._load_fonts()
+
+    # -- Word spec addendum A2.4: the font a character is drawn in ---------------
+
+    def _load_fonts(self) -> None:
+        """The theme's major and minor fonts, the document defaults' run fonts,
+        and each style's own run fonts with the style it is based on, from the
+        styles and theme parts the main part's relationships name. A part
+        that will not parse contributes nothing: the fonts it would have named
+        are unknown, and text in an unknown font is read as the characters it
+        stores."""
+        from lxml import etree
+
+        self._theme_fonts: dict[str, str] = {}
+        self._doc_default_fonts: dict[str, object] = {}
+        self._styles: dict[str, tuple[str | None, dict[str, object]]] = {}
+        self._default_paragraph_style: str | None = None
+        self._style_chain_fonts: dict[tuple, dict[str, object]] = {}
+        a = _DOCX_NS["a"]
+        for part in self.related("theme")[:1]:
+            try:
+                root = etree.fromstring(self.zf.read(part))
+            except Exception:
+                continue
+            for scheme in root.iter(f"{{{a}}}fontScheme"):
+                for kind in ("major", "minor"):
+                    group = next((c for c in scheme if _docx_local(c) == f"{kind}Font"), None)
+                    if group is None:
+                        continue
+                    for local, suffixes in (("latin", ("Ascii", "HAnsi")), ("ea", ("EastAsia",)),
+                                            ("cs", ("Bidi",))):
+                        el = next((c for c in group if _docx_local(c) == local), None)
+                        for suffix in suffixes:
+                            self._theme_fonts[kind + suffix] = (
+                                el.get("typeface") or "" if el is not None else "")
+                break
+        for part in self.related("styles")[:1]:
+            try:
+                root = etree.fromstring(self.zf.read(part))
+            except Exception:
+                continue
+            for el in root:
+                name = _docx_local(el)
+                if name == "docDefaults":
+                    rpr = next((c for c in el.iter(_wq("rPrDefault"))), None)
+                    rpr = next((c for c in rpr if _docx_local(c) == "rPr"), None) \
+                        if rpr is not None else None
+                    self._doc_default_fonts = self._rfonts(rpr)
+                elif name == "style" and el.get(_wq("styleId")):
+                    based = next((c.get(_wq("val")) for c in el
+                                  if _docx_local(c) == "basedOn"), None)
+                    rpr = next((c for c in el if _docx_local(c) == "rPr"), None)
+                    self._styles[el.get(_wq("styleId"))] = (based, self._rfonts(rpr))
+                    if (el.get(_wq("type")) == "paragraph"
+                            and (el.get(_wq("default")) or "").strip().lower() in ("1", "true", "on")):
+                        self._default_paragraph_style = el.get(_wq("styleId"))
+
+    def _rfonts(self, rpr) -> dict[str, object]:
+        """The fonts one ``w:rPr`` names, by slot, and its ``w:hint``. A theme
+        attribute (``w:asciiTheme``) outranks the plain one beside it, as
+        ECMA-376 says."""
+        out: dict[str, object] = {}
+        if rpr is None:
+            return out
+        rf = next((c for c in rpr if _docx_local(c) == "rFonts"), None)
+        if rf is None:
+            return out
+        for slot in _FONT_SLOTS:
+            theme = rf.get(_wq(slot + "Theme"))
+            if theme is not None:
+                out[slot] = self._theme_fonts.get(theme, "")
+            elif rf.get(_wq(slot)) is not None:
+                out[slot] = rf.get(_wq(slot))
+        if rf.get(_wq("hint")) is not None:
+            out["hint"] = rf.get(_wq("hint"))
+        return out
+
+    def _style_fonts(self, style_id: str | None) -> dict[str, object]:
+        """A style's run fonts, with the fonts of the styles it is based on
+        beneath them."""
+        chain: list[dict[str, object]] = []
+        seen: set[str] = set()
+        while style_id and style_id in self._styles and style_id not in seen:
+            seen.add(style_id)
+            based, fonts = self._styles[style_id]
+            chain.append(fonts)
+            style_id = based
+        merged: dict[str, object] = {}
+        for fonts in reversed(chain):
+            merged.update(fonts)
+        return merged
+
+    def _paragraph_style(self, p_el) -> str | None:
+        ppr = next((c for c in p_el if _docx_local(c) == "pPr"), None) \
+            if hasattr(p_el, "tag") else None
+        pstyle = next((c for c in ppr if _docx_local(c) == "pStyle"), None) \
+            if ppr is not None else None
+        return pstyle.get(_wq("val")) if pstyle is not None else self._default_paragraph_style
+
+    def _run_fonts(self, run_el, para_style: str | None) -> dict[str, object]:
+        """The fonts a run is drawn in, slot by slot: its own ``w:rFonts``, then
+        its character style's, its paragraph style's, the enclosing table
+        style's, and the document defaults'. ``complex`` is True when the run
+        is marked ``w:rtl`` or ``w:cs``."""
+        rpr = next((c for c in run_el if _docx_local(c) == "rPr"), None)
+        rstyle, complex_script = None, False
+        if rpr is not None:
+            for c in rpr:
+                local = _docx_local(c)
+                if local == "rStyle":
+                    rstyle = c.get(_wq("val"))
+                elif local in ("rtl", "cs") and _on_off(c):
+                    complex_script = True
+        table_style = self._table_styles[-1] if self._table_styles else None
+        key = (rstyle, para_style, table_style)
+        base = self._style_chain_fonts.get(key)
+        if base is None:
+            base = dict(self._doc_default_fonts)
+            base.update(self._style_fonts(table_style))
+            base.update(self._style_fonts(para_style))
+            base.update(self._style_fonts(rstyle))
+            self._style_chain_fonts[key] = base
+        fonts = dict(base)
+        fonts.update(self._rfonts(rpr))
+        fonts["complex"] = complex_script
+        return fonts
+
+    def _count_symbol(self, font: str | None) -> None:
+        self.counters["symbol"] += 1
+        self.symbol_fonts.add((font or "").strip())
+
+    def _font_text(self, text: str, fonts: dict | None) -> str:
+        """``text`` as the characters its run's fonts draw (addendum A2.4):
+        in Symbol or Zapf Dingbats each character maps through the font's
+        table; in Wingdings and the other symbol-encoded fonts, and wherever a
+        private-use character stands, a character no standard table maps is
+        :data:`SYMBOL_PLACEHOLDER`, counted with its font for the marked note,
+        exactly as a ``w:sym`` is. A space stays a space. Text in any other
+        font is the characters it stores."""
+        if not text:
+            return text
+        fonts = fonts or {}
+        if (not any(_is_symbol_font(fonts.get(slot)) for slot in _FONT_SLOTS)
+                and not _PRIVATE_USE.search(text)):
+            return text
+        hint, complex_script = fonts.get("hint"), bool(fonts.get("complex"))
+        out: list[str] = []
+        for ch in text:
+            code = ord(ch)
+            font = fonts.get(_font_slot(code, hint, complex_script))
+            if ch.isspace() or (not _is_symbol_font(font) and not 0xE000 <= code <= 0xF8FF):
+                out.append(ch)
+                continue
+            char = _symbol_char(font, code)
+            if char == SYMBOL_PLACEHOLDER:
+                self._count_symbol(font)
+            out.append(char)
+        return "".join(out)
 
     def related(self, kind: str) -> list[str]:
         """The stored part names the main part's internal relationships of
@@ -2178,7 +2553,7 @@ class _DocxWalker:
 
     @staticmethod
     def _author(el) -> str:
-        return " ".join((el.get(_wq("author")) or "").splitlines())
+        return _one_line(el.get(_wq("author")) or "")
 
     def _range_marker(self, el, name: str) -> None:
         """Move ranges pair a ``w:moveFrom`` with the ``w:moveTo`` its text
@@ -2199,7 +2574,7 @@ class _DocxWalker:
     # -- Word spec part 2: one paragraph's inline text, plus any text boxes it
     #    anchors (Word spec part 3), collected but not inlined ------------------
 
-    def _inline_text(self, p_el, part_rels: dict, field_code: list[bool] | None = None,
+    def _inline_text(self, p_el, part_rels: dict, field_code: list[list] | None = None,
                      deleted: tuple | None = None) -> tuple[str, list[list[str]]]:
         """``(text, boxes)``: the paragraph's text as it reads with tracked
         changes accepted, and the lines of each text box or watermark it
@@ -2207,31 +2582,39 @@ class _DocxWalker:
         paragraph is deleted content (a deleted row, a deleted text box).
 
         D-56: every character a tracked deletion removed goes to the
-        deletion list instead of the text, grouped: consecutive deleted
-        characters by one author (and one kind, and one move) form one
-        passage, and any character the accepted text keeps between them
-        ends it. Properties, bookmarks and other markup that holds no
-        character do not end a passage; a paragraph's end does."""
+        deletion list instead of the text, in entries by kind, author and
+        move; :meth:`deletion_lines` joins side-by-side entries by one author
+        into one passage (an entry records whether it follows the previous
+        one with no kept character between). Any character the accepted text
+        keeps ends a passage; properties, bookmarks and other markup that
+        holds no character do not; a paragraph's end does.
+
+        Each character is read in its run's fonts (addendum A2.4)."""
         parts: list[str] = []
         boxes: list[list[str]] = []
         box_entries: list[_DelEntry] = []
-        # One entry per complex field open, True while its CODE runs
-        # (between fldChar begin and separate). A field nested in another
-        # field's code (IF { MERGEFIELD } ...) carries its own cached result
-        # there, and that result is part of the outer code, not text. Shared
-        # by the paragraphs of one story: a field's code can run on past a
-        # paragraph mark.
+        # One entry per complex field open, [True while its CODE runs (between
+        # fldChar begin and separate), characters read as code while it did].
+        # A field nested in another field's code (IF { MERGEFIELD } ...)
+        # carries its own cached result there, and that result is part of the
+        # outer code, not text. Shared by the paragraphs of one story: a
+        # field's code can run on past a paragraph mark. A code that reaches
+        # its separate or end was code; the count on a field whose code is
+        # still running when its story ends is text that field swallowed.
         if field_code is None:
             field_code = []
-        group: list | None = None  # [(kind, author, move name), [text]]
+        group: list | None = None  # [(kind, author, move name), [text], adjacent]
         graphic_depth = 0
+        para_style = self._paragraph_style(p_el)
+        fonts_now: list = [None]
 
         def close() -> None:
             nonlocal group
             if group is not None:
-                (kind, author, move_name), texts = group
+                (kind, author, move_name), texts, adjacent = group
                 if "".join(texts):
-                    self._del_sink.append(_DelEntry(kind, author, move_name, "".join(texts)))
+                    self._del_sink.append(_DelEntry(kind, author, move_name, "".join(texts),
+                                                    adjacent))
                 group = None
 
         def put(s: str, key) -> None:
@@ -2243,8 +2626,12 @@ class _DocxWalker:
                 parts.append(s)
                 return
             if group is None or group[0] != key:
+                # A group that follows another with no kept character between
+                # them is adjacent to it (addendum A4: one passage, when the
+                # author is the same).
+                adjacent = group is not None and "".join(group[1]) != ""
                 close()
-                group = [key, []]
+                group = [key, [], adjacent]
             group[1].append(s)
 
         def mark():
@@ -2290,8 +2677,11 @@ class _DocxWalker:
                 if name == "textpath" and child.tag == f"{{{_DOCX_NS['v']}}}textpath":
                     # A VML watermark or WordArt keeps its text only in this
                     # attribute. It is read as a line of its own after the
-                    # paragraph that anchors it, as a text box is.
-                    text = child.get("string") or ""
+                    # paragraph that anchors it, as a text box is, drawn in
+                    # the font its style names (addendum A2.4).
+                    font = _vml_font_family(child.get("style") or "")
+                    text = self._font_text(child.get("string") or "", {
+                        slot: font for slot in _FONT_SLOTS} if font else None)
                     if text and key is None:
                         boxes.append([text])
                     elif text:
@@ -2303,25 +2693,39 @@ class _DocxWalker:
                 if name == "fldChar":
                     kind = child.get(_wq("fldCharType"))
                     if kind == "begin":
-                        if not any(field_code):
+                        if not any(entry[0] for entry in field_code):
                             # A legacy form field shows its value from
-                            # w:ffData, not from any result run.
-                            put(_form_field_value(child), key)
-                        field_code.append(True)
+                            # w:ffData, not from any result run, in the
+                            # field's run fonts.
+                            put(self._font_text(_form_field_value(child), fonts_now[0]), key)
+                        field_code.append([True, 0])
                     elif kind == "separate" and field_code:
-                        field_code[-1] = False
+                        field_code[-1][0] = False
                     elif kind == "end" and field_code:
                         field_code.pop()
                     continue
-                if any(field_code) and name in (
+                if name == "r":
+                    # The run's fonts decide what its characters are
+                    # (addendum A2.4).
+                    held_fonts, fonts_now[0] = fonts_now[0], self._run_fonts(child, para_style)
+                    try:
+                        walk(child, key)
+                    finally:
+                        fonts_now[0] = held_fonts
+                    continue
+                if any(entry[0] for entry in field_code) and name in (
                         "t", "delText", "tab", "ptab", "br", "cr", "noBreakHyphen",
                         "sym", "symEx", "textpath"):
+                    read_as_code = len(child.text or "") if name in ("t", "delText") else 1
+                    for entry in field_code:
+                        if entry[0]:
+                            entry[1] += read_as_code
                     continue
                 if name in ("t", "delText"):
                     # A delText outside any w:del is still deleted text; its
                     # author is unknown.
-                    put(child.text or "", key if key is not None or name == "t"
-                        else ("del", "", None))
+                    put(self._font_text(child.text or "", fonts_now[0]),
+                        key if key is not None or name == "t" else ("del", "", None))
                     continue
                 if name in ("tab", "ptab"):
                     # A positional tab (w:ptab: Word's own left/center/right
@@ -2332,10 +2736,10 @@ class _DocxWalker:
                     put("\n", key)
                     continue
                 if name == "noBreakHyphen":
-                    put("-", key)
+                    put(self._font_text("-", fonts_now[0]), key)
                     continue
                 if name in ("sym", "symEx"):
-                    put(self._symbol(child), key)
+                    put(self._symbol(child, fonts_now[0]), key)
                     continue
                 if name in ("instrText", "delInstrText"):
                     continue  # field code: excluded by name
@@ -2379,11 +2783,12 @@ class _DocxWalker:
                     if rel and rel[1]:
                         grp, first = deleted_since(start)
                         deleted_shown = "".join(grp[1][first:]) if grp is not None else ""
+                        target = _one_line(rel[0])
                         if shown or not deleted_shown:
-                            if rel[0].strip() != shown.strip() and (shown or key is None):
-                                put(f" <{rel[0]}>", None)
-                        elif rel[0].strip() != deleted_shown.strip():
-                            put(f" <{rel[0]}>", grp[0])
+                            if target.strip() != shown.strip() and (shown or key is None):
+                                put(f" <{target}>", None)
+                        elif target.strip() != deleted_shown.strip():
+                            put(f" <{target}>", grp[0])
                     continue
                 if name in ("drawing", "pict", "object"):
                     if key is None:
@@ -2396,9 +2801,15 @@ class _DocxWalker:
                         continue
                     # A deleted picture, chart or object shows nothing
                     # listable; it is counted, once per outermost graphic,
-                    # and any text box inside it is listed.
+                    # and any text box inside it is listed. One moved away
+                    # under a named move is counted only if no destination of
+                    # that move was read (deletion_graphics).
                     if graphic_depth == 0:
-                        self.counters["deleted_graphic"] += 1
+                        if key[0] == "move" and key[2] is not None:
+                            self.counters["moved_graphic"] += 1
+                            self._moved_graphics.append(key[2])
+                        else:
+                            self.counters["deleted_graphic"] += 1
                     graphic_depth += 1
                     try:
                         walk(child, key)
@@ -2412,15 +2823,14 @@ class _DocxWalker:
         self._del_sink.extend(box_entries)
         return "".join(parts), boxes
 
-    def _symbol(self, sym_el) -> str:
+    def _symbol(self, sym_el, fonts: dict | None = None) -> str:
         """``w:sym`` (or ``w16se:symEx``): one character, given as a hex code in
-        a named font. In the Symbol font the code is mapped through the Symbol
-        encoding (``F0B1`` is ±). In Wingdings and the other fonts of
-        :data:`_SYMBOL_ENCODED_FONTS` a code names a picture no standard table
-        maps, and in any other font a private-use, surrogate or malformed code
-        means nothing as a character: each of those stands as
-        :data:`SYMBOL_PLACEHOLDER` in its place and is counted, with its font,
-        for a marked note. Any other code is the Unicode character itself."""
+        a named font (the run's own font when it names none), read by
+        :func:`_symbol_char`: Symbol and Zapf Dingbats through their tables;
+        in Wingdings and the other fonts of :data:`_SYMBOL_ENCODED_FONTS`, and
+        for a private-use, surrogate, control or malformed code in any font,
+        :data:`SYMBOL_PLACEHOLDER` in its place, counted with its font for a
+        marked note. Any other code is the Unicode character itself."""
         font = code_text = None
         for key, value in sym_el.attrib.items():
             local = key.rsplit("}", 1)[-1]
@@ -2432,25 +2842,11 @@ class _DocxWalker:
             code = int(code_text or "", 16)
         except ValueError:
             code = -1
-        folded = (font or "").strip().lower()
-        if folded == "symbol" and (0x20 <= code <= 0xFF or 0xF020 <= code <= 0xF0FF):
-            low = code & 0xFF
-            if 0x20 <= low <= 0x7E:
-                char = _SYMBOL_FONT_TABLE[0][low - 0x20]
-            elif 0xA0 <= low <= 0xFF:
-                char = _SYMBOL_FONT_TABLE[1][low - 0xA0]
-            else:
-                char = SYMBOL_PLACEHOLDER
-        elif folded in _SYMBOL_ENCODED_FONTS and (0 <= code <= 0xFF or 0xF000 <= code <= 0xF0FF):
-            char = SYMBOL_PLACEHOLDER
-        elif (0 < code < 0x110000 and not 0xD800 <= code <= 0xDFFF
-              and not 0xE000 <= code <= 0xF8FF):
-            char = chr(code)
-        else:
-            char = SYMBOL_PLACEHOLDER
+        if font is None and fonts and code >= 0:
+            font = fonts.get(_font_slot(code, fonts.get("hint"), bool(fonts.get("complex"))))
+        char = _symbol_char(font, code)
         if char == SYMBOL_PLACEHOLDER:
-            self.counters["symbol"] += 1
-            self.symbol_fonts.add((font or "").strip() or "no font named")
+            self._count_symbol(font)
         return char
 
     # -- Word spec part 9: chart / SmartArt / large-picture disclosure ----------
@@ -2589,16 +2985,21 @@ class _DocxWalker:
     #    boxes, headers, footers, footnotes, endnotes and comments --------
 
     def _block_lines(self, elements, part_rels: dict, deleted: tuple | None = None,
-                     field_code: list[bool] | None = None) -> list[str]:
+                     field_code: list[list] | None = None) -> list[str]:
         """The lines of one story's block content. With ``deleted`` set every
         character goes to the deletion list and the lines come back empty.
 
         A complex field's state is shared by the story's paragraphs, because
         a field's code can run on past a paragraph mark: the cached result of
-        a field nested in that code is code, not text. A story that ends
-        while a field's code is still open had the text after the field's
-        start read as code; that is counted for a marked note, never left
-        silent."""
+        a field nested in that code is code, not text. A story (the body, a
+        table cell, a text box, a header or footer, a note, a comment) that
+        ends while a field's code is still running, after that code swallowed
+        any text, is counted for a marked note, never left silent.
+
+        Run-level content standing directly among the blocks (a ``w:del``,
+        ``w:ins``, ``w:moveFrom`` or ``w:moveTo`` holding runs, a math
+        paragraph, which the schema allows there) is read as a line of its
+        own, as a paragraph is."""
         lines: list[str] = []
         own_fields = field_code is None
         if field_code is None:
@@ -2631,9 +3032,17 @@ class _DocxWalker:
                     self.counters["altchunk"] += 1
             elif name in self._RANGE_MARKERS:
                 self._range_marker(el, name)
-            # w:sectPr and anything else (bookmarks, proofErr, ...): ignored.
-        if own_fields and any(field_code):
-            self.counters["open_field_code"] += 1
+            elif name != "sectPr" and name not in self._PROPERTY_ELEMENTS:
+                # Run-level content among the blocks, and markup holding no
+                # character (bookmarks, proofErr), which reads as nothing.
+                text, boxes = self._inline_text([el], part_rels, field_code, deleted)
+                if text:
+                    lines.append(text)
+                for box in boxes:
+                    lines.extend(box)
+        if own_fields:
+            swallowed = [entry for entry in field_code if entry[0] and entry[1]]
+            self.counters["open_field_code"] += len(swallowed)
         return lines
 
     def _wrapped(self, elements, want: str):
@@ -2667,16 +3076,23 @@ class _DocxWalker:
 
     def _table_lines(self, tbl_el, part_rels: dict, deleted: tuple | None = None) -> list[str]:
         rows = []
-        for tr in self._wrapped(tbl_el, "tr"):
-            row_deleted = deleted or self._tracked(tr, "trPr", "del")
-            cells = []
-            for tc in self._wrapped(tr, "tc"):
-                cell_deleted = row_deleted or self._tracked(tc, "tcPr", "cellDel")
-                text = self._cell_text(tc, part_rels, cell_deleted)
-                if cell_deleted is None:
-                    cells.append(text)
-            if row_deleted is None:
-                rows.append("\t".join(cells))  # Word spec part 4: row = cells joined by tab
+        tbl_pr = next((c for c in tbl_el if _docx_local(c) == "tblPr"), None)
+        style = next((c.get(_wq("val")) for c in tbl_pr if _docx_local(c) == "tblStyle"),
+                     None) if tbl_pr is not None else None
+        self._table_styles.append(style)
+        try:
+            for tr in self._wrapped(tbl_el, "tr"):
+                row_deleted = deleted or self._tracked(tr, "trPr", "del")
+                cells = []
+                for tc in self._wrapped(tr, "tc"):
+                    cell_deleted = row_deleted or self._tracked(tc, "tcPr", "cellDel")
+                    text = self._cell_text(tc, part_rels, cell_deleted)
+                    if cell_deleted is None:
+                        cells.append(text)
+                if row_deleted is None:
+                    rows.append("\t".join(cells))  # Word spec part 4: row = cells joined by tab
+        finally:
+            self._table_styles.pop()
         return rows
 
     def _cell_text(self, tc_el, part_rels: dict, deleted: tuple | None = None) -> str:
@@ -2776,7 +3192,7 @@ class _DocxWalker:
         except Exception:
             return True
         saved = (dict(self.counters), set(self.symbol_fonts), set(self._move_to_names),
-                 list(self._open_moves), self._del_sink)
+                 list(self._open_moves), self._del_sink, list(self._moved_graphics))
         self._del_sink = []
         try:
             lines: list[str] = []
@@ -2789,7 +3205,7 @@ class _DocxWalker:
             return True
         finally:
             (self.counters, self.symbol_fonts, self._move_to_names,
-             self._open_moves, self._del_sink) = saved
+             self._open_moves, self._del_sink, self._moved_graphics) = saved
 
     # -- Word spec part 6: footnotes, endnotes, comments -------------------------
 
@@ -2818,7 +3234,7 @@ class _DocxWalker:
             if note.get(_wq("type")) not in (None, "normal"):
                 continue  # separator / continuationSeparator: not real notes
             text = "\n".join(self._block_lines(list(note), part_rels))
-            out.append(f"[{tag} {note.get(_wq('id'))}] {text}")
+            out.append(f"[{tag} {_one_line(note.get(_wq('id')) or '')}] {text}")
         return out
 
     def _read_comments(self, part_name: str) -> list[str]:
@@ -2834,7 +3250,7 @@ class _DocxWalker:
             # would let a comment's timestamp masquerade as a page's own
             # first date.
             text = "\n".join(self._block_lines(list(c), part_rels))
-            out.append(f"[comment by {c.get(_wq('author')) or ''}] {text}")
+            out.append(f"[comment by {self._author(c)}] {text}")
         return out
 
     # -- D-56: the deletion list -------------------------------------------------
@@ -2848,14 +3264,29 @@ class _DocxWalker:
         where they were moved to, and listing them again would put every
         date and number in them into the output twice. Moved-from text with
         no such destination reads, with changes accepted, as a deletion, and
-        is listed as one."""
-        out: list[str] = []
+        is listed as one.
+
+        A passage is consecutive removed characters by one author in one
+        paragraph, whatever removed them: deleted text and moved-from text
+        with no destination standing side by side are one passage, as are two
+        moved-from runs of one move. Each passage not listed because it stands
+        where it was moved to is counted for a plain note."""
+        passages: list[list] = []  # [listed, author, text]
         for entry in entries:
-            if entry.kind == "move" and entry.move_name in self._move_to_names:
-                self._moved.add(entry.move_name)
+            listed = not (entry.kind == "move" and entry.move_name in self._move_to_names)
+            last = passages[-1] if passages else None
+            if (entry.adjacent and last is not None and last[0] == listed
+                    and last[1] == entry.author):
+                last[2] += entry.text
+            else:
+                passages.append([listed, entry.author, entry.text])
+        out: list[str] = []
+        for listed, author, text in passages:
+            if not listed:
+                self._moved += 1
                 continue
-            text = re.sub(r"[\r\n]+", " ", entry.text)
-            out.append(f"{TRACKED_DELETION_LABEL}{entry.author}] {text}")
+            text = re.sub(r"[\r\n]+", " ", text)
+            out.append(f"{TRACKED_DELETION_LABEL}{author}] {text}")
         return out
 
     def orphan_parts_with_content(self) -> int:
@@ -2879,8 +3310,34 @@ class _DocxWalker:
                     queue.append(target)
         content_type = _content_type_lookup(self.zf)
         return sum(1 for name in sorted(self.names - reachable)
-                   if content_type(name) in _WORD_TEXT_PART_TYPES
+                   if (content_type(name) in _WORD_TEXT_PART_TYPES
+                       or self._has_word_text_root(name))
                    and self._part_has_content(name))
+
+    _WORD_TEXT_ROOTS = frozenset({"document", "glossaryDocument", "hdr", "ftr",
+                                  "footnotes", "endnotes", "comments"})
+
+    def _has_word_text_root(self, part_name: str) -> bool:
+        """Whether a part's root element is a WordprocessingML story (a
+        document, header, footer, notes or comments part), whatever content
+        type the package gives it: a stale footnotes part typed only by the
+        ``xml`` default is as much a Word text part as one with an
+        Override."""
+        from lxml import etree
+
+        try:
+            head = self.zf.read(part_name)
+        except Exception:
+            return False
+        if not head.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"<"):
+            return False
+        try:
+            for _event, el in etree.iterparse(io.BytesIO(head), events=("start",)):
+                return (el.tag == _wq(_docx_local(el))
+                        and _docx_local(el) in self._WORD_TEXT_ROOTS)
+        except Exception:
+            return False
+        return False
 
     # -- Word spec part 9: the disclosure notes themselves -----------------------
 
@@ -2907,9 +3364,10 @@ class _DocxWalker:
                 "could not be measured against the page — the final section "
                 "carries no usable page size, or the picture no usable extent")
         if c["symbol"]:
+            fonts = ", ".join(quoted(font) if font else "no font named"
+                              for font in sorted(self.symbol_fonts))
             notes.append(f"{M_WORD_UNREAD}: {c['symbol']} symbol character(s) with no "
-                         f"standard text mapping (font(s): "
-                         f"{', '.join(sorted(self.symbol_fonts))}), each shown as U+FFFD")
+                         f"standard text mapping (font(s): {fonts}), each shown as U+FFFD")
         if c["subdoc"]:
             notes.append(f"{M_WORD_UNREAD}: {c['subdoc']} sub-document link(s); "
                          "a sub-document's text is stored outside this file")
@@ -2922,14 +3380,20 @@ class _DocxWalker:
                 "section)")
         if c["open_field_code"]:
             notes.append(f"{M_WORD_UNREAD}: {c['open_field_code']} field code(s) never "
-                         "ended; the text after each in its part was read as field "
-                         "code and left out")
-        if c["deleted_graphic"]:
-            notes.append(f"{M_WORD_TRACKED_DELETION}: {c['deleted_graphic']} deleted "
-                         "drawing(s), picture(s) or object(s); any text inside them is "
-                         "listed with the deletions")
+                         "ended; the text after each, to the end of its story (the body, "
+                         "a table cell, a text box, a header or footer, a note or a "
+                         "comment), was read as field code and left out")
+        deleted_graphics = c["deleted_graphic"] + sum(
+            1 for name in self._moved_graphics if name not in self._move_to_names)
+        if deleted_graphics:
+            notes.append(f"{M_WORD_TRACKED_DELETION}: {deleted_graphics} deleted "
+                         "drawing(s), picture(s) or object(s); the text of a "
+                         "text box or watermark in one is listed with the deletions, the "
+                         "text of a chart or SmartArt drawing is not read, and a document "
+                         "embedded in one is recovered, where it can be, as a child "
+                         "document whose note names the deletion")
         if self._moved:
-            notes.append(f"{len(self._moved)} passage(s) moved under tracked changes "
+            notes.append(f"{self._moved} passage(s) moved under tracked changes "
                          "are shown only where they were moved to")
         if orphans:
             notes.append(f"{orphans} Word part(s) holding text that no relationship "
@@ -2947,6 +3411,17 @@ def _stories(root) -> list[list]:
         body = next((c for c in root if _docx_local(c) == "body"), None)
         return [list(body)] if body is not None else []
     return [list(root)]
+
+
+def _vml_font_family(style: str) -> str | None:
+    """The first family a VML ``style`` attribute's ``font-family`` names
+    (``font-family:"Wingdings"``), or ``None``."""
+    for declaration in style.split(";"):
+        prop, _sep, value = declaration.partition(":")
+        if prop.strip().lower() == "font-family":
+            first = value.split(",")[0].strip().strip("\"'").strip()
+            return first or None
+    return None
 
 
 def _form_field_value(fld_char) -> str:
@@ -3397,10 +3872,14 @@ def _extract_eml(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
         return (synthetic_pages([raw.decode("utf-8", errors="replace")], notes=(note,)),
                 [note])
     parts: list[str] = []
+    # A header's value is one line, as a mail client shows it: an encoded
+    # word can decode to a line break, which started a page line of the
+    # sender's choosing (a stamp line in the Bates head zone) after the label
+    # DocIQ wrote (Word review round 3, the class of C-3).
     for h in ("From", "To", "Cc", "Subject"):
         v = msg.get(h)
         if v:
-            parts.append(f"{h}: {v}")
+            parts.append(f"{h}: {_one_line(str(v))}")
     hdr_date = msg.get("Date")
     if hdr_date:
         try:
@@ -3422,7 +3901,7 @@ def _extract_eml(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                 f"the message's Date header {hdr_date!r} could not be parsed "
                 f"({exc}); it is emitted verbatim but this document is not "
                 "date-anchored on it", 300))
-        parts.append(f"Date: {hdr_date}" + (f" ({iso})" if iso else ""))
+        parts.append(f"Date: {_one_line(str(hdr_date))}" + (f" ({iso})" if iso else ""))
     body = ""
     try:
         bp = msg.get_body(preferencelist=("plain", "html"))
@@ -3481,7 +3960,8 @@ def _extract_msg(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
                            ("Subject", getattr(m, "subject", None)),
                            ("Date", getattr(m, "date", None))):
             if val:
-                parts.append(f"{label}: {val}")
+                # One line, as for an .eml header (_extract_eml).
+                parts.append(f"{label}: {_one_line(str(val))}")
         body = getattr(m, "body", None)
         if body:
             parts.append("")
@@ -3518,6 +3998,10 @@ class ZipMember:
     order: int
     """Position in ``infolist()`` order. Deterministic child ID assignment
     (D-04) depends on it, so it is carried, not recomputed."""
+    notes: tuple[str, ...] = ()
+    """Plain notes the child's own record opens with: what the container
+    knows about this member that the member's bytes cannot say (a document
+    embedded in content deleted under tracked changes)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -3575,7 +4059,7 @@ def expand_eml_attachments(raw: bytes) -> ZipExpansion:
             # retry registry and the accounting tally (Codex review #1, B-3).
             # FINAL rather than transient: a part with no decodable payload
             # decodes to nothing on the second attempt too.
-            notes.append(f"{M_ATTACH_SKIPPED}: attachment '{name}' had no "
+            notes.append(f"{M_ATTACH_SKIPPED}: attachment {quoted(name)} had no "
                          "decodable payload; it is named here and its bytes "
                          "are not in the corpus")
             continue
@@ -3598,13 +4082,13 @@ def _flatten_attached_archives(raw_members: list[tuple[str, bytes]], notes: list
             try:
                 inner = expand_zip(payload)
             except Exception as exc:
-                notes.append(f"{M_ZIP_ATTACH}: attachment '{name}' is a zip "
+                notes.append(f"{M_ZIP_ATTACH}: attachment {quoted(name)} is a zip "
                              f"that could not be read: {exc}"[:200])
                 continue
             prefix = _unused_prefix(name, members, notes, "attached archive")
-            notes.extend(f"{prefix}: {n}" for n in inner.notes)
+            notes.extend(f"{quoted(prefix)}: {n}" for n in inner.notes)
             for m in inner.members:
-                members.append(ZipMember(f"{prefix}/{m.name}", m.raw, len(members)))
+                members.append(ZipMember(f"{prefix}/{m.name}", m.raw, len(members), m.notes))
         else:
             members.append(ZipMember(name, payload, len(members)))
     return tuple(members), tuple(notes)
@@ -3627,8 +4111,8 @@ def _unused_prefix(name: str, members: list[ZipMember], notes: list[str], what: 
     while taken(f"{stem}__{number}{dot}{ext}"):
         number += 1
     prefix = f"{stem}__{number}{dot}{ext}"
-    notes.append(f"{what} '{name}' has the name of one already listed; its "
-                 f"members are listed under '{prefix}'")
+    notes.append(f"{what} {quoted(name)} has the name of one already listed; its "
+                 f"members are listed under {quoted(prefix)}")
     return prefix
 
 
@@ -3678,7 +4162,7 @@ def expand_msg_attachments(raw: bytes, scratch_dir: Path | None) -> ZipExpansion
                 # bytes) or an unreadable attachment kind. Disclosed, not
                 # dropped: the operator sees that content exists and was not
                 # brought in, rather than the run looking complete.
-                notes.append(f"{M_ATTACH_SKIPPED}: attachment '{name}' is an "
+                notes.append(f"{M_ATTACH_SKIPPED}: attachment {quoted(name)} is an "
                              "embedded message or an unsupported attachment "
                              "kind; it is named here and its bytes are not in "
                              "the corpus")
@@ -3731,22 +4215,22 @@ def expand_zip(raw: bytes, depth: int = 0) -> ZipExpansion:
                 break
             if info.file_size and total + info.file_size > cap_bytes:
                 notes.append(f"archive truncated at {_ZIP_MAX_MB} MB uncompressed; "
-                             f"'{info.filename}' and later members were not read")
+                             f"{quoted(info.filename)} and later members were not read")
                 break
             try:
                 blob = zf.read(info)
             except Exception as exc:
-                notes.append(f"{M_ZIP_MEMBER}: '{info.filename}': "
+                notes.append(f"{M_ZIP_MEMBER}: {quoted(info.filename)}: "
                              f"{str(exc)[:120]}")
                 continue
             total += len(blob)
             if _ext(info.filename) == ".zip" and not is_office_package(blob):
                 inner = expand_zip(blob, depth + 1)
                 prefix = _unused_prefix(info.filename, members, notes, "archive")
-                notes.extend(f"{prefix}: {n}" for n in inner.notes)
+                notes.extend(f"{quoted(prefix)}: {n}" for n in inner.notes)
                 for m in inner.members:
                     members.append(ZipMember(f"{prefix}/{m.name}", m.raw,
-                                             len(members)))
+                                             len(members), m.notes))
                 continue
             members.append(ZipMember(info.filename, blob, len(members)))
     return ZipExpansion(tuple(members), tuple(notes))
@@ -3757,18 +4241,77 @@ def expand_zip(raw: bytes, depth: int = 0) -> ZipExpansion:
 # ---------------------------------------------------------------------------
 
 
-def _ole_objects_in_order(xml_bytes: bytes) -> list[tuple[str | None, str, str]]:
-    """``(r:id or None, Type, ProgID)`` for every ``o:OLEObject`` in one
-    part's XML, in document order — ``root.iter()`` visits in document
-    order by construction, so no explicit sort is needed here."""
+def _ole_objects_in_order(xml_bytes: bytes) -> list[tuple[str | None, str, str, tuple | None]]:
+    """``(r:id or None, Type, ProgID, removal)`` for every ``o:OLEObject`` in
+    one part's XML, in document order — ``root.iter()`` visits in document
+    order by construction, so no explicit sort is needed here.
+
+    ``removal`` says whether tracked changes removed the object, by its
+    nearest enclosing ``w:del``, ``w:moveFrom``, deleted row
+    (``w:trPr/w:del``) or deleted cell (``w:tcPr/w:cellDel``):
+    ``("del", author)``, ``("moved", author)`` for moved-from content whose
+    move names a ``w:moveToRangeStart`` in the same part (Word shows it
+    where it was moved to), or ``None``. Moved-from content with no such
+    destination reads, with changes accepted, as deleted, as the text reader
+    lists it (Word spec addendum A4)."""
     from lxml import etree
 
     root = etree.fromstring(xml_bytes)
-    out: list[tuple[str | None, str, str]] = []
-    for el in root.iter(f"{{{_DOCX_NS['o']}}}OLEObject"):
-        out.append((el.get(_rq("id")), el.get("Type") or "Embed",
-                   el.get("ProgID") or ""))
-    return out
+    w = _DOCX_NS["w"]
+    ole = f"{{{_DOCX_NS['o']}}}OLEObject"
+    found: list[tuple[str | None, str, str, tuple | None]] = []
+    open_moves: list[tuple[str | None, str | None]] = []
+    move_to: set[str] = set()
+    for el in root.iter():
+        tag = el.tag if isinstance(el.tag, str) else ""
+        if tag == f"{{{w}}}moveFromRangeStart":
+            open_moves.append((el.get(_wq("id")), el.get(_wq("name"))))
+        elif tag == f"{{{w}}}moveFromRangeEnd":
+            for i in range(len(open_moves) - 1, -1, -1):
+                if open_moves[i][0] == el.get(_wq("id")):
+                    del open_moves[i]
+                    break
+        elif tag == f"{{{w}}}moveToRangeStart":
+            if el.get(_wq("name")):
+                move_to.add(el.get(_wq("name")))
+        elif tag == ole:
+            found.append((el.get(_rq("id")), el.get("Type") or "Embed", el.get("ProgID") or "",
+                          _removal(el, open_moves[-1][1] if open_moves else None)))
+    return [(rid, typ, progid, ("moved", removal[1]) if removal and removal[0] == "move"
+             and removal[2] in move_to else (("del", removal[1]) if removal else None))
+            for rid, typ, progid, removal in found]
+
+
+def _removal(el, move_name: str | None) -> tuple | None:
+    """``(kind, author, move name)`` of the nearest tracked change enclosing
+    ``el`` that removes it, or ``None``."""
+    w = _DOCX_NS["w"]
+    for anc in el.iterancestors():
+        tag = anc.tag if isinstance(anc.tag, str) else ""
+        if tag == f"{{{w}}}del":
+            return ("del", _one_line(anc.get(_wq("author")) or ""), None)
+        if tag == f"{{{w}}}moveFrom":
+            return ("move", _one_line(anc.get(_wq("author")) or ""), move_name)
+        for container, props, marker in (("tr", "trPr", "del"), ("tc", "tcPr", "cellDel")):
+            if tag == f"{{{w}}}{container}":
+                pr = next((c for c in anc if c.tag == f"{{{w}}}{props}"), None)
+                mark = next((c for c in pr if c.tag == f"{{{w}}}{marker}"), None) \
+                    if pr is not None else None
+                if mark is not None:
+                    return ("del", _one_line(mark.get(_wq("author")) or ""), None)
+    return None
+
+
+def _removal_note(removal: tuple) -> str:
+    """The plain note that opens the record of a document embedded in
+    content tracked changes removed."""
+    kind, author = removal
+    if kind == "moved":
+        return (f"embedded in content moved under tracked changes by {quoted(author)}; "
+                "this is the copy that stood where the content was moved from, and "
+                "Word shows the object only where it was moved to")
+    return (f"embedded in content deleted under tracked changes by {quoted(author)}; "
+            "Word, showing the document with its changes accepted, does not show it")
 
 
 def _parse_ole10_native(data: bytes) -> tuple[str, bytes]:
@@ -3865,6 +4408,13 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
       ``__properties_version1.0``) is kept whole as stored, under its own
       extension, and the walker's Tier-1/Tier-2 split takes it from there.
 
+    A part every referencing object of which tracked changes removed (a
+    ``w:del``, a ``w:moveFrom``, a deleted row or cell around it) is still
+    recovered, and each child it yields opens with a plain note naming the
+    removal and its author (:func:`_removal_note`): Word does not show it, and
+    without the note it read exactly as a shown object's child does. A part
+    any shown object references carries no such note.
+
     A child that is itself a ``.zip`` archive is flattened into its members,
     as an archive attached to an email is; a Word, Excel or PowerPoint package
     stored under a ``.zip`` name is kept whole and read. Anything else — any
@@ -3901,14 +4451,51 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
             return True
         return False
 
-    def objects_in(part: str) -> list[tuple[str | None, str, str]]:
-        try:
-            return _ole_objects_in_order(zf.read(part))
-        except Exception as exc:
-            notes.append(f"{M_ATTACH_SKIPPED}: '{part}' could not be parsed "
-                         f"({clip_message(str(exc), 120)}); any embedded object "
+    objects_by_part: dict[str, list | Exception] = {}
+
+    def scanned(part: str) -> list | Exception:
+        if part not in objects_by_part:
+            try:
+                objects_by_part[part] = _ole_objects_in_order(zf.read(part))
+            except Exception as exc:
+                objects_by_part[part] = exc
+        return objects_by_part[part]
+
+    def objects_in(part: str) -> list[tuple[str | None, str, str, tuple | None]]:
+        got = scanned(part)
+        if isinstance(got, Exception):
+            notes.append(f"{M_ATTACH_SKIPPED}: {quoted(part)} could not be parsed "
+                         f"({clip_message(str(got), 120)}); any embedded object "
                          "it references was not identified from it")
             return []
+        return got
+
+    def quiet_rels(part: str) -> dict:
+        try:
+            return _docx_rels(zf, part)
+        except Exception:
+            return {}
+
+    def removed_parts(owners: list[str]) -> dict[str, tuple]:
+        """``{part name: removal}`` for each embedded part every object
+        referencing it was removed by tracked changes; the first removal
+        names it. A part any object still shows is not in it. Resolved
+        without notes: the walk below writes those, in document order."""
+        seen: dict[str, list] = {}
+        for owner in owners:
+            got = scanned(owner)
+            if isinstance(got, Exception):
+                continue
+            rels = quiet_rels(owner)
+            for rid, obj_type, _progid, removal in got:
+                target = rels.get(rid) if rid is not None and obj_type != "Link" else None
+                if target is None or target.external:
+                    continue
+                part = parts.resolve(_opc_target(owner, target.target))
+                if part is not None:
+                    seen.setdefault(part, []).append(removal)
+        return {part: removals[0] for part, removals in seen.items()
+                if all(r is not None for r in removals)}
 
     def rels_of(part: str) -> dict | None:
         if part not in rels_by_part:
@@ -3917,7 +4504,7 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
             except Exception as exc:
                 rels_by_part[part] = None
                 notes.append(f"{M_ATTACH_SKIPPED}: the relationships of "
-                             f"'{part}' could not be parsed "
+                             f"{quoted(part)} could not be parsed "
                              f"({clip_message(str(exc), 120)}); the embedded "
                              "objects it references are not recovered through "
                              "them")
@@ -3934,35 +4521,38 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
 
     def unwrap_part(part_name: str) -> bool:
         """Read and unwrap one stored part; ``False`` once a cap stops the
-        expansion."""
+        expansion. A part only removed content referenced opens each child
+        it yields with a note naming the removal."""
         nonlocal total, truncated
+        removal = removed.get(part_name)
+        child_notes = (_removal_note(removal),) if removal else ()
         if over_member_cap():
             return False
         try:
             blob = zf.read(part_name)
         except Exception as exc:
-            notes.append(f"{M_ZIP_MEMBER}: '{part_name}': {str(exc)[:120]}")
+            notes.append(f"{M_ZIP_MEMBER}: {quoted(part_name)}: {str(exc)[:120]}")
             return True
         total += len(blob)
         if total > cap_bytes:
             if not truncated:
                 notes.append(f"{M_ATTACH_SKIPPED}: embedded objects "
                              f"truncated at {_ZIP_MAX_MB} MB uncompressed; "
-                             f"'{part_name}' and later objects were not read")
+                             f"{quoted(part_name)} and later objects were not read")
                 truncated = True
             return False
-        _unwrap_embedding(part_name, blob, members, notes)
+        _unwrap_embedding(part_name, blob, members, notes, child_notes=child_notes)
         return True
 
     def resolve_and_unwrap(owner_part: str, rid: str | None, obj_type: str) -> None:
         if obj_type == "Link":
             notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
-                         f"'{owner_part}' is a link rather than a stored "
+                         f"{quoted(owner_part)} is a link rather than a stored "
                          "part; it is not recovered")
             return
         if rid is None:
             notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
-                         f"'{owner_part}' has no relationship id; it is not "
+                         f"{quoted(owner_part)} has no relationship id; it is not "
                          "recovered")
             return
         rels = rels_of(owner_part)
@@ -3971,13 +4561,13 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
         target = rels.get(rid)
         if target is None:
             notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
-                         f"'{owner_part}' names relationship id {rid!r}, "
+                         f"{quoted(owner_part)} names relationship id {rid!r}, "
                          "which does not exist; it is not recovered")
             return
         if target.external:
             notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
-                         f"'{owner_part}' links to an external target "
-                         f"'{target.target}' rather than storing it; it is not "
+                         f"{quoted(owner_part)} links to an external target "
+                         f"{quoted(target.target)} rather than storing it; it is not "
                          "recovered")
             return
         written = _opc_target(owner_part, target.target)
@@ -3986,7 +4576,7 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
             if written not in seen_parts:
                 seen_parts.add(written)
                 notes.append(f"{M_ATTACH_SKIPPED}: an embedded object in "
-                             f"'{owner_part}' names part '{written}', which is "
+                             f"{quoted(owner_part)} names part {quoted(written)}, which is "
                              "not in the package; it is not recovered")
             return
         if part_name in seen_parts:
@@ -4005,18 +4595,22 @@ def expand_docx_embeddings(raw: bytes) -> ZipExpansion:
                 "Could not read Word package: it names no Word main document part")
         folder = main_part.rpartition("/")[0]
         prefix = f"{folder}/" if folder else ""
+        story_kinds = ("header", "footer", "footnotes", "endnotes", "comments")
+        quiet_aux = {parts.resolve(_opc_target(main_part, rel.target))
+                     for rel in quiet_rels(main_part).values()
+                     if rel.type in story_kinds and not rel.external}
+        removed = removed_parts([main_part] + sorted(quiet_aux - {None, main_part}))
 
-        for rid, obj_type, _progid in objects_in(main_part):
+        for rid, obj_type, _progid, _removal_of in objects_in(main_part):
             if truncated:
                 break
             resolve_and_unwrap(main_part, rid, obj_type)
 
-        aux = sorted(set(related(main_part, ("header", "footer", "footnotes",
-                                             "endnotes", "comments"))) - {main_part})
+        aux = sorted(set(related(main_part, story_kinds)) - {main_part})
         for part in aux:
             if truncated:
                 break
-            for rid, obj_type, _progid in objects_in(part):
+            for rid, obj_type, _progid, _removal_of in objects_in(part):
                 if truncated:
                     break
                 resolve_and_unwrap(part, rid, obj_type)
@@ -4050,25 +4644,26 @@ order, so the answer never depends on iteration order."""
 
 
 def _unwrap_embedding(part_name: str, blob: bytes, members: list[ZipMember],
-                      notes: list[str]) -> None:
+                      notes: list[str], *, child_notes: tuple[str, ...] = ()) -> None:
     """Append what one embedded part holds to ``members``, or name it in a
-    marked note — see :func:`expand_docx_embeddings` for the rules."""
+    marked note — see :func:`expand_docx_embeddings` for the rules. Each
+    child it yields opens with ``child_notes``."""
     from pathlib import PurePosixPath
 
     stem = PurePosixPath(part_name).stem
     basename = PurePosixPath(part_name).name
     kind = sniff_kind(blob)
     if kind == "zip":
-        _add_embedded_member(basename, blob, members, notes)
+        _add_embedded_member(basename, blob, members, notes, child_notes=child_notes)
         return
     if kind != "ole":
-        notes.append(f"{M_ATTACH_SKIPPED}: '{part_name}' is neither a ZIP nor a "
+        notes.append(f"{M_ATTACH_SKIPPED}: {quoted(part_name)} is neither a ZIP nor a "
                      "compound file; it is not recovered")
         return
     try:
         import olefile
     except ImportError as exc:  # a declared dependency; held by a test all the same
-        notes.append(f"{M_ATTACH_SKIPPED}: '{part_name}' is a compound "
+        notes.append(f"{M_ATTACH_SKIPPED}: {quoted(part_name)} is a compound "
                      f"file and 'olefile' is not installed ({exc}); it "
                      "is not recovered")
         return
@@ -4094,7 +4689,7 @@ def _unwrap_embedding(part_name: str, blob: bytes, members: list[ZipMember],
                     filename, payload = _parse_ole10_native(native)
                 except Exception as exc:
                     notes.append(
-                        f"{M_ATTACH_SKIPPED}: '{part_name}' carries a "
+                        f"{M_ATTACH_SKIPPED}: {quoted(part_name)} carries a "
                         f"malformed Ole10Native stream ({exc}); it is "
                         "not recovered")
                     return
@@ -4105,16 +4700,16 @@ def _unwrap_embedding(part_name: str, blob: bytes, members: list[ZipMember],
                 child = ((basename if _ext(basename) == legacy
                           else f"{stem}{legacy}"), blob)
     except Exception as exc:
-        notes.append(f"{M_ATTACH_SKIPPED}: '{part_name}' is a compound "
+        notes.append(f"{M_ATTACH_SKIPPED}: {quoted(part_name)} is a compound "
                      f"file that could not be read ({exc}); it is not "
                      "recovered")
         return
     if child is None:
-        notes.append(f"{M_ATTACH_SKIPPED}: '{part_name}' is a compound file "
+        notes.append(f"{M_ATTACH_SKIPPED}: {quoted(part_name)} is a compound file "
                      "holding no PDF, no Package object and no legacy Office "
                      "document; it is not recovered")
         return
-    _add_embedded_member(child[0], child[1], members, notes)
+    _add_embedded_member(child[0], child[1], members, notes, child_notes=child_notes)
 
 
 def _ole10_child_name(filename: str, stem: str) -> str:
@@ -4139,30 +4734,32 @@ def _package_stream_extension(payload: bytes) -> str:
 
 
 def _add_embedded_member(name: str, payload: bytes, members: list[ZipMember],
-                         notes: list[str]) -> None:
+                         notes: list[str], *, child_notes: tuple[str, ...] = ()) -> None:
     """One recovered child, or — for a ``.zip`` archive — each of its members,
     named under it, as :func:`expand_eml_attachments` flattens an attached
     archive. Kept whole, a zip became one unsupported record whose members
     were never read. A Word, Excel or PowerPoint package whose stored name
     ends ``.zip`` is kept whole, and read; unpacked, its text and its own
     embedded documents became unrecognized XML parts. A second archive with a
-    name already used is listed under a numbered name."""
+    name already used is listed under a numbered name. Every child opens with
+    ``child_notes``."""
     if _ext(name) != ".zip" or is_office_package(payload):
-        members.append(ZipMember(name, payload, len(members)))
+        members.append(ZipMember(name, payload, len(members), child_notes))
         return
     try:
         inner = expand_zip(payload)
     except Exception as exc:
-        notes.append(f"{M_ATTACH_SKIPPED}: embedded archive '{name}' could not "
+        notes.append(f"{M_ATTACH_SKIPPED}: embedded archive {quoted(name)} could not "
                      f"be read ({clip_message(str(exc), 120)}); its members "
                      "are not recovered")
         return
     prefix = _unused_prefix(name, members, notes, "embedded archive")
     for n in inner.notes:
-        notes.append(f"{prefix}: {n}" if has_evidence_marker(n)
-                     else f"{M_ATTACH_SKIPPED}: embedded archive '{prefix}': {n}")
+        notes.append(f"{quoted(prefix)}: {n}" if has_evidence_marker(n)
+                     else f"{M_ATTACH_SKIPPED}: embedded archive {quoted(prefix)}: {n}")
     for m in inner.members:
-        members.append(ZipMember(f"{prefix}/{m.name}", m.raw, len(members)))
+        members.append(ZipMember(f"{prefix}/{m.name}", m.raw, len(members),
+                                 child_notes + m.notes))
 
 
 # ---------------------------------------------------------------------------
@@ -4200,6 +4797,9 @@ _ABS_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\|(?<![\w.])/)[^\s\"'<>|]*")
 # A Python object's default repr, which carries its memory address:
 # "<_io.BytesIO object at 0x000001AD7ECCB8D0>", "<function f at 0x7f...>".
 _OBJECT_ADDRESS = re.compile(r"(<[^<>]*?) at 0x[0-9A-Fa-f]+>")
+# A set of two or more quoted strings, as Python prints one.
+_STRING_SET = re.compile(
+    r"""\{((?:'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*")(?:, (?:'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"))+)\}""")
 # A name Python's tempfile module made: "tmp" and 8 random characters.
 _TEMP_NAME = re.compile(r"^tmp[a-z0-9_]{8}(\.[A-Za-z0-9]+)?([^A-Za-z0-9_]*)$")
 
@@ -4235,21 +4835,39 @@ def sanitize_message(msg: str) -> str:
     * an object's default repr loses its memory address:
       python-docx rejects a macro-enabled main part with
       ``file '<_io.BytesIO object at 0x000001AD7ECCB8D0>' is not a Word
-      file``, and the address differed between two runs of one file.
+      file``, and the address differed between two runs of one file;
+    * a set of quoted strings is written in sorted order: a set prints in an
+      order that follows the interpreter's hash seed, and openpyxl names the
+      values an attribute accepts that way
+      (``{'normal', 'pageBreakPreview', 'pageLayout'}``).
 
-    Nothing else in the text of an exception reaching a record varies by run:
-    DocIQ's own messages name no process id, thread, time or duration (the
-    watchdog's elapsed time was taken out of ``walker._abandoned`` for this
-    reason), and page notes carry fixed text only.
+    These are the run-varying texts known to reach a record: DocIQ's own
+    messages name no process id, thread, time or duration (the watchdog's
+    elapsed time was taken out of ``walker._abandoned`` for this reason), page
+    notes carry fixed text, and a library message is held to this list only
+    by the two-interpreter tests, one per shape found; a new shape needs its
+    own line here and its own test. A value :func:`quoted` wrote keeps its
+    escapes, so a path cut to its last part never unbalances the quotes.
     """
     if not msg:
         return msg
 
     def _basename(m: re.Match[str]) -> str:
-        base = m.group(0).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or "<path>"
+        whole = m.group(0)
+        base = whole.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or "<path>"
         temp = _TEMP_NAME.match(base)
-        return f"<temp file>{temp.group(1) or ''}{temp.group(2)}" if temp else base
+        base = f"<temp file>{temp.group(1) or ''}{temp.group(2)}" if temp else base
+        # An odd run of backslashes just before a quote is that quote's escape.
+        trailing = len(whole) - len(whole.rstrip("\\"))
+        if trailing % 2 and m.string[m.end():m.end() + 1] in ("'", '"'):
+            base += "\\"
+        return base
 
+    def _sorted_set(m: re.Match[str]) -> str:
+        items = _QUOTED_VALUE.findall(m.group(1))
+        return "{" + ", ".join(sorted(items)) + "}"
+
+    msg = _STRING_SET.sub(_sorted_set, msg)
     return _ABS_PATH.sub(_basename, _OBJECT_ADDRESS.sub(r"\1>", msg))
 
 
@@ -4360,11 +4978,21 @@ def extract(filename: str, raw: bytes,
         # content first: a Word file named .txt was read as its raw zip
         # bytes and reported FULL.
         if ext in _NEVER_FAILING_EXTS and sniff_kind(raw):
+            kind = sniff_kind(raw)
             try:
                 pages, notes = _retry_by_content(ext, raw, opt, ExtractionError(
-                    f"{ext} name on {_SNIFF_LABELS[sniff_kind(raw)]} bytes"))
+                    f"{ext} name on {_SNIFF_LABELS[kind]} bytes"))
             except Exception:
+                # Nothing read the content as what it is: the text reader's
+                # page is the file's raw bytes, and that is a gap, not a read.
                 pages, notes = _dispatch(ext, raw, opt)
+                tried = [label for retry_ext, label in _SNIFF_CHAINS[kind]
+                         if retry_ext != _EXT_ALIASES.get(ext, ext)]
+                notes = list(notes) + [
+                    f"{M_CONTENT_UNREAD}: extension {ext} but content is "
+                    f"{_SNIFF_LABELS[kind]}, which the "
+                    f"{', '.join(tried) if tried else 'matching'} reader(s) could not "
+                    "read; the file's bytes were read as text instead"]
         else:
             pages, notes = _dispatch(ext, raw, opt)
     except Exception as exc:
@@ -4373,6 +5001,8 @@ def extract(filename: str, raw: bytes,
         except Exception as exc2:
             return ExtractedDoc(status=ProcessingStatus.FAILED,
                                 error=clip_message(sanitize_message(str(exc2)), 400))
+    if ext == ".zip":
+        notes = list(notes) + _package_extras_notes(raw)
     notes = [sanitize_message(n) for n in notes]
     # §4 Stage 2: the flag is driven by the page's MEAN confidence against the
     # run threshold. A page that failed OCR outright flags too — it is exactly
