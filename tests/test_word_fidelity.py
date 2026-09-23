@@ -1549,6 +1549,31 @@ def test_a_deleted_chart_is_counted_as_a_deletion_not_as_an_unread_chart():
     marked = [n for n in notes if ex.has_evidence_marker(n)]
     assert marked == [f"{ex.M_WORD_TRACKED_DELETION}: " + _DELETED_GRAPHIC_NOTE.format(n=1)], notes
 
+    # Once per OUTERMOST graphic, however it nests (Word review round 4, C): a
+    # text box's paragraphs are read by a call of their own, and an object,
+    # picture or chart inside a deleted text box used to be counted again.
+    obj = '<w:r><w:object><o:OLEObject Type="Embed" ProgID="Package" r:id="rIdO"/></w:object></w:r>'
+    vml_box = ('<w:r><w:pict><v:shape><v:textbox><w:txbxContent>{}</w:txbxContent>'
+               '</v:textbox></v:shape></w:pict></w:r>')
+    for label, body, n in [
+        ("text box holding an object", _p(_t("KEPT"), _del("Ann", _text_box(_p(obj)))), 1),
+        ("text box holding a chart", _p(_t("KEPT"), _del("Ann", _text_box(_p(chart)))), 1),
+        ("VML text box holding an object",
+         _p(_t("KEPT"), _del("Ann", vml_box.format(_p(obj)))), 1),
+        ("text box in a text box holding an object",
+         _p(_t("KEPT"), _del("Ann", _text_box(_p(_text_box(_p(obj)))))), 1),
+        ("shown text box holding a deleted object",
+         _p(_t("KEPT"), _text_box(_p(_del("Ann", obj)))), 1),
+        ("a deleted text box and a deleted object beside it",
+         _p(_t("KEPT"), _del("Ann", _text_box(_p(_t("x"))) + obj)), 2),
+    ]:
+        got = ex.extract("built.docx", _raw_docx(body, rels=[("rIdO", "oleObject",
+                                                               "embeddings/x.xml")],
+                                                 parts={"word/embeddings/x.xml": "INVENTED"}))
+        marked = [x for x in got.notes if x.startswith(ex.M_WORD_TRACKED_DELETION)]
+        assert marked == [f"{ex.M_WORD_TRACKED_DELETION}: "
+                          + _DELETED_GRAPHIC_NOTE.format(n=n)], (label, got.notes)
+
 
 # ---------------------------------------------------------------------------
 # Parts are found through the main part's relationships, never by file name
@@ -2034,6 +2059,58 @@ def test_ordinary_text_in_a_symbol_font_run_reads_as_the_font_draws_it(case):
     assert marked == ([f"{ex.M_WORD_UNREAD}: {count} symbol character(s) with no standard text "
                        f"mapping (font(s): {fonts}), each shown as U+FFFD"] if disclosed else []), (
         case, notes)
+
+
+def _font_run(font: str, text: str) -> str:
+    return (f'<w:r><w:rPr><w:rFonts w:ascii="{font}" w:hAnsi="{font}"/></w:rPr>'
+            f'<w:t xml:space="preserve">{text}</w:t></w:r>')
+
+
+@pytest.mark.parametrize("font,micro,umlaut,disclosed", [
+    ("Symbol", "\u00b5", "\u23ab", None),
+    ("SymbolMT", "\u00b5", "\u23ab", None),
+    ("Symbol MT", "\u00b5", "\u23ab", None),
+    ("symbol-regular", "\u00b5", "\u23ab", None),
+    ("ZapfDingbatsITC", "\u274d", "\u27bc", None),
+    ("ITC Zapf Dingbats", "\u274d", "\u27bc", None),
+    ("Wingdings-Regular", "\ufffd", "\ufffd", "Wingdings-Regular"),
+    ("Wingdings2", "\ufffd", "\ufffd", "Wingdings2"),
+    ("MTExtra", "\ufffd", "\ufffd", "MTExtra"),
+    ("Invented Dingbats", "\ufffd", "\ufffd", "Invented Dingbats"),
+    ("Invented Serif", "m", "\u00fc", None),
+    ("ArialMT", "m", "\u00fc", None),
+])
+def test_a_symbol_font_is_known_by_its_aliases_and_by_the_files_own_font_table(
+        font, micro, umlaut, disclosed):
+    """Word review round 4, C: symbol fonts were known by a closed list of
+    names, so the PostScript and foundry names a converted file carries
+    (``SymbolMT``, ``ZapfDingbatsITC``, ``Wingdings-Regular``) and a font the
+    file's own font table declares symbol-charset (``w:charset w:val="02"``)
+    read as Latin letters with no note. A name is now folded to its family
+    (case, spaces, hyphens, and ``MT``/``ITC``/``Regular`` affixes ignored),
+    and a declared symbol-charset font is read as Wingdings is. A text font
+    declared with another charset, or an ``MT`` text font, is untouched."""
+    table = _part("fonts", "".join(
+        f'<w:font w:name="{name}"><w:charset w:val="{cs}"/><w:family w:val="auto"/></w:font>'
+        for name, cs in (("Invented Dingbats", "02"), ("Invented Serif", "00"),
+                         ("Symbol", "02"), ("Wingdings2", "02"))))
+    body = _p(_font_run("Arial", "dose 5 "), _font_run(font, "m"), _font_run("Arial", "g"),
+              _font_run(font, " \u00fc"))
+    text, notes = _read(_raw_docx(body, parts={"word/fontTable.xml": table},
+                                  rels=[("rIdFT", "fontTable", "fontTable.xml")]))
+    assert text == f"dose 5 {micro}g {umlaut}", (font, text)
+    marked = [n for n in notes if ex.has_evidence_marker(n) and "symbol" in n]
+    assert marked == ([f"{ex.M_WORD_UNREAD}: 2 symbol character(s) with no standard text "
+                       f"mapping (font(s): '{disclosed}'), each shown as U+FFFD"]
+                      if disclosed else []), (font, notes)
+
+
+def test_without_a_font_table_an_undeclared_font_reads_as_its_characters():
+    """The charset rule reads only what the file declares: the same run in
+    ``Invented Dingbats`` with no font table part is its characters."""
+    body = _p(_font_run("Invented Dingbats", "m"))
+    text, notes = _read(_raw_docx(body))
+    assert text == "m" and not [n for n in notes if "symbol" in n], (text, notes)
 
 
 def test_the_zapf_dingbats_table_matches_reportlabs_codec():

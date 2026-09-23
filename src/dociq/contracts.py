@@ -291,9 +291,9 @@ Word reader appends of the passages deleted under tracked changes (D-56), set
 by that reader only. Every Bates zone read skips exactly those lines. Before it,
 the zone skipped every line starting ``[deleted by `` on every page of every
 format, so a PDF, email, OCR'd or text page that typed such a line lost it from
-its zone: a stamp on it went unread, and on a short page the tail moved up by a
-line. Additive with a safe default, folded into A-25 (which this sprint already
-owed, D-51) and into the unreleased 2.3.0, as D-49's field was folded into
+its zone: a stamp on it went unread, and on a page longer than the zone the
+tail moved up by a line. Additive with a safe default, folded into A-25 (which
+this sprint already owed, D-51) and into the unreleased 2.3.0, as D-49's field was folded into
 A-24. Like every field it is serialized and hashed, so every page's identity
 moves once, by a constant ``None`` where a page has no list.
 

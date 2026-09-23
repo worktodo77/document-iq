@@ -1019,6 +1019,12 @@ def _name_parts(name: str) -> tuple[list[tuple[str, str]], list[str]]:
     return parts, reasons
 
 
+_NAME_NOTE_CHARS = 500
+"""How much of a stored or recorded name a child's name note quotes. A longer
+name is quoted to this many characters and the cut is said after the quote
+(:func:`dociq.ingest.extract.quoted`); a zip allows a 65,535-byte name."""
+
+
 def _child_names(members: Sequence[ex.ZipMember]) -> list[tuple[str, str | None]]:
     """``(safe name, note)`` for every member of ONE container, in member
     order. The safe name becomes part of a ``rel_path`` and a resume-journal
@@ -1090,9 +1096,12 @@ def _child_names(members: Sequence[ex.ZipMember]) -> list[tuple[str, str | None]
         note = None
         if final != plain:
             why = "; ".join(dict.fromkeys(reasons))
-            note = ex.clip_message(
-                f"stored name {m.name!r} is recorded as {final!r}"
-                + (f": {why}" if why else ""), 1200)
+            # Each name is clipped before it is quoted, never the note: a
+            # note cut through a quoted name left the quote open (Word review
+            # round 4). The reasons are DocIQ's own, and bounded.
+            note = (f"stored name {ex.quoted(m.name, _NAME_NOTE_CHARS)} is recorded "
+                    f"as {ex.quoted(final, _NAME_NOTE_CHARS)}"
+                    + (f": {why}" if why else ""))
         out.append((final, note))
     return out
 

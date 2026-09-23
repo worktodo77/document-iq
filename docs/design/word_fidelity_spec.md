@@ -188,13 +188,18 @@ not disclosed: they are computed, not stored, text; that gap is recorded, not cl
    VML `v:textpath` takes its style's `font-family`. In Symbol a code (0x20-0xFF, or its F020-F0FF
    form) maps through the Adobe Symbol encoding (held equal to reportlab's `symbol` codec; Adobe's
    private-use code points for the serif and sans-serif (c), (R), TM and the bracket, brace and
-   arrow pieces become the characters they draw); in Zapf Dingbats (`ZapfDingbats`,
-   `Zapf Dingbats`, `ITC Zapf Dingbats`) through reportlab's `zapfdingbats` codec, held equal by a
-   test. In Wingdings, Webdings, Marlett, MT Extra and Monotype Sorts (no dependency ships a table
-   naming it, so it is not read through Zapf Dingbats'), and for a private-use, surrogate, control
-   or malformed code in any font, the character keeps its place as U+FFFD and one marked note
-   counts them and names the fonts, quoted. A space is a space in every font; any other character
-   is itself. Measured on the 53 corpus `.docx`, OCR off (2026-09-23, against 2671947): 125
+   arrow pieces become the characters they draw); in Zapf Dingbats through reportlab's
+   `zapfdingbats` codec, held equal by a test. In Wingdings (1-3), Webdings, Marlett, MT Extra and
+   Monotype Sorts (no dependency ships a table naming it, so it is not read through Zapf Dingbats'),
+   in any font the file's own font table (`word/fontTable.xml`, by its relationship) declares with
+   the symbol character set (`w:charset w:val="02"`) other than Symbol and Zapf Dingbats, and for
+   a private-use, surrogate, control or malformed code in any font, the character keeps its place
+   as U+FFFD and one marked note counts them and names the fonts, quoted. A font name is matched
+   by its family (fix round 5): case, spaces, hyphens and underscores ignored, and the PostScript
+   and foundry affixes `MT`, `ITC` and `Regular` removed, so `SymbolMT`, `Symbol MT`,
+   `ZapfDingbatsITC`, `ITC Zapf Dingbats` and `Wingdings-Regular` are those fonts (review round 4:
+   they read as Latin letters with no note); `ArialMT` is Arial, a text font. A space is a space in
+   every font; any other character is itself. Measured on the 53 corpus `.docx`, OCR off (2026-09-23, against 2671947): 125
    characters in ordinary Wingdings runs now stand as U+FFFD (496 placeholders in 49 documents,
    was 371 in 41; 8 documents' text changed, nothing else in them), and 0 characters were mapped
    through the Symbol or Zapf Dingbats table: no corpus run text is set in either. Numbering (list-label) fonts are
@@ -235,18 +240,26 @@ otherwise have it unpacked as an archive: at the top level, inside an archive, a
 `.eml` or `.email` is tried by content first, since those readers never fail; when no reader reads it
 by content either, its bytes are read as text and a FINAL-marked note (`M_CONTENT_UNREAD`) says so
 (fix round 3: it read FULL with no marker). A second archive with a name already used in one container
-is listed under a numbered name with a plain note. A `.zip` read as the Office document at its root
-names, in a marked note, every member that is not part of that document (no relationship chain from
-the package's `_rels/.rels` reaches it; `[Content_Types].xml` and relationship parts aside): fix round
-3, they were in no record and no note.
+is listed under a numbered name with a plain note. A zip read by content as the Office document at
+its root, under a name that is not that document's own (`.zip`, a text name, `.pdf`, an attachment's
+or archive member's name), names, in a marked note (`this <extension> is read as the Office document
+at its root, ...`), every member that is not part of that document (no relationship chain from the
+package's `_rels/.rels` reaches it; `[Content_Types].xml` and relationship parts aside): fix round
+3, they were in no record and no note, and fix round 5, the note fired only for the name `.zip`.
+Under its own name (`.docx` holding a Word package) it is the file Word opens, which ignores such
+members too, and no note is written. A zip or compound file named `.pdf` is tried by content
+first (fix round 5): the PDF reader finds a PDF anywhere in the bytes, and a Word file named `.pdf`
+that embeds an Acrobat object was read as that object's pages.
 
 ### A4. D-56: tracked deletions
 
 * **Order of the page.** Header parts, the body, footnotes, endnotes, comments, the deletion list, then
   footer parts. The footer still ends the page.
-* **Form.** One line per deleted passage: `[deleted by <author>] <text>`, no dates. Line breaks inside
-  a passage are spaces, so the label stands on every line a passage occupies. An author missing from
-  the file is empty.
+* **Form.** One line per deleted passage: `[deleted by <author>] <text>`, no dates. Each run of line
+  breaks inside a passage is one space (every break `str.splitlines` knows: CR, LF, NEL, LS, PS and
+  the rest; fix round 5, NEL, LS and PS stayed in the line), so the label stands on every line a
+  passage occupies. An author missing from the file is empty. The line is built already normalized
+  (`_deletion_list_line`), so it is character for character the line the page carries.
 * **Order of the list.** Page-text order: the header parts' deletions, the body's (a table cell's in
   place, a text box's after its anchoring paragraph's own), the notes' and comments', the footer parts'.
 * **Grouping.** Consecutive removed characters by one author, in one paragraph, form one passage,
@@ -274,7 +287,9 @@ the package's `_rels/.rels` reaches it; `[Content_Types].xml` and relationship p
   own text (kept in its own part) is not read; a document embedded in it is recovered, where it can
   be, as a child document. A graphic moved away under a named move whose destination was read is
   shown there, and is not counted. Fix round 3: the note said "any text inside them is listed with
-  the deletions", which held only for a text box.
+  the deletions", which held only for a text box. Fix round 5: a graphic inside a deleted text box
+  (whose paragraphs are read by a call of their own) was counted again; the depth is now the
+  reader's, across text boxes.
 * **Embedded documents in removed content** (fix round 3). A part every object referencing which
   sits inside a `w:del`, a `w:moveFrom`, a deleted row or a deleted cell is recovered as before, and
   each child it yields opens with a plain note: `embedded in content deleted under tracked changes by
@@ -283,7 +298,13 @@ the package's `_rels/.rels` reaches it; `[Content_Types].xml` and relationship p
   tracked changes by '<author>'; this is the copy that stood where the content was moved from, and
   Word shows the object only where it was moved to`. The nearest enclosing change names the author.
   A part any shown object references carries no such note. Every member of an archive recovered
-  from one carries it; a grandchild does not repeat it (its parent record carries it).
+  from one carries it; a grandchild does not repeat it (its parent record carries it). An object is
+  VML's `o:OLEObject` or either WordprocessingML form a `w:object` may hold instead,
+  `w:objectEmbed` or `w:objectLink` (fix round 5: only the VML form was read, so a deleted
+  `w:objectEmbed`'s child had no note). The same holds for a header or footer part no section
+  displays (A2.6, by the reader's own rule): a part every object referencing which stands in one
+  yields children that open with `embedded in '<part>', a header or footer part that no section of
+  the document displays; Word does not show it` (fix round 5).
 * **The count note.** A listed deletion carries no note: it is in the output, not missing, and
   accounting does not count it as lost. `M_WORD_TRACKED_DELETION` remains only for deleted graphics.
 * **Dates and Bates.** A date in the list is found by date detection but, placed after the body, is
@@ -303,7 +324,10 @@ the package's `_rels/.rels` reaches it; `[Content_Types].xml` and relationship p
   and raises rather than guesses if the two disagree; only the Word reader sets it, on its
   synthetic page, and the contract refuses it on any other kind or over lines that do not start
   with the label. `zone_has_candidate` (the footer re-OCR trigger) reads a PDF page's OCR text
-  before any record exists, where no list can be.
+  before any record exists, where no list can be. Fix round 5: every sentence of
+  `slice_lines`' docstring, the list counting toward neither the head bound nor the tail bound
+  among them, is held by a test that a mutant of it fails, and on a Word page with the stamp on
+  either side of the list, in the head and in the tail.
 
 ### A5. Stored names of container children
 
@@ -313,7 +337,8 @@ name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, COM and LPT with superscript 1-3) gets
 folder is one folder for all its members, and yields to a stored folder already holding its new name
 (`_Aux__2/`); repeated whole names are numbered after the first; a name with nothing left is
 `unnamed_child_<order+1>`. Whenever the recorded name differs from the stored one other than by NFC or
-separators, the child's first note quotes the stored name exactly (not scrubbed) and gives the reasons. An
+separators, the child's first note quotes the stored name exactly (not scrubbed; a name over 500
+characters, its first 500, the cut said after the quote) and gives the reasons. An
 Ole10Native stored path is cut to its basename in the embedded-object reader first; its folders are the
 author's own path, which the message scrubber would remove from any note.
 
@@ -325,8 +350,14 @@ container holds. `has_transient_marker` and `has_final_marker` remove quoted val
 a marker phrase, so a member named `archive member unreadable: index.txt`, read in full, no longer
 marks its name note as a retryable gap (the accounting line reported two losses that did not happen).
 Every marker phrase DocIQ writes stands outside quotes. `sanitize_message` keeps a quoted value's
-escapes whole when it cuts a path inside one to its last part. An exception's own text, after the
-marker, is the library's.
+escapes whole when it cuts a path inside one to its last part. A value that can be long is clipped
+before it is quoted (`quoted(value, limit)`), never the note around it (fix round 5: a Date header
+over 300 characters and a stored name over 1,200 were quoted and then the note was cut, leaving the
+quote open). An exception's text can repeat a file value: the one unmarked note that carries one,
+the `.eml` Date note, quotes it (fix round 5: a Date header holding a double quote reached the note
+unquoted through the parser's message, and the accounting line reported a retryable gap that did not
+happen). In a marked note an exception's text, after the marker, is the library's, unquoted: a
+marker phrase in it can move that note between retryable and final, never make a gap of nothing.
 
 ### A6. Note table: every note the package emits
 
@@ -342,7 +373,7 @@ tree: every one killed).
 | `disclosure_notes` | N SmartArt drawing(s) | [M] WORD_UNREAD | fidelity `test_unread_constructs_in_footer_endnote_and_comment` |
 | `disclosure_notes` | N picture(s), each covering at least 25% | [M] WORD_UNREAD | fidelity `test_a_large_picture_is_disclosed_and_a_small_one_is_not` |
 | `disclosure_notes` | N picture(s) could not be measured | [M] IMAGE_UNREAD | fidelity `test_an_unmeasurable_picture_is_disclosed_as_unmeasured` |
-| `disclosure_notes` | N symbol character(s) with no standard text mapping (font(s): '...') | [M] WORD_UNREAD | fidelity `test_an_unmapped_symbol_keeps_its_place_and_is_disclosed`, `test_ordinary_text_in_a_symbol_font_run_reads_as_the_font_draws_it` |
+| `disclosure_notes` | N symbol character(s) with no standard text mapping (font(s): '...') | [M] WORD_UNREAD | fidelity `test_an_unmapped_symbol_keeps_its_place_and_is_disclosed`, `test_ordinary_text_in_a_symbol_font_run_reads_as_the_font_draws_it`, `test_a_symbol_font_is_known_by_its_aliases_and_by_the_files_own_font_table` |
 | `disclosure_notes` | N sub-document link(s) | [M] WORD_UNREAD | fidelity `test_ruby_nested_field_codes_block_alternate_content_and_subdocuments` |
 | `disclosure_notes` | N header/footer part(s) that no section displays | [M] WORD_UNREAD | fidelity `test_a_header_part_no_section_displays_is_disclosed`, `test_header_and_footer_parts_no_section_references_are_disclosed`, `test_a_hidden_first_page_header_holding_only_a_chart_is_disclosed_once` |
 | `disclosure_notes` | N field code(s) never ended; the text after each, to the end of its story (...), was read as field code and left out | [M] WORD_UNREAD | fidelity `test_a_field_code_running_on_past_a_paragraph_mark_stays_code`, `test_an_open_field_code_is_counted_only_where_it_swallowed_text_in_its_own_story` |
@@ -377,8 +408,9 @@ tree: every one killed).
 | `walker._child_names` | stored name '...' is recorded as '...': <reasons> | plain, unscrubbed | embeddings `test_a_changed_stored_name_loses_as_little_as_possible_and_is_quoted_exactly` |
 | `extract` (content sniff) | extension .X but content is ...; recovered via ... extractor | plain | embeddings `test_a_word_package_under_a_text_name_is_read_as_word` |
 | `extract` (text-name fallback) | extension .X but content is ..., which the ... reader(s) could not read; the file's bytes were read as text instead | [M] CONTENT_UNREAD | embeddings `test_bytes_no_reader_can_read_under_a_text_name_are_read_as_text_with_a_marker` |
-| `_package_extras_notes` | this .zip is read as the Office document at its root, and N member(s) that are not part of that document were not read: '...' | [M] ATTACH_SKIPPED | embeddings `test_a_zip_read_as_the_office_document_at_its_root_names_its_other_members` |
-| `_removal_note` (child's own record, via `ZipMember.notes`) | embedded in content deleted (or moved) under tracked changes by '...'; ... | plain | embeddings `test_a_document_embedded_in_removed_content_says_so_and_a_shown_one_does_not` |
+| `_package_extras_notes` | this <extension> is read as the Office document at its root, and N member(s) that are not part of that document were not read: '...' | [M] ATTACH_SKIPPED | embeddings `test_a_zip_read_as_the_office_document_at_its_root_names_its_other_members`, `test_office_content_read_under_any_other_name_names_its_other_members` |
+| `_removal_note` (child's own record, via `ZipMember.notes`) | embedded in content deleted (or moved) under tracked changes by '...'; ... | plain | embeddings `test_a_document_embedded_in_removed_content_says_so_and_a_shown_one_does_not`, `test_an_object_written_as_w_object_embed_or_link_is_read_as_the_vml_form_is` |
+| `_removal_note` (child's own record, via `ZipMember.notes`) | embedded in '...', a header or footer part that no section of the document displays; Word does not show it | plain | embeddings `test_a_document_embedded_in_a_header_part_no_section_displays_says_so` |
 
 `sanitize_message` removes an object repr's memory address and a `tempfile` name, and writes a set of
 quoted strings in sorted order (openpyxl names an attribute's accepted values as a set, whose order

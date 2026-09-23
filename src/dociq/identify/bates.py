@@ -145,7 +145,13 @@ class BatesZone:
         neither be read as the locator nor refuse the real one as ambiguous.
         No line is ever skipped for what it says (D-59): with no span, every
         line is eligible, including one that starts ``[deleted by``. Indices
-        stay positions in ``text``."""
+        stay positions in ``text``. Each line is returned stripped; a blank
+        line takes its place in a bound but is not returned. A span that does
+        not lie inside the text is refused (``ValueError``), never clipped.
+
+        ``tests/test_bates_deletion_span.py`` holds each sentence here to a
+        test that a mutant of it fails (the list above its ``slice_lines``
+        section)."""
         lines = [ln.strip() for ln in text.split("\n")]
         if skip is None:
             eligible = list(range(len(lines)))

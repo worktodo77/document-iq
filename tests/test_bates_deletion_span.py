@@ -10,12 +10,15 @@ types such a line lost it from its zone. D-59 rules a contract field instead:
 exactly the lines it names.
 
 Every test here was watched failing on ``347df32`` (the text match), by full node
-id. All text is invented (D-12).
+id, or, for those Word review round 4 asked for (from the ``slice_lines`` section
+on), failing on ``85efb95`` or under the named round-4 mutant applied to it. All
+text is invented (D-12).
 """
 
 from __future__ import annotations
 
 import ast
+import html
 import json
 import pathlib
 
@@ -368,3 +371,290 @@ def test_no_zone_read_matches_the_deletion_label():
                         and node.func.attr == "slice_lines"):
                     slicers.add(fn.name)
     assert slicers == {"page_lines", "zone_has_candidate"}, slicers
+
+
+# ---------------------------------------------------------------------------
+# slice_lines, sentence by sentence (Word review round 4, finding 1)
+#
+# Every property BatesZone.slice_lines' docstring asserts, and the test a
+# mutant of it fails (word_fix5 mutation run):
+#   (a) indices stay positions in ``text``, even past a span
+#         -> test_slice_lines_indices_count_the_whole_text_past_a_span
+#   (b) head first then tail, in text order
+#         -> test_slice_lines_indices_count_the_whole_text_past_a_span (exact order)
+#   (c) no line repeated when the page is shorter than the zone
+#         -> test_slice_lines_repeats_no_line_on_a_page_shorter_than_the_zone
+#   (d) the span is not part of the zone
+#         -> test_slice_lines_leaves_the_span_out_of_a_short_page
+#   (e) the span counts toward neither bound: head
+#         -> test_slice_lines_head_is_chosen_from_the_lines_outside_the_span,
+#            test_a_word_stamp_just_below_a_list_in_the_head_stays_in_the_zone
+#   (f) ... nor tail
+#         -> test_slice_lines_tail_is_chosen_from_the_lines_outside_the_span,
+#            test_a_word_stamp_just_above_a_list_in_the_tail_stays_in_the_zone
+#   (g) no line skipped for what it says
+#         -> test_slice_lines_with_no_span_skips_no_line_for_what_it_says
+#            (and the format tests at the top of this file)
+#   (h) lines stripped; a blank line takes its place in a bound, unreturned
+#         -> test_slice_lines_strips_lines_and_a_blank_line_holds_its_place
+#   (i) a span outside the text is refused, never clipped
+#         -> test_slice_lines_refuses_a_span_outside_the_text
+# ---------------------------------------------------------------------------
+
+Z = BatesZone()
+
+
+def _numbered(n: int) -> str:
+    return "\n".join(f"L{i}" for i in range(n))
+
+
+def _zone(text: str, skip=None) -> list[tuple[int, str]]:
+    return list(Z.slice_lines(text, skip=skip))
+
+
+def test_slice_lines_indices_count_the_whole_text_past_a_span():
+    got = _zone(_numbered(20), skip=(8, 3))
+    assert got == [(0, "L0"), (1, "L1"), (2, "L2")] + [(i, f"L{i}") for i in range(12, 20)]
+
+
+def test_slice_lines_repeats_no_line_on_a_page_shorter_than_the_zone():
+    assert _zone(_numbered(5)) == [(i, f"L{i}") for i in range(5)]
+    assert _zone(_numbered(11)) == [(i, f"L{i}") for i in range(11)]
+
+
+def test_slice_lines_leaves_the_span_out_of_a_short_page():
+    assert _zone(_numbered(6), skip=(2, 2)) == [(0, "L0"), (1, "L1"), (4, "L4"), (5, "L5")]
+
+
+def test_slice_lines_head_is_chosen_from_the_lines_outside_the_span():
+    """A span at the top pushes the head down past it: three lines, none of
+    them the span's, and the tail is still the text's own last eight."""
+    got = _zone(_numbered(20), skip=(1, 4))
+    assert got == [(0, "L0"), (5, "L5"), (6, "L6")] + [(i, f"L{i}") for i in range(12, 20)]
+
+
+def test_slice_lines_tail_is_chosen_from_the_lines_outside_the_span():
+    """A span near the end pushes the tail up past it: eight lines, none of
+    them the span's."""
+    got = _zone(_numbered(20), skip=(15, 3))
+    assert got == ([(0, "L0"), (1, "L1"), (2, "L2")]
+                   + [(i, f"L{i}") for i in (9, 10, 11, 12, 13, 14, 18, 19)])
+
+
+def test_slice_lines_with_no_span_skips_no_line_for_what_it_says():
+    lines = ["[deleted by Ann] head"] + [f"L{i}" for i in range(1, 12)] + [
+        "[deleted by Bob] tail"]
+    assert _zone("\n".join(lines)) == [(0, lines[0]), (1, "L1"), (2, "L2")] + [
+        (i, lines[i]) for i in range(5, 13)]
+
+
+def test_slice_lines_strips_lines_and_a_blank_line_holds_its_place():
+    lines = ["  A  ", "", "B", "C"] + [f"L{i}" for i in range(4, 20)]
+    got = _zone("\n".join(lines))
+    assert got == [(0, "A"), (2, "B")] + [(i, f"L{i}") for i in range(12, 20)]
+    lines[15] = "   "
+    got = _zone("\n".join(lines))
+    assert got == [(0, "A"), (2, "B")] + [(i, f"L{i}") for i in range(12, 20) if i != 15]
+
+
+def test_slice_lines_refuses_a_span_outside_the_text():
+    for bad in ((-1, 1), (0, 0), (18, 3), (20, 1), (3, -1)):
+        with pytest.raises(ValueError, match="does not lie inside"):
+            Z.slice_lines(_numbered(20), skip=bad)
+
+
+# The same two bounds on a real Word page, with the stamp on either side of the
+# list, read end to end: extract, page_lines, detect_candidates and
+# apply_bates_reported. Twelve footer paragraphs make the page long enough that
+# the head and the tail are different lines.
+
+_TWELVE_FOOTER = [f"Footer line {i}" for i in range(1, 12)]
+
+
+def _read_word(body: str, **kw) -> PageRecord:
+    got = ex.extract("zone.docx", _raw_docx(body, **kw))
+    assert got.status.value == "full", (got.status, got.error, got.notes)
+    return got.pages[0]
+
+
+def _applied(p: PageRecord) -> tuple[list[str], str | None]:
+    doc = document("zone.docx", (p,))
+    cands = [c.raw for c in detect_candidates((doc,))]
+    app = apply_bates_reported((doc,), CONFIRMED_MNFV)
+    return cands, app.documents[0].pages[0].bates
+
+
+def test_a_word_stamp_just_above_a_list_in_the_tail_stays_in_the_zone():
+    """Round 4's reproduction: the stamp is the last body line but one clause
+    block, and six deletion-list lines follow. With the list counted toward the
+    tail, the tail would be clauses and list, and the stamp would go unread."""
+    body = ("".join(_p(_t(f"Paragraph {i}.")) for i in range(6)) + _p(_t("MNFV 000321"))
+            + "".join(_p(_t(f"Clause {j}"), _del("Ann", _dt(f"struck wording {j}")))
+                      for j in range(6)))
+    p = _read_word(body)
+    lines = p.text.split("\n")
+    assert lines[13:] == [f"[deleted by Ann] struck wording {j}" for j in range(6)], lines
+    assert p.deletion_line_span == (13, 6)
+    assert list(BatesZone().page_lines(p)) == (
+        [(0, "Paragraph 0."), (1, "Paragraph 1."), (2, "Paragraph 2."), (5, "Paragraph 5."),
+         (6, "MNFV 000321")] + [(7 + j, f"Clause {j}") for j in range(6)])
+    assert _applied(p) == (["MNFV 000321"], "MNFV 000321")
+
+
+def test_a_word_stamp_below_a_list_in_the_tail_stays_in_the_zone():
+    """The list above the stamp: the footer's last line is the stamp, and the
+    tail above it is footer and body, never the list."""
+    body = ("".join(_p(_t(f"Paragraph {i}.")) for i in range(4))
+            + "".join(_p(_t(f"Clause {j}"), _del("Ann", _dt(f"struck wording {j}")))
+                      for j in range(3)))
+    p = _read_word(body, **_footer("Footer note", "MNFV 000321"))
+    lines = p.text.split("\n")
+    assert lines == ([f"Paragraph {i}." for i in range(4)] + [f"Clause {j}" for j in range(3)]
+                     + [f"[deleted by Ann] struck wording {j}" for j in range(3)]
+                     + ["Footer note", "MNFV 000321"]), lines
+    assert p.deletion_line_span == (7, 3)
+    assert list(BatesZone().page_lines(p)) == (
+        [(i, f"Paragraph {i}.") for i in range(4)] + [(4 + j, f"Clause {j}") for j in range(3)]
+        + [(10, "Footer note"), (11, "MNFV 000321")])
+    assert _applied(p) == (["MNFV 000321"], "MNFV 000321")
+
+
+def test_a_word_stamp_just_below_a_list_in_the_head_stays_in_the_zone():
+    """One body line, then the list, then a footer whose FIRST line is the
+    stamp: the head is the body line and the two lines after the list. With the
+    list counted toward the head, the head would be the body line and the list,
+    and the stamp -- above the eight-line tail -- would go unread."""
+    body = _p(_t("Cover. "), _del("Ann", _dt("struck one")), _t("and "),
+              _del("Bob", _dt("struck two")))
+    p = _read_word(body, **_footer("MNFV 000321", *_TWELVE_FOOTER))
+    lines = p.text.split("\n")
+    assert lines[:4] == ["Cover. and", "[deleted by Ann] struck one",
+                         "[deleted by Bob] struck two", "MNFV 000321"], lines
+    assert len(lines) == 15 and p.deletion_line_span == (1, 2)
+    assert list(BatesZone().page_lines(p)) == (
+        [(0, "Cover. and"), (3, "MNFV 000321"), (4, "Footer line 1")]
+        + [(7 + k, f"Footer line {4 + k}") for k in range(8)])
+    assert _applied(p) == (["MNFV 000321"], "MNFV 000321")
+
+
+def test_a_word_stamp_above_a_list_in_the_head_stays_in_the_zone():
+    """The stamp heads the page (a header line) and the list follows the body:
+    the head is the header and the first two body lines, and the list is in
+    neither bound."""
+    body = (_p(_t("Cover. "), _del("Ann", _dt("struck one")))
+            + _p(_t("Second."), _del("Bob", _dt("struck two"))))
+    p = _read_word(body, sect='<w:headerReference w:type="default" r:id="rIdH"/>'
+                   '<w:footerReference w:type="default" r:id="rIdF"/>',
+                   parts={"word/header1.xml": _part("hdr", _p(_t("MNFV 000321"))),
+                          "word/footer1.xml": _part("ftr", "".join(
+                              _p(_t(x)) for x in _TWELVE_FOOTER))},
+                   rels=[("rIdH", "header", "header1.xml"), ("rIdF", "footer", "footer1.xml")])
+    lines = p.text.split("\n")
+    assert lines[:5] == ["MNFV 000321", "Cover.", "Second.", "[deleted by Ann] struck one",
+                         "[deleted by Bob] struck two"], lines
+    assert p.deletion_line_span == (3, 2)
+    assert list(BatesZone().page_lines(p)) == (
+        [(0, "MNFV 000321"), (1, "Cover."), (2, "Second.")]
+        + [(8 + k, f"Footer line {4 + k}") for k in range(8)])
+    assert _applied(p) == (["MNFV 000321"], "MNFV 000321")
+
+
+# ---------------------------------------------------------------------------
+# The span's precondition, by construction (round 4, mutants R4M1 and R4M8)
+# ---------------------------------------------------------------------------
+
+_BREAKS = [chr(c) for c in range(0x110000)
+           if not 0xD800 <= c <= 0xDFFF and len(f"a{chr(c)}b".splitlines()) == 2]
+"""Every character str.splitlines breaks a line at, derived from splitlines
+itself rather than listed."""
+
+# (deleted text as the XML writes it, the text as it reads, the listed line)
+SHAPES = [
+    ("the old wording ", "trailing space", "[deleted by Ann] the old wording"),
+    ("5\u00a0days", "NBSP", "[deleted by Ann] 5 days"),
+    ("cafe\u0301 terms", "decomposed accent", "[deleted by Ann] caf\u00e9 terms"),
+    ("line one&#13;line two", "CR", "[deleted by Ann] line one line two"),
+    ("line one&#13;&#10;line two", "CRLF", "[deleted by Ann] line one line two"),
+    ("line one&#10;&#10;line two", "LF LF", "[deleted by Ann] line one line two"),
+    ("line one\u0085line two", "NEL", "[deleted by Ann] line one line two"),
+    ("line one\u2028line two", "LS", "[deleted by Ann] line one line two"),
+    ("line one\u2029line two", "PS", "[deleted by Ann] line one line two"),
+    ("zero\u200bwidth\ufeff", "ZWSP and BOM", "[deleted by Ann] zerowidth"),
+    ("tail \u00a0\u200b", "NBSP and ZWSP at the end", "[deleted by Ann] tail"),
+]
+
+
+def test_every_deletion_list_line_is_one_normalized_line_whatever_it_holds():
+    """The reader's own line builder: for every break splitlines knows and every
+    shape normalize changes, the line is one line, starts with the label, and
+    is left as it is by normalize."""
+    from dociq.ingest.pagemodel import normalize
+
+    assert {"\n", "\r", "\x85", "\u2028", "\u2029"} <= set(_BREAKS)
+    cases = [("Ann", f"x{b}y") for b in _BREAKS] + [
+        ("Ann", f"x{a}{b}y") for a in _BREAKS for b in _BREAKS]
+    cases += [("Ann", html.unescape(xml)) for xml, _why, _line in SHAPES]
+    cases += [(author, "text") for author in ("Ann\u00a0", "An\u0301n", "A\u2028B",
+                                              "A\r\nB ", "\u200bAnn")]
+    for author, text in cases:
+        line = ex._deletion_list_line(author, text)
+        assert line.startswith("[deleted by "), (author, text, line)
+        assert len(line.splitlines()) == 1 and not any(b in line for b in _BREAKS), (
+            author, text, line)
+        assert normalize(line) == line, (author, text, line)
+    for b in _BREAKS:
+        assert ex._deletion_list_line("Ann", f"x{b}{b}y") == "[deleted by Ann] x y", repr(b)
+
+
+@pytest.mark.parametrize("xml,why,listed", SHAPES, ids=[s[1] for s in SHAPES])
+def test_a_word_file_whose_deleted_text_normalize_changes_reads_in_full(xml, why, listed):
+    """The shapes that failed an ordinary Word file outright under R4M1 and
+    R4M8 (pages=0): each reads FULL, its list line exact, its span on it."""
+    body = (_p(_t("Invented notice, kept text."))
+            + _p(_t("Clause."), _del("Ann", _dt(xml))))
+    got = ex.extract("shapes.docx", _raw_docx(body, **_footer("MNFV 000777")))
+    assert got.status.value == "full", (why, got.status, got.error)
+    p = got.pages[0]
+    assert p.text.split("\n") == ["Invented notice, kept text.", "Clause.", listed,
+                                  "MNFV 000777"], (why, p.text)
+    assert p.deletion_line_span == (2, 1), why
+
+
+@pytest.mark.parametrize("filler", ["   ", "\u200b", "\u00a0\u00a0", "\ufeff "],
+                         ids=["spaces", "ZWSP", "NBSPs", "BOM and space"])
+def test_a_body_line_that_normalizes_blank_does_not_move_the_span(filler):
+    """Round 4's R4M2 (the lead counted over the lines as written): a body
+    paragraph holding only characters normalization removes is a line before
+    the list that the page text does not carry as a non-blank line. The span
+    is counted after normalization, so it still names the list exactly."""
+    body = (_p(_t("Invented opening.")) + _p(_t(filler)) + _p(_t("Kept clause."))
+            + _p(_t("More."), _del("Ann", _dt("struck wording"))))
+    got = ex.extract("filler.docx", _raw_docx(body, **_footer("MNFV 000777")))
+    assert got.status.value == "full", (filler, got.status, got.error)
+    p = got.pages[0]
+    lines = p.text.split("\n")
+    assert lines == ["Invented opening.", "", "Kept clause.", "More.",
+                     "[deleted by Ann] struck wording", "MNFV 000777"], lines
+    assert p.deletion_line_span == (4, 1)
+
+
+# ---------------------------------------------------------------------------
+# Identity (round 4, R4M5): the span is hashed like every other page field
+# ---------------------------------------------------------------------------
+
+
+def test_every_page_field_but_ocr_conf_is_part_of_a_pages_identity():
+    """The contract says every PageRecord field is serialized and hashed, the
+    float ocr_conf alone excepted; two pages that differ only in which lines
+    their span names are two identities."""
+    from dociq.contracts import _IDENTITY_EXCLUDED, content_hash
+
+    assert {f for f in PageRecord.__dataclass_fields__ if f in _IDENTITY_EXCLUDED} == {
+        "ocr_conf"}
+    text = "Body.\n[deleted by Ann] a\n[deleted by Bob] b"
+    spans = [None, (1, 1), (1, 2), (2, 1)]
+    pages = [PageRecord(page_no=1, text=text, kind=PageKind.SYNTHETIC, deletion_line_span=s)
+             for s in spans]
+    for p in pages:
+        p.validate()
+    assert len({content_hash(p) for p in pages}) == len(spans)

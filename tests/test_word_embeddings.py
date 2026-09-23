@@ -2650,6 +2650,114 @@ def test_a_document_embedded_in_removed_content_says_so_and_a_shown_one_does_not
         f"{ex.M_WORD_TRACKED_DELETION}: 7 deleted drawing(s), picture(s) or object(s); "), word.notes
 
 
+def test_an_object_written_as_w_object_embed_or_link_is_read_as_the_vml_form_is(tmp_path):
+    """Word review round 4, C: a ``w:object`` may hold its object as
+    ``w:objectEmbed`` (or ``w:objectLink``) instead of VML's ``o:OLEObject``.
+    The scanner read only the VML form, so a deleted ``w:objectEmbed``'s part
+    reached the trailing sweep and its child carried no removal note, while
+    the Word record said the child's note named the deletion. Each form is
+    now the same object: removal noted, shown one plain, a link named."""
+    embed = lambda rid: (f'<w:r><w:object><w:objectEmbed w:drawAspect="content" '  # noqa: E731
+                         f'r:id="{rid}" w:progId="Package" w:shapeId="1"/></w:object></w:r>')
+    body = (f'<w:p><w:del w:id="1" w:author="Ann" {_W_REV}>' + embed("rIdDel") + "</w:del></w:p>"
+            + "<w:p>" + embed("rIdLive") + "</w:p>"
+            + f'<w:p><w:moveFrom w:id="2" w:author="Bob" {_W_REV}>' + embed("rIdOrphan")
+            + "</w:moveFrom></w:p>"
+            + '<w:p><w:r><w:object><w:objectLink r:id="rIdLink" w:progId="Excel.Sheet.12" '
+            'w:updateMode="always"/></w:object></w:r></w:p>')
+    rels = [(rid, "oleObject", f"embeddings/{target}.bin") for rid, target in (
+        ("rIdDel", "del"), ("rIdLive", "live"), ("rIdOrphan", "orphan"))]
+    parts = {f"word/embeddings/{name}.bin": _package(f"{name.upper()}.txt",
+                                                     f"INVENTED-{name}".encode())
+             for name in ("del", "live", "orphan")}
+    r = _walk_files(tmp_path, {"memo.docx": _docx_body(body, rels, parts)})
+    got = {d.rel_path: [n for n in d.notes if n.startswith("embedded in content")]
+           for d in r.documents if d.parent_doc_id == "memo.docx"}
+    deleted = lambda who: (f"embedded in content deleted under tracked changes by {who}; "  # noqa: E731
+                           "Word, showing the document with its changes accepted, does not show it")
+    assert got == {"memo.docx/DEL.txt": [deleted("'Ann'")], "memo.docx/LIVE.txt": [],
+                   "memo.docx/ORPHAN.txt": [deleted("'Bob'")]}, got
+    word = next(d for d in r.documents if d.rel_path == "memo.docx")
+    assert any(n.startswith(f"{ex.M_ATTACH_SKIPPED}: an embedded object in 'word/document.xml' "
+                            "is a link rather than a stored part") for n in word.notes), word.notes
+    counted = [n for n in word.notes if n.startswith(ex.M_WORD_TRACKED_DELETION)]
+    assert len(counted) == 1 and counted[0].startswith(
+        f"{ex.M_WORD_TRACKED_DELETION}: 2 deleted drawing(s), picture(s) or object(s); "), word.notes
+
+
+def test_a_document_embedded_in_a_header_part_no_section_displays_says_so(tmp_path):
+    """Word review round 4, C (sibling of round 3's removal note): a header or
+    footer part no section displays -- referenced only as a first-page part
+    with no w:titlePg, or related by the main part and referenced by no
+    section -- is not shown by Word, and a document embedded in it was
+    recovered as a child reading exactly as a shown one. Each such child now
+    says so; a child of a displayed header, or of a part a shown object also
+    references, says nothing."""
+    rt = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+    rels = lambda *items: (  # noqa: E731
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + "".join(f'<Relationship Id="{i}" Type="{rt}{t}" Target="{g}"/>' for i, t, g in items)
+        + "</Relationships>")
+    part = lambda tag, inner: ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'  # noqa: E731
+                               f'<w:{tag} {_OBJ_NS}>{inner}</w:{tag}>')
+    body = ("<w:p>" + _object_run("rIdShared") + "</w:p>"
+            + '<w:p><w:pPr><w:sectPr><w:headerReference w:type="first" r:id="rIdFirst"/>'
+            '<w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>one</w:t></w:r></w:p>'
+            + "<w:p><w:r><w:t>two</w:t></w:r></w:p>")
+    doc_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               f'<w:document {_OBJ_NS}><w:body>{body}'
+               '<w:sectPr><w:headerReference w:type="default" r:id="rIdShown"/>'
+               '<w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>')
+    hdr = "application/vnd.openxmlformats-officedocument.wordprocessingml."
+    ct = _OBJ_CT.replace("</Types>", "".join(
+        f'<Override PartName="/word/{n}.xml" ContentType="{hdr}{k}+xml"/>'
+        for n, k in (("header1", "header"), ("header2", "header"), ("footer9", "footer")))
+        + "</Types>")
+    files = {
+        "[Content_Types].xml": ct, "_rels/.rels": _MIN_ROOT_RELS,
+        "word/document.xml": doc_xml,
+        "word/_rels/document.xml.rels": rels(
+            ("rIdShared", "oleObject", "embeddings/shared.bin"),
+            ("rIdFirst", "header", "header1.xml"), ("rIdShown", "header", "header2.xml"),
+            ("rIdLoose", "footer", "footer9.xml")),
+        "word/header1.xml": part("hdr", "<w:p>" + _object_run("rIdA") + _object_run("rIdB")
+                                 + "<w:r><w:t>first-page header</w:t></w:r></w:p>"),
+        "word/_rels/header1.xml.rels": rels(("rIdA", "oleObject", "embeddings/hidden.bin"),
+                                            ("rIdB", "oleObject", "embeddings/shared.bin")),
+        "word/header2.xml": part("hdr", "<w:p>" + _object_run("rIdC")
+                                 + "<w:r><w:t>shown header</w:t></w:r></w:p>"),
+        "word/_rels/header2.xml.rels": rels(("rIdC", "oleObject", "embeddings/shown.bin")),
+        "word/footer9.xml": part("ftr", "<w:p>" + _object_run("rIdD") + "</w:p>"),
+        "word/_rels/footer9.xml.rels": rels(("rIdD", "oleObject", "embeddings/loose.bin")),
+    }
+    for name in ("shared", "hidden", "shown", "loose"):
+        files[f"word/embeddings/{name}.bin"] = _package(f"{name.upper()}.txt",
+                                                       f"INVENTED-{name}".encode())
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in files.items():
+            zf.writestr(name, data)
+    r = _walk_files(tmp_path, {"memo.docx": buf.getvalue()})
+    got = {d.rel_path: [n for n in d.notes if n.startswith("embedded in")]
+           for d in r.documents if d.parent_doc_id == "memo.docx"}
+    hidden = lambda part: (f"embedded in '{part}', a header or footer part that no section "  # noqa: E731
+                           "of the document displays; Word does not show it")
+    assert got == {"memo.docx/SHARED.txt": [], "memo.docx/HIDDEN.txt": [hidden("word/header1.xml")],
+                   "memo.docx/SHOWN.txt": [],
+                   "memo.docx/LOOSE.txt": [hidden("word/footer9.xml")]}, got
+    assert not any(ex.has_evidence_marker(n) for d in r.documents if d.parent_doc_id
+                   for n in d.notes), [d.notes for d in r.documents]
+    word = next(d for d in r.documents if d.rel_path == "memo.docx")
+    assert "first-page header" not in word.pages[0].text and "shown header" in word.pages[0].text
+    # The parent's marked count names the hidden header, whose text was not
+    # read. The loose footer holds only the embedded document, which is read,
+    # as a child whose own note says Word does not show it.
+    counted = [n.split(" (")[0] for n in word.notes if "header/footer part(s)" in n]
+    assert counted == [f"{ex.M_WORD_UNREAD}: 1 header/footer part(s) that no section "
+                       "displays"], counted
+
+
 def test_an_object_target_written_unescaped_finds_a_part_stored_escaped():
     """A part name compares as OPC compares it, a target's percent-escapes
     read either way: ``Sheet 1.xlsx`` written plainly names the part stored as
@@ -2723,6 +2831,64 @@ def test_stored_names_holding_marker_phrases_leave_the_accounting_clean(tmp_path
     assert accounting.check(r).evidence_line == ""
 
 
+def test_a_long_or_quote_holding_file_value_is_clipped_before_it_is_quoted(tmp_path):
+    """Word review round 4, C: three shapes still read a marker phrase inside a
+    file value. An .eml Date header holding a double quote reached its note a
+    second time, unquoted, inside the parser's message; a Date header over 300
+    characters, and a stored name over 1,200, were quoted and then the whole
+    note was cut, leaving the quote open. Each value is now clipped first and
+    then quoted, the cut said after the quote, and the note is never cut: no
+    retryable gap that did not happen, and a long name's first 500 characters
+    quoted exactly."""
+    from dociq.verify import accounting
+
+    phrase = ex.M_ATTACH_READ
+    assert phrase in ex.TRANSIENT_MARKERS
+    eml = lambda date: ("From: a@example.com\r\nTo: b@example.com\r\nSubject: Invented memo\r\n"  # noqa: E731
+                        f"Date: {date}\r\n\r\nInvented body.\r\n").encode()
+    long_name = f"RE: {phrase} " + "w" * 1250 + ".txt"
+    r = _walk_files(tmp_path, {"quote.eml": eml(f'x" {phrase} "y'),
+                               "long.eml": eml(f"{phrase} " + "z" * 320),
+                               "names.zip": _zip_of([(long_name, b"INVENTED-READ-IN-FULL")])})
+    assert walker._degradations(r.documents) == []
+    assert accounting.check(r).evidence_line == ""
+    by_rel = {d.rel_path: d for d in r.documents}
+    quote_note = next(n for n in by_rel["quote.eml"].notes if "Date header" in n)
+    assert quote_note.startswith(
+        "the message's Date header 'x\" " + phrase + " \"y' could not be parsed ('"), quote_note
+    assert quote_note.endswith("'); it is emitted verbatim but this document is not "
+                               "date-anchored on it"), quote_note
+    long_note = next(n for n in by_rel["long.eml"].notes if "Date header" in n)
+    assert long_note.startswith("the message's Date header "
+                                + repr(f"{phrase} " + "z" * (199 - len(phrase)))
+                                + " […value truncated at 200 chars] could not be parsed"), long_note
+    assert long_note.endswith("date-anchored on it"), long_note
+    child = next(d for d in r.documents if d.parent_doc_id == "names.zip")
+    name_note = next(n for n in child.notes if n.startswith("stored name "))
+    assert name_note.startswith(f"stored name {long_name[:500]!r} […value truncated at "
+                                "500 chars] is recorded as '"), name_note[:600]
+    assert name_note.endswith(": ':' was replaced by '_'"), name_note[-200:]
+    assert all(not ex.has_evidence_marker(n) for d in r.documents for n in d.notes), [
+        n[:120] for d in r.documents for n in d.notes if ex.has_evidence_marker(n)]
+
+
+def test_quoted_clips_the_value_and_never_leaves_a_quote_open():
+    """The helper itself, over values that end in each character repr escapes,
+    at every cut: the quoted part is always a closed literal of the value's
+    first ``limit`` characters, and no marker phrase inside it is read."""
+    import ast as _ast
+
+    phrase = ex.M_ATTACH_READ
+    for tail in ("'", '"', "\\", "\n", "'\"", "x"):
+        value = (phrase + tail) * 5
+        for limit in range(1, len(value) + 2):
+            q = ex.quoted(value, limit)
+            literal, _sep, rest = q.partition(" […value truncated at ")
+            assert _ast.literal_eval(literal) == value[:limit], (tail, limit, q)
+            assert rest == ("" if limit >= len(value) else f"{limit} chars]"), (tail, limit, q)
+            assert not ex.has_evidence_marker(f"note {q} ends"), (tail, limit, q)
+
+
 # ---------------------------------------------------------------------------
 # 36. Review-fix round 3: nothing in a file is lost for want of a note
 # ---------------------------------------------------------------------------
@@ -2749,6 +2915,36 @@ def test_a_zip_read_as_the_office_document_at_its_root_names_its_other_members(t
             route, by_rel[route].notes)
     assert not any("this .zip is read as" in n for n in by_rel["plain.zip/inner.zip"].notes), (
         by_rel["plain.zip/inner.zip"].notes)
+
+
+def test_office_content_read_under_any_other_name_names_its_other_members(tmp_path):
+    """Word review round 4, C: the note fired only for the name ``.zip``. The
+    same bytes under a text name, a misnamed ``.pdf``, attached to an email or
+    archived under one of those names were read as the Word file with their
+    other members dropped in silence. Wherever the content is read as the
+    Office package at its root under a name not its own, the note names them.
+    Under the package's own name (``.docx``) it is the Word file Word opens,
+    which ignores such members too, and no note is written."""
+    word = (FIXTURES / "17_word_embeddings.docx").read_bytes()
+    zin = zipfile.ZipFile(io.BytesIO(word))
+    mixed = _zip_of([(n, zin.read(n)) for n in zin.namelist()]
+                    + [("Schedule 2019.txt", b"INVENTED-OSPREY"), ("sub/Letter.txt", b"INVENTED-WALRUS")])
+    files = {"bundle.txt": mixed, "bundle.csv": mixed, "bundle.md": mixed, "bundle.pdf": mixed,
+             "mail.eml": _eml_attaching("bundle.txt", mixed),
+             "outer.zip": _zip_of([("inner.log", mixed)]), "own.docx": mixed}
+    r = _walk_files(tmp_path, files)
+    by_rel = {d.rel_path: d for d in r.documents}
+    tail = ("is read as the Office document at its root, and 2 member(s) that are not part "
+            "of that document were not read: 'Schedule 2019.txt', 'sub/Letter.txt'")
+    for route, ext in (("bundle.txt", ".txt"), ("bundle.csv", ".csv"), ("bundle.md", ".md"),
+                       ("bundle.pdf", ".pdf"), ("mail.eml/bundle.txt", ".txt"),
+                       ("outer.zip/inner.log", ".log")):
+        assert "This sentence opens the fixture" in _text(by_rel[route]), route
+        assert [n for n in by_rel[route].notes if "is read as the Office document" in n] == [
+            f"{ex.M_ATTACH_SKIPPED}: this {ext} {tail}"], (route, by_rel[route].notes)
+    assert "This sentence opens the fixture" in _text(by_rel["own.docx"])
+    assert not any("is read as the Office document" in n for n in by_rel["own.docx"].notes), (
+        by_rel["own.docx"].notes)
 
 
 @pytest.mark.parametrize("name,kind,content", [
