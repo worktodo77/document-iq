@@ -120,6 +120,26 @@ Verified: **1,461 tests green**, `python -m dociq.selftest` exit 0 with 70
 checks and determinism over 8 sequential runs at one corpus hash, amendment
 registry OK at 23 entries.
 
+## D-59 — the Bates zone skips the Word deletion list by position, not by what a line says (2026-09-23)
+
+| # | Decision | Ruling | Date |
+|---|---|---|---|
+| D-59 | How the Bates zone leaves out the deletion list D-56 adds to a Word page, after Word review round 3 found the skip steered by text any document can type | **A contract field, in A-25.** `PageRecord` gains a span naming the lines the Word reader wrote as its deletion list, set by that reader only, in the manner of D-49's `image_line_span`. The Bates zone skips exactly those lines and no others, so no line is skipped because of what it says. The field is added under the A-25 amendment this sprint already owes (D-51), not a new one. Ruled by Alex (the recommended option) over two alternatives: keep the text match and record it as a known limitation; and apply the skip only to pages of `.docx` documents, with no new field. | 2026-09-23 |
+
+**What the ruling was made on.** Word fix round 2 (`2671947`) made `BatesZone.slice_lines` skip every
+line starting `[deleted by `, for every document type. Review round 3 confirmed this as a B finding: a
+PDF, email, OCR'd or text page whose own text starts a line that way loses the line from its Bates
+zone, which can shift the locator on a page with no stamp or refuse a real footer stamp. Fix round 3
+(`347df32`) stopped on it because the structural fix is a contract field. It found the other route the
+brief offered, keeping the list out of the zone's reach, impossible: a Word document is one synthetic
+page, normalization collapses blank lines, and a page shorter than the zone's 3-line head plus 8-line
+tail has no line outside it. Every zone reader (`detect_candidates`, `zone_has_candidate` for footer
+re-OCR selection, `_zone_stamp`, `_zone_near_miss`) goes through `slice_lines`, so all of them change
+together.
+
+**Status: ruled, not yet built.** Word fix round 4 builds it on `build/sprint-5-word`; the A-25 flip at
+merge carries it.
+
 ## D-58 — region OCR may read typed text twice; it must never lose it (2026-09-14)
 
 | # | Decision | Ruling | Date |
