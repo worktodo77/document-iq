@@ -50,7 +50,8 @@ PAGE_NOTE_XLSX = "XLSX has no page boundaries; one synthetic page per worksheet"
 PAGE_NOTE_XLS = "XLS has no page boundaries; one synthetic page per worksheet"
 FORMULA_NOTE_ONE = ("1 cell(s): a formula cell had no stored value; the formula is "
                     "shown in the cell's place instead of the missing value")
-CHART1_NOTE = (f"chartsheet 'Chart1': its chart, and any print header or footer on it, "
+CHART1_NOTE = (f"chartsheet 'Chart1': its chart, any text box or shape on it, and any print "
+               f"header or footer on it, "
                f"were not read ({UNREAD})")
 CAP_LINE = "[not read: the row cap was reached before this sheet]"
 
@@ -663,7 +664,8 @@ def _ledger_and_plot(wb, rows: int = 2):
     plot.add_chart(chart)
 
 
-PLOT_NOTE = (f"chartsheet 'Plot': its chart, and any print header or footer on it, "
+PLOT_NOTE = (f"chartsheet 'Plot': its chart, any text box or shape on it, and any print "
+             f"header or footer on it, "
              f"were not read ({UNREAD})")
 
 
@@ -1039,13 +1041,14 @@ def test_e12_print_header_and_footer_bound_the_sheets_page():
     raw = _patch(_xlsx(build), {"xl/worksheets/sheet1.xml": lambda t: _set_header_footer(
         t, header_footer)})
     doc = _extract("stamps.xlsx", raw)
-    # The even header's &G places a picture: its code leaves no letter, and
-    # the picture is named in a FINAL note (review-fix round 3), not dropped.
+    # The even header's &G code leaves no letter. It places no picture here:
+    # openpyxl wrote no header picture part, so there is none to name (review
+    # r4 C restored this test's notes; round 3 had pinned a FINAL note for a
+    # picture the file does not hold).
     _assert_doc(doc,
                 ["[sheet: Stamps]\nLEFTWORD\nMID&WORD\nRIGHTWORD\nEVENWORD\nSTAMPROW\n"
                  "QXZ 000123\nPage\nFIRSTFOOTWORD"],
-                [f"sheet 'Stamps': 1 picture(s) in its print header or footer were not "
-                 f"read ({UNREAD})", PAGE_NOTE_XLSX])
+                [PAGE_NOTE_XLSX])
     parsed = bates._parse_line("QXZ 000123")
     assert (parsed.prefix, parsed.number) == ("QXZ", 123), parsed
 
@@ -1299,7 +1302,9 @@ def test_formula_and_sheet_list_read_failures_are_marked_notes(monkeypatch):
     doc = _pages("18_workbook_constructs.xlsx")
     list_note = ("the workbook's own sheet list could not be read (MemoryError); tabs "
                  "follow openpyxl's list, which leaves out a sheet that names no part "
-                 f"or a part openpyxl does not find in the file ({PART_UNREAD})")
+                 "or a part openpyxl does not find in the file, and the workbook part's "
+                 f"own elements were not checked for what this reader does not read "
+                 f"({PART_UNREAD})")
     # Review-fix round 2 (A5): the fallback still knows each worksheet's part,
     # so the header, links, comments and raw cells all read.
     _assert_doc(doc, [REGISTER_PAGE, "[chartsheet: Chart1]", "[sheet: Later]\nQUETZAL"],
@@ -1619,7 +1624,13 @@ def _twin_parts_xlsx() -> bytes:
         xml = re.sub(r'<hyperlink ([^>]*)ref="A5"', r'<hyperlink \1ref="A5:B6"', xml)
         # The link on A6 moves to C8: a row the part holds no cell for.
         xml = re.sub(r'<hyperlink ([^>]*)ref="A6"', r'<hyperlink \1ref="C8"', xml)
-        return re.sub(r'<c r="A6"[^>]*>.*?</c>', "", xml)
+        xml = re.sub(r'<c r="A6"[^>]*>.*?</c>', "", xml)
+        # The sheet DECLARES its even-page and first-page variants, as Excel
+        # writes a sheet whose two settings are on (and as the .xls twin's
+        # HEADERFOOTER flags do): openpyxl writes the variants' text with no
+        # flags, which Excel prints none of (review r4 B1).
+        return re.sub(r"<headerFooter[^>]*>",
+                      '<headerFooter differentOddEven="1" differentFirst="1">', xml)
 
     return _patch(_xlsx(build), {"xl/worksheets/sheet1.xml": sheet})
 
@@ -1777,7 +1788,9 @@ def test_the_sheet_list_fallback_still_reads_stored_values(monkeypatch):
     monkeypatch.setattr(ET, "fromstring", no_sheet_list)
     list_note = ("the workbook's own sheet list could not be read (MemoryError); tabs "
                  "follow openpyxl's list, which leaves out a sheet that names no part "
-                 f"or a part openpyxl does not find in the file ({PART_UNREAD})")
+                 "or a part openpyxl does not find in the file, and the workbook part's "
+                 f"own elements were not checked for what this reader does not read "
+                 f"({PART_UNREAD})")
     with pytest.warns(UserWarning, match="outside the limits for dates"):
         _assert_doc(_extract("tally.xlsx", _tally_xlsx()), [TALLY_PAGE],
                     [list_note] + intact)
@@ -2579,6 +2592,7 @@ def _board_xlsx(sheet_edit=None, parts_edit=None) -> bytes:
            '<div>NOTEVMLWORD</div></v:textbox><x:ClientData ObjectType="Note"><x:Row>1</x:Row>'
            '<x:Column>0</x:Column></x:ClientData></v:shape></xml>')
     tail = (f'<drawing xmlns:r="{rel}" r:id="rIdDr"/><legacyDrawing xmlns:r="{rel}" r:id="rIdVml"/>'
+            f'<legacyDrawingHF xmlns:r="{rel}" r:id="rIdHF"/>'
             f'<oleObjects xmlns:r="{rel}" xmlns:mc="http://schemas.openxmlformats.org/'
             'markup-compatibility/2006"><mc:AlternateContent><mc:Choice Requires="x14">'
             '<oleObject progId="Packager Shell Object" shapeId="1027" r:id="rIdOle"/></mc:Choice>'
@@ -2594,6 +2608,7 @@ def _board_xlsx(sheet_edit=None, parts_edit=None) -> bytes:
     rels = (f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             f'<Relationship Id="rIdDr" Type="{rel}/drawing" Target="../drawings/drawing1.xml"/>'
             f'<Relationship Id="rIdVml" Type="{rel}/vmlDrawing" Target="../drawings/vmlDrawing1.vml"/>'
+            f'<Relationship Id="rIdHF" Type="{rel}/vmlDrawing" Target="../drawings/vmlDrawingHF1.vml"/>'
             f'<Relationship Id="rIdOle" Type="{rel}/oleObject" Target="../embeddings/oleObject1.bin"/>'
             f'<Relationship Id="rIdC1" Type="{rel}/ctrlProp" Target="../ctrlProps/ctrlProp1.xml"/>'
             f'<Relationship Id="rIdC2" Type="{rel}/ctrlProp" Target="../ctrlProps/ctrlProp2.xml"/>'
@@ -2605,10 +2620,17 @@ def _board_xlsx(sheet_edit=None, parts_edit=None) -> bytes:
                           "</oddHeader></headerFooter>" + tail + "</worksheet>")
         return sheet_edit(xml) if sheet_edit else xml
 
+    # The header picture's own VML part, as real Excel 16 wrote it
+    # (excel_fix4/excel_real/g08_hfpic.xlsx): the sheet's legacyDrawingHF.
+    header_vml = ('<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:'
+                  'office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">'
+                  '<v:shape id="CH" o:spid="_x0000_s2049" type="#_x0000_t75"><v:imagedata '
+                  'o:relid="rId1"/></v:shape></xml>')
     parts = {"xl/worksheets/sheet1.xml": sheet,
              "xl/worksheets/_rels/sheet1.xml.rels": lambda t: rels,
              "xl/drawings/drawing1.xml": lambda t: drawing,
-             "xl/drawings/vmlDrawing1.vml": lambda t: vml}
+             "xl/drawings/vmlDrawing1.vml": lambda t: vml,
+             "xl/drawings/vmlDrawingHF1.vml": lambda t: header_vml}
     parts.update(parts_edit or {})
     return _patch(_xlsx(build), parts)
 
@@ -2640,7 +2662,19 @@ def _board_xls(records=None) -> bytes:
     return make_fixtures.xls_bytes([{
         "name": "Board", "header": "&C&G&LSHOVELERHEAD",
         "cells": [(0, 0, "KITEROW", 0), (1, 0, 5.0, 0), (2, 0, 7.0, 0)],
-        "records": board if records is None else records}])
+        "records": ([_xls_record(0x0866, _EXCEL_HF_PICTURE)]
+                    + (board if records is None else records))}])
+
+
+# The sheet's own HFPICTURE record real Excel 16 wrote for a picture in the
+# center header (excel_fix4/excel_real/g08_hfpic.xls): where an .xls sheet
+# keeps its header pictures, so an '&G' counts one (review r4 C).
+_EXCEL_HF_PICTURE = bytes.fromhex(
+    "66080000000000000000000001000f0002f0a6000000100008f00800000002000000010400000f0003f08e00"
+    "00000f0004f028000000010009f0100000000000000000000000000000000000000002000af0080000000004"
+    "0000050000000f0004f056000000b2040af00800000001040000000a000043000bf02e0000007f0000010001"
+    "04410100000005c11000000080c3060000006700300031005f0064006f0074000000430048000000000010f0"
+    "080000003000000020000000")
 
 
 BOARD_PAGE = ("[sheet: Board]\nSHOVELERHEAD\nKITEROW\n5\n7\n"
@@ -2863,3 +2897,835 @@ def test_the_persons_note_when_the_workbook_part_is_not_found(monkeypatch):
     assert persons in doc.notes, doc.notes
     assert ex.has_transient_marker(persons) and not ex.has_final_marker(persons)
     assert "[comment on A1 by {P1}] MAGPIE" in doc.pages[0].text, doc.pages[0].text
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 4 (D-55): disclosure by construction, and round 4's findings
+# ---------------------------------------------------------------------------
+
+_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+
+def _add_rels(rels_xml: str | None, *entries: tuple[str, str, str, str | None]) -> str:
+    """A ``.rels`` part with ``(id, type, target, target mode)`` entries added
+    (the part created when there is none)."""
+    xml = rels_xml or f'<Relationships xmlns="{_PKG_REL}"></Relationships>'
+    added = "".join(f'<Relationship Id="{rid}" Type="{rtype}" Target="{target}"'
+                    + (f' TargetMode="{mode}"' if mode else "") + "/>"
+                    for rid, rtype, target, mode in entries)
+    return xml.replace("</Relationships>", added + "</Relationships>")
+
+
+def _add_overrides(types_xml: str, *entries: tuple[str, str]) -> str:
+    return types_xml.replace("</Types>", "".join(
+        f'<Override PartName="{name}" ContentType="{ctype}"/>' for name, ctype in entries)
+        + "</Types>")
+
+
+# The print header and footer real Excel 16 saved for a sheet whose 'Different
+# first page' and 'Different odd and even pages' settings were switched on,
+# the variants typed, and both switched OFF again (excel_fix4/excel_real/
+# g02_hf_off.xlsx and .xls): the variants' text stays in the file.
+_TOGGLE_HF = ("<oddHeader>&amp;CMAINHEADWORD</oddHeader><oddFooter>&amp;CMAINFOOTWORD</oddFooter>"
+              "<evenHeader>&amp;REVNHEADWORD</evenHeader><evenFooter>&amp;LEVNFOOTWORD</evenFooter>"
+              "<firstHeader>&amp;LOPENERHEADWORD</firstHeader><firstFooter>&amp;ROPENERFOOTWORD"
+              "</firstFooter>")
+_TOGGLE_HEADER = bytes.fromhex("0e000026434d41494e48454144574f5244")
+_TOGGLE_FOOTER = bytes.fromhex("0e000026434d41494e464f4f54574f5244")
+_TOGGLE_HEADERFOOTER = bytes.fromhex(
+    "9c0800000000000000000000000000000000000000000000000000003c330d000d00100010000d00002652"
+    "45564e48454144574f52440d0000264c45564e464f4f54574f5244100000264c4f50454e45524845414457"
+    "4f524410000026524f50454e4552464f4f54574f5244")
+"""The HEADERFOOTER record, flags word ``0x333C`` at offset 28: both variant
+bits clear. Excel's 'on' file differs only there (``0x333F``)."""
+
+
+def _toggle_xlsx(attrs: str, hf: str = _TOGGLE_HF) -> bytes:
+    def build(wb):
+        wb.active.title = "Toggle"
+        wb.active["A1"] = "TOGROWWORD"
+
+    def sheet(xml: str) -> str:
+        xml = re.sub(r"<headerFooter>.*?</headerFooter>|<headerFooter/>", "", xml, flags=re.S)
+        return xml.replace("</worksheet>", f"<headerFooter{attrs}>{hf}</headerFooter></worksheet>")
+
+    return _patch(_xlsx(build), {"xl/worksheets/sheet1.xml": sheet})
+
+
+def _toggle_xls(flags: int) -> bytes:
+    import struct
+
+    headerfooter = (_TOGGLE_HEADERFOOTER[:28] + struct.pack("<H", flags)
+                    + _TOGGLE_HEADERFOOTER[30:])
+    return make_fixtures.xls_bytes([{
+        "name": "Toggle", "cells": [(0, 0, "TOGROWWORD", 0)],
+        "records": [(0x0014, _TOGGLE_HEADER), (0x0015, _TOGGLE_FOOTER),
+                    (0x089C, headerfooter)]}])
+
+
+def test_a_header_or_footer_variant_the_sheet_does_not_use_is_named_never_printed():
+    """Review r4 (B1): Excel keeps a sheet's first-page and even-page header
+    and footer text after 'Different first page' and 'Different odd and even
+    pages' are switched off again, and prints none of it -- only the ordinary
+    header and footer, on every page (the reviewer's PDF export). Both
+    readers printed all six as the sheet's own, the flags unread. A variant
+    is on the page only when the sheet declares it (``.xlsx``
+    ``differentFirst`` / ``differentOddEven``; ``.xls`` HEADERFOOTER's flag
+    bits 1 and 0); a variant not in use is named in a FINAL note -- the file
+    holds text the page leaves out, as the Word package names a header part
+    no section shows -- and never printed as the header. Pinned on real
+    Excel 16's own bytes, off and on, in both formats; and the reviewer's
+    downstream case: a Bates-shaped first-page footer the sheet does not use
+    is not on the page for the stamp scanner to take."""
+    off_page = "[sheet: Toggle]\nMAINHEADWORD\nTOGROWWORD\nMAINFOOTWORD"
+    on_page = ("[sheet: Toggle]\nMAINHEADWORD\nEVNHEADWORD\nOPENERHEADWORD\nTOGROWWORD\n"
+               "MAINFOOTWORD\nEVNFOOTWORD\nOPENERFOOTWORD")
+    all_unused = ("sheet 'Toggle': its first-page header, first-page footer, even-page header "
+                  "and even-page footer are kept in the file but not in use: Excel prints them "
+                  "only when 'Different first page' or 'Different odd and even pages' is on, "
+                  f"and both are off, so their text was not read ({UNREAD})")
+    first_unused = ("sheet 'Toggle': its first-page header and first-page footer are kept in "
+                    "the file but not in use: Excel prints them only when 'Different first "
+                    f"page' is on, and it is off, so their text was not read ({UNREAD})")
+    even_only_page = ("[sheet: Toggle]\nMAINHEADWORD\nEVNHEADWORD\nTOGROWWORD\nMAINFOOTWORD\n"
+                      "EVNFOOTWORD")
+    cases = [("", 0x333C, off_page, [all_unused]),
+             (' differentOddEven="1" differentFirst="1"', 0x333F, on_page, []),
+             (' differentOddEven="1"', 0x333D, even_only_page, [first_unused])]
+    for attrs, flags, page, notes in cases:
+        _assert_doc(_extract("toggle.xlsx", _toggle_xlsx(attrs)), [page], notes + [PAGE_NOTE_XLSX])
+        _assert_doc(_extract("toggle.xls", _toggle_xls(flags)), [page], notes + [PAGE_NOTE_XLS])
+        assert all(ex.has_final_marker(n) for n in notes)
+
+    stamp = _toggle_xlsx("", "<oddFooter>&amp;CPage</oddFooter>"
+                             "<firstFooter>&amp;RQZX 004417</firstFooter>")
+    _assert_doc(_extract("stamp.xlsx", stamp), ["[sheet: Toggle]\nTOGROWWORD\nPage"],
+                ["sheet 'Toggle': its first-page footer is kept in the file but not in use: "
+                 "Excel prints it only when 'Different first page' is on, and it is off, so "
+                 f"its text was not read ({UNREAD})", PAGE_NOTE_XLSX])
+
+
+def _pic_in_cell_xlsx(structure: str = "_localImage", with_metadata: bool = True) -> bytes:
+    """Excel 16's own save of a picture placed in a cell (excel_fix4/
+    excel_real/g02_pic.xlsx): C3 ``t="e" vm="1"`` with the cached ``#VALUE!``
+    older readers are given, its value metadata and rich-value parts; C4 a
+    genuine ``#VALUE!`` error, the control."""
+    rd = "http://schemas.microsoft.com/office/spreadsheetml/2017/richdata"
+    rd2 = "http://schemas.microsoft.com/office/spreadsheetml/2017/richdata2"
+    ms = "http://schemas.microsoft.com/office"
+
+    def build(wb):
+        ws = wb.active
+        ws.title = "Site"
+        ws["A1"], ws["A3"], ws["A4"] = "GANTRYPHOTOLOG", "CULVERTVIEW", "REALERRORROW"
+
+    def sheet(xml: str) -> str:
+        xml = re.sub(r'(<row r="3"[^>]*>.*?)</row>',
+                     r'\1<c r="C3" t="e" vm="1"><v>#VALUE!</v></c></row>', xml, flags=re.S)
+        return re.sub(r'(<row r="4"[^>]*>.*?)</row>',
+                      r'\1<c r="C4" t="e"><v>#VALUE!</v></c></row>', xml, flags=re.S)
+
+    edits = {"xl/worksheets/sheet1.xml": sheet}
+    if with_metadata:
+        edits.update({
+            "xl/metadata.xml": lambda t: (
+                f'<metadata xmlns="{_MAIN}" xmlns:xlrd="{rd}"><metadataTypes count="1">'
+                '<metadataType name="XLRICHVALUE" minSupportedVersion="120000" copy="1" '
+                'pasteAll="1" pasteValues="1" merge="1" splitFirst="1" rowColShift="1" '
+                'clearFormats="1" clearComments="1" assign="1" coerce="1"/></metadataTypes>'
+                '<futureMetadata name="XLRICHVALUE" count="1"><bk><extLst><ext uri="'
+                '{3e2802c4-a4d2-4d8b-9148-e3be6c30e623}"><xlrd:rvb i="0"/></ext></extLst></bk>'
+                '</futureMetadata><valueMetadata count="1"><bk><rc t="1" v="0"/></bk>'
+                '</valueMetadata></metadata>'),
+            "xl/richData/rdrichvalue.xml": lambda t: (
+                f'<rvData xmlns="{rd}" count="1"><rv s="0"><v>0</v><v>5</v></rv></rvData>'),
+            "xl/richData/rdrichvaluestructure.xml": lambda t: (
+                f'<rvStructures xmlns="{rd}" count="1"><s t="{structure}"><k n="_rvRel:'
+                'LocalImageIdentifier" t="i"/><k n="CalcOrigin" t="i"/></s></rvStructures>'),
+            "xl/richData/rdRichValueTypes.xml": lambda t: (
+                f'<rvTypesInfo xmlns="{rd2}"><global><keyFlags><key name="_Self"><flag '
+                'name="ExcludeFromFile" value="1"/></key></keyFlags></global></rvTypesInfo>'),
+            "xl/richData/richValueRel.xml": lambda t: (
+                f'<richValueRels xmlns="{ms}/spreadsheetml/2022/richvaluerel" '
+                f'xmlns:r="{_REL}"><rel r:id="rId1"/></richValueRels>'),
+            "xl/richData/_rels/richValueRel.xml.rels": lambda t: _add_rels(
+                None, ("rId1", f"{_REL}/image", "../media/image1.png", None)),
+            "xl/_rels/workbook.xml.rels": lambda t: _add_rels(
+                t, ("rIdM", f"{_REL}/sheetMetadata", "metadata.xml", None),
+                ("rIdV", f"{ms}/2017/06/relationships/rdRichValue", "richData/rdrichvalue.xml",
+                 None),
+                ("rIdS", f"{ms}/2017/06/relationships/rdRichValueStructure",
+                 "richData/rdrichvaluestructure.xml", None),
+                ("rIdT", f"{ms}/2017/06/relationships/rdRichValueTypes",
+                 "richData/rdRichValueTypes.xml", None),
+                ("rIdR", f"{ms}/2022/10/relationships/richValueRel", "richData/richValueRel.xml",
+                 None)),
+        })
+    return _patch(_xlsx(build), edits)
+
+
+def test_a_picture_placed_in_a_cell_is_named_never_read_as_an_error():
+    """Review r4 (B2): a picture placed in a cell (Excel 365's rich value)
+    read as ``#VALUE!`` -- the stand-in Excel caches for older readers --
+    with status FULL, identical to a genuine error beside it. The cell's
+    ``vm`` is resolved through the workbook's value metadata to its rich
+    value's structure: a picture reads ``[picture in cell]`` and is counted
+    in the sheet's FINAL note; another rich value (a linked data type) reads
+    ``[rich value in cell]``, named by its kind; a genuine ``#VALUE!`` stays
+    ``#VALUE!``. Excel's own ``.xls`` save of the same workbook keeps only
+    the error in both cells, so the ``.xls`` reads them as the file holds
+    them."""
+    base = "[sheet: Site]\nGANTRYPHOTOLOG\n[blank row 2]\nCULVERTVIEW\t\t{}\nREALERRORROW\t\t#VALUE!"
+    _assert_doc(_extract("site.xlsx", _pic_in_cell_xlsx()), [base.format("[picture in cell]")],
+                ["sheet 'Site': 1 picture(s) placed in a cell (each shown as '[picture in "
+                 f"cell]') were not read ({UNREAD})", PAGE_NOTE_XLSX])
+    for raw, kind in ((_pic_in_cell_xlsx("_entity"), "_entity"),
+                      (_pic_in_cell_xlsx(with_metadata=False), "unknown")):
+        _assert_doc(_extract("site.xlsx", raw), [base.format("[rich value in cell]")],
+                    [f"sheet 'Site': 1 cell(s) holding a rich value of kind {kind!r} (shown as "
+                     f"'[rich value in cell]') were not read ({UNREAD})", PAGE_NOTE_XLSX])
+    value_error = make_fixtures.XlsError(0x0F)
+    xls = make_fixtures.xls_bytes([{"name": "Site", "cells": [
+        (0, 0, "GANTRYPHOTOLOG", 0), (2, 0, "CULVERTVIEW", 0), (2, 2, value_error, 0),
+        (3, 0, "REALERRORROW", 0), (3, 2, value_error, 0)]}])
+    _assert_doc(_extract("site.xls", xls), [base.format("#VALUE!")], [PAGE_NOTE_XLS])
+
+
+def _shared_xlsx() -> bytes:
+    """A shared workbook's change history as real Excel 16 wrote it
+    (excel_fix4/excel_real/g02_shared.xlsx, the user's name replaced by an
+    invented one): A1 changed, A2 changed, A3 cleared -- three revision
+    records holding the earlier values."""
+    def build(wb):
+        ws = wb.active
+        ws.title = "Costs"
+        ws["A1"], ws["A2"] = "BASALTNEW", 27182
+
+    head = f'<headers xmlns="{_MAIN}" xmlns:r="{_REL}" guid="{{59322C55-6EC3-4418-8E38-4349481D7DA3}}"'
+    return _patch(_xlsx(build), {
+        "xl/revisions/revisionHeaders.xml": lambda t: (
+            head + ' diskRevisions="1" revisionId="3" version="2"><header guid="{0F180E20-5E7A-'
+            '49D0-B2D9-B6A6F1CDDF3D}" dateTime="2026-09-23T09:06:23" maxSheetId="2" '
+            'userName="QUILLWORTH" r:id="rId1"><sheetIdMap count="1"><sheetId val="1"/>'
+            '</sheetIdMap></header><header guid="{59322C55-6EC3-4418-8E38-4349481D7DA3}" '
+            'dateTime="2026-09-23T09:06:23" maxSheetId="2" userName="QUILLWORTH" r:id="rId2" '
+            'minRId="1" maxRId="3"><sheetIdMap count="1"><sheetId val="1"/></sheetIdMap>'
+            '</header></headers>'),
+        "xl/revisions/revisionLog1.xml": lambda t: f'<revisions xmlns="{_MAIN}"/>',
+        "xl/revisions/revisionLog2.xml": lambda t: (
+            f'<revisions xmlns="{_MAIN}"><rcc rId="1" sId="1"><oc r="A1" t="inlineStr"><is>'
+            '<t>AMBERGRISOLD</t></is></oc><nc r="A1" t="inlineStr"><is><t>BASALTNEW</t></is>'
+            '</nc></rcc><rcc rId="2" sId="1"><oc r="A2"><v>31415</v></oc><nc r="A2"><v>27182'
+            '</v></nc></rcc><rcc rId="3" sId="1"><oc r="A3" t="inlineStr"><is><t>CINNABARGONE'
+            '</t></is></oc><nc r="A3"/></rcc></revisions>'),
+        "xl/revisions/userNames.xml": lambda t: f'<users xmlns="{_MAIN}" count="0"/>',
+        "xl/revisions/_rels/revisionHeaders.xml.rels": lambda t: _add_rels(
+            None, ("rId2", f"{_REL}/revisionLog", "revisionLog2.xml", None),
+            ("rId1", f"{_REL}/revisionLog", "revisionLog1.xml", None)),
+        "xl/_rels/workbook.xml.rels": lambda t: _add_rels(
+            t, ("rIdU", f"{_REL}/usernames", "revisions/userNames.xml", None),
+            ("rIdH", f"{_REL}/revisionHeaders", "revisions/revisionHeaders.xml", None)),
+    })
+
+
+def _shared_xls() -> bytes:
+    """The same history in ``.xls``: Excel 16's three RRDChgCell records
+    (excel_fix4/excel_real/g02_shared.xls, byte for byte) inside a Revision
+    Log stream whose header records -- which carry the user's name there --
+    are zeroed, and a User Names stream with none."""
+    import struct
+
+    def rec(opcode: int, data: bytes) -> bytes:
+        return struct.pack("<HH", opcode, len(data)) + data
+
+    changes = [
+        "52000000010000000800000001001b000000000000001e00000000000c0000414d424552475249534f4c44"
+        "090000424153414c544e4557",
+        "4200000002000000080000000100120000000100000008000000000000000000c0adde4000000000808bda40",
+        "3a0000000300000008000000010018000000020000001e00000000000c000043494e4e41424152474f4e45"]
+    log = (rec(0x0196, b"\0" * 50) + rec(0x0195, b"\0" * 162) + rec(0x0194, b"\0" * 162)
+           + rec(0x0138, b"\0" * 158) + rec(0x013D, b"\x01\x00") + rec(0x0138, b"\0" * 158)
+           + rec(0x013D, b"\x01\x00") + b"".join(rec(0x013B, bytes.fromhex(h)) for h in changes)
+           + rec(0x000A, b""))
+    users = rec(0x0191, b"\0\0") + rec(0x0198, b"\x06\0\0\0") + rec(0x0197, b"\0\0")
+    return make_fixtures.xls_bytes(
+        [{"name": "Costs", "cells": [(0, 0, "BASALTNEW", 0), (1, 0, 27182.0, 0)]}],
+        streams={"Revision Log": log, "User Names": users})
+
+
+def test_a_shared_workbooks_change_history_is_named():
+    """Review r4 (B3): a shared workbook's change history -- the earlier
+    values of changed and cleared cells, which Excel lists on a History
+    sheet -- was neither shown nor named, status FULL. Found by the package
+    census (the ``revisionHeaders`` relationship's log parts; the ``.xls``
+    'Revision Log' stream), counted, and named in ONE FINAL note in both
+    formats. Whether to list the old values is a ruling this note waits on."""
+    note = ("the workbook keeps a shared-workbook change history of 3 revision record(s) -- "
+            "the earlier values of changed and cleared cells among them -- which was not read "
+            f"({UNREAD})")
+    _assert_doc(_extract("shared.xlsx", _shared_xlsx()), ["[sheet: Costs]\nBASALTNEW\n27182"],
+                [note, PAGE_NOTE_XLSX])
+    _assert_doc(_extract("shared.xls", _shared_xls()), ["[sheet: Costs]\nBASALTNEW\n27182"],
+                [note, PAGE_NOTE_XLS])
+    assert ex.has_final_marker(note)
+
+
+def _links_drawing() -> str:
+    """Real Excel 16's drawing for linked shapes (excel_fix4/excel_real/
+    g02_links.xlsx; fills, lines and styles left out): a text box with a web
+    link, a rectangle with a file link, a text box with an internal link, an
+    untexted rectangle with a link, a linked picture, a hidden text box --
+    and a text box with a hover link, which the Excel UI does not make."""
+    def props(shape_id: int, name: str, rid: str | None, hidden: bool = False,
+              hover: bool = False) -> str:
+        link = (f'<a:{"hlinkHover" if hover else "hlinkClick"} xmlns:r="{_REL}" r:id="{rid}"/>'
+                if rid else "")
+        hide = ' hidden="1"' if hidden else ""
+        return (f'<xdr:cNvPr id="{shape_id}" name="{name}"{hide}>{link}<a:extLst><a:ext uri="'
+                '{FF2B5EF4-FFF2-40B4-BE49-F238E27FC236}"><a16:creationId xmlns:a16="http://'
+                'schemas.microsoft.com/office/drawing/2014/main" id="{1E1B2156-668D-97DE-740D-'
+                '0A08F4ED4AEA}"/></a:ext></a:extLst></xdr:cNvPr>')
+
+    def sp(shape_id, name, rid, text, box, hidden=False, hover=False):
+        para = (f'<a:p><a:r><a:rPr lang="en-US" sz="1100"/><a:t>{text}</a:t></a:r></a:p>'
+                if text else '<a:p><a:pPr algn="l"/><a:endParaRPr lang="en-US" sz="1100"/></a:p>')
+        return _anchor(f'<xdr:sp macro="" textlink=""><xdr:nvSpPr>'
+                       f'{props(shape_id, name, rid, hidden, hover)}'
+                       f'<xdr:cNvSpPr{" txBox=\"1\"" if box else ""}/></xdr:nvSpPr><xdr:spPr>'
+                       '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody>'
+                       f'<a:bodyPr rtlCol="0" anchor="t"/><a:lstStyle/>{para}</xdr:txBody></xdr:sp>')
+
+    pic = _anchor(f'<xdr:pic><xdr:nvPicPr>{props(7, "Picture 6", "rId5")}<xdr:cNvPicPr>'
+                  '<a:picLocks/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip xmlns:r="'
+                  f'{_REL}" r:embed="rId6"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
+                  '<xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>')
+    return _drawing_xml(
+        sp(2, "TextBox 1", "rId1", "WEBBOXGROUSE", True),
+        sp(3, "Rectangle 2", "rId2", "FILESHAPEHERON", False),
+        sp(4, "TextBox 3", "rId3", "INTERNALBOXIBIS", True),
+        sp(5, "Rectangle 4", "rId4", "", False),
+        pic,
+        sp(8, "TextBox 7", None, "INVISIBLEBOXWORD", True, hidden=True),
+        sp(9, "TextBox 8", "rId7", "HOVERBOXWORD", True, hover=True))
+
+
+def _links_xlsx() -> bytes:
+    def build(wb):
+        ws = wb.active
+        ws.title = "Ledger"
+        ws["A1"] = "GANNETCELL"
+        from openpyxl.worksheet.hyperlink import Hyperlink
+
+        ws["A1"].hyperlink = Hyperlink(ref="A1", target="https://example.invalid/CELLTARGETZEBU",
+                                       tooltip="SCREENTIPWORD")
+
+    return _patch(_xlsx(build), {
+        "xl/worksheets/sheet1.xml": lambda t: t.replace(
+            "</worksheet>", f'<drawing xmlns:r="{_REL}" r:id="rIdDrawing"/></worksheet>'),
+        "xl/worksheets/_rels/sheet1.xml.rels": lambda t: _add_rels(
+            t, ("rIdDrawing", f"{_REL}/drawing", "../drawings/drawing1.xml", None)),
+        "xl/drawings/drawing1.xml": lambda t: _links_drawing(),
+        "xl/drawings/_rels/drawing1.xml.rels": lambda t: _add_rels(
+            None, ("rId3", f"{_REL}/hyperlink", "#'Ledger'!Z99", None),
+            ("rId2", f"{_REL}/hyperlink",
+             "file:///\\\\fileserver.invalid\\share\\FILETARGETTAPIR.pdf", "External"),
+            ("rId1", f"{_REL}/hyperlink", "https://example.invalid/WEBTARGETOKAPI", "External"),
+            ("rId6", f"{_REL}/image", "../media/image1.png", None),
+            ("rId5", f"{_REL}/hyperlink", "https://example.invalid/PICTARGETNUMBAT", "External"),
+            ("rId4", f"{_REL}/hyperlink", "https://example.invalid/BUTTONTARGETQUOLL", "External"),
+            ("rId7", f"{_REL}/hyperlink", "https://example.invalid/HOVERTARGETSKINK", "External")),
+    })
+
+
+def _xls_art(spid: int, hidden: bool = False, hlink: bytes = b"") -> bytes:
+    """One shape's OfficeArt drawing data as Excel writes it before the
+    shape's OBJ record: an SpContainer holding its FSP, its FOPT (the group
+    boolean property 0x03BF with fUsefHidden and fHidden, and the IHlink of
+    property 0x0382, pihlShape, as a complex property), its anchor and its
+    ClientData."""
+    import struct
+
+    def atom(ver_inst: int, rtype: int, body: bytes) -> bytes:
+        return struct.pack("<HHI", ver_inst, rtype, len(body)) + body
+
+    fixed, blobs, count = struct.pack("<HI", 0x03BF, 0x00020000 | (0x0002 if hidden else 0)), b"", 1
+    if hlink:
+        fixed += struct.pack("<HI", 0x8382, len(hlink))
+        blobs += hlink
+        count += 1
+    body = (atom(0x0002 | (202 << 4), 0xF00A, struct.pack("<II", spid, 0x0A00))
+            + atom(0x0003 | (count << 4), 0xF00B, fixed + blobs)
+            + atom(0x0000, 0xF010, b"\0" * 18) + atom(0x0000, 0xF011, b""))
+    return struct.pack("<HHI", 0x000F, 0xF004, len(body) + 8) + body
+
+
+# The IHlink blobs real Excel 16 wrote into each linked shape's pihlShape
+# property (excel_fix4/excel_real/g02_links.xls): a URL, a UNC file path, an
+# internal location.
+_HLINK_WEB = bytes.fromhex(
+    "d0c9ea79f9bace118c8200aa004ba90b0200000003000000e0c9ea79f9bace118c8200aa004ba90b660000006800"
+    "74007400700073003a002f002f006500780061006d0070006c0065002e0069006e00760061006c00690064002f00"
+    "5700450042005400410052004700450054004f004b004100500049000000795881f43b1d7f48af2c825dc4852763"
+    "00000000a5ab0003")
+_HLINK_UNC = bytes.fromhex(
+    "d0c9ea79f9bace118c8200aa004ba90b02000000030100002f0000005c005c00660069006c006500730065007200"
+    "7600650072002e0069006e00760061006c00690064005c00730068006100720065005c00460049004c0045005400"
+    "41005200470045005400540041005000490052002e007000640066000000")
+_HLINK_INTERNAL = bytes.fromhex(
+    "d0c9ea79f9bace118c8200aa004ba90b02000000080000000d00000027004c0065006400670065007200270021005a"
+    "00390039000000")
+_HLINK_BUTTON = bytes.fromhex(
+    "d0c9ea79f9bace118c8200aa004ba90b0200000003000000e0c9ea79f9bace118c8200aa004ba90b6c000000680074"
+    "007400700073003a002f002f006500780061006d0070006c0065002e0069006e00760061006c00690064002f004200"
+    "5500540054004f004e00540041005200470045005400510055004f004c004c000000795881f43b1d7f48af2c825dc4"
+    "85276300000000a5ab0003")
+_HLINK_PICTURE = bytes.fromhex(
+    "d0c9ea79f9bace118c8200aa004ba90b0200000003000000e0c9ea79f9bace118c8200aa004ba90b680000006800"
+    "74007400700073003a002f002f006500780061006d0070006c0065002e0069006e00760061006c00690064002f00"
+    "5000490043005400410052004700450054004e0055004d004200410054000000795881f43b1d7f48af2c825dc485"
+    "276300000000a5ab0003")
+
+
+def _links_xls() -> bytes:
+    """:func:`_links_xlsx` as real Excel 16 saved it to ``.xls``: each
+    object's drawing data, then its OBJ, then (for text) its TXO -- and, as
+    Excel writes it, each drawing record after the first as a CONTINUE of
+    the record before it."""
+    import struct
+
+    def drawn(ot, obj_id, text, art, first=False, extra=b""):
+        return _xls_record(0x00EC if first else 0x003C, art) + _xls_shape(ot, obj_id, text, extra)
+
+    return make_fixtures.xls_bytes([{
+        "name": "Ledger", "cells": [(0, 0, "GANNETCELL", 0)],
+        "links": [(0, 0, 0, 0, "url", "https://example.invalid/CELLTARGETZEBU", None)],
+        "records": [
+            # HLINKTOOLTIP after its HLINK: the link's range and its screen tip.
+            (0x0800, struct.pack("<5H", 0x0800, 0, 0, 0, 0)
+             + "SCREENTIPWORD\0".encode("utf-16-le")),
+            drawn(0x06, 1, "WEBBOXGROUSE", _xls_art(1025, hlink=_HLINK_WEB), first=True),
+            drawn(0x02, 2, "FILESHAPEHERON", _xls_art(1026, hlink=_HLINK_UNC)),
+            drawn(0x06, 3, "INTERNALBOXIBIS", _xls_art(1027, hlink=_HLINK_INTERNAL)),
+            drawn(0x02, 4, "", _xls_art(1028, hlink=_HLINK_BUTTON)),
+            drawn(0x08, 5, "", _xls_art(1029, hlink=_HLINK_PICTURE), extra=_PICTURE),
+            drawn(0x06, 6, "INVISIBLEBOXWORD", _xls_art(1030, hidden=True)),
+        ]}])
+
+
+def test_a_hyperlink_on_a_text_box_shape_or_picture_follows_it_as_a_cells_does():
+    """Review r4 (B4): a hyperlink on a text box, shape or picture was
+    dropped, in both formats -- the E13 class on a construct round 3 began
+    reading. ``.xlsx``: a shape's ``hlinkClick`` or ``hlinkHover`` is
+    resolved through the drawing's own relationships; ``.xls``: the shape's
+    OfficeArt pihlShape property is read by xlrd's own HLINK reader. The
+    target follows the shape's text as `` <URL>``, as a cell's does; an
+    internal link adds nothing; an untexted shape or a picture with a link
+    gets a line for the link. And (review r4 C) a text box Excel hides reads
+    ``[hidden text box]``, never as ordinary visible text. Each format spells
+    a file target as it stores it (``.xlsx`` keeps Excel's ``file:///``). A
+    link's screen tip (``tooltip``; HLINKTOOLTIP), text shown on pointing at
+    it, is named in the sheet's FINAL note, in both formats."""
+    lines = ["[sheet: Ledger]", "GANNETCELL <https://example.invalid/CELLTARGETZEBU>",
+             "[text box] WEBBOXGROUSE <https://example.invalid/WEBTARGETOKAPI>",
+             "[shape] FILESHAPEHERON <{file}>", "[text box] INTERNALBOXIBIS",
+             "[shape] <https://example.invalid/BUTTONTARGETQUOLL>",
+             "[picture] <https://example.invalid/PICTARGETNUMBAT>",
+             "[hidden text box] INVISIBLEBOXWORD"]
+    page = "\n".join(lines)
+    picture = (f"sheet 'Ledger': 1 picture(s) and 1 hyperlink screen tip(s) (the text shown "
+               f"on pointing at a link) were not read ({UNREAD})")
+    _assert_doc(_extract("links.xlsx", _links_xlsx()),
+                [page.format(file="file:///\\\\fileserver.invalid\\share\\FILETARGETTAPIR.pdf")
+                 + "\n[text box] HOVERBOXWORD <https://example.invalid/HOVERTARGETSKINK>"],
+                [picture, PAGE_NOTE_XLSX])
+    _assert_doc(_extract("links.xls", _links_xls()),
+                [page.format(file="\\\\fileserver.invalid\\share\\FILETARGETTAPIR.pdf")],
+                [picture, PAGE_NOTE_XLS])
+
+
+# Real Excel 16's equation text boxes (excel_fix4/excel_real/g02_eq.xlsx;
+# fills, lines and styles left out): Insert > Equation over typed text in a
+# whole box, over the tail of a box, over a fraction made professional, and
+# Excel's own placeholder equation. Each shape is an mc:AlternateContent: the
+# math zone (a14:m) in its Choice, a plain-text copy in its Fallback.
+_EQ_RPR = ('<a:rPr lang="en-US" sz="1100" i="1"><a:latin typeface="Cambria Math" '
+           'panose="02040503050406030204" pitchFamily="18" charset="0"/></a:rPr>')
+_OMML = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+
+
+def _eq_box(shape_id: int, choice_para: str, fallback_para: str) -> str:
+    def sp(para: str) -> str:
+        return (f'<xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="{shape_id}" '
+                f'name="TextBox {shape_id - 1}"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr>'
+                '<xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
+                f'<xdr:txBody><a:bodyPr rtlCol="0" anchor="t"/><a:lstStyle/><a:p>{para}'
+                '<a:endParaRPr lang="en-US" sz="1100"/></a:p></xdr:txBody></xdr:sp>')
+
+    return _anchor('<mc:AlternateContent><mc:Choice xmlns:a14="http://schemas.microsoft.com/'
+                   f'office/drawing/2010/main" Requires="a14">{sp(choice_para)}</mc:Choice>'
+                   + (f"<mc:Fallback>{sp(fallback_para)}</mc:Fallback>" if fallback_para else "")
+                   + "</mc:AlternateContent>")
+
+
+def _eq_run(text: str) -> str:
+    return f"<m:r>{_EQ_RPR}<m:t>{text}</m:t></m:r>"
+
+
+def _fallback_run(text: str) -> str:
+    return (f'<a:r><a:rPr lang="en-US" sz="1100" i="0"><a:latin typeface="Cambria Math"/></a:rPr>'
+            f"<a:t>{text}</a:t></a:r>")
+
+
+def _eq_xlsx(*boxes: str) -> bytes:
+    def build(wb):
+        wb.active.title = "EqV"
+        wb.active["A1"] = "VROW"
+
+    return _patch(_xlsx(build), {
+        "xl/worksheets/sheet1.xml": lambda t: t.replace(
+            "</worksheet>", f'<drawing xmlns:r="{_REL}" r:id="rIdEq"/></worksheet>'),
+        "xl/worksheets/_rels/sheet1.xml.rels": lambda t: _add_rels(
+            t, ("rIdEq", f"{_REL}/drawing", "../drawings/drawing1.xml", None)),
+        "xl/drawings/drawing1.xml": lambda t: _drawing_xml(*boxes).replace(
+            "<xdr:wsDr ", f'<xdr:wsDr xmlns:m="{_OMML}" xmlns:a14="http://schemas.microsoft.com/'
+            'office/drawing/2010/main" ', 1),
+    })
+
+
+_FRACTION = ("<a14:m><m:oMathPara><m:oMath><m:f><m:fPr><m:ctrlPr>" + _EQ_RPR + "</m:ctrlPr>"
+             "</m:fPr><m:num>" + _eq_run("𝑄𝑍𝑁𝑈𝑀") + "</m:num><m:den>" + _eq_run("𝑄𝑍𝐷𝐸𝑁")
+             + "</m:den></m:f></m:oMath></m:oMathPara></a14:m>")
+
+
+def test_an_equation_in_a_text_box_reads_as_excels_own_xls_spells_it():
+    """Review r4 (B5): an equation typed into a worksheet text box (Excel's
+    Insert > Equation, OMML ``a14:m`` in an mc:Choice) was dropped from the
+    ``.xlsx`` page with no note, while the ``.xls`` copy of the same file
+    showed it. A math zone of runs is read in order, its mathematical
+    letters (``𝑉``) as Excel's ``.xls`` writer spells them (``V``); one laid
+    out in two dimensions (a fraction) or holding Excel's placeholder field
+    is read from the plain-text copy Excel stores in mc:Fallback. The four
+    real-Excel boxes read identically in both formats; a fraction with no
+    fallback reads its characters in order, and its lost layout is named."""
+    page = ('[sheet: EqV]\nVROW\n[text box] VQA=7\n[text box] VLEAD VQB=9\n'
+            '[text box] QZNUM/QZDEN\n[text box] "Type equation here."')
+    placeholder = ("<a14:m><m:oMathPara><m:oMath><m:r><m:rPr><m:nor/></m:rPr>" + _EQ_RPR
+                   + '<m:t><a:fld id="{825F15A7-03F4-43D7-82C5-3E23DA2F108C}" type="mathplaceholder">'
+                   + _EQ_RPR + "<a:t>Type equation here.</a:t></a:fld></m:t></m:r></m:oMath>"
+                   "</m:oMathPara></a14:m>")
+    raw = _eq_xlsx(
+        _eq_box(2, "<a14:m><m:oMathPara><m:oMath>" + _eq_run("𝑉𝑄𝐴") + _eq_run("=7")
+                + "</m:oMath></m:oMathPara></a14:m>", _fallback_run("𝑉𝑄𝐴=7")),
+        _eq_box(3, '<a:r><a:rPr lang="en-US" sz="1100"/><a:t>VLEAD </a:t></a:r><a14:m><m:oMath>'
+                + _eq_run("𝑉𝑄𝐵") + _eq_run("=9") + "</m:oMath></a14:m>",
+                '<a:r><a:rPr lang="en-US" sz="1100"/><a:t>VLEAD </a:t></a:r>'
+                + _fallback_run("𝑉𝑄𝐵=9")),
+        _eq_box(4, _FRACTION, _fallback_run("𝑄𝑍𝑁𝑈𝑀/𝑄𝑍𝐷𝐸𝑁")),
+        _eq_box(5, placeholder, _fallback_run('"Type equation here."')))
+    _assert_doc(_extract("eq.xlsx", raw), [page], [PAGE_NOTE_XLSX])
+    xls = make_fixtures.xls_bytes([{
+        "name": "EqV", "cells": [(0, 0, "VROW", 0)],
+        "records": [_xls_shape(0x06, 1, "VQA=7"), _xls_shape(0x06, 2, "VLEAD VQB=9"),
+                    _xls_shape(0x06, 3, "QZNUM/QZDEN"),
+                    _xls_shape(0x06, 4, '"Type equation here."')]}])
+    _assert_doc(_extract("eq.xls", xls), [page], [PAGE_NOTE_XLS])
+
+    _assert_doc(_extract("eq.xlsx", _eq_xlsx(_eq_box(2, _FRACTION, ""))),
+                ["[sheet: EqV]\nVROW\n[text box] QZNUMQZDEN"],
+                ["sheet 'EqV': 1 equation layout(s) (each equation read as its characters in "
+                 f"order) were not read ({UNREAD})", PAGE_NOTE_XLSX])
+
+
+def test_what_this_reader_has_no_rule_for_is_named_whatever_it_is():
+    """Review-fix round 4, the class: each round found one more Excel
+    feature neither read nor named, because disclosure listed features.
+    Now every package part and relationship, sheet element, extension, cell
+    attribute, cell type and cell child, shared-string element, drawing
+    element and text element, ``.xls`` record in a sheet or in the globals,
+    and compound-file stream is looked up in the reader's tables of what it
+    reads, counts and knows to be structural -- and anything else is NAMED,
+    with its count, in a FINAL note. The guard builds a workbook of names no
+    table holds (checked first, so the guard stays a guard) and asserts each
+    is named; on 1619fc7 none was."""
+    import struct
+
+    def build(wb):
+        ws = wb.active
+        ws.title = "Guard"
+        ws["A1"] = "GUARDWORD"
+        ws["A1"].comment = openpyxl.comments.Comment("GUARDNOTE", "AUTHORWORD")
+
+    cells = ('<row r="1"><c r="A1" t="inlineStr"><is><t>GUARDWORD</t></is></c>'
+             '<c r="B1" t="inlineStr" zzmark="1"><is><t>MARKEDWORD</t></is></c>'
+             '<c r="C1" t="zz"><v>TYPEDWORD</v></c>'
+             '<c r="D1" t="inlineStr"><is><t>NOTEDWORD</t></is><zzNote>ZZNOTEWORD</zzNote></c>'
+             '<c r="E1" t="inlineStr"><is><t>RUBYBASEWORD</t><rPh sb="0" eb="1"><t>RUBYWORD</t>'
+             '</rPh></is></c><c r="F1" cm="1"><f>1+1</f><v>2</v></c>'
+             '<c r="G1"><v>7</v><extLst><ext uri="{00000000-0000-0000-0000-000000000000}"/>'
+             '</extLst></c><zzRowThing/></row>')
+    drawing = _drawing_xml(
+        _anchor("<xdr:zzHologram/>"),
+        _anchor('<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="3" name="Box"/><xdr:cNvSpPr txBox="1"/>'
+                '</xdr:nvSpPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>BOXWORD</a:t></a:r>'
+                "<a:zzGlyphRun>GLYPHWORD</a:zzGlyphRun></a:p></xdr:txBody></xdr:sp>"))
+    raw = _patch(_xlsx(build), {
+        "xl/worksheets/sheet1.xml": lambda t: re.sub(
+            r"<sheetData>.*?</sheetData>", lambda _m: f"<sheetData>{cells}</sheetData>", t,
+            flags=re.S).replace(
+            "</worksheet>", f'<drawing xmlns:r="{_REL}" r:id="rIdG"/><zzLedgerLock/><extLst>'
+            '<ext uri="{11111111-1111-1111-1111-111111111111}"><zzExtThing/></ext></extLst>'
+            "</worksheet>"),
+        "xl/worksheets/_rels/sheet1.xml.rels": lambda t: _add_rels(
+            t, ("rIdG", f"{_REL}/drawing", "../drawings/drawing1.xml", None),
+            ("rIdF", "http://schemas.invalid/relationships/zzRemoteFeed",
+             "https://example.invalid/FEEDWORD", "External")),
+        "xl/drawings/drawing1.xml": lambda t: drawing,
+        "xl/metadata.xml": lambda t: (
+            f'<metadata xmlns="{_MAIN}"><metadataTypes count="1"><metadataType name="XLZZTYPE"/>'
+            '</metadataTypes><cellMetadata count="1"><bk><rc t="1" v="0"/></bk></cellMetadata>'
+            "</metadata>"),
+        "xl/zzFuture/widget1.xml": lambda t: "<zzWidget>WIDGETWORD</zzWidget>",
+        "xl/zzOrphan/orphan1.xml": lambda t: "<zzOrphan>ORPHANWORD</zzOrphan>",
+        "xl/_rels/workbook.xml.rels": lambda t: _add_rels(
+            t, ("rIdW", "http://schemas.invalid/relationships/zzFutureWidget",
+                "zzFuture/widget1.xml", None),
+            ("rIdMeta", f"{_REL}/sheetMetadata", "metadata.xml", None),
+            ("rIdSst", f"{_REL}/sharedStrings", "sharedStrings.xml", None)),
+        "xl/sharedStrings.xml": lambda t: (
+            f'<sst xmlns="{_MAIN}" count="1" uniqueCount="1"><si><t>SHAREDWORD</t><rPh sb="0" '
+            'eb="1"><t>SHAREDRUBY</t></rPh></si><si><t>GLOSSED</t><zzGloss/></si></sst>'),
+        "[Content_Types].xml": lambda t: _add_overrides(
+            t, ("/xl/zzOrphan/orphan1.xml", "application/vnd.invalid.zzorphan+xml")),
+        "xl/workbook.xml": lambda t: re.sub(
+            r"(<calcPr\b)", '<definedNames><definedName name="RATEWORD">0.05</definedName>'
+            '<definedName name="HIDDENRATEWORD" hidden="1">7</definedName>'
+            '<definedName name="SPANWORD">Guard!$A$1:$B$1</definedName></definedNames>'
+            r"<zzWorkbookThing/>\1", t, count=1),
+        "xl/comments/comment1.xml": lambda t: t.replace(
+            "GUARDNOTE</t>", 'GUARDNOTE</t><rPh sb="0" eb="1"><t>NOTERUBY</t></rPh>'),
+    })
+    doc = _extract("guard.xlsx", raw)
+    sheet_note = (
+        "sheet 'Guard': 1 'zzLedgerLock' element(s) this reader has no rule for, 1 cell "
+        "attribute(s) 'zzmark' this reader has no rule for, 1 cell element(s) 'zzNote' this "
+        "reader has no rule for, 1 cell extension list(s) (extLst), 1 cell(s) carrying cell "
+        "metadata of kind 'XLZZTYPE', 1 cell(s) of type 'zz' this reader has no rule for, 1 "
+        "drawing element(s) 'zzHologram' this reader has no rule for, 1 drawing text "
+        "element(s) 'zzGlyphRun' this reader has no rule for, 1 phonetic guide(s) (rPh), 1 "
+        "phonetic guide(s) (rPh) in its comments, 1 row element(s) 'zzRowThing' this reader "
+        "has no rule for and 1 sheet extension(s) 'zzExtThing' this reader has no rule for "
+        f"were not read ({UNREAD})")
+    book_note = (
+        "the workbook holds 1 'zzGloss' element(s) in the shared strings this reader has no "
+        "rule for, 1 'zzWorkbookThing' element(s) in the workbook part this reader has no rule "
+        "for, 1 defined name(s) holding a constant value (not a cell's), 1 external link(s) of "
+        "type 'zzRemoteFeed', 1 hidden defined name(s) holding a constant value (Excel lists "
+        "them nowhere, not even in its Name Manager), 1 part(s) no relationship names "
+        "(content type 'application/vnd.invalid.zzorphan+xml'), 1 part(s) of type "
+        "'zzFutureWidget' and 1 phonetic guide(s) (rPh) in the shared strings, which this reader "
+        f"does not read ({UNREAD})")
+    # Each cell still shows what it holds; the note says what else it holds.
+    _assert_doc(doc, ["[sheet: Guard]\nGUARDWORD\tMARKEDWORD\tTYPEDWORD\tNOTEDWORD\t"
+                      "RUBYBASEWORD\t2\t7\n[text box] BOXWORD\n"
+                      "[comment on A1 by AUTHORWORD] GUARDNOTE"],
+                [sheet_note, book_note, PAGE_NOTE_XLSX])
+    assert all(ex.has_final_marker(n) for n in (sheet_note, book_note))
+
+    def rec(opcode: int, data: bytes) -> bytes:
+        return struct.pack("<HH", opcode, len(data)) + data
+
+    # A text record after a group, an object that owns no text (xlrd itself
+    # fails a file whose TXO follows no OBJ at all -- loudly, FAILED).
+    orphan_text = (_xls_shape(0x00, 9)
+                   + rec(0x01B6, struct.pack("<HH6sHHH", 0x0212, 0, b"\0" * 6, 9, 16, 0) + b"\0\0")
+                   + rec(0x003C, b"\x00ORPHANTXO") + rec(0x003C, b"\0" * 16))
+    # A NAME record whose formula is one number token (tNum 0.05): a
+    # constant, as .xlsx's RATEWORD.
+    constant_name = (struct.pack("<HBBH", 0, 0, len("RATEWORD"), 9) + b"\0" * 8 + b"\x00"
+                     + b"RATEWORD" + b"\x1f" + struct.pack("<d", 0.05))
+    xls = make_fixtures.xls_bytes(
+        [{"name": "Guard", "cells": [(0, 0, "GUARDWORD", 0)],
+          "records": [orphan_text, (0x0A77, b"\0\0\0\0")]}],
+        globals_extra=[(0x0A78, b"\0\0"), (0x0018, constant_name)],
+        streams={"ZzFutureStream": b"ZZ" * 16})
+    _assert_doc(_extract("guard.xls", xls), ["[sheet: Guard]\nGUARDWORD"], [
+        "sheet 'Guard': 1 record(s) of type 0x0A77 this reader has no rule for and 1 text "
+        f"record(s) (TXO) belonging to no drawing object were not read ({UNREAD})",
+        "the workbook holds 1 defined name(s) holding a constant value (not a cell's), 1 "
+        "record(s) of type 0x0A78 in the workbook's globals this reader has no rule for and 1 "
+        "stream(s) 'ZzFutureStream' in the compound file, which this reader does not read "
+        f"({UNREAD})", PAGE_NOTE_XLS])
+
+    # The guard's own guard: none of the invented names is in any table, so
+    # each note above is the construction naming the unknown, not a rule.
+    invented_elements = ("zzLedgerLock", "zzExtThing", "zzHologram", "zzGlyphRun", "zzNote",
+                         "zzRowThing", "zzGloss", "zzWorkbookThing")
+    tables = (set(ex._XLSX_SHEET_ELEMENTS) | set(ex._XLSX_SHEET_EXTENSIONS)
+              | ex._XLSX_CELL_CHILDREN | ex._XLSX_SST_ELEMENTS | ex._DRAWING_OBJECT_PARTS
+              | ex._DRAWING_ANCHORS | ex._XLSX_WORKBOOK_ELEMENTS | ex._XLSX_WORKBOOK_EXTENSIONS)
+    assert not tables & set(invented_elements)
+    assert "zzfuturewidget" not in ex._XLSX_PART_TYPES and "zzremotefeed" not in ex._XLSX_PART_TYPES
+    assert "zzmark" not in ex._XLSX_CELL_ATTRS and "zz" not in ex._XLSX_CELL_TYPES
+    assert not {0x0A77, 0x0A78} & (ex._XLS_SHEET_RECORD_TYPES | ex._XLS_GLOBALS_RECORD_TYPES)
+    assert "ZzFutureStream" not in ex._XLS_STREAMS
+
+
+def test_drawing_text_real_excel_writes_reads_alike_in_both_formats():
+    """Review r4 (C, the mutants O01-O08 that passed): a text box whose
+    ``.xls`` text spans two CONTINUE records, one of non-Latin-1 (UTF-16)
+    text, a soft line break (``a:br``), a cell-linked text box (``a:fld``), a
+    background picture, a literal ``&&G`` beside a real header picture, an
+    ink (content part) object -- each read or counted, and pinned. And
+    (review r4 C) an ``&G`` counts a header picture only where the sheet
+    holds one: an ``.xlsx`` with no ``legacyDrawingHF``, an ``.xls`` with no
+    HFPICTURE record of its own, count none."""
+    import struct
+
+    long_text = "LONGBOXWORD " * 700 + "LONGBOXEND"
+    unicode_text = "EPEEWORD — ΔLTAWORD €"
+
+    def two_continues(obj_id: int, text: str) -> bytes:
+        cut = len(text) // 2
+        obj = _xls_record(0x005D, struct.pack("<HHHHH", 0x15, 0x12, 0x06, obj_id, 0x6011)
+                          + b"\0" * 12 + b"\0" * 4)
+        return (obj + _xls_record(0x00EC, bytes.fromhex("00000df000000000"))
+                + _xls_record(0x01B6, struct.pack("<HH6sHHH", 0x0212, 0, b"\0" * 6,
+                                                  len(text), 16, 0) + b"\0\0")
+                + _xls_record(0x003C, b"\x00" + text[:cut].encode("latin-1"))
+                + _xls_record(0x003C, b"\x00" + text[cut:].encode("latin-1"))
+                + _xls_record(0x003C, b"\0" * 16))
+
+    def utf16(obj_id: int, text: str) -> bytes:
+        obj = _xls_record(0x005D, struct.pack("<HHHHH", 0x15, 0x12, 0x06, obj_id, 0x6011)
+                          + b"\0" * 12 + b"\0" * 4)
+        return (obj + _xls_record(0x01B6, struct.pack("<HH6sHHH", 0x0212, 0, b"\0" * 6,
+                                                      len(text), 16, 0) + b"\0\0")
+                + _xls_record(0x003C, b"\x01" + text.encode("utf-16-le"))
+                + _xls_record(0x003C, b"\0" * 16))
+
+    page = ("[sheet: Kinds]\n&G LITERALWORD\nKINDROW\n"
+            f"[text box] {long_text}\n[text box] {unicode_text}\n"
+            "[text box] BRKFIRST ¶ BRKSECOND\n[text box] KINDROW")
+    xls = make_fixtures.xls_bytes([{
+        "name": "Kinds", "cells": [(0, 0, "KINDROW", 0)], "header": "&C&G&L&&G LITERALWORD",
+        "records": [_xls_record(0x0866, _EXCEL_HF_PICTURE), two_continues(1, long_text),
+                    utf16(2, unicode_text), _xls_shape(0x06, 3, "BRKFIRST\nBRKSECOND"),
+                    _xls_shape(0x06, 4, "KINDROW"), _xls_record(0x00E9, b"\0" * 8)]}])
+    note = (f"sheet 'Kinds': 1 picture(s) and 1 picture(s) in its print header or footer were "
+            f"not read ({UNREAD})")
+    _assert_doc(_extract("kinds.xls", xls), [page], [note, PAGE_NOTE_XLS])
+
+    def build(wb):
+        ws = wb.active
+        ws.title = "Kinds"
+        ws["A1"] = "KINDROW"
+
+    drawing = _drawing_xml(
+        _anchor(_sp(long_text, 2, box=True)), _anchor(_sp(unicode_text, 3, box=True)),
+        _anchor(_sp("BRKFIRST", 4, box=True).replace(
+            "</a:t></a:r></a:p>", '</a:t></a:r><a:br><a:rPr lang="en-US"/></a:br><a:r>'
+            "<a:t>BRKSECOND</a:t></a:r></a:p>")),
+        _anchor(_sp("", 5, box=True).replace(
+            '<a:endParaRPr lang="en-US"/>', '<a:fld id="{00000000-0000-0000-0000-000000000001}" '
+            'type="TxLink"><a:rPr lang="en-US"/><a:t>KINDROW</a:t></a:fld>')),
+        _anchor('<xdr:contentPart xmlns:r="' + _REL + '" r:id="rIdInk"/>'))
+    header = "<headerFooter><oddHeader>&amp;C&amp;G&amp;L&amp;&amp;G LITERALWORD</oddHeader></headerFooter>"
+    raw = _patch(_xlsx(build), {
+        "xl/worksheets/sheet1.xml": lambda t: re.sub(
+            r"<headerFooter>.*?</headerFooter>|<headerFooter/>", "", t, flags=re.S).replace(
+            "</worksheet>", f'{header}<drawing xmlns:r="{_REL}" r:id="rIdK"/><legacyDrawingHF '
+            f'xmlns:r="{_REL}" r:id="rIdKH"/><picture xmlns:r="{_REL}" r:id="rIdBg"/></worksheet>'),
+        "xl/worksheets/_rels/sheet1.xml.rels": lambda t: _add_rels(
+            t, ("rIdK", f"{_REL}/drawing", "../drawings/drawing1.xml", None),
+            ("rIdKH", f"{_REL}/vmlDrawing", "../drawings/vmlDrawingHF1.vml", None)),
+        "xl/drawings/drawing1.xml": lambda t: drawing,
+        "xl/drawings/vmlDrawingHF1.vml": lambda t: '<xml><v:shape id="CH"/></xml>',
+    })
+    _assert_doc(_extract("kinds.xlsx", raw), [page],
+                ["sheet 'Kinds': 1 picture(s), 1 picture(s) in its print header or footer and 1 "
+                 f"drawing object(s) of another kind were not read ({UNREAD})", PAGE_NOTE_XLSX])
+
+    # '&G' with no header picture part in the sheet: nothing to count.
+    no_part = _patch(raw, {"xl/worksheets/sheet1.xml": lambda t: re.sub(
+        r'<legacyDrawingHF [^>]*/>', "", t)})
+    _assert_doc(_extract("kinds.xlsx", no_part), [page],
+                ["sheet 'Kinds': 1 picture(s) and 1 drawing object(s) of another kind were not "
+                 f"read ({UNREAD})", PAGE_NOTE_XLSX])
+    xls = make_fixtures.xls_bytes([{
+        "name": "Kinds", "cells": [(0, 0, "KINDROW", 0)], "header": "&C&G&LLITERALWORD"}])
+    _assert_doc(_extract("kinds.xls", xls), ["[sheet: Kinds]\nLITERALWORD\nKINDROW"],
+                [PAGE_NOTE_XLS])
+
+
+def test_validation_messages_lists_sparklines_and_scenarios_are_named():
+    """Review-fix round 4, what the tables COUNT: a data validation's input
+    or error message (text Excel shows on selecting the cell), its typed
+    list of values (the drop-down's items), a sparkline group and a
+    scenario's alternative values are not read, and are named in the sheet's
+    FINAL note -- pinned on real Excel 16's own XML and DV records
+    (excel_fix4/excel_real/g02_rich.xlsx and .xls). A validation with neither
+    names nothing."""
+    def build(wb):
+        wb.active.title = "Calib"
+        wb.active["A1"] = "CALROW"
+
+    validations = (
+        '<dataValidations count="3"><dataValidation type="whole" allowBlank="1" '
+        'showInputMessage="1" showErrorMessage="1" error="VALERRORWORD" promptTitle="VALTITLEWORD" '
+        'prompt="VALPROMPTWORD" sqref="E2"><formula1>1</formula1><formula2>10</formula2>'
+        '</dataValidation><dataValidation type="list" allowBlank="1" showInputMessage="1" '
+        'showErrorMessage="1" sqref="E3"><formula1>"ALPHAPICK,BETAPICK"</formula1></dataValidation>'
+        '<dataValidation type="whole" sqref="E4"><formula1>1</formula1></dataValidation>'
+        "</dataValidations>")
+    tail = ('<scenarios><scenario name="SCENNAMEWORD" count="1"><inputCells r="B2" val="99"/>'
+            '</scenario></scenarios><extLst><ext uri="{05C60535-1F16-4fd2-B633-F4F36F0B64E0}" '
+            'xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:'
+            'sparklineGroups xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main">'
+            '<x14:sparklineGroup displayEmptyCellsAs="gap"><x14:colorSeries rgb="FF376092"/>'
+            "<x14:sparklines><x14:sparkline><xm:f>Calib!B2:C2</xm:f><xm:sqref>D2</xm:sqref>"
+            "</x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext>"
+            "</extLst>")
+    raw = _patch(_xlsx(build), {"xl/worksheets/sheet1.xml": lambda t: t.replace(
+        "</worksheet>", validations + tail + "</worksheet>")})
+    _assert_doc(_extract("calib.xlsx", raw), ["[sheet: Calib]\nCALROW"], [
+        "sheet 'Calib': 1 data validation list(s) of typed values, 1 data validation message(s) "
+        "(a cell's input or error message), 1 scenario(s) (alternative values for cells) and 1 "
+        f"sparkline group(s) (small charts in cells) were not read ({UNREAD})", PAGE_NOTE_XLSX])
+
+    # Excel 16's DV records for the first two (and one with no message or
+    # list), and a SCENARIO record; .xls keeps no sparklines.
+    message = bytes.fromhex(
+        "01010c000c000056414c5449544c45574f5244010000000d000056414c50524f4d5054574f52440c000056"
+        "414c4552524f52574f5244030074001e01000300002f1e0a0001000100010004000400")
+    typed_list = bytes.fromhex(
+        "83010c00010000000100000001000000010000001500000d171200414c5048415049434b00424554415049"
+        "434b0000420001000200020004000400")
+    plain = bytes.fromhex("01010000010000000100000001000000010000000300002f1e0100000000000100030003000400"
+                          "0400")
+    xls = make_fixtures.xls_bytes([{"name": "Calib", "cells": [(0, 0, "CALROW", 0)], "records": [
+        (0x01B2, bytes.fromhex("00000000000000000000ffffffff03000000")), (0x01BE, message),
+        (0x01BE, typed_list), (0x01BE, plain), (0x00AF, b"\0" * 12)]}])
+    _assert_doc(_extract("calib.xls", xls), ["[sheet: Calib]\nCALROW"], [
+        "sheet 'Calib': 1 data validation list(s) of typed values, 1 data validation message(s) "
+        "(a cell's input or error message) and 1 scenario(s) (alternative values for cells) "
+        f"were not read ({UNREAD})", PAGE_NOTE_XLS])
+
+
+def test_an_xls_file_links_short_path_reads_in_the_writers_code_page():
+    """Mutant Q11 (rounds 3 and 4, waiting on a BIFF writer): a file link's
+    short path is bytes in the writer's ANSI code page, read cp1252 first --
+    a Euro sign (0x80) is ``€``, never the control character latin-1 makes
+    of it. The HLINK is built byte for byte as Excel's file moniker."""
+    import struct
+
+    short = b"annex\\EURO\x80FILE.pdf\0"
+    moniker = (bytes.fromhex("0303000000000000C000000000000046") + struct.pack("<Hi", 0, len(short))
+               + short + b"\xff\xff\xad\xde" + b"\0" * 20 + struct.pack("<i", 0))
+    link = (struct.pack("<HHHH", 0, 0, 0, 0) + bytes.fromhex("D0C9EA79F9BACE118C8200AA004BA90B")
+            + b"\x02\x00\x00\x00" + struct.pack("<i", 0x01) + moniker)
+    xls = make_fixtures.xls_bytes([{"name": "Files", "cells": [(0, 0, "ANNEXROW", 0)],
+                                    "records": [(0x01B8, link)]}])
+    _assert_doc(_extract("files.xls", xls), ["[sheet: Files]\nANNEXROW <annex\\EURO€FILE.pdf>"],
+                [PAGE_NOTE_XLS])

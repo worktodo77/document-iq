@@ -341,7 +341,8 @@ _XLS_SUBSTREAM_TYPE = {"worksheet": (0, 0x0010), "macro": (1, 0x0040),
 
 def xls_bytes(sheets, *, datemode: int = 0,
               formats: dict[int, str] | None = None,
-              globals_extra: list[tuple[int, bytes]] | None = None) -> bytes:
+              globals_extra: list[tuple[int, bytes]] | None = None,
+              streams: dict[str, bytes] | None = None) -> bytes:
     """A BIFF8 workbook inside a hand-built OLE2 compound file, since no
     ``.xls`` writer is installed anywhere on this machine.
 
@@ -380,6 +381,12 @@ def xls_bytes(sheets, *, datemode: int = 0,
 
     ``globals_extra`` -- raw ``(opcode, data)`` records appended to the
     workbook globals after the XF records (e.g. a malformed PALETTE).
+
+    ``streams`` -- more streams at the top of the compound file, by name,
+    after ``Workbook`` (a shared workbook's ``Revision Log``, a stream no
+    reader knows); each is padded like the Workbook stream. ``hf_flags`` in a
+    sheet is the HEADERFOOTER record's flags word (default ``0x333F``: both
+    variants declared, as Excel writes a sheet whose settings are on).
 
     One XF record per distinct format, in order of first use after XF 0
     (General). The stream is padded to at least the 4096-byte mini-stream
@@ -499,7 +506,7 @@ def xls_bytes(sheets, *, datemode: int = 0,
             if "even_first" in sheet:
                 strings = sheet["even_first"]
                 body += rec(0x089C, struct.pack("<HH8x", 0x089C, 0) + b"\0" * 16
-                            + struct.pack("<H", 0x333F)
+                            + struct.pack("<H", sheet.get("hf_flags", 0x333F))
                             + struct.pack("<4H", *(len(s) for s in strings))
                             + b"".join(xl_str(s, "<H") for s in strings if s))
             for colx in sheet.get("hidden_cols", ()):
@@ -539,28 +546,49 @@ def xls_bytes(sheets, *, datemode: int = 0,
     workbook_stream = globals_bytes + b"".join(substreams)
 
     sec = 512
-    stream_total = max(4096, -(-len(workbook_stream) // sec) * sec)
-    workbook_stream += b"\x00" * (stream_total - len(workbook_stream))
 
-    # --- OLE2/CFB container: the FAT sector(s), one directory sector, then
-    # the padded Workbook stream as a plain sector chain. ---
+    def padded(data: bytes) -> bytes:
+        total = max(4096, -(-len(data) // sec) * sec)
+        return data + b"\x00" * (total - len(data))
+
+    workbook_stream = padded(workbook_stream)
+    stream_total = len(workbook_stream)
+    extra = [(name, padded(data)) for name, data in (streams or {}).items()]
+
+    # --- OLE2/CFB container: the FAT sector(s), the directory sector(s),
+    # then the padded Workbook stream and any extra streams, each a plain
+    # sector chain. ---
     freesect, endofchain, fatsect = -1, -2, -3
     n_stream_sectors = stream_total // sec
+    n_extra_sectors = sum(len(d) // sec for _n, d in extra)
+    n_dir = -(-(2 + len(extra)) // 4)
     n_fat = 1
-    while n_fat * (sec // 4) < n_fat + 1 + n_stream_sectors:
+    while n_fat * (sec // 4) < n_fat + n_dir + n_stream_sectors + n_extra_sectors:
         n_fat += 1
     assert n_fat <= 109, n_fat
     dir_sector_idx = n_fat
-    stream_first_sid = n_fat + 1
-    total_sectors = n_fat + 1 + n_stream_sectors
+    stream_first_sid = n_fat + n_dir
+    total_sectors = n_fat + n_dir + n_stream_sectors + n_extra_sectors
 
     fat_entries = [freesect] * (n_fat * (sec // 4))
     for i in range(n_fat):
         fat_entries[i] = fatsect
-    fat_entries[dir_sector_idx] = endofchain
-    for i in range(n_stream_sectors):
-        sid = stream_first_sid + i
-        fat_entries[sid] = endofchain if i == n_stream_sectors - 1 else sid + 1
+    for i in range(n_dir):
+        fat_entries[dir_sector_idx + i] = (endofchain if i == n_dir - 1
+                                           else dir_sector_idx + i + 1)
+
+    def chain(first: int, count: int) -> None:
+        for i in range(count):
+            sid = first + i
+            fat_entries[sid] = endofchain if i == count - 1 else sid + 1
+
+    chain(stream_first_sid, n_stream_sectors)
+    extra_first: list[int] = []
+    next_sid = stream_first_sid + n_stream_sectors
+    for _name, data in extra:
+        extra_first.append(next_sid)
+        chain(next_sid, len(data) // sec)
+        next_sid += len(data) // sec
     fat_sector_bytes = b"".join(struct.pack("<i", v) for v in fat_entries)
 
     def dir_entry(name, etype, color, left, right, child, first_sid, tot_size):
@@ -578,9 +606,16 @@ def xls_bytes(sheets, *, datemode: int = 0,
         return entry
 
     root_entry = dir_entry("Root Entry", 5, 1, -1, -1, 1, -2, 0)
-    wb_entry = dir_entry("Workbook", 2, 1, -1, -1, -1, stream_first_sid, stream_total)
+    # Each further stream is the right sibling of the one before it.
+    wb_entry = dir_entry("Workbook", 2, 1, -1, 2 if extra else -1, -1,
+                         stream_first_sid, stream_total)
     empty_entry = b"\x00" * 128
-    dir_sector_bytes = root_entry + wb_entry + empty_entry + empty_entry
+    entries = [root_entry, wb_entry]
+    for k, ((name, data), first) in enumerate(zip(extra, extra_first)):
+        right = 3 + k if k + 1 < len(extra) else -1
+        entries.append(dir_entry(name, 2, 1, -1, right, -1, first, len(data)))
+    entries += [empty_entry] * (n_dir * 4 - len(entries))
+    dir_sector_bytes = b"".join(entries)
 
     header = bytearray(512)
     struct.pack_into("<8s", header, 0, b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
@@ -601,7 +636,8 @@ def xls_bytes(sheets, *, datemode: int = 0,
     for i, v in enumerate(difat):
         struct.pack_into("<i", header, 76 + i * 4, v)
 
-    file_bytes = bytes(header) + fat_sector_bytes + dir_sector_bytes + workbook_stream
+    file_bytes = (bytes(header) + fat_sector_bytes + dir_sector_bytes + workbook_stream
+                  + b"".join(data for _n, data in extra))
     assert len(file_bytes) == 512 + sec * total_sectors, (
         len(file_bytes), 512 + sec * total_sectors)
     return file_bytes

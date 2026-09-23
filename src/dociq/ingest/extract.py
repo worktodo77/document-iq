@@ -1847,7 +1847,12 @@ def _xl_number_text(value) -> str:
 # never to a negative zero (0.125 under 0% is 13%, -0.001 is 0%). Every place
 # this module rounds a number to fewer digits -- a percentage's decimals, a
 # time's, a date-time's or a duration's millisecond -- goes through these two
-# helpers, and nowhere else.
+# helpers, and nowhere else. What was measured is the RULE (review r4 C): the
+# value Excel holds and rounds with. A page does not copy Excel's on-screen
+# text: a time or date-time keeps its millisecond under a format that shows
+# none (Excel shows 0.00146484375 under hh:mm:ss as 00:02:07; the page reads
+# 00:02:06.563, the millisecond Excel holds), and a value too wide for its
+# column is never Excel's '####'.
 _XL_15_DIGITS = decimal.Context(prec=15, rounding=decimal.ROUND_HALF_DOWN,
                                 Emax=999_999, Emin=-999_999)
 _XL_EXACT = decimal.Context(prec=2_000, rounding=decimal.ROUND_HALF_UP,
@@ -1981,7 +1986,9 @@ def _xl_serial_text(value: float, datemode: int, fmt: str | None) -> tuple[str, 
       in Excel's calendar: the number as stored, flagged ``'not_a_date'``.
 
     Milliseconds are Excel's (:func:`_xl_serial_ms`), never binary
-    half-to-even: 0.00146484375 reads ``00:02:06.563``, as Excel shows it.
+    half-to-even: 0.00146484375 reads ``00:02:06.563``, the millisecond Excel
+    holds (and shows under a format with ``.000``; under ``hh:mm:ss`` Excel
+    shows ``00:02:07``, a rounding to the second the page does not make).
     """
     if not math.isfinite(value):
         return _xl_number_text(value), "not_a_date"
@@ -2317,7 +2324,8 @@ def _xlsx_workbook_part(z) -> str:
     return member
 
 
-def _xlsx_sheet_order(z, workbook_part: str) -> list[tuple[str, str | None, str, str]]:
+def _xlsx_sheet_order(z, workbook_part: str, named: dict[str, int] | None = None
+                      ) -> list[tuple[str, str | None, str, str]]:
     """Every sheet the workbook part lists, in TAB ORDER, as ``(name, part
     member or None, kind, state)``.
 
@@ -2333,6 +2341,8 @@ def _xlsx_sheet_order(z, workbook_part: str) -> list[tuple[str, str | None, str,
     import xml.etree.ElementTree as ET
 
     root = ET.fromstring(z.read(workbook_part))
+    if named is not None:
+        _xlsx_workbook_census(root, named)     # review-fix round 4: the same parse
     rels = _xlsx_rels(z, workbook_part)
 
     out: list[tuple[str, str | None, str, str]] = []
@@ -2409,8 +2419,13 @@ class _XlsxSheetExtras:
     (``'shape'``) on the sheet's drawing that carries text, in the drawing's
     own order (review-fix round 3)."""
     objects: dict[str, int] = field(default_factory=dict)
-    """What the sheet shows that is counted, not read: :data:`_DRAWING_KINDS`
-    to how many."""
+    """What the sheet holds that is counted, not read: :data:`_DRAWING_KINDS`,
+    and every element, attribute or cell kind the sheet's census named
+    (review-fix round 4), to how many."""
+    rich_cells: dict[tuple[int, int], str] = field(default_factory=dict)
+    """``{(row, column): what the cell holds}`` for each cell whose value is
+    a rich value kept outside it (``vm``): ``'picture'`` for a picture placed
+    in the cell, else the rich value's kind (:class:`_XlsxCellMeta`)."""
     unread: list[str] = field(default_factory=list)
     """One marked note tail per read that failed or part that is missing, for
     the caller to prefix with the sheet's name -- disclosed, never swallowed."""
@@ -2499,6 +2514,7 @@ _FOOTER_TAGS = ("oddFooter", "evenFooter", "firstFooter")
 _DRAWING_KINDS = {
     "chart": "chart(s)",
     "picture": "picture(s)",
+    "cell picture": "picture(s) placed in a cell (each shown as '[picture in cell]')",
     "SmartArt": "SmartArt diagram(s)",
     "control": "form or ActiveX control(s)",
     "object": "embedded or linked object(s)",
@@ -2519,17 +2535,597 @@ def _count_objects(into: dict[str, int], counts: dict[str, int]) -> None:
             into[kind] = into.get(kind, 0) + n
 
 
+def _listing(parts: list[str]) -> str:
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
 def _drawing_objects_note(name: str, objects: dict[str, int]) -> str:
-    """The ONE FINAL note naming what a sheet shows that was counted, not
-    read."""
+    """The ONE FINAL note naming what a sheet holds that was counted, not
+    read: the kinds of :data:`_DRAWING_KINDS` in that order, then every
+    other thing the sheet's own census named (review-fix round 4: an
+    element, cell attribute or record this reader has no rule for), each
+    by its own name, in sorted order."""
     parts = [f"{objects[kind]} {label}" for kind, label in _DRAWING_KINDS.items()
              if objects.get(kind)]
-    listed = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
-    return f"sheet {name!r}: {listed} were not read ({M_XLSX_SHEET_UNREAD})"
+    parts += [f"{objects[kind]} {kind}" for kind in sorted(objects)
+              if kind not in _DRAWING_KINDS and objects[kind]]
+    return f"sheet {name!r}: {_listing(parts)} were not read ({M_XLSX_SHEET_UNREAD})"
 
 
 def _shape_line(kind: str, text: str) -> str:
     return f"[{kind}] {_clean_cell_text(text)}"
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 4 (D-55): disclosure BY CONSTRUCTION.
+#
+# Four rounds each found one more Excel feature whose content was neither read
+# nor named, because disclosure worked from a list of features someone had
+# thought of. The rule now runs the other way: every piece of a workbook --
+# package part, relationship, sheet element, cell attribute, drawing element,
+# BIFF record, compound-file stream -- is looked up in an explicit table of
+# what this reader READS, what it COUNTS in a note of its own, and what holds
+# NO EVIDENCE (each with its reason). Anything the table does not name, known
+# or invented tomorrow, is counted and NAMED in a FINAL note, by its own name.
+# The tables below are the disposition of record; nothing else is.
+# ---------------------------------------------------------------------------
+
+_READ = "read"
+_COUNTED = "counted"
+_NO_EVIDENCE = "no evidence"
+
+_PROPERTIES_REASON = ("document properties: the file's own metadata (author, dates, "
+                      "application), not what the workbook shows; no DocIQ extractor reads "
+                      "document properties in any format")
+
+_XLSX_PART_TYPES: dict[str, tuple[str, str]] = {
+    # A package part's disposition by the TYPE of the relationship that
+    # reaches it (the last segment of the Type URI, lower case).
+    "officedocument": (_READ, "the workbook part: its sheet list, tab order and kinds"),
+    "worksheet": (_READ, "cells, print header and footer, hyperlinks, drawings, comments"),
+    "xlmacrosheet": (_READ, "an Excel 4.0 macro sheet's cells, read as a worksheet's"),
+    "xlintlmacrosheet": (_READ, "an Excel 4.0 macro sheet's cells, read as a worksheet's"),
+    "sharedstrings": (_READ, "cell text, through openpyxl; a phonetic guide in it is named"),
+    "styles": (_READ, "number formats, through openpyxl"),
+    "comments": (_READ, "cell comments (E11)"),
+    "threadedcomment": (_READ, "threaded comments (E11)"),
+    "person": (_READ, "the people threaded comments are credited to"),
+    "drawing": (_READ, "text boxes' and shapes' text and links; every other object on it "
+                       "is counted in the sheet's note"),
+    "vmldrawing": (_READ, "form controls and pictures only it holds are counted; a "
+                          "comment's shape adds nothing to its comment; a header or footer "
+                          "picture is counted from the header's &G field"),
+    "hyperlink": (_READ, "the external target of a cell's or a shape's hyperlink (E13)"),
+    "sheetmetadata": (_READ, "which cells hold a picture or other rich value, and which "
+                             "formulas are dynamic arrays"),
+    "rdrichvalue": (_READ, "the rich value a cell holds"),
+    "rdrichvaluestructure": (_READ, "each rich value's kind: a picture in a cell or another"),
+    "chartsheet": (_COUNTED, "its own page and FINAL note"),
+    "dialogsheet": (_COUNTED, "its own page and FINAL note"),
+    "chart": (_COUNTED, "counted in its sheet's note, or named in its chartsheet's"),
+    "chartex": (_COUNTED, "counted in its sheet's note, or named in its chartsheet's"),
+    "chartusershapes": (_COUNTED, "shapes drawn on a chart, part of the chart counted"),
+    "diagramdata": (_COUNTED, "a SmartArt diagram, counted in its sheet's note"),
+    "diagramlayout": (_COUNTED, "a SmartArt diagram, counted in its sheet's note"),
+    "diagramquickstyle": (_COUNTED, "a SmartArt diagram, counted in its sheet's note"),
+    "diagramcolors": (_COUNTED, "a SmartArt diagram, counted in its sheet's note"),
+    "diagramdrawing": (_COUNTED, "a SmartArt diagram, counted in its sheet's note"),
+    "image": (_COUNTED, "every picture a sheet shows is counted in its note: a drawing's "
+                        "picture, a background, a header picture, a picture in a cell, an "
+                        "object's icon; a chart's own picture is part of the chart"),
+    "control": (_COUNTED, "an ActiveX control, counted in its sheet's note"),
+    "activexcontrolbinary": (_COUNTED, "an ActiveX control, counted in its sheet's note"),
+    "ctrlprop": (_COUNTED, "a form control, counted in its sheet's note"),
+    "oleobject": (_COUNTED, "an embedded or linked object, counted in its sheet's note"),
+    "package": (_COUNTED, "an embedded file: a sheet's object (counted) or a chart's own "
+                          "data (its chart counted)"),
+    "richvaluerel": (_COUNTED, "the pictures placed in cells, each counted in its sheet's note"),
+    "revisionheaders": (_COUNTED, "a shared workbook's change history, counted in its own note"),
+    "revisionlog": (_COUNTED, "a shared workbook's change history, counted in its own note"),
+    "usernames": (_COUNTED, "a shared workbook's change history, counted in its own note"),
+    "externallinkpath": (_COUNTED, "the other workbook's path, part of the externalLink "
+                                   "part it belongs to, which is named"),
+    "xlpathmissing": (_COUNTED, "the other workbook's path, part of the externalLink part "
+                                "it belongs to, which is named"),
+    "slicer": (_COUNTED, "the slicer a sheet shows is a drawing frame, counted"),
+    "timeline": (_COUNTED, "the timeline a sheet shows is a drawing frame, counted"),
+    "theme": (_NO_EVIDENCE, "fonts and colors"),
+    "calcchain": (_NO_EVIDENCE, "the order Excel recalculates cells in"),
+    "printersettings": (_NO_EVIDENCE, "a binary printer setup (DEVMODE)"),
+    "chartstyle": (_NO_EVIDENCE, "a chart's style: fonts, colors, effects"),
+    "chartcolorstyle": (_NO_EVIDENCE, "a chart's color palette"),
+    "table": (_NO_EVIDENCE, "a table's header, data and totals rows are cells in sheetData, "
+                            "which are read; the part holds its name, style and column "
+                            "formulas"),
+    "pivottable": (_NO_EVIDENCE, "what a pivot table shows are cells in sheetData, which "
+                                 "are read; the part holds its layout (its cache is named)"),
+    "querytable": (_NO_EVIDENCE, "a query's results are cells in sheetData, which are read; "
+                                 "the part maps its fields"),
+    "rdrichvaluetypes": (_NO_EVIDENCE, "flags on rich-value keys"),
+    "slicercache": (_NO_EVIDENCE, "the items a slicer lists: values the table or pivot "
+                                  "table it filters holds"),
+    "timelinecache": (_NO_EVIDENCE, "the dates a timeline lists: values the pivot table it "
+                                    "filters holds"),
+    "namedsheetview": (_NO_EVIDENCE, "a named sheet view's own filter and sort settings"),
+    "core-properties": (_NO_EVIDENCE, _PROPERTIES_REASON),
+    "extended-properties": (_NO_EVIDENCE, _PROPERTIES_REASON),
+    "custom-properties": (_NO_EVIDENCE, _PROPERTIES_REASON),
+    "thumbnail": (_NO_EVIDENCE, "a picture of the first sheet, whose content is read"),
+}
+"""Everything else -- ``vbaProject``, ``customXml``, ``externalLink``,
+``pivotCacheDefinition``/``pivotCacheRecords``, ``connections``,
+``webextension``, a linked data type's rich-data parts, a part type Office
+adds tomorrow -- is named, with its count, in the workbook's FINAL note
+(:func:`_xlsx_package_census`)."""
+
+
+def _workbook_unread_note(items: dict[str, int]) -> str:
+    """The ONE FINAL note per workbook naming what it holds that this reader
+    does not read, each by its own name, in sorted order."""
+    parts = [f"{items[k]} {k}" for k in sorted(items) if items[k]]
+    return (f"the workbook holds {_listing(parts)}, which this reader does not read "
+            f"({M_XLSX_SHEET_UNREAD})")
+
+
+def _revision_note(records: int) -> str:
+    return (f"the workbook keeps a shared-workbook change history of {records} revision "
+            f"record(s) -- the earlier values of changed and cleared cells among them -- "
+            f"which was not read ({M_XLSX_SHEET_UNREAD})")
+
+
+def _rels_source(rels_member: str) -> str | None:
+    """The part a ``.rels`` member belongs to (``""`` for the package's own
+    ``_rels/.rels``), or ``None`` when the member is not a relationships part."""
+    import posixpath
+
+    folder, base = posixpath.split(rels_member)
+    if posixpath.basename(folder) != "_rels" or not base.endswith(".rels"):
+        return None
+    return posixpath.join(posixpath.dirname(folder), base[:-len(".rels")]).lstrip("/")
+
+
+def _content_type_key(ctype: str) -> str:
+    """A content type's part-type key, for a part no relationship reaches:
+    the workbook's own types are ``officedocument``; otherwise the last
+    dotted token before ``+xml`` (``...spreadsheetml.worksheet+xml`` is
+    ``worksheet``, ``...package.core-properties+xml`` ``core-properties``)."""
+    if ctype.endswith(_XLSX_WORKBOOK_CONTENT_TYPES):
+        return "officedocument"
+    return ctype.split("+", 1)[0].rsplit(".", 1)[-1].rsplit("/", 1)[-1].lower()
+
+
+def _xlsx_package_census(z, covered: frozenset[str] = frozenset()
+                         ) -> tuple[dict[str, int], int, list[str]]:
+    """``(named, revision records, revision log members)`` for one package.
+
+    Every relationship in every ``.rels`` part is walked -- the package's,
+    the workbook's, each sheet's, chartsheet's, drawing's, chart's, rich-data
+    and pivot part's -- and every member the package holds. A member is
+    classified by the type of each relationship that reaches it
+    (:data:`_XLSX_PART_TYPES`); one no known relationship reaches is named by
+    that relationship's own type. One no relationship reaches at all is
+    classified by its content type (:func:`_content_type_key`): the workbook
+    part (found that way, as openpyxl finds it) and a part that holds no
+    evidence pass; any other is named. An external relationship of a type not
+    in the table is named too. ``covered`` are parts another note already
+    names (each tab's part: every tab has its page and its own note).
+    ``named`` maps a label to how many parts (or links) carry it.
+    """
+    import xml.etree.ElementTree as ET
+
+    members = [m for m in z.namelist() if not m.endswith("/")]
+    reached: dict[str, dict[str, str]] = {}       # member -> {type key: display name}
+    named: dict[str, int] = {}
+    for rels in members:
+        source = _rels_source(rels)
+        if source is None:
+            continue
+        for el in ET.fromstring(z.read(rels)):
+            if _local(el.tag) != "Relationship":
+                continue
+            shown = el.get("Type", "").rstrip("/").rsplit("/", 1)[-1] or "(no type)"
+            key = shown.lower()
+            target = el.get("Target", "")
+            if (el.get("TargetMode") or "").lower() == "external":
+                if key not in _XLSX_PART_TYPES:
+                    label = f"external link(s) of type {shown!r}"
+                    named[label] = named.get(label, 0) + 1
+                continue
+            if not target or target.startswith("#"):
+                continue      # a location inside the workbook (an internal link)
+            member = _zip_member(z, _xlsx_resolve_part(source, target))
+            if member is not None:
+                reached.setdefault(member, {})[key] = shown
+    content_types: dict[str, str] = {}
+    defaults: dict[str, str] = {}
+    types_member = _zip_member(z, "[Content_Types].xml")
+    if types_member is not None:
+        for el in ET.fromstring(z.read(types_member)).iter():
+            if _local(el.tag) == "Override":
+                content_types[el.get("PartName", "").lstrip("/").lower()] = el.get("ContentType", "")
+            elif _local(el.tag) == "Default":
+                defaults[el.get("Extension", "").lower()] = el.get("ContentType", "")
+    revision_logs: list[str] = []
+    for member in members:
+        if member == types_member or _rels_source(member) is not None or member in covered:
+            continue
+        keys = reached.get(member)
+        if keys:
+            if "revisionlog" in keys:
+                revision_logs.append(member)
+            if any(k in _XLSX_PART_TYPES for k in keys):
+                continue
+            label = f"part(s) of type {sorted(keys.values())[0]!r}"
+        else:
+            ctype = (content_types.get(member.lower())
+                     or defaults.get(member.rsplit(".", 1)[-1].lower() if "." in member else "")
+                     or "unknown")
+            key = _content_type_key(ctype)
+            if key == "officedocument" or _XLSX_PART_TYPES.get(key, ("",))[0] == _NO_EVIDENCE:
+                continue
+            label = f"part(s) no relationship names (content type {ctype!r})"
+        named[label] = named.get(label, 0) + 1
+    records = 0
+    for member in revision_logs:
+        root = ET.fromstring(z.read(member))
+        records += sum(1 for _child in root)
+    for member, keys in reached.items():
+        if "sharedstrings" not in keys:
+            continue
+        # openpyxl reads each string's text; its phonetic guide (rPh), and
+        # anything else a string holds, it drops without a word.
+        with z.open(member) as fh:
+            for _event, el in ET.iterparse(fh, events=("end",)):
+                name = _local(el.tag)
+                if name == "rPh":
+                    label = "phonetic guide(s) (rPh) in the shared strings"
+                elif name in _XLSX_SST_ELEMENTS:
+                    if name == "si":
+                        el.clear()
+                    continue
+                else:
+                    label = f"{name!r} element(s) in the shared strings this reader has no rule for"
+                named[label] = named.get(label, 0) + 1
+    return named, records, revision_logs
+
+
+# The workbook part's root elements (ECMA-376 CT_Workbook and Excel's own
+# additions): the sheet list is READ; the rest is structural -- file and
+# application versions, protection and sharing switches (a password hash, the
+# name of who reserved the file), window positions, calculation settings,
+# pointers to parts the package census names (external references, pivot
+# caches), the folder the file was last saved in (file metadata, like its
+# properties), and names for cell ranges and formulas; a defined name that
+# holds a constant value rather than naming cells is counted.
+_XLSX_WORKBOOK_ELEMENTS = frozenset({
+    "sheets", "fileVersion", "fileSharing", "workbookPr", "workbookProtection",
+    "bookViews", "functionGroups", "externalReferences", "definedNames", "calcPr",
+    "oleSize", "customWorkbookViews", "pivotCaches", "smartTagPr", "smartTagTypes",
+    "webPublishing", "fileRecoveryPr", "webPublishObjects", "extLst", "revisionPtr",
+    "absPath"})
+_XLSX_WORKBOOK_EXTENSIONS = frozenset({
+    # An extension by its first child: settings, feature flags, and pointers
+    # to parts the package census names.
+    "workbookPr", "calcFeatures", "version", "slicerCaches", "timelineCacheRefs",
+    "timelineCachePivotCaches", "pivotCaches", "dataModel", "webExtensions"})
+_CONSTANT_NAME = re.compile(r'\s*(?:-?\d[\d.]*(?:[eE][+-]?\d+)?|"[^"]*"|\{[^}]*\}|TRUE|FALSE)\s*')
+
+
+def _xlsx_workbook_census(root, named: dict[str, int]) -> None:
+    """The workbook part's root elements against :data:`_XLSX_WORKBOOK_ELEMENTS`
+    (through a root mc:AlternateContent's first Choice) and its extensions
+    against :data:`_XLSX_WORKBOOK_EXTENSIONS`: anything else is counted into
+    ``named``, and so is a defined name holding a constant."""
+    def bump(label: str) -> None:
+        named[label] = named.get(label, 0) + 1
+
+    def children(root):
+        for el in root:
+            if _local(el.tag) == "AlternateContent":
+                branch = next((b for b in el if _local(b.tag) == "Choice"),
+                              next((b for b in el if _local(b.tag) == "Fallback"), None))
+                yield from (branch if branch is not None else ())
+            else:
+                yield el
+
+    for el in children(root):
+        name = _local(el.tag)
+        if name not in _XLSX_WORKBOOK_ELEMENTS:
+            bump(f"{name!r} element(s) in the workbook part this reader has no rule for")
+        elif name == "extLst":
+            for ext in el:
+                first = next(iter(ext), None)
+                ext_name = _local(first.tag) if first is not None else "(empty)"
+                if ext_name not in _XLSX_WORKBOOK_EXTENSIONS:
+                    bump(f"workbook extension(s) {ext_name!r} this reader has no rule for")
+        elif name == "definedNames":
+            for dn in el:
+                if _local(dn.tag) == "definedName" and _CONSTANT_NAME.fullmatch(dn.text or ""):
+                    bump("hidden defined name(s) holding a constant value (Excel lists them "
+                         "nowhere, not even in its Name Manager)"
+                         if dn.get("hidden") in ("1", "true")
+                         else "defined name(s) holding a constant value (not a cell's)")
+
+
+_XLSX_SST_ELEMENTS = frozenset({
+    # A shared string's text, its runs and their fonts: read, or formatting.
+    "sst", "si", "t", "r", "rPr", "phoneticPr", "b", "i", "u", "strike", "condense",
+    "extend", "outline", "shadow", "vertAlign", "sz", "color", "rFont", "family",
+    "charset", "scheme"})
+
+
+# A cell's own XML: what the renderer understands, and nothing else passes
+# unnamed. ``r`` (its address), ``s`` (its style) and ``ph`` (show the
+# phonetic guide: a display switch; the guide's own text is named where it
+# lives) are structural; ``t`` picks the value's reading; ``vm`` and ``cm``
+# point into the workbook's cell metadata (:class:`_XlsxCellMeta`).
+_XLSX_CELL_ATTRS = frozenset({"r", "s", "t", "cm", "vm", "ph"})
+_XLSX_CELL_TYPES = frozenset({"n", "s", "str", "inlineStr", "b", "e", "d"})
+_XLSX_CELL_CHILDREN = frozenset({"f", "v", "is"})
+_XLSX_INLINE_CHILDREN = frozenset({"t", "r", "phoneticPr"})   # rPh is named
+_XLSX_RUN_CHILDREN = frozenset({"t", "rPr"})
+_XLSX_ROW_CHILDREN = frozenset({"c"})
+
+# A worksheet's root elements (ECMA-376 CT_Worksheet), each read, counted or
+# structural. Structural: nothing in it is content a reader of the sheet
+# sees, and why.
+_XLSX_SHEET_ELEMENTS: dict[str, tuple[str, str]] = {
+    "sheetData": (_READ, "the cells"),
+    "headerFooter": (_READ, "the print header and footer (E12)"),
+    "hyperlinks": (_READ, "cell hyperlinks (E13)"),
+    "drawing": (_READ, "the sheet's drawing"),
+    "legacyDrawing": (_READ, "the sheet's legacy (VML) drawing"),
+    "legacyDrawingHF": (_COUNTED, "the pictures its header or footer places"),
+    "drawingHF": (_COUNTED, "the pictures its header or footer places"),
+    "picture": (_COUNTED, "the sheet's background picture"),
+    "oleObjects": (_COUNTED, "embedded or linked objects"),
+    "controls": (_COUNTED, "form and ActiveX controls"),
+    "cols": (_READ, "hidden columns, and the sheet's width"),
+    "sheetFormatPr": (_READ, "rows hidden by default; the rest is default sizes"),
+    "dataValidations": (_COUNTED, "each validation's input or error message, or its "
+                                  "typed list of values"),
+    "scenarios": (_COUNTED, "each scenario's alternative cell values"),
+    "extLst": (_READ, "each extension by its own rule (:data:`_XLSX_SHEET_EXTENSIONS`)"),
+    "customSheetViews": (_NO_EVIDENCE, "a Custom View's copy of the sheet's print "
+                                       "settings, filter and hidden rows, never the "
+                                       "sheet's own state"),
+    "sheetPr": (_NO_EVIDENCE, "tab color, outline and fit-to-page settings"),
+    "dimension": (_NO_EVIDENCE, "the used range's address"),
+    "sheetViews": (_NO_EVIDENCE, "zoom, panes and the selection"),
+    "sheetCalcPr": (_NO_EVIDENCE, "a recalculation switch"),
+    "sheetProtection": (_NO_EVIDENCE, "protection switches and a password hash"),
+    "protectedRanges": (_NO_EVIDENCE, "ranges' protection and password hashes"),
+    "autoFilter": (_NO_EVIDENCE, "filter criteria; a row a filter hides carries its own "
+                                 "hidden flag, which is counted"),
+    "sortState": (_NO_EVIDENCE, "sort criteria"),
+    "dataConsolidate": (_NO_EVIDENCE, "consolidation source references"),
+    "mergeCells": (_NO_EVIDENCE, "merged ranges; a merged range's value is its first cell's"),
+    "phoneticPr": (_NO_EVIDENCE, "the phonetic guide's font"),
+    "conditionalFormatting": (_NO_EVIDENCE, "formatting rules"),
+    "printOptions": (_NO_EVIDENCE, "print layout"),
+    "pageMargins": (_NO_EVIDENCE, "print layout"),
+    "pageSetup": (_NO_EVIDENCE, "print layout"),
+    "rowBreaks": (_NO_EVIDENCE, "print layout"),
+    "colBreaks": (_NO_EVIDENCE, "print layout"),
+    "ignoredErrors": (_NO_EVIDENCE, "error-check switches"),
+    "cellWatches": (_NO_EVIDENCE, "the Watch Window's cell addresses"),
+    "webPublishItems": (_NO_EVIDENCE, "publish-to-web settings"),
+    "tableParts": (_NO_EVIDENCE, "pointers to the sheet's tables, whose cells are read"),
+    "customProperties": (_NO_EVIDENCE, "pointers to custom-property parts, each named "
+                                       "by the package census"),
+}
+_XLSX_SHEET_EXTENSIONS: dict[str, tuple[str, str]] = {
+    # An extension (``extLst/ext``) by its first child's local name.
+    "conditionalFormattings": (_NO_EVIDENCE, "formatting rules"),
+    "dataValidations": (_COUNTED, "as dataValidations"),
+    "sparklineGroups": (_COUNTED, "sparklines: small charts in cells"),
+    "slicerList": (_NO_EVIDENCE, "pointers to slicers, each a counted drawing frame"),
+    "timelineRefs": (_NO_EVIDENCE, "pointers to timelines, each a counted drawing frame"),
+    "protectedRanges": (_NO_EVIDENCE, "ranges' protection"),
+    "ignoredErrors": (_NO_EVIDENCE, "error-check switches"),
+    "webExtensions": (_NO_EVIDENCE, "pointers to content add-ins, each a counted drawing "
+                                    "frame"),
+}
+
+
+def _named_element(name: str) -> str:
+    return f"{name!r} element(s) this reader has no rule for"
+
+
+_SCREEN_TIP = "hyperlink screen tip(s) (the text shown on pointing at a link)"
+
+
+@dataclass
+class _XlsxCellMeta:
+    """The workbook's cell metadata (``xl/metadata.xml``), resolved once:
+    what each ``vm`` (value metadata) and ``cm`` (cell metadata) index means.
+    ``values[i - 1]`` is ``'picture'`` for a picture placed in a cell (a rich
+    value of structure ``_localImage`` or ``_webimage``), else the rich
+    value's structure name; ``cells[i - 1]`` is ``None`` for a dynamic
+    array's formula (its cell shows its own computed value, which is read),
+    else the metadata type's name."""
+
+    values: list[str] = field(default_factory=list)
+    cells: list[str | None] = field(default_factory=list)
+
+
+_XLSX_PICTURE_STRUCTURES = frozenset({"_localImage", "_webimage"})
+
+
+def _xlsx_cell_meta(z, workbook_part: str) -> _XlsxCellMeta:
+    """:class:`_XlsxCellMeta` from the workbook's ``sheetMetadata`` and
+    rich-value parts; empty when it has none."""
+    import xml.etree.ElementTree as ET
+
+    meta = _XlsxCellMeta()
+    rels = _xlsx_rels(z, workbook_part)
+    parts: dict[str, str] = {}
+    for target, rel_type in rels.values():
+        key = rel_type.rstrip("/").rsplit("/", 1)[-1].lower()
+        member = _zip_member(z, _xlsx_resolve_part(workbook_part, target))
+        if member is not None:
+            parts.setdefault(key, member)
+    if "sheetmetadata" not in parts:
+        return meta
+    structures: list[str] = []
+    if "rdrichvaluestructure" in parts:
+        for el in ET.fromstring(z.read(parts["rdrichvaluestructure"])):
+            if _local(el.tag) == "s":
+                structures.append(el.get("t", ""))
+    rich_values: list[str] = []
+    if "rdrichvalue" in parts:
+        for el in ET.fromstring(z.read(parts["rdrichvalue"])):
+            if _local(el.tag) == "rv":
+                try:
+                    rich_values.append(structures[int(el.get("s", ""))])
+                except (ValueError, IndexError):
+                    rich_values.append("")
+    root = ET.fromstring(z.read(parts["sheetmetadata"]))
+    type_names = [el.get("name", "") for el in root.iter() if _local(el.tag) == "metadataType"]
+    future: dict[str, list] = {}
+    for el in root:
+        if _local(el.tag) == "futureMetadata":
+            future[el.get("name", "")] = [bk for bk in el if _local(bk.tag) == "bk"]
+
+    def resolve(rc) -> tuple[str, int | None]:
+        try:
+            name = type_names[int(rc.get("t", "")) - 1]
+            return name, int(rc.get("v", ""))
+        except (ValueError, IndexError):
+            return "", None
+
+    for el in root:
+        which = _local(el.tag)
+        if which not in ("valueMetadata", "cellMetadata"):
+            continue
+        for bk in (b for b in el if _local(b.tag) == "bk"):
+            rc = next((r for r in bk if _local(r.tag) == "rc"), None)
+            name, v = resolve(rc) if rc is not None else ("", None)
+            if which == "cellMetadata":
+                meta.cells.append(None if name == "XLDAPR" else (name or "unknown"))
+                continue
+            kind = name or "unknown"
+            if name == "XLRICHVALUE" and v is not None:
+                try:
+                    rvb = next(x for x in future["XLRICHVALUE"][v].iter() if _local(x.tag) == "rvb")
+                    kind = rich_values[int(rvb.get("i", ""))] or "unknown"
+                except (KeyError, IndexError, StopIteration, ValueError):
+                    kind = "unknown"
+            meta.values.append("picture" if kind in _XLSX_PICTURE_STRUCTURES else kind)
+    return meta
+
+
+PICTURE_IN_CELL = "[picture in cell]"
+RICH_VALUE_IN_CELL = "[rich value in cell]"
+"""What a cell holding a picture (or another rich value, a linked data type)
+reads in place of its cached ``#VALUE!``, which older readers are given in
+its stead: the value is elsewhere, and an error it is not."""
+
+
+def _rich_value_label(kind: str) -> str:
+    return (f"cell(s) holding a rich value of kind {kind!r} (shown as "
+            f"{RICH_VALUE_IN_CELL!r})")
+
+
+def _xlsx_census_cell(c, kinds: dict[str, int], meta: _XlsxCellMeta | None) -> int | None:
+    """One ``<c>`` against :data:`_XLSX_CELL_ATTRS` and its children: what it
+    holds that the renderer does not understand is counted into ``kinds``
+    (a ``cm`` that is not a dynamic array's among them). Returns its ``vm``
+    index, or ``None``."""
+    def bump(label: str) -> None:
+        kinds[label] = kinds.get(label, 0) + 1
+
+    vm = None
+    for key in c.attrib:
+        name = _local(key)
+        if name not in _XLSX_CELL_ATTRS:
+            bump(f"cell attribute(s) {name!r} this reader has no rule for")
+    t = c.get("t")
+    if t is not None and t not in _XLSX_CELL_TYPES:
+        bump(f"cell(s) of type {t!r} this reader has no rule for")
+    if c.get("vm") is not None:
+        try:
+            vm = int(c.get("vm"))
+        except ValueError:
+            vm = 0
+    cm = c.get("cm")
+    if cm is not None:
+        try:
+            what = meta.cells[int(cm) - 1] if meta is not None else "unknown"
+        except (ValueError, IndexError):
+            what = "unknown"
+        if what is not None:
+            bump(f"cell(s) carrying cell metadata of kind {what!r}")
+    for child in c:
+        name = _local(child.tag)
+        if name in _XLSX_CELL_CHILDREN:
+            if name == "is":
+                for part in child:
+                    pname = _local(part.tag)
+                    if pname == "rPh":
+                        bump("phonetic guide(s) (rPh)")
+                    elif pname not in _XLSX_INLINE_CHILDREN:
+                        bump(f"cell element(s) {pname!r} this reader has no rule for")
+                    elif pname == "r":
+                        for run_part in part:
+                            rname = _local(run_part.tag)
+                            if rname not in _XLSX_RUN_CHILDREN:
+                                bump(f"cell element(s) {rname!r} this reader has no rule for")
+        elif name == "extLst":
+            bump("cell extension list(s) (extLst)")
+        else:
+            bump(f"cell element(s) {name!r} this reader has no rule for")
+    return vm
+
+
+_MATH_LETTERLIKE = frozenset("ℎℬℰℱℋℐℒℳℛℯℊℴℂℍℕℙℚℝℤℭℌℑℜℨ")
+
+
+def _math_plain(text: str) -> str:
+    """An equation's letters as Excel's own ``.xls`` writer spells the same
+    equation: a mathematical alphanumeric (``𝑉``, ``ℎ``) as the letter or
+    digit it styles (``V``, ``h``), nothing else changed."""
+    import unicodedata
+
+    return "".join(unicodedata.normalize("NFKC", ch)
+                   if 0x1D400 <= ord(ch) <= 0x1D7FF or ch in _MATH_LETTERLIKE else ch
+                   for ch in text)
+
+
+# An equation (OMML, ``a14:m``) this reader can read in order: runs of text
+# and their properties, and nothing that lays text out in two dimensions (a
+# fraction, a radical, a script, a matrix), whose characters in order would
+# not be what Excel shows. Anything else is read from the plain-text copy
+# Excel stores for older readers (``mc:Fallback``).
+_MATH_LINEAR = frozenset({"m", "oMathPara", "oMath", "r", "t"})
+_MATH_PROPERTIES = frozenset({"oMathParaPr", "rPr", "ctrlPr", "argPr"})
+
+
+def _math_text(zone) -> tuple[str, bool]:
+    """``(text, readable)`` for one ``a14:m`` equation zone."""
+    parts: list[str] = []
+    readable = True
+
+    def walk(el) -> None:
+        nonlocal readable
+        for child in el:
+            name = _local(child.tag)
+            if name in _MATH_PROPERTIES:
+                continue
+            if name not in _MATH_LINEAR:
+                readable = False
+                walk(child)
+                continue
+            if name == "t":
+                if len(child):
+                    readable = False  # Excel's placeholder field, not typed text
+                parts.append(child.text or "")
+                walk(child)
+            else:
+                walk(child)
+
+    walk(zone)
+    return _math_plain("".join(parts)), readable
 
 
 def _header_footer_pictures(raw: str) -> int:
@@ -2550,12 +3146,29 @@ def _header_footer_pictures(raw: str) -> int:
     return count
 
 
-def _xlsx_shape_text(sp) -> str:
-    """A DrawingML shape's text: each paragraph a line, a line break inside
-    one a newline, runs and fields joined."""
+def _xlsx_shape_text(sp, unknown: dict[str, int] | None = None) -> tuple[str, bool]:
+    """``(text, every equation in it readable)`` for a DrawingML shape: each
+    paragraph a line, a line break inside one a newline, runs, fields and
+    equations (``a14:m``, :func:`_math_text`) joined in order. A text-body
+    or paragraph element this reader has no rule for is counted into
+    ``unknown`` by name -- its text is not on the page, and the page says
+    so (review-fix round 4)."""
     lines: list[str] = []
+    readable = True
+
+    def bump(name: str) -> None:
+        if unknown is not None:
+            label = f"drawing text element(s) {name!r} this reader has no rule for"
+            unknown[label] = unknown.get(label, 0) + 1
+
     for body in (c for c in sp if _local(c.tag) == "txBody"):
-        for p in (c for c in body if _local(c.tag) == "p"):
+        for p in body:
+            pname = _local(p.tag)
+            if pname in ("bodyPr", "lstStyle"):
+                continue                        # layout and list styles
+            if pname != "p":
+                bump(pname)
+                continue
             parts: list[str] = []
             for child in p:
                 name = _local(child.tag)
@@ -2563,72 +3176,165 @@ def _xlsx_shape_text(sp) -> str:
                     parts.extend(t.text or "" for t in child if _local(t.tag) == "t")
                 elif name == "br":
                     parts.append("\n")
+                elif name == "m":
+                    text, ok = _math_text(child)
+                    readable = readable and ok
+                    parts.append(text)
+                elif name not in ("pPr", "endParaRPr"):
+                    bump(name)
             lines.append("".join(parts))
-    return "\n".join(lines)
+    return "\n".join(lines), readable
+
+
+# A worksheet drawing's elements (ECMA-376 CT_Drawing and its anchors), each
+# read, counted or structural; any other is counted by its name.
+_DRAWING_ANCHORS = frozenset({"twoCellAnchor", "oneCellAnchor", "absoluteAnchor"})
+_DRAWING_ANCHOR_PLACEMENT = frozenset({"from", "to", "pos", "ext", "clientData"})
+_DRAWING_OBJECT_PARTS = frozenset({
+    # An object's own properties, geometry, fill and style: no content.
+    "nvSpPr", "spPr", "style", "nvGrpSpPr", "grpSpPr", "nvPicPr", "blipFill",
+    "nvGraphicFramePr", "xfrm", "graphic", "nvCxnSpPr", "nvContentPartPr",
+    "nvPr", "extLst", "txBody"})
 
 
 def _xlsx_drawing(z, member: str, mirrored: set[str]
                   ) -> tuple[list[tuple[str, str]], dict[str, int]]:
-    """``(shapes, counts)`` for one worksheet drawing part, streamed.
+    """``(shapes, counts)`` for one worksheet drawing part, streamed one
+    top-level anchor at a time.
 
     A shape (``sp``, grouped or not) with text is read, as ``'text box'``
-    when it is one; a picture, a chart, a SmartArt diagram or any other
-    graphic frame or content part is counted. Of an ``mc:AlternateContent``
-    only the first ``mc:Choice`` is read (or the ``mc:Fallback`` when there is
-    no Choice) -- the fallback is a copy for older readers (a slicer's "This
-    shape represents a table slicer" text). A shape whose id is a form
-    control's or embedded object's (``mirrored``, from the sheet's own
-    ``controls`` and ``oleObjects``) is Excel's drawn copy of it, counted
-    there, not read here.
+    when it is one, ``'hidden text box'`` / ``'hidden shape'`` when Excel
+    hides it; a hyperlink on it (``hlinkClick`` or ``hlinkHover``, resolved
+    through the drawing's own relationships) follows its text as `` <URL>``,
+    as a cell's does, and a picture, chart or untexted shape with a link gets
+    a line for the link alone. A picture, a chart, a SmartArt diagram or any
+    other graphic frame or content part is counted. Of an
+    ``mc:AlternateContent`` the first ``mc:Choice`` is read -- unless it holds
+    an equation laid out in two dimensions (:func:`_math_text`), when the
+    ``mc:Fallback``, Excel's plain-text copy of the same shape, is read in its
+    place; otherwise the fallback is a copy for older readers (a slicer's
+    "This shape represents a table slicer" text). A shape whose id is a form
+    control's or embedded object's (``mirrored``) is Excel's drawn copy of
+    it, counted there, not read here. Any element this reader has no rule
+    for is counted by its name.
     """
     import xml.etree.ElementTree as ET
 
     shapes: list[tuple[str, str]] = []
     counts: dict[str, int] = {}
+    rels: dict[str, tuple[str, str]] | None = None
+
+    def bump(kind: str, n: int = 1) -> None:
+        counts[kind] = counts.get(kind, 0) + n
+
+    def links(el) -> list[str]:
+        nonlocal rels
+        out: list[str] = []
+        props = next((x for x in el.iter() if _local(x.tag) == "cNvPr"), None)
+        for h in (props if props is not None else ()):
+            if _local(h.tag) not in ("hlinkClick", "hlinkHover"):
+                continue
+            if h.get("tooltip"):
+                bump(_SCREEN_TIP)
+            rid = h.get(f"{_XLSX_NS_R}id")
+            if not rid:
+                continue
+            if rels is None:
+                rels = _xlsx_rels(z, member)
+            target = rels.get(rid, ("", ""))[0]
+            if target and not target.startswith("#") and target not in out:
+                out.append(target)           # an internal location adds nothing (E13)
+        return out
+
+    def line(kind: str, text: str, urls: list[str]) -> tuple[str, str]:
+        tail = " ".join(f"<{u}>" for u in urls)
+        return kind, (f"{text} {tail}" if text and tail else text or tail)
+
+    def walk(el, sink: list, state: dict) -> None:
+        name = _local(el.tag)
+        if name == "AlternateContent":
+            branches = [c for c in el if _local(c.tag) in ("Choice", "Fallback")]
+            choice = next((c for c in branches if _local(c.tag) == "Choice"), None)
+            fallback = next((c for c in branches if _local(c.tag) == "Fallback"), None)
+            first = choice if choice is not None else fallback
+            if first is None:
+                return
+            taken: list = []
+            trial = {"math": True, "plain": state.get("plain", False)}
+            for c in first:
+                walk(c, taken, trial)
+            if not trial["math"] and first is choice and fallback is not None:
+                taken = []
+                for c in fallback:
+                    walk(c, taken, {"math": True, "plain": True})
+            elif not trial["math"]:
+                bump("equation layout(s) (each equation read as its characters in order)")
+            sink.extend(taken)
+            return
+        if name in _DRAWING_ANCHORS:
+            for c in el:
+                walk(c, sink, state)
+            return
+        if name in _DRAWING_ANCHOR_PLACEMENT:
+            return
+        if name == "grpSp":
+            for c in el:
+                if _local(c.tag) not in ("nvGrpSpPr", "grpSpPr"):
+                    walk(c, sink, state)
+            return
+        for c in el:
+            cname = _local(c.tag)
+            if cname not in _DRAWING_OBJECT_PARTS and name in ("sp", "pic", "cxnSp",
+                                                               "graphicFrame"):
+                bump(f"drawing element(s) {cname!r} this reader has no rule for")
+        props = next((x for x in el.iter() if _local(x.tag) == "cNvPr"), None)
+        hidden = props is not None and props.get("hidden") in ("1", "true")
+        prefix = "hidden " if hidden else ""
+        if name == "sp":
+            if props is not None and props.get("id") in mirrored:
+                return
+            text, readable = _xlsx_shape_text(el, counts)
+            if not readable:
+                state["math"] = False
+            if state.get("plain"):
+                text = _math_plain(text)
+            urls = links(el)
+            if text.strip() or urls:
+                box = any(_local(x.tag) == "cNvSpPr" and x.get("txBox") in ("1", "true")
+                          for x in el.iter())
+                sink.append(line(prefix + ("text box" if box else "shape"), text, urls))
+        elif name == "cxnSp":
+            urls = links(el)
+            if urls:
+                sink.append(line(prefix + "shape", "", urls))
+        elif name == "pic":
+            bump("picture")
+            urls = links(el)
+            if urls:
+                sink.append(line(prefix + "picture", "", urls))
+        elif name in ("graphicFrame", "contentPart"):
+            uri = next((x.get("uri", "") for x in el.iter()
+                        if _local(x.tag) == "graphicData"), "")
+            kind = ("chart" if uri in _DRAWING_CHART_URIS
+                    else "SmartArt" if uri == _DRAWING_SMARTART_URI else "other")
+            bump(kind)
+            urls = links(el)
+            if urls:
+                sink.append(line(prefix + {"other": "drawing object"}.get(kind, kind), "", urls))
+        else:
+            bump(f"drawing element(s) {name!r} this reader has no rule for")
+
     depth = 0
-    skip_below: int | None = None       # depth of a skipped subtree's root
-    choice_taken: list[bool] = []       # one per open AlternateContent
     with z.open(member) as fh:
         for event, el in ET.iterparse(fh, events=("start", "end")):
-            name = _local(el.tag)
             if event == "start":
                 depth += 1
-                if skip_below is not None:
-                    continue
-                if name == "AlternateContent":
-                    choice_taken.append(False)
-                elif name in ("Choice", "Fallback") and choice_taken:
-                    if choice_taken[-1]:
-                        skip_below = depth
-                    else:
-                        choice_taken[-1] = True
                 continue
             depth -= 1
-            if skip_below is not None:
-                if depth + 1 == skip_below:
-                    skip_below = None
-                    el.clear()
-                continue
-            if name == "AlternateContent" and choice_taken:
-                choice_taken.pop()
-            elif name == "sp":
-                props = next((x for x in el.iter() if _local(x.tag) == "cNvPr"), None)
-                if props is None or props.get("id") not in mirrored:
-                    text = _xlsx_shape_text(el)
-                    if text.strip():
-                        box = any(_local(x.tag) == "cNvSpPr" and x.get("txBox") in ("1", "true")
-                                  for x in el.iter())
-                        shapes.append(("text box" if box else "shape", text))
-                el.clear()
-            elif name == "pic":
-                counts["picture"] = counts.get("picture", 0) + 1
-                el.clear()
-            elif name in ("graphicFrame", "contentPart"):
-                uri = next((x.get("uri", "") for x in el.iter()
-                            if _local(x.tag) == "graphicData"), "")
-                kind = ("chart" if uri in _DRAWING_CHART_URIS
-                        else "SmartArt" if uri == _DRAWING_SMARTART_URI else "other")
-                counts[kind] = counts.get(kind, 0) + 1
+            if depth == 1:
+                # A child of the drawing's root, complete: an anchor (or an
+                # anchor wrapped in AlternateContent), read whole, then freed.
+                walk(el, shapes, {"math": True})
                 el.clear()
     return shapes, counts
 
@@ -2659,7 +3365,54 @@ def _xlsx_vml_objects(z, member: str, mirrored: set[str]
     return [], counts
 
 
-def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtras:
+_HF_VARIANT_NAMES = {"evenHeader": "even-page header", "evenFooter": "even-page footer",
+                     "firstHeader": "first-page header", "firstFooter": "first-page footer"}
+_HF_SETTINGS = {"even": "'Different odd and even pages'", "first": "'Different first page'"}
+
+
+def _header_footer_used(texts: dict[str, str], odd_even: bool, first: bool
+                        ) -> tuple[list[str], list[str], dict[str, str], str | None]:
+    """E12, both formats: ``(header lines, footer lines, the texts in use,
+    note tail)`` for a sheet's six print header/footer strings (keyed by the
+    ``.xlsx`` tag names) and its two settings. The odd-page (ordinary)
+    header and footer are always in use; an even-page one only when
+    'Different odd and even pages' is on, a first-page one only when
+    'Different first page' is (review r4 B1). Excel keeps a variant's text
+    when the setting is turned off again and prints none of it, so text in
+    a variant not in use is left off the page and NAMED in a FINAL note --
+    never printed as the sheet's own."""
+    in_use = {"oddHeader", "oddFooter"}
+    if odd_even:
+        in_use |= {"evenHeader", "evenFooter"}
+    if first:
+        in_use |= {"firstHeader", "firstFooter"}
+    header_lines: list[str] = []
+    footer_lines: list[str] = []
+    for tags, bucket in ((_HEADER_TAGS, header_lines), (_FOOTER_TAGS, footer_lines)):
+        for tag in tags:
+            if tag not in in_use:
+                continue
+            for line in _header_footer_lines(texts.get(tag, "")):
+                if line not in bucket:
+                    bucket.append(line)
+    unused = [tag for tag in ("firstHeader", "firstFooter", "evenHeader", "evenFooter")
+              if tag not in in_use and _header_footer_lines(texts.get(tag, ""))]
+    note = None
+    if unused:
+        settings = [_HF_SETTINGS[k] for k in ("first", "even")
+                    if any(t.startswith(k) for t in unused)]
+        one = len(unused) == 1
+        note = (f"its {_listing([_HF_VARIANT_NAMES[t] for t in unused])} "
+                f"{'is' if one else 'are'} kept in the file but not in use: Excel prints "
+                f"{'it' if one else 'them'} only when {' or '.join(settings)} is on, and "
+                f"{'it is' if len(settings) == 1 else 'both are'} off, so "
+                f"{'its text was' if one else 'their text was'} not read "
+                f"({M_XLSX_SHEET_UNREAD})")
+    return header_lines, footer_lines, {t: texts.get(t, "") for t in in_use}, note
+
+
+def _xlsx_sheet_extras(z, part: str, persons: dict[str, str],
+                       meta: _XlsxCellMeta | None = None) -> _XlsxSheetExtras:
     """E11/E12/E13 for one worksheet part: print header/footer, EXTERNAL
     hyperlink targets, cell comments (threaded and legacy), how many rows and
     columns the sheet hides -- and the sheet's real extent: its widest column,
@@ -2675,14 +3428,26 @@ def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtra
     Everything is taken from the SHEET'S OWN state, by the element's place in
     the part (review-fix round 3): a Custom View (``customSheetView``) keeps
     its own copy of the print header and footer, and that copy is never the
-    sheet's. And the sheet's drawings (:func:`_xlsx_drawing`): a text box's or
-    shape's text is read; a chart, picture, SmartArt diagram, control or
-    embedded object is counted for a marked note.
+    sheet's. A root element Excel wraps in ``mc:AlternateContent`` is the
+    sheet's own through its first ``mc:Choice``. And the sheet's drawings
+    (:func:`_xlsx_drawing`): a text box's or shape's text is read; a chart,
+    picture, SmartArt diagram, control or embedded object is counted for a
+    marked note.
+
+    The census (review-fix round 4): every root element is looked up in
+    :data:`_XLSX_SHEET_ELEMENTS`, every extension in
+    :data:`_XLSX_SHEET_EXTENSIONS`, every cell in :func:`_xlsx_census_cell`;
+    what has no rule is counted by name into ``objects`` for the sheet's ONE
+    FINAL note, and so are a data validation's messages, a sparkline group
+    and a scenario. A cell holding a picture or another rich value is marked
+    in ``rich_cells``.
     """
     from openpyxl.utils.cell import coordinate_to_tuple
 
     extras = _XlsxSheetExtras()
     header_texts: dict[str, str] = {}
+    hf_flags = {"odd_even": False, "first": False}
+    hf_pictures_part = False
     links: list[tuple[str | None, str | None, str | None]] = []
     max_col = last_row = rewritten = skipped_total = 0
     skipped: list[int] = []
@@ -2691,12 +3456,33 @@ def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtra
     control_ids: set[str] = set()
     object_ids: set[str] = set()
     backgrounds = 0
+    kinds: dict[str, int] = {}
+    rich: dict[tuple[int, int], str] = {}
+    root_choice_seen = False                       # the open root-level AlternateContent's
+
+    def bump(label: str) -> None:
+        kinds[label] = kinds.get(label, 0) + 1
+
     try:
         for row_no, el, path in _xlsx_iter_rows(z, part):
             name = _local(el.tag)
-            own = len(path) == 1                      # a child of the sheet's root
             if row_no is None and "customSheetView" in path:
                 continue                              # a Custom View's copy, never the sheet's
+            if row_no is None and path[1:2] == ("AlternateContent",):
+                # Inside a root element Excel wrapped for older readers: its
+                # first Choice is the sheet's own, a Fallback after one a copy.
+                if name == "Choice" and len(path) == 2:
+                    root_choice_seen = True
+                    continue
+                if name == "Fallback" and len(path) == 2:
+                    continue
+                if path[2:3] == ("Fallback",) and root_choice_seen:
+                    continue
+                path = path[:1] + path[3:]
+            elif row_no is None and name == "AlternateContent" and len(path) == 1:
+                root_choice_seen = False
+                continue
+            own = len(path) == 1                      # a child of the sheet's root
             if row_no is not None:
                 read_by_openpyxl = row_no > last_row
                 if read_by_openpyxl:
@@ -2711,36 +3497,80 @@ def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtra
                 seen: set[int] = set()
                 for c in el:
                     if _local(c.tag) != "c":
+                        if _local(c.tag) == "extLst":
+                            bump("row extension list(s) (extLst)")
+                        else:
+                            bump(f"row element(s) {_local(c.tag)!r} this reader has no rule for")
                         continue
                     col = _xlsx_cell_column(c.get("r"), col)
                     if col in seen and read_by_openpyxl:
                         rewritten += 1
                     seen.add(col)
                     max_col = max(max_col, col)
-            elif name == "sheetFormatPr" and own:
-                if el.get("zeroHeight") in ("1", "true"):
-                    extras.rows_hidden_by_default = True
-            elif name == "col" and path[1:] == ("cols",):
+                    vm = _xlsx_census_cell(c, kinds, meta)
+                    if vm is not None and read_by_openpyxl:
+                        try:
+                            what = meta.values[vm - 1] if meta is not None else "unknown"
+                        except IndexError:
+                            what = "unknown"
+                        rich[(row_no, col)] = what
+                continue
+            if own:
+                rule = _XLSX_SHEET_ELEMENTS.get(name)
+                if rule is None:
+                    bump(_named_element(name))
+                elif name == "headerFooter":
+                    hf_flags["odd_even"] = el.get("differentOddEven") in ("1", "true")
+                    hf_flags["first"] = el.get("differentFirst") in ("1", "true")
+                elif name in ("legacyDrawingHF", "drawingHF"):
+                    hf_pictures_part = True
+                elif name == "sheetFormatPr":
+                    if el.get("zeroHeight") in ("1", "true"):
+                        extras.rows_hidden_by_default = True
+                elif name == "drawing":
+                    drawing_ids.append(el.get(f"{_XLSX_NS_R}id"))
+                elif name == "legacyDrawing":
+                    vml_ids.append(el.get(f"{_XLSX_NS_R}id"))
+                elif name == "picture":
+                    backgrounds += 1                  # the sheet's background picture
+                continue
+            parent = path[1:]
+            if name == "col" and parent == ("cols",):
                 if el.get("hidden") in ("1", "true") or _is_zero(el.get("width")):
                     try:
                         extras.hidden_cols += int(el.get("max")) - int(el.get("min")) + 1
                     except (TypeError, ValueError):
                         extras.hidden_cols += 1
-            elif (name in _HEADER_TAGS or name in _FOOTER_TAGS) and path[1:] == ("headerFooter",):
-                header_texts[name] = el.text or ""
-            elif name == "hyperlink" and path[1:] == ("hyperlinks",):
+            elif parent == ("headerFooter",):
+                if name in _HEADER_TAGS or name in _FOOTER_TAGS:
+                    header_texts[name] = el.text or ""
+                else:
+                    bump(_named_element(name))
+            elif name == "hyperlink" and parent == ("hyperlinks",):
                 links.append((el.get("ref"), el.get(f"{_XLSX_NS_R}id"),
                               el.get("location")))
-            elif name == "drawing" and own:
-                drawing_ids.append(el.get(f"{_XLSX_NS_R}id"))
-            elif name == "legacyDrawing" and own:
-                vml_ids.append(el.get(f"{_XLSX_NS_R}id"))
-            elif name == "picture" and own:
-                backgrounds += 1                      # the sheet's background picture
+                if el.get("tooltip"):
+                    bump(_SCREEN_TIP)
             elif name == "control" and "controls" in path:
                 control_ids.add(el.get("shapeId") or el.get(f"{_XLSX_NS_R}id") or "")
             elif name == "oleObject" and "oleObjects" in path:
                 object_ids.add(el.get("shapeId") or el.get(f"{_XLSX_NS_R}id") or "")
+            elif name == "ext" and parent == ("extLst",):
+                first_child = next(iter(el), None)
+                ext_name = _local(first_child.tag) if first_child is not None else "(empty)"
+                if ext_name not in _XLSX_SHEET_EXTENSIONS:
+                    bump(f"sheet extension(s) {ext_name!r} this reader has no rule for")
+            elif name == "dataValidation" and parent in (
+                    ("dataValidations",), ("extLst", "ext", "dataValidations")):
+                if any(el.get(a) for a in ("prompt", "error", "promptTitle", "errorTitle")):
+                    bump("data validation message(s) (a cell's input or error message)")
+            elif name in ("formula1", "f") and path[-1:] in (("dataValidation",), ("formula1",)) \
+                    and "dataValidations" in path and (el.text or "").startswith('"'):
+                bump("data validation list(s) of typed values")
+            elif name == "sparklineGroup" and parent == ("extLst", "ext", "sparklineGroups"):
+                bump("sparkline group(s) (small charts in cells)")
+            elif name == "scenario" and parent == ("scenarios",):
+                bump("scenario(s) (alternative values for cells)")
     except Exception as exc:
         extras.unread.append(
             f"its print header/footer, hyperlinks, hidden rows and columns, "
@@ -2751,24 +3581,29 @@ def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtra
         extras.hidden_rows = extras.hidden_cols = 0
         extras.rows_hidden_by_default = False
         drawing_ids, vml_ids, control_ids, object_ids, backgrounds = [], [], set(), set(), 0
+        kinds, rich, hf_pictures_part = {}, {}, False
     else:
         extras.extent_known = True
         extras.max_col = max_col
         extras.skipped_rows, extras.skipped_total = skipped, skipped_total
         extras.rewritten_cells = rewritten
+        extras.rich_cells = rich
 
-    for tags, bucket in ((_HEADER_TAGS, extras.header_lines),
-                         (_FOOTER_TAGS, extras.footer_lines)):
-        for tag in tags:
-            for line in _header_footer_lines(header_texts.get(tag, "")):
-                if line not in bucket:
-                    bucket.append(line)
+    extras.header_lines, extras.footer_lines, in_use, unused_note = _header_footer_used(
+        header_texts, hf_flags["odd_even"], hf_flags["first"])
+    if unused_note:
+        extras.unread.append(unused_note)
 
+    _count_objects(extras.objects, kinds)
     _count_objects(extras.objects, {
         "picture": backgrounds,
         "control": len(control_ids),
         "object": len(object_ids),
-        "header picture": sum(_header_footer_pictures(t) for t in header_texts.values())})
+        # A header's &G places a picture only where the sheet holds a header
+        # picture part (review r4 C): an '&G' a writer copied without one
+        # places nothing.
+        "header picture": (sum(_header_footer_pictures(t) for t in in_use.values())
+                           if hf_pictures_part else 0)})
 
     try:
         rels = _xlsx_rels(z, part)
@@ -2844,9 +3679,10 @@ def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtra
             extras.unread.append(f"its comments part is missing from the file; "
                                  f"its comments were not read ({M_XLSX_SHEET_UNREAD})")
             continue
+        phonetic = [0]
         try:
             legacy.extend(
-                c for c in _xlsx_legacy_comments(z, member)
+                c for c in _xlsx_legacy_comments(z, member, phonetic)
                 # Excel writes a threaded comment twice: in its own part, and
                 # as a placeholder note (author 'tc={id}', a flattened
                 # transcript) for older readers. The thread is the evidence.
@@ -2854,6 +3690,9 @@ def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtra
         except Exception as exc:
             extras.unread.append(f"its comments could not be read "
                                  f"({type(exc).__name__}) ({M_XLSX_PART_UNREAD})")
+        else:
+            _count_objects(extras.objects,
+                           {"phonetic guide(s) (rPh) in its comments": phonetic[0]})
 
     def comment_order(item):
         try:
@@ -2866,10 +3705,13 @@ def _xlsx_sheet_extras(z, part: str, persons: dict[str, str]) -> _XlsxSheetExtra
     return extras
 
 
-def _xlsx_legacy_comments(z, cpart: str) -> list[tuple[str, str, str]]:
+def _xlsx_legacy_comments(z, cpart: str, phonetic: list[int] | None = None
+                          ) -> list[tuple[str, str, str]]:
     """``(ref, author, text)`` for each note in a legacy comments part, in file
     order, streamed. One malformed note does not cost the others: a missing
-    author reads empty and a ref that is not a cell still prints."""
+    author reads empty and a ref that is not a cell still prints. A phonetic
+    guide (``rPh``) in a comment's text is not read; it is counted into
+    ``phonetic[0]`` (review-fix round 4)."""
     import xml.etree.ElementTree as ET
 
     authors: list[str] = []
@@ -2877,7 +3719,9 @@ def _xlsx_legacy_comments(z, cpart: str) -> list[tuple[str, str, str]]:
     with z.open(cpart) as fh:
         for _event, el in ET.iterparse(fh, events=("end",)):
             name = _local(el.tag)
-            if name == "author":
+            if name == "rPh" and phonetic is not None:
+                phonetic[0] += 1
+            elif name == "author":
                 authors.append(el.text or "")
             elif name == "comment":
                 aid = el.get("authorId", "")
@@ -3216,8 +4060,10 @@ def _hidden_cells_note(name: str, rows: int, cols: int, by_default: bool) -> str
 
 
 def _chart_note(name: str) -> str:
-    return (f"chartsheet {name!r}: its chart, and any print header or footer on "
-            f"it, were not read ({M_XLSX_SHEET_UNREAD})")
+    # Review r4 C: a text box or shape drawn on a chartsheet is on no page,
+    # and the note now names it with the rest of what is not read.
+    return (f"chartsheet {name!r}: its chart, any text box or shape on it, and any "
+            f"print header or footer on it, were not read ({M_XLSX_SHEET_UNREAD})")
 
 
 def _skipped_rows_note(name: str, rows: list[int], total: int) -> str:
@@ -3304,21 +4150,46 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
 
         persons: dict[str, str] = {}
         workbook_part: str | None = None
+        workbook_named: dict[str, int] = {}
         try:
             workbook_part = _xlsx_workbook_part(z)
-            sheet_order = _xlsx_sheet_order(z, workbook_part)
+            sheet_order = _xlsx_sheet_order(z, workbook_part, workbook_named)
         except Exception as exc:
             sheet_order = _xlsx_openpyxl_sheet_order(wb, z)
+            workbook_named = {}
             notes.append(
                 f"the workbook's own sheet list could not be read "
                 f"({type(exc).__name__}); tabs follow openpyxl's list, which "
                 f"leaves out a sheet that names no part or a part openpyxl does "
-                f"not find in the file ({M_XLSX_PART_UNREAD})")
+                f"not find in the file, and the workbook part's own elements were "
+                f"not checked for what this reader does not read ({M_XLSX_PART_UNREAD})")
             if workbook_part is None:
                 persons_gap = (f"the workbook part was not found ({type(exc).__name__}), "
                                f"so its persons part was not read; {{n}} threaded "
                                f"comment(s) are credited to person ids, not names "
                                f"({M_XLSX_PART_UNREAD})")
+        meta: _XlsxCellMeta | None = None
+        if workbook_part is not None:
+            try:
+                meta = _xlsx_cell_meta(z, workbook_part)
+            except Exception as exc:
+                meta = None
+                notes.append(
+                    f"the workbook's cell metadata could not be read ({type(exc).__name__}), "
+                    f"so a cell holding a picture or another rich value shows "
+                    f"{RICH_VALUE_IN_CELL!r} and a dynamic array's formula cell is named "
+                    f"as unknown ({M_XLSX_PART_UNREAD})")
+        try:
+            package_named, revision_records, revision_logs = _xlsx_package_census(
+                z, frozenset(p for _n, p, _k, _s in sheet_order if p))
+        except Exception as exc:
+            package_named, revision_records, revision_logs = {}, 0, []
+            notes.append(
+                f"the workbook's list of parts could not be read ({type(exc).__name__}), so "
+                f"a part this reader does not read, or a shared workbook's change "
+                f"history, may be there with no note of its own ({M_XLSX_PART_UNREAD})")
+        for label, n in workbook_named.items():
+            package_named[label] = package_named.get(label, 0) + n
         if workbook_part is not None:
             try:
                 persons, persons_missing = _xlsx_persons(z, workbook_part)
@@ -3395,7 +4266,8 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                 continue
 
             rows_before = rows_emitted
-            extras = _xlsx_sheet_extras(z, part, persons)
+            extras = _xlsx_sheet_extras(z, part, persons, meta)
+            rich_cells = extras.rich_cells
             for what in extras.unread:
                 notes.append(f"sheet {name!r}: {what}")
             if extras.hidden_rows or extras.hidden_cols or extras.rows_hidden_by_default:
@@ -3444,6 +4316,7 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                 previous_row = row_no
                 cells_text: list[str] = []
                 row_flags: list[str] = []
+                row_rich: list[str] = []
                 blank = True
                 for col_idx in range(max(len(row_cells), link_width.get(row_no, 0))):
                     vcell = row_cells[col_idx] if col_idx < len(row_cells) else None
@@ -3451,6 +4324,14 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                              if col_idx < len(formula_row) else None)
                     text, flag = _xlsx_cell_text(vcell, fcell, raw_cells, row_no,
                                                  col_idx + 1, epoch)
+                    held = rich_cells.get((row_no, col_idx + 1)) if rich_cells else None
+                    if held is not None:
+                        # The value is a picture (or another rich value) kept
+                        # outside the cell; the cached #VALUE! is older
+                        # readers' stand-in, never the value (review r4 B2).
+                        text, flag = (PICTURE_IN_CELL if held == "picture"
+                                      else RICH_VALUE_IN_CELL), None
+                        row_rich.append(held)
                     if flag:
                         row_flags.append(flag)
                     url = links.get((row_no, col_idx + 1)) if links else None
@@ -3483,6 +4364,9 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
                 rows_emitted += 1
                 for flag in row_flags:
                     flags[flag] += 1
+                for held in row_rich:
+                    key = "cell picture" if held == "picture" else _rich_value_label(held)
+                    extras.objects[key] = extras.objects.get(key, 0) + 1
             # Trailing blank rows (E4): any still-pending run is discarded,
             # never flushed — it produces nothing.
             raw_cells.close()
@@ -3550,6 +4434,10 @@ def _extract_xlsx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
         notes.append(persons_gap.format(n=threaded_total))
     if truncated:
         notes.append(_truncation_note(truncated_sheet, never_opened))
+    if revision_records:          # a history with no change in it loses nothing
+        notes.append(_revision_note(revision_records))
+    if package_named:
+        notes.append(_workbook_unread_note(package_named))
     notes.append(XLSX_PAGE_NOTE)
     return synthetic_pages(blocks, notes=(XLSX_PAGE_NOTE,)), notes
 
@@ -3706,13 +4594,18 @@ class _XlsSheetRecords:
     keeps only the later one."""
     shapes: list[tuple[str, str]] = field(default_factory=list)
     """``(kind, text)`` for each text box or shape with text (an OBJ record
-    and its TXO), in the sheet's own order -- as the ``.xlsx`` reader's."""
+    and its TXO), and each drawing object with a hyperlink, in the sheet's
+    own order -- as the ``.xlsx`` reader's."""
     objects: dict[str, int] = field(default_factory=dict)
     """Charts, pictures, controls, embedded objects and header pictures,
-    counted, as :data:`_DRAWING_KINDS`."""
+    counted, as :data:`_DRAWING_KINDS` -- and every record type the census
+    named (review-fix round 4)."""
     open_view: bool = False
     """A Custom View's records began (USERSVIEWBEGIN) and never ended: what
     followed was skipped with them."""
+    unused_header_footer: str | None = None
+    """The note tail naming first-page or even-page header/footer text the
+    sheet does not use (:func:`_header_footer_used`), or ``None``."""
 
 
 # BIFF5-8 records that hold ONE cell, its row and column their first four
@@ -3721,6 +4614,173 @@ class _XlsSheetRecords:
 _XLS_CELL_RECORDS = frozenset({0x0203, 0x0204, 0x00FD, 0x027E, 0x0205, 0x0201,
                                0x00D6, 0x0006, 0x0206, 0x0406})
 _XLS_CELL_RUN_RECORDS = frozenset({0x00BD, 0x00BE})
+
+# Review-fix round 4: every record a worksheet substream may hold, by what
+# this reader does with it. READ here or by xlrd: the cells (and a formula's
+# STRING, ARRAY, SHRFMLA, TABLE), ROW, COLINFO and DEFAULTROWHEIGHT (hidden
+# rows and columns), NOTE/OBJ/TXO and their CONTINUE (comments, drawing
+# objects), MSODRAWING (each object's hidden flag and hyperlink), HLINK and
+# HEADER/FOOTER/HEADERFOOTER, WSBOOL, the Custom View block,
+# BOF/EOF. COUNTED: BITMAP, HFPICTURE, SCENARIO, DV, HLINKTOOLTIP. Every other type listed
+# is STRUCTURAL -- view, print, protection, calculation, formatting, filter,
+# sort, outline and pivot-layout settings, the shared-feature and
+# future-record headers Excel 2007+ writes, and index records -- none of
+# which holds a value or text a reader of the sheet sees. A record type NOT
+# listed is counted and named by its number.
+_XLS_SHEET_RECORD_TYPES = frozenset({
+    # read
+    0x0006, 0x0201, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207, 0x0221, 0x0236, 0x027E,
+    0x0406, 0x04BC, 0x00BD, 0x00BE, 0x00D6, 0x00FD, 0x0208, 0x007D, 0x0225, 0x001C,
+    0x005D, 0x01B6, 0x003C, 0x00EC, 0x01B8, 0x0014, 0x0015, 0x089C, 0x0081,
+    0x01AA, 0x01AB, 0x0809, 0x000A,
+    # counted
+    0x00E9, 0x0866, 0x00AF, 0x01BE, 0x0800,
+    # structural: calculation, reference style, protection, print, view
+    0x000C, 0x000D, 0x000F, 0x0010, 0x0011, 0x0012, 0x0013, 0x0019, 0x005F, 0x0063,
+    0x00DD, 0x0026, 0x0027, 0x0028, 0x0029, 0x002A, 0x002B, 0x0033, 0x004D, 0x00A1,
+    0x0083, 0x0084, 0x001A, 0x001B, 0x0082, 0x0080, 0x0055, 0x0099, 0x0200, 0x020B,
+    0x00D7, 0x001D, 0x0041, 0x023E, 0x003E, 0x00A0, 0x088B, 0x00ED, 0x01BA, 0x0862,
+    # merged ranges, labels, phonetic settings, conditional formats, validation
+    # header, scenario manager, filters, sort, consolidation
+    0x00E5, 0x015F, 0x00EF, 0x01B0, 0x01B1, 0x0879, 0x087A, 0x087B, 0x01B2, 0x00AE,
+    0x009B, 0x009D, 0x009E, 0x087E, 0x0090, 0x0895, 0x0050, 0x0051, 0x0052, 0x01B5,
+    # pivot table layout (its values are cells, read; its cache is a stream, named)
+    0x00B0, 0x00B1, 0x00B2, 0x00B4, 0x00B5, 0x00B6, 0x00C5, 0x00F1, 0x00F2, 0x00F4,
+    0x00F5, 0x00F6, 0x00F8, 0x00F9, 0x00FB, 0x0100, 0x0103, 0x080C, 0x080D, 0x080E,
+    0x080F, 0x0810, 0x0864, 0x0802, 0x0859,
+    # query tables (results are cells) and web publishing
+    0x01AD, 0x0803, 0x0804, 0x0805, 0x0806, 0x0807, 0x0801,
+    # Excel 2007+ shared features (protection, tables), watch, drop-down ids,
+    # future-record wrappers and continuations
+    0x0867, 0x0868, 0x0871, 0x0872, 0x0877, 0x0878, 0x086C, 0x0874, 0x0850, 0x0851,
+    0x0852, 0x0853, 0x0812, 0x0875, 0x087F, 0x088D, 0x08A3,
+})
+# BIFF2-4 worksheet files are one stream of globals and cells together: the
+# workbook-level records they carry are structural (fonts, formats, window,
+# code page, dates) or cells (read by xlrd).
+_XLS_BIFF4_RECORD_TYPES = frozenset({
+    0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0007, 0x0008, 0x0009, 0x000B,
+    0x000E, 0x0017, 0x0018, 0x001E, 0x001F, 0x0020, 0x0021, 0x0022, 0x0023, 0x0024,
+    0x0025, 0x002F, 0x0031, 0x0032, 0x0036, 0x0037, 0x003D, 0x0040, 0x0042, 0x0043,
+    0x0044, 0x0045, 0x0056, 0x0092, 0x009C, 0x0209, 0x0218, 0x0223, 0x0231, 0x0243,
+    0x0293, 0x0409, 0x041E, 0x0443, 0x0218,
+})
+
+_OFFICEART_CONTAINER = 0xF
+_FOPT_TYPES = frozenset({0xF00B, 0xF121, 0xF122})
+
+
+class _OfficeArtShapes:
+    """A worksheet's OfficeArt drawing data (MSODRAWING records and the
+    CONTINUE records that carry the rest of one), streamed. Each shape's
+    properties that this reader uses -- whether Excel hides it (the fHidden
+    bit of property 0x03BF) and its hyperlink (the IHlink blob of property
+    0x0382, pihlShape) -- are queued when its ClientData atom is reached,
+    which is where Excel puts the shape's OBJ record: one entry per OBJ, in
+    order."""
+
+    def __init__(self) -> None:
+        self.buf = bytearray()
+        self.pos = 0
+        self.current: dict | None = None
+        self.ready: list[dict] = []
+
+    def feed(self, data: bytes) -> None:
+        import struct
+
+        self.buf.extend(data)
+        while self.pos + 8 <= len(self.buf):
+            verinst, rtype, rlen = struct.unpack_from("<HHI", self.buf, self.pos)
+            if verinst & 0x000F == _OFFICEART_CONTAINER:
+                self.pos += 8                   # a container: its children follow
+                continue
+            body = self.pos + 8
+            if body + rlen > len(self.buf):
+                break                           # an atom whose rest has not come yet
+            if rtype == 0xF00A:                 # FSP: a new shape
+                self.current = {"hidden": False, "hlink": None}
+            elif rtype in _FOPT_TYPES and self.current is not None:
+                count = verinst >> 4
+                fixed = body
+                blob = body + 6 * count
+                for _ in range(count):
+                    if fixed + 6 > body + rlen:
+                        break
+                    pid, value = struct.unpack_from("<HI", self.buf, fixed)
+                    fixed += 6
+                    number = pid & 0x3FFF
+                    if pid & 0x8000:           # complex: its data follows the table
+                        if number == 0x0382:
+                            self.current["hlink"] = bytes(self.buf[blob:blob + value])
+                        blob += value
+                    elif number == 0x03BF and value & 0x00020000:
+                        self.current["hidden"] = bool(value & 0x0002)
+            elif rtype == 0xF011:               # ClientData: the OBJ record comes next
+                self.ready.append(self.current or {})
+                self.current = None
+            self.pos = body + rlen
+        if self.pos > 1 << 16:
+            del self.buf[:self.pos]
+            self.pos = 0
+
+    def take(self) -> dict:
+        return self.ready.pop(0) if self.ready else {}
+
+
+def _xls_link_target(link) -> str | None:
+    """E13's rule for one xlrd hyperlink: an external link's target (a URL,
+    a file, a UNC path) with its location after ``#``; ``None`` for an
+    internal link; ``""`` for a link of a kind xlrd does not recognize."""
+    kind = getattr(link, "type", None)
+    if kind == "workbook":
+        return None
+    target = getattr(link, "url_or_path", None)
+    if isinstance(target, bytes):
+        # A file link's short path is in the writer's ANSI code page.
+        try:
+            target = target.decode("cp1252")
+        except UnicodeDecodeError:
+            target = target.decode("latin-1")
+    if kind not in ("url", "local file", "unc") or not target:
+        return ""
+    mark = getattr(link, "textmark", None)
+    return f"{target}#{mark}" if mark else target
+
+
+def _xls_shape_link(blob: bytes | None) -> str | None:
+    """A drawing object's hyperlink (the IHlink of its pihlShape property,
+    the same structure an HLINK record holds after its cell range), read by
+    xlrd's own HLINK reader; ``None`` for no link or an internal one, ``""``
+    for one xlrd does not recognize."""
+    import types
+
+    import xlrd.sheet
+
+    if not blob:
+        return None
+    holder = types.SimpleNamespace(hyperlink_list=[], hyperlink_map={},
+                                   logfile=io.StringIO())
+    xlrd.sheet.Sheet.handle_hlink(holder, b"\0" * 8 + blob)
+    return _xls_link_target(holder.hyperlink_list[0])
+
+
+def _xls_dv_counts(data: bytes, book) -> tuple[bool, bool]:
+    """``(holds a message, holds a typed list of values)`` for one DV
+    record: its prompt title, error title, prompt and error strings, and a
+    list validation whose first formula is a literal string (tStr)."""
+    import struct
+
+    from xlrd.biffh import unpack_unicode_update_pos
+
+    flags = struct.unpack_from("<I", data, 0)[0]
+    pos = 4
+    message = False
+    for _ in range(4):
+        text, pos = unpack_unicode_update_pos(data, pos, lenlen=2)
+        message = message or bool(text.strip("\0").strip())
+    cce = struct.unpack_from("<H", data, pos)[0]
+    first = data[pos + 4] if cce and pos + 4 < len(data) else None
+    return message, (flags & 0x0F) == 3 and first == 0x17
 
 
 def _xls_header_string(data: bytes, book) -> str:
@@ -3767,43 +4827,77 @@ def _xls_sheet_records(stream, offset: int, book) -> _XlsSheetRecords:
     """E12 and the dialog flag for one ``.xls`` worksheet, from the records of
     its own substream (the BOF at ``offset`` to its matching EOF; an embedded
     chart's own records are skipped). Header and footer text goes through the
-    same code stripping as ``.xlsx`` (:func:`_header_footer_lines`), in the
-    same order: odd, even, first page, each distinct line once. A cell
-    written twice is counted with one bit per row and column (at most 32
-    bytes a row), never a record of the cells themselves.
+    same code stripping and the same rule as ``.xlsx``
+    (:func:`_header_footer_used`): odd, even and first page, an even or first
+    variant only when HEADERFOOTER's own flag declares it. A cell written
+    twice is counted with one bit per row and column (at most 32 bytes a
+    row), never a record of the cells themselves.
 
     Only the SHEET'S OWN records (review-fix round 3): every record between a
     Custom View's USERSVIEWBEGIN and USERSVIEWEND is the view's -- its own
     HEADER, FOOTER and HEADERFOOTER, which Excel writes after the sheet's --
     and is skipped. And its drawing objects, as the ``.xlsx`` reader's: a
     text box's or shape's text (its OBJ record, then the TXO record and the
-    CONTINUE records holding the text) is read; a chart, picture, control,
-    embedded object, background picture or header picture is counted."""
+    CONTINUE records holding the text) is read, marked hidden when its
+    OfficeArt properties say Excel hides it, with its hyperlink after it
+    (:class:`_OfficeArtShapes`); a chart, picture, control, embedded object,
+    background picture or header picture is counted.
+
+    The census (review-fix round 4): a record type not in
+    :data:`_XLS_SHEET_RECORD_TYPES`, and a TXO that belongs to no object, is
+    counted by name; so are a validation's messages and a scenario."""
     import struct
 
+    from xlrd.biffh import XLRDError as xlrd_error
     from xlrd.biffh import unpack_unicode_update_pos
 
     mem, base, length = stream
     end = base + length
     out = _XlsSheetRecords()
-    headers = {"odd": "", "even": "", "first": ""}
-    footers = {"odd": "", "even": "", "first": ""}
+    texts = {"oddHeader": "", "oddFooter": "", "evenHeader": "", "evenFooter": "",
+             "firstHeader": "", "firstFooter": ""}
+    hf_flags = 0
+    hf_picture = False
     seen: dict[int, bytearray] = {}
     in_view = False
-    shape_kind: str | None = None      # the last OBJ's, while its TXO may follow
+    shape: dict | None = None          # the last OBJ that is a shape, while its TXO may follow
+    last_obj: str | None = None        # what the last OBJ was: 'shape', 'counted', 'note', 'none'
     text_left = 0                      # characters of a TXO's text still to come
+    runs_left = 0                      # bytes of its formatting runs still to come
     text_parts: list[str] = []
+    art = _OfficeArtShapes()
+    previous = None                    # the last record's type, for a CONTINUE
+    known = _XLS_SHEET_RECORD_TYPES | (_XLS_BIFF4_RECORD_TYPES if book.biff_version < 50
+                                       else frozenset())
 
     def tally(kind: str) -> None:
         out.objects[kind] = out.objects.get(kind, 0) + 1
 
-    def text_done() -> None:
-        nonlocal shape_kind, text_left
-        text = "".join(text_parts)
-        if shape_kind and text.strip():
-            out.shapes.append((shape_kind, text))
+    def urls_of(props: dict) -> list[str]:
+        try:
+            target = _xls_shape_link(props.get("hlink"))
+        except (AssertionError, IndexError, ValueError, struct.error, UnicodeDecodeError,
+                xlrd_error):
+            target = ""        # a link whose bytes xlrd's reader cannot parse: named
+        if target == "":
+            tally("hyperlink(s) on a drawing object of a kind this reader does not "
+                  "recognize")
+            return []
+        return [target] if target else []
+
+    def emit(kind: str, text: str, urls: list[str]) -> None:
+        tail = " ".join(f"<{u}>" for u in urls)
+        out.shapes.append((kind, f"{text} {tail}" if text and tail else text or tail))
+
+    def shape_done() -> None:
+        """The last shape's line: its text (if any came) and its links."""
+        nonlocal shape, text_left
+        if shape is not None:
+            text = "".join(text_parts)
+            if text.strip() or shape["urls"]:
+                emit(shape["kind"], text if text.strip() else "", shape["urls"])
         text_parts.clear()
-        shape_kind, text_left = None, 0
+        shape, text_left = None, 0
 
     def written(row: int, col: int) -> None:
         bits = seen.get(row)
@@ -3844,64 +4938,125 @@ def _xls_sheet_records(stream, offset: int, book) -> _XlsSheetRecords:
             continue
         if in_view:
             continue
-        if text_left:
-            if opcode == 0x003C and size >= 1:
+        if opcode == 0x003C:
+            # A CONTINUE carries the rest of the record before it: a TXO's
+            # text, then its formatting runs; after those, or after an
+            # MSODRAWING or OBJ, more drawing data (Excel writes the next
+            # object's MSODRAWING as a CONTINUE there); anything else's
+            # continuation (a BITMAP's image) is its own record's.
+            if text_left and size >= 1:
                 chunk = data[1:]
                 chars = (chunk[:len(chunk) // 2 * 2].decode("utf-16-le", "replace")
                          if data[0] & 0x01 else chunk.decode("latin-1"))
-                text_parts.append(chars[:text_left])
+                if shape is not None:
+                    text_parts.append(chars[:text_left])
                 text_left -= len(chars[:text_left])
                 if text_left <= 0 or not chars:
-                    text_done()
-                continue
-            text_done()                # the text's records ended early
-        if opcode == 0x005D:
-            shape_kind = None
+                    text_left = 0
+                    if shape is not None:
+                        shape_done()
+            elif runs_left > 0:
+                runs_left -= size
+            elif previous in (0x00EC, 0x005D, 0x01B6):
+                art.feed(data)
+            continue
+        previous = opcode
+        if text_left or runs_left:
+            text_left = runs_left = 0          # the text's records ended early
+            shape_done()
+        if opcode not in known:
+            tally(f"record(s) of type 0x{opcode:04X} this reader has no rule for")
+            continue
+        if opcode == 0x00EC:
+            art.feed(data)
+        elif opcode == 0x005D:
+            shape_done()
+            props = art.take()
+            hidden = "hidden " if props.get("hidden") else ""
+            last_obj = "counted"
             if book.biff_version < 80 or size < 6:
                 tally("other")         # no ftCmo to tell its kind by
+                continue
+            ft, _cb, ot = struct.unpack_from("<HHH", data, 0)
+            counted = None
+            if ft != 0x0015:
+                counted = "other"
+            elif ot in _XLS_OBJ_SHAPES:
+                shape = {"kind": hidden + _XLS_OBJ_SHAPES[ot], "urls": urls_of(props)}
+                last_obj = "shape"
+            elif ot == 0x05:
+                counted = "chart"
+            elif ot == 0x08:
+                counted = _xls_picture_kind(data)
+            elif ot in _XLS_OBJ_CONTROLS:
+                counted = "control"
+            elif ot == 0x19:
+                last_obj = "note"
+            elif ot in (0x00, 0x01):
+                last_obj = "none"
+                urls = urls_of(props)
+                if urls:
+                    emit(hidden + "shape", "", urls)
             else:
-                ft, _cb, ot = struct.unpack_from("<HHH", data, 0)
-                if ft != 0x0015:
-                    tally("other")
-                elif ot in _XLS_OBJ_SHAPES:
-                    shape_kind = _XLS_OBJ_SHAPES[ot]
-                elif ot == 0x05:
-                    tally("chart")
-                elif ot == 0x08:
-                    tally(_xls_picture_kind(data))
-                elif ot in _XLS_OBJ_CONTROLS:
-                    tally("control")
-                elif ot not in (0x00, 0x01, 0x19):
-                    tally("other")
-        elif opcode == 0x01B6 and size >= 12:
-            if shape_kind:
-                text_left = struct.unpack_from("<H", data, 10)[0]
-                if not text_left:
-                    shape_kind = None
+                counted = "other"
+            if counted:
+                tally(counted)
+                urls = urls_of(props)
+                if urls and counted in ("picture", "chart", "other"):
+                    emit(hidden + {"other": "drawing object"}.get(counted, counted), "", urls)
+        elif opcode == 0x01B6 and size >= 14:
+            # TXO: its text (cchText characters) and formatting runs (cbRuns
+            # bytes) follow in CONTINUE records, whoever owns it.
+            text_left, runs_left = struct.unpack_from("<HH", data, 10)
+            if shape is None and text_left and last_obj not in ("counted", "note"):
+                # A text record after no object that owns text: its text is
+                # not a shape's, a control's or a comment's.
+                tally("text record(s) (TXO) belonging to no drawing object")
+            if shape is not None and not text_left:
+                shape_done()
         elif opcode == 0x00E9:
             tally("picture")           # the sheet's background picture
+        elif opcode == 0x0866:
+            hf_picture = True          # the sheet's own header/footer pictures
         elif opcode == 0x0014:
-            headers["odd"] = _xls_header_string(data, book)
+            texts["oddHeader"] = _xls_header_string(data, book)
         elif opcode == 0x0015:
-            footers["odd"] = _xls_header_string(data, book)
+            texts["oddFooter"] = _xls_header_string(data, book)
         elif opcode == 0x089C and book.biff_version >= 80 and size >= 38:
             # HEADERFOOTER: a 12-byte future-record header, a 16-byte view
-            # GUID, 2 bytes of flags, the four string lengths, then the even
-            # header, even footer, first header and first footer strings.
+            # GUID, 2 bytes of flags (fHFDiffOddEven, fHFDiffFirst, ...), the
+            # four string lengths, then the even header, even footer, first
+            # header and first footer strings.
+            hf_flags = struct.unpack_from("<H", data, 28)[0]
             counts = struct.unpack_from("<4H", data, 30)
             at = 38
-            texts = []
+            strings = []
             for count in counts:
                 if count:
                     text, at = unpack_unicode_update_pos(data, at, lenlen=2)
                 else:
                     text = ""
-                texts.append(text)
-            headers["even"], footers["even"], headers["first"], footers["first"] = texts
+                strings.append(text)
+            (texts["evenHeader"], texts["evenFooter"], texts["firstHeader"],
+             texts["firstFooter"]) = strings
         elif opcode == 0x0081 and size >= 1:
             out.dialog = bool(data[0] & 0x10)
         elif opcode == 0x001C and book.biff_version >= 80:
             out.note_records += 1
+        elif opcode == 0x01BE and book.biff_version >= 80:
+            try:
+                message, typed_list = _xls_dv_counts(data, book)
+            except (IndexError, struct.error, UnicodeDecodeError):
+                tally("data validation record(s) this reader could not parse")
+                continue
+            if message:
+                tally("data validation message(s) (a cell's input or error message)")
+            if typed_list:
+                tally("data validation list(s) of typed values")
+        elif opcode == 0x00AF:
+            tally("scenario(s) (alternative values for cells)")
+        elif opcode == 0x0800:
+            tally(_SCREEN_TIP)         # HLINKTOOLTIP: a cell link's screen tip
         elif book.biff_version >= 50 and opcode in _XLS_CELL_RECORDS and size >= 4:
             written(*struct.unpack_from("<HH", data, 0))
         elif book.biff_version >= 50 and opcode in _XLS_CELL_RUN_RECORDS and size >= 6:
@@ -3909,44 +5064,146 @@ def _xls_sheet_records(stream, offset: int, book) -> _XlsSheetRecords:
             last_col = struct.unpack_from("<H", data, size - 2)[0]
             for col in range(first_col, last_col + 1):
                 written(row, col)
-    if text_left:
-        text_done()
+    shape_done()
     out.open_view = in_view
-    for source, bucket in ((headers, out.header_lines), (footers, out.footer_lines)):
-        for which in ("odd", "even", "first"):
-            for line in _header_footer_lines(source[which]):
-                if line not in bucket:
-                    bucket.append(line)
+    out.header_lines, out.footer_lines, in_use, out.unused_header_footer = (
+        _header_footer_used(texts, bool(hf_flags & 0x0001), bool(hf_flags & 0x0002)))
+    # A header's &G places a picture only where the sheet holds its header
+    # pictures (an HFPICTURE record of its own): review r4 C.
     _count_objects(out.objects, {"header picture": sum(
-        _header_footer_pictures(t) for t in (*headers.values(), *footers.values()))})
+        _header_footer_pictures(t) for t in in_use.values()) if hf_picture else 0})
     return out
 
 
 def _xls_links(sheet, book) -> tuple[dict[tuple[int, int], str], int]:
     """E13 for ``.xls``: ``({(row, col): target}, links not read)``, the same
-    rules as ``.xlsx``. An external link (a URL, a file, a UNC path) prints its
-    target, with its location after ``#``; a range link attaches to the
-    range's first cell only; an internal link adds nothing. A link of a kind
-    xlrd does not recognize is counted, for a marked note."""
+    rules as ``.xlsx`` (:func:`_xls_link_target`). An external link (a URL, a
+    file, a UNC path) prints its target, with its location after ``#``; a
+    range link attaches to the range's first cell only; an internal link adds
+    nothing. A link of a kind xlrd does not recognize is counted, for a
+    marked note."""
     links: dict[tuple[int, int], str] = {}
     unread = 0
     for link in getattr(sheet, "hyperlink_list", ()):
-        kind = getattr(link, "type", None)
-        if kind == "workbook":
+        target = _xls_link_target(link)
+        if target is None:
             continue  # internal (location-only) links add nothing
-        target = getattr(link, "url_or_path", None)
-        if isinstance(target, bytes):
-            # A file link's short path is in the writer's ANSI code page.
-            try:
-                target = target.decode("cp1252")
-            except UnicodeDecodeError:
-                target = target.decode("latin-1")
-        if kind not in ("url", "local file", "unc") or not target:
+        if not target:
             unread += 1
             continue
-        mark = getattr(link, "textmark", None)
-        links.setdefault((link.frowx, link.fcolx), f"{target}#{mark}" if mark else target)
+        links.setdefault((link.frowx, link.fcolx), target)
     return links, unread
+
+
+# Review-fix round 4: every stream or storage at the top of an .xls compound
+# file, by what this reader does with it. Anything else -- a VBA project
+# (_VBA_PROJECT_CUR), a pivot cache (_SX_DB_CUR), custom XML (MsoDataStore),
+# a stream Office adds tomorrow -- is named in the workbook's FINAL note.
+_XLS_STREAMS: dict[str, tuple[str, str]] = {
+    "Workbook": (_READ, "the workbook's records"),
+    "Book": (_READ, "a BIFF5 workbook's records"),
+    "\x05SummaryInformation": (_NO_EVIDENCE, _PROPERTIES_REASON),
+    "\x05DocumentSummaryInformation": (_NO_EVIDENCE, _PROPERTIES_REASON),
+    "\x01CompObj": (_NO_EVIDENCE, "the file's OLE class name"),
+    "Ctls": (_COUNTED, "ActiveX controls' data, each control counted in its sheet's note"),
+    "Revision Log": (_COUNTED, "a shared workbook's change history, counted in its own note"),
+    "User Names": (_COUNTED, "a shared workbook's change history, counted in its own note"),
+}
+_XLS_EMBEDDED_STORAGE = "MBD"   # an embedded object's storage, counted in its sheet's note
+# Records of a Revision Log stream that frame the history rather than
+# record a change: padding, BOF/EOF, each save's header and info, the tab
+# map, and the locks.
+_XLS_REVISION_FRAMING = frozenset({0x0000, 0x000A, 0x0809, 0x0138, 0x0196, 0x013D,
+                                   0x0194, 0x0195})
+# Every record a BIFF5-8 workbook globals substream may hold that this reader
+# (or xlrd) reads or that is structural: the tab list, strings, formats,
+# fonts, styles and themes, names and external-sheet references, window,
+# protection, calculation and compatibility settings, the drawing group, the
+# pivot caches' stream pointers, and future-record wrappers. SUPBOOK is read
+# for whether it names another workbook; any other type is named.
+_XLS_GLOBALS_RECORD_TYPES = frozenset({
+    0x0809, 0x000A, 0x00E1, 0x00C1, 0x00E2, 0x005C, 0x0042, 0x0161, 0x01C0, 0x013D,
+    0x00D3, 0x01BA, 0x009C, 0x0019, 0x0012, 0x0013, 0x01AF, 0x01BC, 0x003D, 0x0040,
+    0x008D, 0x0022, 0x000E, 0x01B7, 0x00DA, 0x0031, 0x041E, 0x00E0, 0x087C, 0x087D,
+    0x0892, 0x0293, 0x0092, 0x088E, 0x088F, 0x0890, 0x0896, 0x0085, 0x008C, 0x0160,
+    0x01AE, 0x0023, 0x0059, 0x005A, 0x0017, 0x0018, 0x0893, 0x00EB, 0x00FC, 0x00FF,
+    0x003C, 0x0863, 0x0866, 0x088C, 0x089A, 0x089B, 0x08A3, 0x01C1, 0x0864, 0x088D,
+    0x0051, 0x00D5, 0x00E3, 0x01A9, 0x005B, 0x0060, 0x00DE, 0x0897, 0x0898, 0x0899,
+    0x0850, 0x0851, 0x0852, 0x0853, 0x0812, 0x0801, 0x0894, 0x008E, 0x008F, 0x0162,
+    0x00C2, 0x00C3,
+})
+
+
+def _xls_file_census(raw: bytes, stream, book) -> tuple[dict[str, int], int | None]:
+    """``(named, revision records or None)`` for one ``.xls`` file: every
+    stream and storage at the top of the compound file
+    (:data:`_XLS_STREAMS`), and every record type of the workbook's globals
+    substream (:data:`_XLS_GLOBALS_RECORD_TYPES`, a SUPBOOK naming another
+    workbook named as an external link). ``None`` when the file keeps no
+    shared-workbook change history."""
+    import struct
+
+    from xlrd import compdoc
+
+    named: dict[str, int] = {}
+
+    def bump(label: str) -> None:
+        named[label] = named.get(label, 0) + 1
+
+    revisions: int | None = None
+    if raw[:8] == compdoc.SIGNATURE:
+        cd = compdoc.CompDoc(raw, logfile=io.StringIO())
+        for did in cd.dirlist[0].children:
+            entry = cd.dirlist[did]
+            if entry.etype not in (1, 2):
+                continue
+            if entry.name in _XLS_STREAMS:
+                continue
+            if entry.etype == 1 and entry.name.startswith(_XLS_EMBEDDED_STORAGE):
+                continue
+            kind = "storage(s)" if entry.etype == 1 else "stream(s)"
+            bump(f"{kind} {entry.name!r} in the compound file")
+        mem, base, length = cd.locate_named_stream("Revision Log")
+        if mem:
+            revisions = 0
+            pos, end = base, base + length
+            while pos + 4 <= end:
+                opcode, size = struct.unpack_from("<HH", mem, pos)
+                pos += 4 + size
+                revisions += opcode not in _XLS_REVISION_FRAMING
+    if stream is not None and book.biff_version >= 50:
+        mem, base, length = stream
+        pos, end = base, base + length
+        first = True
+        while pos + 4 <= end:
+            opcode, size = struct.unpack_from("<HH", mem, pos)
+            data = mem[pos + 4:pos + 4 + size]
+            pos += 4 + size
+            if first:
+                first = False
+                continue                          # the globals' own BOF
+            if opcode == 0x000A:
+                break
+            if opcode not in _XLS_GLOBALS_RECORD_TYPES:
+                bump(f"record(s) of type 0x{opcode:04X} in the workbook's globals this "
+                     f"reader has no rule for")
+            elif opcode == 0x01AE and size >= 4:
+                cch = struct.unpack_from("<H", data, 2)[0]
+                if cch not in (0x0401, 0x3A01):  # a self-reference or an add-in
+                    bump("external workbook link(s) (SUPBOOK)")
+            elif opcode == 0x0018 and book.biff_version >= 80 and size >= 15:
+                # NAME: a defined name whose formula is one constant token (a
+                # string, error, boolean, integer or number), as .xlsx's.
+                grbit, _key, cch, cce = struct.unpack_from("<HBBH", data, 0)
+                name_bytes = cch * (2 if data[14] & 0x01 else 1)
+                rgce = bytes(data[15 + name_bytes:15 + name_bytes + cce])
+                if rgce and rgce[0] in (0x17, 0x1C, 0x1D, 0x1E, 0x1F) and (
+                        rgce[0] == 0x17 or len(rgce) == {0x1C: 2, 0x1D: 2, 0x1E: 3,
+                                                         0x1F: 9}[rgce[0]]):
+                    bump("hidden defined name(s) holding a constant value (Excel lists "
+                         "them nowhere, not even in its Name Manager)" if grbit & 0x0001
+                         else "defined name(s) holding a constant value (not a cell's)")
+    return named, revisions
 
 
 def _extract_xls(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], list[str]]:
@@ -3999,6 +5256,15 @@ def _extract_xls(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
     tabs, stream, tab_problem = _xls_tabs(raw, book)
     if tab_problem:
         notes.append(tab_problem)
+    try:
+        file_named, revision_records = _xls_file_census(raw, stream, book)
+    except Exception as exc:
+        file_named, revision_records = {}, None
+        notes.append(
+            f"the workbook's list of streams and its own records could not be read "
+            f"({type(exc).__name__}), so a part this reader does not read, or a shared "
+            f"workbook's change history, may be there with no note of its own "
+            f"({M_XLSX_PART_UNREAD})")
 
     for name, kind, visibility, sheet, offset in tabs:
         hidden = bool(visibility)
@@ -4042,6 +5308,8 @@ def _extract_xls(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
             notes.append(f"sheet {name!r}: a Custom View's records begin and never "
                          f"end, so every record after them was skipped with them"
                          f"{_XLS_RECORDS_COST} ({M_XLSX_SHEET_UNREAD})")
+        if records is not None and records.unused_header_footer:
+            notes.append(f"sheet {name!r}: {records.unused_header_footer}")
         rows_before = rows_emitted
 
         hidden_rows = sum(1 for info in sheet.rowinfo_map.values()
@@ -4141,6 +5409,10 @@ def _extract_xls(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], lis
         notes.append(_time_day_note(flags["time_day"]))
     if truncated:
         notes.append(_truncation_note(truncated_sheet, never_opened))
+    if revision_records:          # a history with no change in it loses nothing
+        notes.append(_revision_note(revision_records))
+    if file_named:
+        notes.append(_workbook_unread_note(file_named))
     notes.append(XLS_PAGE_NOTE)
     return synthetic_pages(blocks, notes=(XLS_PAGE_NOTE,)), notes
 
