@@ -1705,14 +1705,37 @@ because the page was counted. Counted is not read.
   of the rendering before cropping; the third review found that mask erasing scan
   content with no marker (a diagonal watermark's word boxes, a wrong OCR layer),
   and D-58 removed it. Duplication loses nothing and is accepted: the document
-  note names every page whose text layer overlaps an image region that was read
-  (`IMAGE_TEXT_MAY_REPEAT`), unmarked. The geometry, measured and cropped, is
+  note names every page where a character of the text layer is centered inside
+  an image region that was read and whose OCR returned text
+  (`IMAGE_TEXT_MAY_REPEAT`), unmarked. (Corrected 2026-09-23, D-51's fourth
+  review round: it tested word boxes, which start at the font's ascender, against
+  every region cropped, so a caption set just under a chart named its page.) The geometry, measured and cropped, is
   every image the page PAINTS (`_image_placements`): every draw, inline images
   and repeated placements included (an image drawn twice was measured at its
   first placement only, and a scan stored inline was not seen at all); clipped to
   the page; not an image used only as a soft mask; a tiling pattern measured by
-  the area it fills. A page whose geometry cannot be interpreted is marked
-  `M_IMAGE_UNMEASURED` and named, where it came out NATIVE with no note.
+  the area it fills; a stencil mask painted through a shading or a tiling
+  pattern (MuPDF's `clip_image_mask`) as well as one painted solid. A page whose
+  geometry cannot be interpreted is read whole when OCR runs (D-60), and
+  otherwise marked `M_IMAGE_UNMEASURED` and named, where it came out NATIVE with
+  no note.
+* **Every picture accounted for, or the page read whole (D-60, 2026-09-23).**
+  After the regions are read, the drawn image area outside every region that
+  was actually read (cut from the rendering and passed to OCR without an
+  exception) is computed; crops are cut outward to whole pixels, and above one
+  rendered pixel of uncovered area the page is read whole instead, from the
+  same rendering, as a scan is. That reading replaces the region texts and is
+  the page's image text, placed and marked by `image_line_span` like any image
+  text, so the text layer is kept and D-49's locator rule is unchanged. The page
+  note and the document note (`IMAGE_READ_WHOLE`, unmarked: nothing is lost)
+  name the page and its cause (`unmeasurable`, `cap`, `floor`, `ocr-error`,
+  `uncovered`); the computation, not that list, decides. A page read whole is
+  an OCR attempt in `ocr_yield`. A region whose OCR raised also puts the
+  TRANSIENT `M_OCR_PAGE` on the page, so the walker re-reads the document alone
+  and a calm run's region reading is what the run keeps; a page that cannot be
+  read even whole carries `M_OCR_PAGE` as a scan that will not rasterize does.
+  A page the quick pass skips never reaches region OCR, so no fallback brings
+  it back.
 * **Placement.** Image text sits after the text layer's opening lines. Appended
   after the text layer, it pushed a page's own footer stamp out of the Bates zone,
   and from eight image lines up it left a stamp from an embedded exhibit as the
@@ -1740,11 +1763,15 @@ because the page was counted. Counted is not read.
 ### Bounds, disclosed
 
 At most `DOCIQ_MIXED_MAX_REGIONS` (24) image regions are read per page, and a
-region under 8 pixels on either side is not read. Whatever either bound skips sets
-the page's `M_IMAGE_UNREAD` marker, and so does a region whose OCR raised,
-**whether or not another region of the page was read** (corrected 2026-09-14,
-D-51's third review round: the page loop looked at the failure only when nothing
-had been read, so a page read 24 of its 30 pictures under a clean MIXED status).
+region under 8 pixels on either side is not read. **Since D-60 (2026-09-23)**
+whatever either bound leaves unread, and a region whose OCR raised, sends the
+page to be read whole and named with the bound as its cause: a cost in reading
+time, not evidence. Until then each set the page's `M_IMAGE_UNREAD` marker (from
+D-51's third review round, whether or not another region read), and the log
+called the skipped regions a failure to rasterize or read, which they were not.
+Draws that touch or lie within `_MERGE_GAP_PT` (1 point) of each other merge into
+one region (D-51's fourth review round: a scan stored as touching bands lost
+every line a band edge cut).
 A region that is read and holds no text is counted in a document note rather than
 marked: a site photograph has no words, and a warning that fires on the normal
 case teaches an operator to stop reading warnings. Merging draws into regions is
@@ -1825,7 +1852,9 @@ identifies a run could say which one it was.
 * **The dead-engine alarm.** `ocr_yield` counted every page note carrying
   `M_IMAGE_UNREAD` as a failed OCR attempt. A skipped page was never attempted, so
   it is excluded, and at the default the alarm would otherwise fire on any run
-  over letterhead-and-chart pages. A region that was tried and failed still counts.
+  over letterhead-and-chart pages. Since D-60 a region left unread sends its page
+  to a whole-page reading, which is the attempt counted; a region under the size
+  floor no longer counts as a failed attempt of its own.
 * **Accounting** still counts a skipped page's document under `M_IMAGE_UNREAD` as
   evidence not in the corpus, with the reason in the note. No accounting category
   is added: how the screen tells a choice from a failure is D-52's decision.
@@ -1860,9 +1889,12 @@ layer. That is closest to a run that skips them, but not the same: the quick pas
 still reads stamped scans whose drawn image areas add up to 90% or more of the
 page (D-54), so over a production of them the estimate may be low, by an amount
 not measured. Region OCR reads each image region whole, so typed text lying on an
-image may appear twice in the page's text (D-58); the pages where the text layer
-overlaps a region that was read are named in a document note, and image content
-under the text layer is read like the rest of its region. A run that reads the
+image may appear twice in the page's text (D-58); the pages where a character of
+the text layer is centered inside a region that was read and yielded text are
+named in a document note, and image content under the text layer is read like the
+rest of its region. A page whose pictures the regions read do not account for is
+read whole (D-60), which costs a whole-page OCR on that page; how many corpus pages
+that is, by cause, is D-60's census in the decision register. A run that reads the
 images gets no
 estimate with OCR on. The determinism proof repeats a READING run only; the skipping default is
 checked once by the selftest, not repeated. The packaged offline probe takes the

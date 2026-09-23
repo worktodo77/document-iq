@@ -939,8 +939,12 @@ def test_a_stamped_scan_adds_its_body_and_keeps_its_stamp_as_its_locator(tmp_pat
     page = got.pages[0]
     flat = _flat(page.text)
     assert page.kind is PageKind.MIXED, (page.kind, page.text)
-    assert all(flat.count(t) >= 1 for t in _BODY_TOKENS), page.text
-    assert flat.count("ATTORNEYSEYESONLY") >= 1, page.text
+    # EXACTLY once: the body is in the scan alone, never in the text layer, so
+    # D-58's accepted repeat cannot reach it. A picture read twice would
+    # (D-51 round-4 review: loosened to "at least once", this let a mutant
+    # that reads every region twice pass every test).
+    assert {t: flat.count(t) for t in _BODY_TOKENS} == dict.fromkeys(_BODY_TOKENS, 1), page.text
+    assert flat.count("ATTORNEYSEYESONLY") >= 1, page.text  # typed, so may repeat
     assert page.locator_text.strip() == _STAMP
     _assert_named_as_repeating(got, "1")
 
@@ -1002,7 +1006,9 @@ def test_an_annotations_words_over_a_scan_are_read():
 
     page = ex.extract("annotated.pdf", raw).pages[0]
     # The date alone: the engine reads this rendering of RECEIVED as "RECEVED".
-    assert _flat(page.text).count("19JULY2024") >= 1, page.text
+    # Exactly once: an annotation is in no text layer, so only a picture read
+    # twice could repeat it (D-51 round-4 review).
+    assert _flat(page.text).count("19JULY2024") == 1, page.text
 
 
 def _text_layer_text(raw: bytes) -> str:
@@ -1098,7 +1104,13 @@ def test_a_page_whose_image_geometry_cannot_be_interpreted_is_marked():
     measured. The share swallowed the error and answered "no image", and the
     page came out NATIVE with no note on either setting; before the every-draw
     count it had carried ``M_IMAGE_UNREAD`` (D-51 round-3 review). The page is
-    marked, named in the document note, and not counted as an OCR attempt.
+    marked and named in the document note.
+
+    D-60: a page that cannot be measured is read whole on either setting. This
+    one cannot be rendered either (the same interpreter limit), so it keeps the
+    unmeasured marker and gains the transient page-failure marker a scan that
+    will not rasterize carries; that failure is an OCR attempt, as it is for a
+    scan (``test_a_page_ocr_could_not_even_rasterize_counts_as_an_attempt``).
 
     FAIL-BEFORE (61baefd): NATIVE, no page note, no document note.
     """
@@ -1118,10 +1130,18 @@ def test_a_page_whose_image_geometry_cannot_be_interpreted_is_marked():
         got, page = _page_notes_and_doc_notes(raw, opt)
         assert ex.has_evidence_marker(" ".join(page.notes)), (page.notes, got.notes)
         assert page.kind is PageKind.NATIVE
-        assert page.notes == (ex.M_IMAGE_UNMEASURED,)
+        assert page.notes == (
+            ex.M_IMAGE_UNMEASURED,
+            f"{ex.M_OCR_PAGE} to rasterize or read the page whole (unmeasurable)")
         (note,) = [n for n in got.notes if n.startswith(ex.M_IMAGE_UNREAD)]
         assert note.startswith(ex.M_IMAGE_UNMEASURED) and note.endswith("page(s) 1"), note
-        assert ex.ocr_yield([got]) == (0, 0), "no OCR was attempted on the page"
+        (failed,) = [n for n in got.notes if n.startswith(ex.M_OCR_PAGE)]
+        assert failed.endswith("page(s) 1"), failed
+        assert ex.ocr_yield([got]) == (1, 0)
+    # With OCR off nothing is attempted, and the page is only unmeasured.
+    got, page = _page_notes_and_doc_notes(raw, ex.ExtractOptions(ocr_enabled=False))
+    assert page.notes == (ex.M_IMAGE_UNMEASURED,)
+    assert ex.ocr_yield([got]) == (0, 0)
 
 
 def test_one_unmeasurable_page_leaves_the_other_pages_measured(tmp_path, monkeypatch):
@@ -1129,6 +1149,10 @@ def test_one_unmeasurable_page_leaves_the_other_pages_measured(tmp_path, monkeyp
     letterhead over a chart, is still measured and skip-noted by the quick pass.
     Every exception the measure can raise reaches the same branch; the review's
     nested graphics states are one, a page MuPDF cannot load is another.
+
+    D-60: page 2 renders, so it is read whole, as a scan is, on the default
+    run too, and named with its cause; page 3 is still skipped, because a
+    fallback never brings a skipped page back.
 
     FAIL-BEFORE (61baefd): page 2 silent, NATIVE, no note.
     """
@@ -1151,18 +1175,28 @@ def test_one_unmeasurable_page_leaves_the_other_pages_measured(tmp_path, monkeyp
 
     monkeypatch.setattr(ex, "_image_placements", placements)
     got = ex.extract(path.name, path.read_bytes())
-    assert ex.has_evidence_marker(" ".join(got.pages[1].notes)), got.notes
-    assert [p.notes for p in got.pages] == [(), (ex.M_IMAGE_UNMEASURED,), (ex.M_IMAGE_SKIPPED,)]
-    (unmeasured,) = [n for n in got.notes if n.startswith(ex.M_IMAGE_UNMEASURED)]
-    assert unmeasured.endswith("page(s) 2"), unmeasured
+    assert [p.kind for p in got.pages] == [PageKind.NATIVE, PageKind.MIXED, PageKind.NATIVE]
+    assert [p.notes for p in got.pages] == [
+        (), (f"page {ex.IMAGE_READ_WHOLE}: unmeasurable",), (ex.M_IMAGE_SKIPPED,)]
+    assert "NOTICEOFDELAYNO31" in _flat(got.pages[1].text), got.pages[1].text
+    assert not ex.has_evidence_marker(" ".join(got.pages[1].notes))
+    (whole,) = [n for n in got.notes if ex.IMAGE_READ_WHOLE in n]
+    assert whole.endswith("page(s) 2 (unmeasurable)"), whole
+    assert not [n for n in got.notes if n.startswith(ex.M_IMAGE_UNMEASURED)], got.notes
     (skip,) = [n for n in got.notes if "left unread because" in n]
     assert skip.endswith("page(s) 3"), skip
+    # OCR off: nothing is read, so the page is unmeasured and says so.
+    off = ex.extract(path.name, path.read_bytes(), ex.ExtractOptions(ocr_enabled=False))
+    assert off.pages[1].notes == (ex.M_IMAGE_UNMEASURED,)
+    (unmeasured,) = [n for n in off.notes if n.startswith(ex.M_IMAGE_UNMEASURED)]
+    assert unmeasured.endswith("page(s) 2"), unmeasured
 
 
 def test_region_ocr_that_cannot_measure_the_page_again_marks_it(monkeypatch):
     """Region OCR measures the page a second time to cut its crops. When that
     raised, the crop list came back empty and the page was dropped from region
-    OCR: NATIVE, no note, although the routing had found its chart."""
+    OCR: NATIVE, no note, although the routing had found its chart. Since D-60
+    the page is read whole instead, and named with the cause."""
     calls: dict[int, int] = {}
     original = ex._image_placements
 
@@ -1175,9 +1209,11 @@ def test_region_ocr_that_cannot_measure_the_page_again_marks_it(monkeypatch):
     monkeypatch.setattr(ex, "_image_placements", placements)
     got = _pages("15_mixed_content_page.pdf", _reading())
     page = got.pages[0]
-    assert ex.M_IMAGE_UNREAD in page.notes, (page.kind, page.notes, got.notes)
-    assert page.kind is PageKind.NATIVE
-    assert any("could not be rasterized or read" in n for n in got.notes), got.notes
+    assert page.kind is PageKind.MIXED, (page.kind, page.notes, got.notes)
+    assert "NOTICEOFDELAY" in _flat(_image_lines(page)), page.text
+    assert page.notes == (f"page {ex.IMAGE_READ_WHOLE}: unmeasurable",)
+    (whole,) = [n for n in got.notes if ex.IMAGE_READ_WHOLE in n]
+    assert whole.endswith("page(s) 1 (unmeasurable)"), whole
 
 
 def _two_pictures_page(path) -> bytes:
@@ -1189,35 +1225,57 @@ def _two_pictures_page(path) -> bytes:
     return raw
 
 
-def test_image_regions_past_the_region_cap_are_marked_even_when_another_reads(
-        tmp_path, monkeypatch):
-    """The cap at one region, two pictures: the first is read, the second is
-    not. The page loop looked at the failure only when nothing had been read, so
-    the page was MIXED under a clean status (D-51 round-3 review: 30 pictures,
-    24 read, 6 lost with no marker, on both settings).
+def _o0(flat: str) -> str:
+    """The fixtures' bitmap font's zero reads as the letter O on a whole-page
+    reading, so text is compared with every O taken as a zero."""
+    return flat.replace("O", "0")
 
-    FAIL-BEFORE (61baefd): MIXED, no page note, no marker anywhere.
+
+def _whole_note(got) -> str:
+    """The document note naming the pages read whole (D-60)."""
+    (note,) = [n for n in got.notes if ex.IMAGE_READ_WHOLE in n]
+    assert not ex.has_evidence_marker(note), note  # a cost in time, not a loss
+    return note
+
+
+@pytest.mark.parametrize("pictures, cap, count", [(2, 1, "1 of 2"), (3, 1, "2 of 3")],
+                         ids=["2-pictures", "3-pictures"])
+def test_image_regions_past_the_region_cap_send_the_page_to_be_read_whole(
+        tmp_path, monkeypatch, pictures, cap, count):
+    """The cap at one region: the first picture's region is read, the others are
+    not. Round 3 marked the page "k of n image region(s)" and the log called
+    them a failure to rasterize or read, naming no page, when they were never
+    tried (D-51 round-4 review). D-60: the uncovered pictures send the page to
+    be read whole, every picture's words are in its text, nothing is marked
+    lost, and the page and its cause, with the count, are named. Three
+    pictures, because with two a count of one is right by accident (the
+    review's X14 mutant).
+
+    FAIL-BEFORE (4105aac): the later pictures' words missing, an
+    ``M_IMAGE_UNREAD`` page note.
     """
-    raw = _two_pictures_page(tmp_path / "two_pictures.pdf")
-    monkeypatch.setattr(ex, "_MIXED_MAX_REGIONS", 1)
-    got = ex.extract("two_pictures.pdf", raw, _reading())
+    rects = [(40, 560, 515, 200), (40, 320, 515, 200), (40, 80, 515, 200)][:pictures]
+    path = tmp_path / "pictures.pdf"
+    _stamped_pdf(path, [rects])
+    raw = path.read_bytes()
+    assert ex.PHOTO_MIN_IMAGE_AREA_SHARE <= _share(raw) < ex._SCAN_MIN_IMAGE_SHARE
+    monkeypatch.setattr(ex, "_MIXED_MAX_REGIONS", cap)
+    got = ex.extract(path.name, raw, _reading())
     page = got.pages[0]
+    flat = _o0(_flat(page.text))
+    assert all(flat.count(_o0(f"SITEINSTRUCTION0{k:02d}")) == 1 for k in range(pictures)), page.text
     assert page.kind is PageKind.MIXED, (page.kind, page.notes, got.notes)
-    assert ex.has_evidence_marker(" ".join(page.notes)), (page.notes, got.notes)
-    assert page.notes == (f"{ex.M_IMAGE_UNREAD}: 1 of 2 image region(s) of this page",)
-    (note,) = [n for n in got.notes if "could not be rasterized or read" in n]
-    assert note.startswith(f"{ex.M_IMAGE_UNREAD}: 1 page(s) "), note
+    assert not ex.has_evidence_marker(" ".join(page.notes)), page.notes
+    assert page.notes == (f"page {ex.IMAGE_READ_WHOLE}: cap ({count} image region(s))",)
+    assert _whole_note(got).endswith("page(s) 1 (cap)")
+    assert not any("could not be rasterized or read" in n for n in got.notes), got.notes
+    assert page.locator_text.strip() == _STAMP  # D-49: the text layer alone
 
 
-def test_one_regions_ocr_raising_is_marked_even_when_another_reads(tmp_path, monkeypatch):
-    """The same gap by its other road: OCR raises on one of the page's two
-    regions and reads the other.
-
-    FAIL-BEFORE (61baefd): MIXED, no page note, no marker anywhere.
-    """
+def _raise_once(monkeypatch):
+    """Make the first OCR call of the process raise, and every later one work."""
     import threading
 
-    raw = _two_pictures_page(tmp_path / "two_pictures.pdf")
     lock = threading.Lock()
     seen = []
     original = ex._ocr_array
@@ -1231,11 +1289,436 @@ def test_one_regions_ocr_raising_is_marked_even_when_another_reads(tmp_path, mon
         return original(arr)
 
     monkeypatch.setattr(ex, "_ocr_array", ocr)
+    return seen
+
+
+def test_one_regions_ocr_raising_reads_the_page_whole_and_marks_it_for_retry(
+        tmp_path, monkeypatch):
+    """OCR raises on one of the page's two regions and reads the other. Round
+    3 filed the lost region under the FINAL ``M_IMAGE_UNREAD``, so the walker
+    never re-read it, where the same exception on a scan is retried (D-51
+    round-4 review). D-60: the page is read whole, so both pictures are in it,
+    and it carries the TRANSIENT page-failure marker, so the walker re-reads
+    the document alone and a calm run's reading is the one kept.
+
+    FAIL-BEFORE (4105aac): the second picture's words missing, and a FINAL
+    marker only.
+    """
+    raw = _two_pictures_page(tmp_path / "two_pictures.pdf")
+    _raise_once(monkeypatch)
     got = ex.extract("two_pictures.pdf", raw, _reading())
     page = got.pages[0]
+    flat = _o0(_flat(page.text))
+    assert all(flat.count(_o0(f"SITEINSTRUCTION0{k:02d}")) == 1 for k in range(2)), page.text
     assert page.kind is PageKind.MIXED, (page.kind, page.notes, got.notes)
-    assert ex.has_evidence_marker(" ".join(page.notes)), (page.notes, got.notes)
-    assert page.notes == (f"{ex.M_IMAGE_UNREAD}: 1 of 2 image region(s) of this page",)
+    assert ex.has_transient_marker(" ".join(page.notes)), page.notes
+    assert not ex.has_final_marker(" ".join(page.notes)), page.notes
+    assert page.notes == (
+        f"page {ex.IMAGE_READ_WHOLE}: ocr-error (1 of 2 image region(s))",
+        f"{ex.M_OCR_PAGE} on 1 image region(s); the page was read whole instead")
+    assert _whole_note(got).endswith("page(s) 1 (ocr-error)")
+
+
+def test_a_region_ocr_exception_is_retried_and_the_run_matches_a_calm_one(
+        tmp_path, monkeypatch):
+    """The Principle-5 claim ``test_load_dependent`` holds for whole-page OCR,
+    held for region OCR: one region's OCR raises once, on a chart page and on
+    a page of two pictures, and the finished run is the calm run, byte for
+    byte (D-51 round-4 review, finding 3).
+
+    FAIL-BEFORE (4105aac): the pages differ from the calm run's.
+    """
+    from dociq.contracts import RunConfig, to_jsonable
+    from dociq.ingest import walker
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "chart.pdf").write_bytes((FIXTURES / "15_mixed_content_page.pdf").read_bytes())
+    (src / "two.pdf").write_bytes(_two_pictures_page(tmp_path / "two_pictures.pdf"))
+
+    def run(out):
+        cfg = RunConfig(source_root=str(src), output_root=str(tmp_path / out),
+                        skip_images_on_text_pages=False)
+        return walker.run(cfg, walker.WalkOptions(resume=False, workers=1))
+
+    calm = run("calm")
+    for target in ("chart.pdf", "two.pdf"):
+        real = walker.ex.extract
+        fired: list[str] = []
+
+        def flaky(filename, raw, opt=None, _t=target, _real=real, _fired=fired):
+            if filename == _t and not _fired:
+                _fired.append(filename)
+                _raise_once(monkeypatch)
+                try:
+                    return _real(filename, raw, opt)
+                finally:
+                    monkeypatch.setattr(ex, "_ocr_array", _ORIGINAL_OCR_ARRAY)
+            return _real(filename, raw, opt)
+
+        monkeypatch.setattr(walker.ex, "extract", flaky)
+        notes = walker.RunNotes()
+        cfg = RunConfig(source_root=str(src), output_root=str(tmp_path / f"flaky_{target}"),
+                        skip_images_on_text_pages=False)
+        flaky_run = walker.run(cfg, walker.WalkOptions(resume=False, workers=1), notes)
+        monkeypatch.setattr(walker.ex, "extract", real)
+        assert fired, "the injection never fired"
+        assert [to_jsonable(d) for d in flaky_run.documents] == \
+            [to_jsonable(d) for d in calm.documents], target
+        assert any(target in d for d in notes.load_dependent), notes.load_dependent
+
+
+_ORIGINAL_OCR_ARRAY = ex._ocr_array
+
+
+# ---------------------------------------------------------------------------
+# D-60: region OCR only when every picture is accounted for, by construction
+# ---------------------------------------------------------------------------
+
+
+def test_the_uncovered_area_is_computed_from_draws_and_the_regions_read():
+    """The computation D-60 turns on, alone: the area of each draw outside
+    every region read, and the causes that follow from it. A draw half inside
+    a read region leaves half its area; a region past the cap or under the
+    floor leaves all of its draws; within the tolerance nothing is uncovered;
+    a draw no region contains is ``uncovered`` whatever the statuses say."""
+    draws = [(0, 0, 10, 10), (20, 0, 30, 10), (40, 0, 44, 2)]
+    regions = [(0, 0, 10, 10), (20, 0, 30, 10), (40, 0, 44, 2)]
+    left = ex._uncovered_draw_area(draws, [(0, 0, 10, 10), (20, 0, 25, 10)])
+    assert list(left) == pytest.approx([0.0, 50.0, 8.0])
+    assert ex._coverage_causes(draws, regions, [None, None, None], regions, 0.13) == ()
+    assert ex._coverage_causes(draws, regions, [None, "cap", "floor"], regions[:1], 0.13) == (
+        "cap (1 of 3 image region(s))", "floor (1 of 3 image region(s))")
+    assert ex._coverage_causes(draws, regions, [None, "ocr-error", None],
+                               [regions[0], regions[2]], 0.13) == (
+        "ocr-error (1 of 3 image region(s))",)
+    # A draw left out of every region, as a merge that lost one would leave it.
+    assert ex._coverage_causes(draws, regions[:2], [None, None], regions[:2], 0.13) == (
+        "uncovered",)
+    # Within the tolerance: a sliver the size of one pixel is not a picture.
+    assert ex._coverage_causes([(0, 0, 10, 10.01)], [(0, 0, 10, 10.01)], [None],
+                               [(0, 0, 10, 10)], 0.13) == ()
+
+
+def _hairline_beside_chart(path) -> bytes:
+    """Fixture 15's letterhead and chart, plus a 2-point rule drawn as an image:
+    its region is under the 8-pixel floor."""
+    import fitz  # pymupdf
+
+    doc = fitz.open(FIXTURES / "15_mixed_content_page.pdf")
+    page = doc[0]
+    png = _typeset_png([(60, 140, "RULE")])
+    page.insert_image(fitz.Rect(40, 380, 555, 382), stream=png, keep_proportion=False)
+    raw = doc.tobytes()
+    path.write_bytes(raw)
+    return raw
+
+
+def _hairline_page(chart: bool) -> bytes:
+    """A typed letter with a 2-point rule stored as an image (its region is
+    under the 8-pixel floor), and optionally fixture 15's kind of chart beside
+    it. The rule alone is drawn 400 times at one place, as the round-4 review's
+    page drew it, so its drawn areas add up to a full-page scan (D-54) and a
+    DEFAULT run reads it."""
+    content = b"".join(b"BT /F1 11 Tf 60 %d Td (PARAGRAPH %02d THE CONTRACTOR GIVES NOTICE) Tj ET\n"
+                       % (760 - 20 * k, k) for k in range(12))
+    rule = b"q 515 0 0 2 40 450 cm /Im0 Do Q\n" if chart else b"q 595 0 0 2 0 450 cm /Im0 Do Q\n"
+    objects = {6: _gray_image(0)}
+    resources = _IM0
+    if chart:
+        content += rule + b"q 515 0 0 300 40 60 cm /Im1 Do Q\n"
+        objects[7] = _image_xobject(_words_picture(["NOTICE OF DELAY No 14"], size=(1240, 722)))
+        resources = b"<< /Font << /F1 5 0 R >> /XObject << /Im0 6 0 R /Im1 7 0 R >> >>"
+    else:
+        content += rule * 400
+    return _raw_pdf(content, resources, objects)
+
+
+def _image_xobject(img) -> bytes:
+    """A grayscale image XObject holding a PIL image's pixels."""
+    img = img.convert("L")
+    return _pdf_stream(b"/Type /XObject /Subtype /Image /Width %d /Height %d "
+                       b"/ColorSpace /DeviceGray /BitsPerComponent 8" % img.size, img.tobytes())
+
+
+def _png(img) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _halved_regions(monkeypatch):
+    """A way of cutting regions that loses part of every picture, standing in
+    for a defect nobody has found yet: each region keeps its lower half."""
+    original = ex._merge_boxes
+
+    def halved(boxes, page_rect):
+        return [(x0, (y0 + y1) / 2, x1, y1) for x0, y0, x1, y1 in original(boxes, page_rect)]
+
+    monkeypatch.setattr(ex, "_merge_boxes", halved)
+
+
+@pytest.mark.parametrize("case", ["floor-beside-a-chart", "floor-only", "cap",
+                                  "unlisted-reason"])
+def test_pictures_no_region_read_covers_send_the_page_to_be_read_whole(
+        tmp_path, monkeypatch, case):
+    """D-60, the derived guard. Each page draws pictures the counter measures
+    and no region that was read covers: a rule under the size floor beside a
+    chart, that rule alone, pictures past the region cap, and regions cut by a
+    stand-in defect that loses half of every picture (a reason the code does
+    not list: it is caught because coverage is COMPUTED). Every one is read
+    whole, loses no picture's words, carries no evidence marker, and is named
+    with its cause. The floor-only page raises no dead-engine alarm: OCR ran on
+    it (round 4: no OCR call was made and ``ocr_yield`` said (1, 0)).
+
+    FAIL-BEFORE (4105aac): each page carries ``M_IMAGE_UNREAD`` or, for the
+    stand-in defect, loses the upper half of its chart with no note at all.
+    """
+    opt = _reading()
+    want_words: tuple[str, ...] = ()
+    if case == "floor-beside-a-chart":
+        raw, cause, want_words = _hairline_page(chart=True), "floor", (_o0("NOTICEOFDELAY"),)
+    elif case == "floor-only":
+        raw, cause, opt = _hairline_page(chart=False), "floor", ex.ExtractOptions()
+        assert _share(raw) >= ex._SCAN_MIN_IMAGE_SHARE
+    elif case == "cap":
+        raw, cause = _two_pictures_page(tmp_path / "two.pdf"), "cap"
+        want_words = (_o0("SITEINSTRUCTION000"), _o0("SITEINSTRUCTION001"))
+        monkeypatch.setattr(ex, "_MIXED_MAX_REGIONS", 1)
+    else:
+        raw, cause = (FIXTURES / "15_mixed_content_page.pdf").read_bytes(), "uncovered"
+        want_words = (_o0("NOTICEOFDELAY"),)
+        _halved_regions(monkeypatch)
+    got = ex.extract("probe.pdf", raw, opt)
+    page = got.pages[0]
+    flat = _o0(_flat(page.text))
+    assert all(w in flat for w in want_words), (want_words, page.text)
+    assert page.kind is PageKind.MIXED, (page.kind, page.notes, got.notes)
+    assert not ex.has_evidence_marker(" ".join(page.notes) + " ".join(got.notes)), got.notes
+    (note,) = page.notes
+    assert note.startswith(f"page {ex.IMAGE_READ_WHOLE}: {cause}"), note
+    assert _whole_note(got).endswith(f"page(s) 1 ({cause})")
+    # D-49, unchanged: the whole-page reading is image text, kept out of the
+    # locator, which is the text layer alone.
+    assert page.image_line_span is not None
+    assert not any(w in _o0(_flat(page.locator_text)) for w in want_words), page.locator_text
+    assert ex.ocr_yield([got]) == (1, 1)
+    assert ex.ocr_yield_warning([got]) is None
+
+
+_BAND_WORDS = ("ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOXTROT", "GULF", "HOTEL",
+               "INDIA", "JULIET", "KILO", "LIMA")
+
+
+def _banded_scan(bands: int) -> bytes:
+    """A scan stored as ``bands`` touching horizontal strips, as some scanners
+    and PDF producers store one, with a typed stamp as its only text layer.
+    The lines of type are spaced so that band edges cut through some of them."""
+    import fitz  # pymupdf
+    from PIL import Image
+
+    lines = tuple((60, 90 + 62 * k, f"LINE {w} OF THE SCAN BODY") for k, w in enumerate(_BAND_WORDS))
+    full = Image.open(io.BytesIO(_typeset_png(lines, size=22))).convert("L")
+    doc = fitz.open()
+    page = doc.new_page(width=_A4[0], height=_A4[1])
+    for b in range(bands):
+        y0, y1 = round(b * full.height / bands), round((b + 1) * full.height / bands)
+        buf = io.BytesIO()
+        full.crop((0, y0, full.width, y1)).save(buf, "PNG")
+        page.insert_image(fitz.Rect(0, _A4[1] * y0 / full.height, _A4[0], _A4[1] * y1 / full.height),
+                          stream=buf.getvalue(), keep_proportion=False)
+    page.insert_text((40, 822), _STAMP, fontsize=16)
+    return doc.tobytes()
+
+
+@pytest.mark.parametrize("bands", [4, 8])
+def test_a_scan_stored_as_touching_bands_loses_no_line_at_a_band_edge(bands):
+    """A stamped scan stored as touching horizontal bands. Only overlapping
+    draws were merged, so each band was cropped alone, and a line of type a
+    band edge cut through was read as two halves or not at all, with no mark,
+    while the D-58 note said "nothing is left out" (D-51 round-4 review). The
+    bands merge into one region, every line is read exactly once, and the note
+    claims nothing it does not know.
+
+    FAIL-BEFORE (4105aac): lines missing (2 of 12 on 4 bands), and the note.
+    """
+    import fitz  # pymupdf
+
+    raw = _banded_scan(bands)
+    with fitz.open(stream=raw, filetype="pdf") as d:
+        assert len(ex._image_placements(d[0])) == bands
+    got = ex.extract("banded.pdf", raw)
+    page = got.pages[0]
+    flat = _flat(page.text)
+    assert {w: flat.count(f"LINE{w}") for w in _BAND_WORDS} == dict.fromkeys(
+        _BAND_WORDS, 1), page.text
+    assert page.kind is PageKind.MIXED
+    assert page.notes == (), page.notes
+    assert page.locator_text.strip() == _STAMP
+    assert not any("nothing is left out" in n for n in got.notes), got.notes
+    with fitz.open(stream=raw, filetype="pdf") as d:
+        assert len(ex._pdf_image_rects(d[0])) == 1
+
+
+def test_a_caption_set_just_under_a_chart_is_not_named_as_repeating():
+    """An 11-point caption 3 points under a chart: MuPDF's word box starts at
+    the font's ascender and overlaps the chart's region by under a point, but
+    no glyph lies in it, so the caption cannot be read again. Named anyway at
+    4105aac (D-51 round-4 review). The caption appears once and the page is not
+    named; the precondition, the word box overlapping, is measured first.
+
+    FAIL-BEFORE (4105aac): the page named as repeating.
+    """
+    import fitz  # pymupdf
+
+    doc = fitz.open()
+    page = doc.new_page(width=_A4[0], height=_A4[1])
+    page.insert_text((40, 60), "SYNTHETIC CONTRACTOR LTD MONTHLY REPORT LETTERHEAD", fontsize=12)
+    chart = fitz.Rect(40, 100, 555, 400)
+    page.insert_image(chart, stream=_png(_words_picture(["PROGRESS CHART"], size=(1240, 722))),
+                      keep_proportion=False)
+    page.insert_text((40, 411.1), "FIGURE 3 PROGRESS AGAINST PLAN", fontsize=11)
+    raw = doc.tobytes()
+    with fitz.open(stream=raw, filetype="pdf") as d:
+        words = [w for w in d[0].get_text("words") if w[4] == "FIGURE"]
+        assert words and words[0][1] < chart.y1, words  # the box overlaps the chart
+    got = ex.extract("caption.pdf", raw, _reading())
+    page = got.pages[0]
+    assert page.kind is PageKind.MIXED, (page.kind, got.notes)
+    assert "PROGRESSCHART" in _flat(_image_lines(page)), page.text
+    assert _flat(page.text).count("FIGURE3") == 1, page.text
+    assert _repeat_notes(got) == [], got.notes
+
+
+def test_text_over_a_picture_that_read_nothing_is_not_named_as_repeating():
+    """Invisible text over a blank picture, and a chart elsewhere that reads.
+    The page was named because the test ran per page: any region's text plus
+    any overlap (D-51 round-4 review). Only a region that yielded text can
+    repeat a word, and the blank one yielded none.
+
+    FAIL-BEFORE (4105aac): the page named as repeating.
+    """
+    import fitz  # pymupdf
+
+    doc = fitz.open()
+    page = doc.new_page(width=_A4[0], height=_A4[1])
+    page.insert_text((40, 60), "SYNTHETIC CONTRACTOR LTD MONTHLY REPORT LETTERHEAD", fontsize=12)
+    page.insert_image(fitz.Rect(40, 100, 555, 300), stream=_typeset_png([], size=20),
+                      keep_proportion=False)
+    page.insert_text((60, 200), "INVISIBLE WORDS OVER A BLANK PICTURE", fontsize=14,
+                     render_mode=3)
+    page.insert_image(fitz.Rect(40, 450, 555, 750),
+                      stream=_png(_words_picture(["PROGRESS CHART"], size=(1240, 722))),
+                      keep_proportion=False)
+    raw = doc.tobytes()
+    got = ex.extract("blank_picture.pdf", raw, _reading())
+    page = got.pages[0]
+    assert page.kind is PageKind.MIXED, (page.kind, got.notes)
+    assert "PROGRESSCHART" in _flat(page.text), page.text
+    assert _repeat_notes(got) == [], got.notes
+
+
+def _stencil_page(fill: str) -> bytes:
+    """A full-page 1-bit stencil mask carrying a scan's words, painted with a
+    solid color, a shading or a tiling pattern, and a typed stamp."""
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(_typeset_png(_BODY))).convert("1")
+    mask = _pdf_stream(b"/Type /XObject /Subtype /Image /Width %d /Height %d /ImageMask true "
+                       b"/BitsPerComponent 1" % img.size, img.tobytes())
+    stamp = b"BT /F1 12 Tf 40 20 Td (" + _STAMP.encode() + b") Tj ET\n"
+    draw = b"595 0 0 842 0 0 cm /Im0 Do Q\n"
+    if fill == "solid":
+        return _raw_pdf(b"q 0 g " + draw + stamp, _IM0, {6: mask})
+    if fill == "shading":
+        pattern = (b"<< /PatternType 2 /Shading << /ShadingType 2 /ColorSpace /DeviceGray "
+                   b"/Coords [0 0 595 0] /Function << /FunctionType 2 /Domain [0 1] "
+                   b"/C0 [0.1] /C1 [0.2] /N 1 >> >> >>")
+    else:
+        pattern = _pdf_stream(b"/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 "
+                              b"/BBox [0 0 10 10] /XStep 10 /YStep 10 /Resources << >>",
+                              b"0.1 g 0 0 10 10 re f")
+    return _raw_pdf(b"q /Pattern cs /P0 scn " + draw + stamp,
+                    b"<< /Font << /F1 5 0 R >> /XObject << /Im0 6 0 R >> "
+                    b"/Pattern << /P0 7 0 R >> >>", {6: mask, 7: pattern})
+
+
+@pytest.mark.parametrize("fill", ["solid", "shading", "tiling"])
+def test_a_stencil_mask_scan_is_measured_and_read_whatever_fills_it(fill):
+    """A scan stored as a stencil mask (1-bit ``ImageMask``) paints its color
+    through the image. Filled with a shading or a tiling pattern it reaches
+    MuPDF's device as a clip, not as ``fill_image_mask``, so it measured 0 and
+    the page came out NATIVE, its words unread, with no note on either setting
+    (D-51 round-4 review; a regression against 0a29e30). The solid fill was
+    measured but no test held it (the review's X1 mutant).
+
+    FAIL-BEFORE (4105aac): shading and tiling measured 0.0, NATIVE, no words.
+    """
+    raw = _stencil_page(fill)
+    assert _share(raw) == 1.0
+    got = ex.extract("stencil.pdf", raw)  # a scan, so read on the default run
+    page = got.pages[0]
+    flat = _flat(page.text)
+    assert page.kind is PageKind.MIXED, (page.kind, page.notes, got.notes)
+    assert {t: flat.count(t) for t in _BODY_TOKENS} == dict.fromkeys(_BODY_TOKENS, 1), page.text
+    assert page.locator_text.strip() == _STAMP
+
+
+def test_tier3_never_calls_an_unmeasurable_page_blank():
+    """``pdf_spans`` answers "an image of unknown size" for a page whose
+    geometry cannot be interpreted, so Tier 3 never calls it a Blank page (the
+    review's X4 mutant: "the page has no text and no image" for an image drawn
+    inside 2,047 nested graphics states)."""
+    raw = _raw_pdf(b"q " * 2047 + b"400 0 0 400 100 200 cm /Im0 Do " + b"Q " * 2047 + b"\n",
+                   _IM0, {6: _gray_image()})
+    got = ex.extract("deep.pdf", raw, ex.ExtractOptions(ocr_enabled=False))
+    spans = ex.pdf_spans(raw, got.pages)
+    assert spans and all(s.section != "Blank page" for s in spans), spans
+    assert [s.section for s in spans] == ["Image-only page"], spans
+
+
+def test_boxes_that_touch_merge_and_boxes_apart_do_not():
+    """The merge's gap, alone: touching boxes (a band edge) and boxes under
+    ``_MERGE_GAP_PT`` apart are one region; boxes further apart stay two."""
+    page = (0.0, 0.0, 595.0, 842.0)
+    assert ex._merge_boxes([(0, 0, 10, 10), (0, 10, 10, 20)], page) == [(0, 0, 10, 20)]
+    g = ex._MERGE_GAP_PT
+    assert ex._merge_boxes([(0, 0, 10, 10), (0, 10 + g / 2, 10, 20)], page) == [(0, 0, 10, 20)]
+    assert len(ex._merge_boxes([(0, 0, 10, 10), (0, 10 + 2 * g, 10, 20)], page)) == 2
+
+
+def _page_mupdf_does_not_have(page2: bytes) -> bytes:
+    """Two page objects under a /Count of 1: pypdf reads two pages, MuPDF one."""
+    return _raw_pdf(_TYPED, _IM0, {
+        2: b"<< /Type /Pages /Kids [3 0 R 7 0 R] /Count 1 >>",
+        6: _gray_image(),
+        7: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources " + _IM0
+           + b" /Contents 8 0 R >>",
+        8: _pdf_stream(b"", page2),
+    })
+
+
+def test_a_page_mupdf_does_not_have_is_marked_on_either_route():
+    """The whole-page route dropped a page that the text layer's reader sees
+    and MuPDF does not: EMPTY, no note, a FULL document (D-51 round-4 review,
+    C; the geometry route was fixed in round 3). It now carries the page
+    failure marker, as a scan that will not rasterize does. The same page with
+    a text layer and a picture is unmeasured and cannot be read whole either.
+
+    FAIL-BEFORE (4105aac): page 2 EMPTY with no note.
+    """
+    scan = _page_mupdf_does_not_have(b"q 595 0 0 842 0 0 cm /Im0 Do Q\n")
+    for opt in (ex.ExtractOptions(), _reading()):
+        got = ex.extract("count.pdf", scan, opt)
+        assert len(got.pages) == 2
+        assert got.pages[1].notes == (f"{ex.M_OCR_PAGE} to rasterize or read",), got.pages[1]
+        assert ex.has_transient_marker(" ".join(got.pages[1].notes))
+
+    typed = _page_mupdf_does_not_have(b"q 595 0 0 421 0 0 cm /Im0 Do Q\n" + _TYPED)
+    got = ex.extract("count.pdf", typed, _reading())
+    assert got.pages[1].notes == (
+        ex.M_IMAGE_UNMEASURED,
+        f"{ex.M_OCR_PAGE} to rasterize or read the page whole (unmeasurable)")
 
 
 def test_many_small_pictures_that_add_up_are_skip_noted_and_read():
@@ -1411,8 +1894,11 @@ def test_an_image_drawn_off_the_page_is_not_measured_and_one_half_off_is_clipped
     assert got.pages[0].notes == () and got.notes == (), got.notes
 
 
-def _pairwise_union(boxes):
-    """61baefd's merge, verbatim in effect: the reference the sweep must equal."""
+def _pairwise_union(boxes, gap: float | None = None):
+    """61baefd's merge, in effect: the reference the sweep must equal. Boxes
+    within ``gap`` (by default the product's ``_MERGE_GAP_PT``) merge as if
+    they overlapped (D-51 round 4); 61baefd merged only overlapping ones."""
+    g = ex._MERGE_GAP_PT if gap is None else gap
     boxes = [b for b in boxes if b[2] > b[0] and b[3] > b[1]]
     merged = True
     while merged and len(boxes) > 1:
@@ -1420,7 +1906,7 @@ def _pairwise_union(boxes):
         out = []
         for b in boxes:
             for i, a in enumerate(out):
-                if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
+                if a[0] < b[2] + g and b[0] < a[2] + g and a[1] < b[3] + g and b[1] < a[3] + g:
                     out[i] = (min(a[0], b[0]), min(a[1], b[1]),
                               max(a[2], b[2]), max(a[3], b[3]))
                     merged = True
@@ -1475,6 +1961,10 @@ def test_merging_one_image_drawn_14400_times_is_bounded():
     assert seconds < 5.0, seconds
     for x0, y0, x1, y1 in draws:
         assert any(r[0] <= x0 and r[1] <= y0 and x1 <= r[2] and y1 <= r[3] for r in regions)
+    # One region: the grid's cells touch once widened, and touching regions
+    # merge. Without that the page broke into 256 regions and 232 went past the
+    # cap (the review's X6 mutant, which no test caught).
+    assert len(regions) == 1, len(regions)
 
 
 def test_past_the_exact_limit_boxes_are_merged_on_the_coarse_grid():

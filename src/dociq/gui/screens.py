@@ -320,7 +320,10 @@ class SetupScreen(QWidget):
         # OCR'd whole); a stamped scan is read only when its
         # pictures add up to 90% or more (D-54); the areas are ADDED UP as drawn,
         # so a picture drawn twice counts twice and "cover" was false (round 3);
-        # typed text lying on a picture that is read can appear twice (D-58);
+        # typed text lying on a picture that is read can appear twice (D-58),
+        # and "nothing is left out" is withdrawn from that sentence (round 4:
+        # it stood where lines were lost); a page whose pictures the regions
+        # read do not account for is read whole (D-60);
         # and the 12-document timing (D-49) compared reading every such picture
         # with reading none, which is not what ticking the box saves.
         skip_help = _muted(
@@ -333,7 +336,8 @@ class SetupScreen(QWidget):
             "even with a typed stamp. Pictures adding up to less than a quarter "
             "of such a page are not read whether the box is ticked or not. "
             "Where typed text lies on a picture that is read, its words can "
-            "appear twice in the text; nothing is left out. On a timed sample of "
+            "appear twice in the text. A page whose pictures cannot all be read "
+            "one by one is read whole, as a scan is, and listed. On a timed sample of "
             "12 documents, reading every such picture made extraction about 3.4 "
             "times as long as reading none; the saving on a whole matter has not "
             "been measured. Untick it to read those pictures before relying on "

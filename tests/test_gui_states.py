@@ -296,7 +296,9 @@ def test_the_time_beside_the_action_follows_the_image_setting(window) -> None:
                      "Pictures adding up to less than a quarter of such a page are not "
                      "read whether the box is ticked or not.",
                      "Where typed text lies on a picture that is read, its words can "
-                     "appear twice in the text; nothing is left out.",
+                     "appear twice in the text.",
+                     "A page whose pictures cannot all be read one by one is read "
+                     "whole, as a scan is, and listed.",
                      "On a timed sample of 12 documents",
                      "about 3.4 times as long as reading none",
                      "the saving on a whole matter has not been measured",
@@ -304,7 +306,7 @@ def test_the_time_beside_the_action_follows_the_image_setting(window) -> None:
         assert sentence in help_text, sentence
     for withdrawn in ("no typed text", "Scanned pages are still read",
                       "for the full reading", "cover a quarter", "image covers 90%",
-                      "Pictures covering"):
+                      "Pictures covering", "nothing is left out"):
         assert withdrawn not in help_text, withdrawn
 
     box.setChecked(False)

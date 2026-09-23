@@ -576,11 +576,15 @@ class OmissionApproval:
 
     A seam record rather than :class:`dociq.sections.model.ApprovedOmission`
     itself, because the freeze forbids the GUI reaching into the pipeline's
-    packages — the adapter converts. Every field of that record is here: an
-    approval that reached a screen without its approver, or without the matter
-    it was given on, would be exactly the half-record D-34 says must not exist.
-    One field is here that it lacks, :attr:`skip_images_on_text_pages`, which is
-    for the setup screen and is not carried to Stage 4.
+    packages — the adapter converts. Every field of that record is here except
+    ``host``: an approval that reached a screen without its approver, or
+    without the matter it was given on, would be exactly the half-record D-34
+    says must not exist. ``host`` does not cross the seam; the adapter leaves it
+    at its default ``""``, nothing reads it, and the processing log's ``run``
+    section records the machine the run was made on instead (D-51 round-4
+    review, C). One field is here that it lacks,
+    :attr:`skip_images_on_text_pages`, which is for the setup screen and is not
+    carried to Stage 4.
 
     **The GUI never constructs one.** It asks the pipeline to record an approval
     and is handed this back. That is what keeps ``approved_by`` and

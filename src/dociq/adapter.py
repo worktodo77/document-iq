@@ -927,9 +927,11 @@ class RealPipeline:
         matter = Path(request.source_root).name
         template = self._template
         # The seam records become the pipeline's own, here and nowhere else.
-        # Every Stage-4 field travels: an approval that reached Stage 4 without
-        # its approver would be the half-record D-34 forbids, and
-        # `ApprovedOmission.validate()` refuses it rather than defaulting one.
+        # Every Stage-4 field travels except `host`: an approval that reached
+        # Stage 4 without its approver would be the half-record D-34 forbids,
+        # and `ApprovedOmission.validate()` refuses it rather than defaulting
+        # one. `host` is left at its default "", which nothing reads; the log's
+        # `run` section records the run's machine instead.
         # The seam record's reviewed picture setting does not: it is for the
         # setup screen's warning, and Stage 4 reads the setting through the
         # `recognition` fingerprint instead.
