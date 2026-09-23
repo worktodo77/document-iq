@@ -40,6 +40,11 @@ def test_every_page_and_document_field_survives_the_resume_journal():
     whose loss on resume would silently put a MIXED page's image lines back into
     its Bates zone -- and no end-to-end resume test could notice, because they
     all run with OCR off and none produces a MIXED page.
+
+    Two pages since D-59: ``deletion_line_span`` is held to SYNTHETIC pages and
+    ``image_line_span`` to MIXED ones, so no single valid page can set both.
+    Every page field must be off its default on at least one of the two, and
+    both pages must come back whole.
     """
     import dataclasses
 
@@ -54,24 +59,34 @@ def test_every_page_and_document_field_survives_the_resume_journal():
         drop_rule="progress-report:hse-statistics", notes=("a page note",),
         image_line_span=(1, 1))
     page.validate()
+    word_page = PageRecord(
+        page_no=2, text="Body.\n[deleted by Ann] gone\nfooter", kind=PageKind.SYNTHETIC,
+        deletion_line_span=(1, 1))
+    word_page.validate()
     doc = DocumentRecord(
         doc_id="DIQ-000007", rel_path="a/b.pdf", filename="b.pdf", sha256="0" * 64,
-        size_bytes=123, ext=".pdf", pages=(page,),
+        size_bytes=123, ext=".pdf", pages=(page, word_page),
         status=ProcessingStatus.PARTIAL_OCR_FLAGGED, parent_doc_id="DIQ-000001",
         container_order=2, detected_dates=("2024-07-16",), doc_type="MPR",
         li_file_no="LI-00001", notes=("a document note",), error="an error")
 
-    for record in (page, doc):
-        for f in dataclasses.fields(record):
-            if f.default is not dataclasses.MISSING:
-                assert getattr(record, f.name) != f.default, (
-                    f"{type(record).__name__}.{f.name} is left at its default, so "
-                    "this test cannot tell whether the journal keeps it")
+    for f in dataclasses.fields(PageRecord):
+        if f.default is not dataclasses.MISSING:
+            assert any(getattr(p, f.name) != f.default for p in (page, word_page)), (
+                f"PageRecord.{f.name} is left at its default on both pages, so "
+                "this test cannot tell whether the journal keeps it")
+    for f in dataclasses.fields(doc):
+        if f.default is not dataclasses.MISSING:
+            assert getattr(doc, f.name) != f.default, (
+                f"DocumentRecord.{f.name} is left at its default, so "
+                "this test cannot tell whether the journal keeps it")
 
     rebuilt = walker._doc_from_jsonable(json.loads(json.dumps(to_jsonable(doc))))
-    for f in dataclasses.fields(PageRecord):
-        assert getattr(rebuilt.pages[0], f.name) == getattr(page, f.name), (
-            f"PageRecord.{f.name} did not survive the resume journal")
+    for original, back in zip(doc.pages, rebuilt.pages, strict=True):
+        for f in dataclasses.fields(PageRecord):
+            assert getattr(back, f.name) == getattr(original, f.name), (
+                f"PageRecord.{f.name} did not survive the resume journal "
+                f"(page {original.page_no})")
     for f in dataclasses.fields(DocumentRecord):
         assert getattr(rebuilt, f.name) == getattr(doc, f.name), (
             f"DocumentRecord.{f.name} did not survive the resume journal")

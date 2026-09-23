@@ -1728,3 +1728,66 @@ the page's `M_IMAGE_UNREAD` marker. A region that is read and holds no text is
 counted in a document note rather than marked: a site photograph has no words,
 and a warning that fires on the normal case teaches an operator to stop reading
 warnings.
+
+## A-25 — a run cannot say it chose not to read the images on its text pages
+
+**Status:** RAISED, NOT APPLIED. The body of A-25 (D-51's run setting) is on
+`build/sprint-5-d51`; this branch carries only the part below, and this heading
+and status paragraph exist so the registry check holds here. At the merge they are
+dropped and the part below is appended to that branch's A-25.
+
+### Also under A-25: the Word deletion list's lines (D-59, 2026-09-23)
+
+**Raised by:** Alex's ruling D-59 of 2026-09-23, after Word review round 3's
+finding 1. Built on `build/sprint-5-word` (Word fix round 4), each part held by a
+test watched failing on `347df32` first. `CONTRACT_VERSION` stays **2.3.0**, as for
+the rest of A-25.
+
+`PageRecord` gains `deletion_line_span: tuple[int, int] | None`, the `(first line,
+line count)` of the list the Word reader appends of the passages deleted under
+tracked changes (D-56, `[deleted by <author>] <text>`), defaulting to `None`.
+Additive with a safe default.
+
+**The case the contract could not express.** Word fix round 2 kept the list out of
+the Bates zone by skipping every line starting `[deleted by `, on every page of
+every format. A PDF, email, OCR'd, text or Word-body page that types such a line
+then lost it from its zone: a stamp on it went unread, and on a page whose tail
+held it the zone moved up by a line, which can pull a stamp-shaped line into the
+zone or refuse a real one. Nothing on the record said which lines the Word reader
+had written.
+
+**What it touches, enumerated** (every read or write of D-49's `image_line_span`,
+and whether this field needs the same):
+
+* **`PageRecord` field and `validate`.** Yes, and stricter: set only on a
+  `SYNTHETIC` page (the only kind the Word reader writes), so never beside
+  `image_line_span`, which requires `MIXED`; a pair of true ints (a `bool` is
+  refused); inside the page's lines; and every line it names starts with
+  `TRACKED_DELETION_LABEL`, which moved into `contracts` for this check and is
+  re-exported by `identify/bates`. The label check can only refuse a record; it is
+  never used to find lines.
+* **`locator_text`.** No: it removes image lines only, and on every page that may
+  carry this span it equals `text`, so the span's indices hold over it.
+* **`make_page`.** Yes: accepted only over already-normalized text, dropped on an
+  EMPTY page.
+* **The Word reader** (`extract._extract_docx`, `_deletion_list_span`). Sets it,
+  from the lines it wrote, over the normalized page text; raises if the two
+  disagree. No other reader sets it, which a parse-tree test holds.
+* **The Bates zone.** `BatesZone.slice_lines(text, skip=...)` skips exactly the
+  span; the `[deleted by ` text match is removed. `BatesZone.page_lines(page)` is
+  the one read of a page's zone (locator text less the span), used by
+  `detect_candidates` (and so `propose_format` and `matter_prefixes`), by
+  `apply_bates_reported` for `_zone_stamp` and `_zone_near_miss`, and by the
+  acceptance harness. `zone_has_candidate` reads a PDF page's OCR text before any
+  record exists and keeps every line.
+* **Resume.** `walker._page_from_jsonable` reads it, as a tuple, and REQUIRES the
+  key: a journal written before the field raises `KeyError`, which `_load_resume`
+  answers by discarding the journal, because a Word page replayed without its span
+  would put its deleted text back into the zone and no record check could see it.
+* **`tools/bates_acceptance.zone_only`.** Cuts a page to `page_lines` and clears
+  the span, since the reduced page holds no list.
+* **Identity.** Serialized and hashed, like `image_line_span`: the same text with a
+  different span can take a different locator. Every page's identity moves once,
+  by a constant `None` where it has no list; after that only where the list moves.
+  `recognition_fingerprint` does not change: recognition reads `text`, which this
+  field does not alter.

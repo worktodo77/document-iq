@@ -56,6 +56,8 @@ from typing import Mapping, Sequence
 from urllib.parse import quote, unquote
 
 from dociq.contracts import (
+    TRACKED_DELETION_LABEL,  # re-exported: the Word reader imports it from here
+    ContractViolation,
     DocumentRecord,
     PageKind,
     PageRecord,
@@ -113,10 +115,6 @@ _TAIL_LINES_BASE = 4
 is allowed for. Four lines is what the detector looked at before D-25 and it is
 still the whole of what a page's own text contributes."""
 
-TRACKED_DELETION_LABEL = "[deleted by "
-"""The start of every line on which the Word reader lists a tracked deletion
-(D-56): ``[deleted by <author>] <text>``. Defined here, where the zone that
-must never read such a line is, and imported by the reader that writes it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,34 +131,53 @@ class BatesZone:
     head_lines: int = 3
     tail_lines: int = _TAIL_LINES_BASE + FOOTER_BLOCK_MAX_LINES
 
-    def slice_lines(self, text: str) -> tuple[tuple[int, str], ...]:
+    def slice_lines(self, text: str, skip: tuple[int, int] | None = None
+                    ) -> tuple[tuple[int, str], ...]:
         """Zone lines as ``(line index, text)``, head first then tail, without
         repeating a line when the page is shorter than the zone.
 
-        A line listing a tracked deletion (:data:`TRACKED_DELETION_LABEL`,
-        D-56) is not a zone line and does not count toward either bound: the
-        zone is chosen from the other lines, so a Word page's zone is the one
-        it would have without its deletion list. Deleted text is not what the
-        document says, and a stamp-shaped number in it would otherwise be read
-        as the page's locator, or refuse the real one as ambiguous, whenever
-        the footer below it is shorter than the tail zone. Indices stay
-        positions in ``text``.
-
-        Open defect (Word review round 3, finding 1): the skip decides by what
-        a line says, not by who wrote it, so a line any document types that
-        starts with the label (a PDF, an email, a text file, a Word body) is
-        skipped too. Skipping only the lines the Word reader listed needs that
-        knowledge carried on :class:`PageRecord` (a line span like D-49's
-        ``image_line_span``), which is a contract field awaiting a ruling."""
+        ``skip`` is a ``(first line, line count)`` span of ``text`` that is not
+        part of the zone and does not count toward either bound: the zone is
+        chosen from the other lines. It is how a Word page's deletion list
+        (D-56) stays out of its zone -- :attr:`PageRecord.deletion_line_span`,
+        passed by :meth:`page_lines` -- so the zone is the one the page would
+        have without its list, and a stamp-shaped number in deleted text can
+        neither be read as the locator nor refuse the real one as ambiguous.
+        No line is ever skipped for what it says (D-59): with no span, every
+        line is eligible, including one that starts ``[deleted by``. Indices
+        stay positions in ``text``."""
         lines = [ln.strip() for ln in text.split("\n")]
-        eligible = [i for i, ln in enumerate(lines)
-                    if not ln.startswith(TRACKED_DELETION_LABEL)]
+        if skip is None:
+            eligible = list(range(len(lines)))
+        else:
+            first, count = skip
+            if first < 0 or count < 1 or first + count > len(lines):
+                raise ValueError(f"skip span {skip!r} does not lie inside the "
+                                 f"text's {len(lines)} line(s)")
+            eligible = [i for i in range(len(lines))
+                        if not first <= i < first + count]
         picked: dict[int, str] = {}
         for i in eligible[:self.head_lines]:
             picked[i] = lines[i]
         for i in eligible[max(0, len(eligible) - self.tail_lines):]:
             picked[i] = lines[i]
         return tuple((i, picked[i]) for i in sorted(picked) if picked[i])
+
+    def page_lines(self, page: PageRecord) -> tuple[tuple[int, str], ...]:
+        """A page's Bates zone: the ONE way a zone is read from a page record.
+
+        Its locator text (D-49: a MIXED page without its image lines), less
+        exactly the lines the Word reader listed as deletions (D-59). The two
+        spans never meet on one page -- the contract holds ``image_line_span``
+        to MIXED pages and ``deletion_line_span`` to SYNTHETIC ones, and it is
+        checked again here -- so the deletion span's indices, which count
+        :attr:`PageRecord.text`, are valid over the locator text, which on such
+        a page is the same string."""
+        if page.deletion_line_span is not None and page.image_line_span is not None:
+            raise ContractViolation(
+                f"page {page.page_no}: a page cannot carry both an image line "
+                "span and a deletion line span")
+        return self.slice_lines(page.locator_text, skip=page.deletion_line_span)
 
 
 # A Bates stamp is a production mark: an optional alphanumeric prefix, an
@@ -443,7 +460,8 @@ def detect_candidates(
             # D-49: a page's Bates zone is its text layer. On a MIXED page the
             # lines read from an embedded image may carry another document's
             # stamp; locator_text leaves them out, so they cannot propose one.
-            for line_index, line in z.slice_lines(page.locator_text):
+            # D-59: neither can a line of a Word page's deletion list.
+            for line_index, line in z.page_lines(page):
                 parsed = _parse_line(line)
                 if parsed is None:
                     continue
@@ -478,6 +496,11 @@ def zone_has_candidate(text: str, zone: BatesZone | None = None) -> bool:
     the production's format is not confirmed until Stage 3, so the trigger
     cannot ask "does this match the confirmed format?" — only "did the ordinary
     pass produce anything stamp-shaped at all?".
+
+    It takes text, not a page record, because it runs on a PDF page's OCR text
+    before the record exists; no reader but Word's writes a deletion list
+    (D-59), so every line of that text is eligible, including one typed as
+    ``[deleted by ...``.
     """
     z = zone or BatesZone()
     return any(_parse_line(line) is not None for _, line in z.slice_lines(text))
@@ -1024,9 +1047,13 @@ def _near_miss_token_re(fmt: BatesFormat) -> re.Pattern[str]:
         r"(?<![A-Za-z0-9])(?P<token>" + "".join(parts) + r")(?![A-Za-z0-9])")
 
 
-def _zone_stamp(text: str, zone: BatesZone,
+def _zone_stamp(zone_lines: Sequence[tuple[int, str]],
                 token_re: re.Pattern[str]) -> str | None:
     """The one confirmed stamp in this page's zone, or ``None``.
+
+    ``zone_lines`` is the page's zone as :meth:`BatesZone.page_lines` reads it
+    (D-49's locator text, less D-59's deletion list), so this function cannot
+    read a zone any other way.
 
     ``None`` when the zone holds no match **and** when it holds two different
     ones: a page whose footer read as two candidate locators is a page DocIQ
@@ -1044,14 +1071,14 @@ def _zone_stamp(text: str, zone: BatesZone,
     one zone is a REFUSAL wherever they came from.
     """
     found: set[str] = set()
-    for _, line in zone.slice_lines(text):
+    for _, line in zone_lines:
         found.update(m.group(1) for m in token_re.finditer(line))
         if len(found) > 1:
             return None
     return next(iter(found)) if len(found) == 1 else None
 
 
-def _zone_near_miss(text: str, zone: BatesZone, fmt: BatesFormat,
+def _zone_near_miss(zone_lines: Sequence[tuple[int, str]], fmt: BatesFormat,
                     near_re: re.Pattern[str]) -> tuple[str, str] | None:
     """``(what the page reads, which rule)`` for a repairable stamp, or ``None``.
 
@@ -1062,7 +1089,7 @@ def _zone_near_miss(text: str, zone: BatesZone, fmt: BatesFormat,
     they are the same page read twice.
     """
     reads: dict[str, str] = {}
-    for _, line in zone.slice_lines(text):
+    for _, line in zone_lines:
         for m in near_re.finditer(line):
             rule = near_miss_rule(m.group("prefix"), fmt.prefix)
             if rule is None:
@@ -1178,15 +1205,17 @@ def apply_bates_reported(
             # D-49: read the text layer only. On a MIXED page an embedded image
             # may carry a different document's stamp, and a zone that saw both
             # would refuse the page's own stamp as ambiguous -- or, where the page
-            # has no stamp of its own, apply the foreign one.
-            stamp = _zone_stamp(page.locator_text, z, token_re)
+            # has no stamp of its own, apply the foreign one. D-59: and never a
+            # line of the Word reader's deletion list. page_lines does both.
+            zone_lines = z.page_lines(page)
+            stamp = _zone_stamp(zone_lines, token_re)
             # Near-miss repair corrects OCR RECOGNITION errors, so it stays gated
             # on kind OCR on purpose -- deliberately not PageRecord.read_by_ocr. A
             # MIXED page's own stamp lives in its text layer, which has no
             # recognition errors to repair; on a MIXED page, repair could only
             # ever act on image text.
             if stamp is None and near_re is not None and page.kind is PageKind.OCR:
-                got = _zone_near_miss(page.locator_text, z, fmt, near_re)
+                got = _zone_near_miss(zone_lines, fmt, near_re)
                 if got is not None:
                     read, rule = got
                     stamp = fmt.prefix + read[len(read) - _tail_len(fmt, read):]

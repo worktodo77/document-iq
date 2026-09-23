@@ -2301,9 +2301,11 @@ def _one_line(value: str) -> str:
     """A value from the file that DocIQ writes into a label or beside page text
     (a deletion's or comment's author, a note's id, a hyperlink's target), with
     every line break read as a space. Such a value is not the document's text:
-    a line break in it would start a page line of the file's choosing, a stamp
-    line in a Bates zone or a line beginning ``[deleted by``, where the label
-    DocIQ wrote cannot vouch for it."""
+    a line break in it would start a page line of the file's choosing, such as
+    a stamp line in a Bates zone, where the label DocIQ wrote cannot vouch for
+    it. For a deletion's author it also keeps each listed passage on exactly
+    one line, which is what lets the reader count the lines of its deletion
+    list (D-59, :func:`_deletion_list_span`)."""
     return " ".join(value.splitlines())
 
 
@@ -3602,11 +3604,48 @@ def _extract_docx(raw: bytes, opt: ExtractOptions) -> tuple[list[PageRecord], li
     # stamp out of it. Notes (part 6) land after the body and before the
     # footer, per the same reasoning applied to where they appear at all.
     # D-56: the deletion list follows the notes and comments, so the footer
-    # still ends the page, and no line of it is ever a Bates zone line
-    # (BatesZone.slice_lines).
-    all_lines = header_lines + body_lines + note_lines + deletion_lines + footer_lines
+    # still ends the page. D-59: the page records where the list sits
+    # (PageRecord.deletion_line_span), and every Bates zone read skips exactly
+    # those lines -- this reader is the only code that sets the span.
+    before = header_lines + body_lines + note_lines
+    text = normalize("\n".join(before + deletion_lines + footer_lines))
+    span = _deletion_list_span(text, before, deletion_lines)
     notes = [WORD_LAYOUT_NOTE] + walker.disclosure_notes(orphans)
-    return synthetic_pages(["\n".join(all_lines)], notes=tuple(notes)), notes
+    return [make_page(1, text, PageKind.SYNTHETIC, notes=tuple(notes),
+                      deletion_line_span=span)], notes
+
+
+def _deletion_list_span(text: str, before: list[str],
+                        listed: list[str]) -> tuple[int, int] | None:
+    """Where the deletion list stands in ``text``, the page's NORMALIZED text,
+    as ``(first line, line count)``; ``None`` when nothing is listed (D-59).
+
+    Found by position, from what this reader wrote, never by what a line says:
+    a body line typed as ``[deleted by ...`` is the document's own text.
+    Normalization only removes blank lines and changes characters within a
+    line, so the list begins at the first non-blank line after as many
+    non-blank lines as ``before`` normalizes to; and each listed passage is one
+    non-blank line (its line breaks, and its author's, are read as spaces). The
+    result is checked against the lines the reader wrote; a mismatch is a
+    reader defect and is raised, never guessed round."""
+    if not listed:
+        return None
+    lines = text.split("\n")
+    lead = sum(1 for ln in normalize("\n".join(before)).split("\n") if ln)
+    seen = 0
+    start = None
+    for i, ln in enumerate(lines):
+        if not ln:
+            continue
+        if seen == lead:
+            start = i
+            break
+        seen += 1
+    wrote = [normalize(ln) for ln in listed]
+    if start is None or lines[start:start + len(wrote)] != wrote:
+        raise ExtractionError(
+            "the Word reader could not place its own deletion list in the page text")
+    return (start, len(wrote))
 
 
 def _xlsx_cell(v) -> str:

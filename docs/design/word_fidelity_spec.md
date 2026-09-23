@@ -290,14 +290,20 @@ the package's `_rels/.rels` reaches it; `[Content_Types].xml` and relationship p
   never the first date while the header, body or notes carry one. A document dated only in its footer
   can take a date from its list as its first: D-56 accepts a listed date first "unless the body
   carries none", and the list stays before the footer so the footer still ends the page (review round
-  3, recorded as an accepted limitation). The Bates zone skips the list: `BatesZone.slice_lines`
-  skips every line starting `[deleted by ` and chooses the head and tail zones from the others, so a
-  Word page's zone is the one it would have without its list, and a stamp-shaped number in deleted
-  text can neither become a locator nor make the real one ambiguous. **Open defect (review round 3,
-  finding 1):** the skip decides by what a line says, so on any page, of any format, a typed line
-  starting `[deleted by ` leaves the zone too. Excluding only the lines the Word reader wrote needs
-  that knowledge carried on the page record (a line span like D-49's `image_line_span`), which is a
-  contract field; fix round 3 stopped there for a ruling rather than add one.
+  3, recorded as an accepted limitation). The Bates zone skips the list **by position** (D-59, fix
+  round 4): the reader records where it wrote the list in `PageRecord.deletion_line_span` (A-25), and
+  `BatesZone.page_lines`, which every zone read of a page goes through, passes that span to
+  `BatesZone.slice_lines`, which chooses the head and tail zones from the other lines. So a Word
+  page's zone is the one it would have without its list, and a stamp-shaped number in deleted text
+  can neither become a locator nor make the real one ambiguous. No line is skipped for what it says:
+  a line typed as `[deleted by ...` in a PDF, an email, a text file, an OCR'd page or a Word body is
+  that document's text and stays in its zone. (Fix round 2 skipped every line starting
+  `[deleted by `, on every page of every format; review round 3 confirmed that as finding 1, and
+  D-59 ruled the field.) The reader finds the span from what it wrote, over the normalized text,
+  and raises rather than guesses if the two disagree; only the Word reader sets it, on its
+  synthetic page, and the contract refuses it on any other kind or over lines that do not start
+  with the label. `zone_has_candidate` (the footer re-OCR trigger) reads a PDF page's OCR text
+  before any record exists, where no list can be.
 
 ### A5. Stored names of container children
 

@@ -681,7 +681,16 @@ def _page_from_jsonable(d: dict) -> PageRecord:
         # image lines back into the Bates zone; the contract refuses that record,
         # which is the loud failure a missing key has to reach.
         image_line_span=(tuple(d["image_line_span"])
-                         if d.get("image_line_span") is not None else None))
+                         if d.get("image_line_span") is not None else None),
+        # D-59. Rebuilt as a tuple, as above. But `[...]`, not `.get`: a Word
+        # page journaled before the field carries its deletion list with nothing
+        # to say where it is, and no record-level check can see that (a page
+        # with no span is valid). A missing key raises KeyError, which
+        # `_load_resume` answers by discarding the whole journal, so such a
+        # journal costs one re-extraction instead of silently putting deleted
+        # text back into the Bates zone.
+        deletion_line_span=(tuple(d["deletion_line_span"])
+                            if d["deletion_line_span"] is not None else None))
 
 
 def _doc_from_jsonable(d: dict) -> DocumentRecord:

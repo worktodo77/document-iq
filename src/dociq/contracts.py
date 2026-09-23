@@ -285,6 +285,18 @@ returned as the page's locator. Placement fixed the eviction. Only knowing which
 lines came from an image keeps an embedded exhibit's stamp from ever becoming
 this page's locator, and D-49 rules that it never may.
 
+Also under 2.3.0, amendment A-25, from Alex's ruling D-59 on 2026-09-23:
+:class:`PageRecord` gains ``deletion_line_span``, the position of the list the
+Word reader appends of the passages deleted under tracked changes (D-56), set
+by that reader only. Every Bates zone read skips exactly those lines. Before it,
+the zone skipped every line starting ``[deleted by `` on every page of every
+format, so a PDF, email, OCR'd or text page that typed such a line lost it from
+its zone: a stamp on it went unread, and on a short page the tail moved up by a
+line. Additive with a safe default, folded into A-25 (which this sprint already
+owed, D-51) and into the unreleased 2.3.0, as D-49's field was folded into
+A-24. Like every field it is serialized and hashed, so every page's identity
+moves once, by a constant ``None`` where a page has no list.
+
 1.9.0 — amendment A-19, extended, from Codex review r2's finding B-2. :class:`OmissionSnapshot`
 gains ``matter_root`` and :func:`matter_key` is added.
 
@@ -486,6 +498,15 @@ class IdRegime(str, enum.Enum):
 # ---------------------------------------------------------------------------
 
 
+TRACKED_DELETION_LABEL = "[deleted by "
+"""The start of every line on which the Word reader lists a tracked deletion
+(D-56): ``[deleted by <author>] <text>``. Defined here because
+:meth:`PageRecord.validate` holds :attr:`PageRecord.deletion_line_span` to it;
+the reader imports it to write the lines. It is never used to FIND deletion-list
+lines: which lines those are is the span's to say (D-59), and a line any
+document types starting with these characters is that document's own text."""
+
+
 @dataclass(frozen=True, slots=True)
 class PageRecord:
     """One page of one source document.
@@ -583,6 +604,40 @@ class PageRecord:
     page's image lines along and re-points the span at them, rather than leaving
     this one pointing into text the reduced page no longer holds (D-49)."""
 
+    deletion_line_span: tuple[int, int] | None = None
+    """Where the Word reader's DELETION LIST sits in :attr:`text`, as ``(first
+    line, line count)``, or ``None`` when the page carries none (amendment A-25,
+    ruled by D-59).
+
+    D-56 lists each passage deleted under Word's tracked changes after the page's
+    body, one line each, ``[deleted by <author>] <text>``
+    (:data:`TRACKED_DELETION_LABEL`). Deleted text is not what the document says,
+    so no line of the list may be read as, or refuse, the page's Bates locator.
+    This span is how the Bates zone knows which lines those are: every zone read
+    skips exactly the lines it names and no others, so no line of any page is
+    left out of the zone because of what it SAYS. A line a PDF, an email, a text
+    file or a Word body types starting with the label is that page's own text and
+    stays in its zone (D-59 replaced a skip of every line starting with the label,
+    which a document could trigger by typing it).
+
+    Set by the Word reader only, on the page where it appends the list; every
+    other reader leaves it ``None``, so nothing downstream can derive it from
+    text. :meth:`validate` holds what can be held on the record: it may be set
+    only on a :attr:`PageKind.SYNTHETIC` page, the only kind the Word reader
+    writes; the span lies inside the page's lines; and every line it names starts
+    with the label (a check that can only REFUSE a record, never choose a line;
+    it catches a span left pointing at the wrong lines after the text was
+    rewritten, which a bounds check cannot see). Never on the same page as
+    :attr:`image_line_span`: that one requires ``MIXED``, this one
+    ``SYNTHETIC``. The indices count the lines of :attr:`text`, which equals
+    :attr:`locator_text` on every page that may carry this span.
+
+    Hashed and persisted like every field, because it decides which lines the
+    Bates zone reads: the same text with a different span can take a different
+    locator. It moves a page's identity only where the reader's list moves,
+    which is the text it marks; on a page with no list it is a constant
+    ``None``."""
+
     def evolve(self, **changes: object) -> "PageRecord":
         """Return a copy with fields replaced. The only sanctioned way for a
         later stage to enrich a page."""
@@ -669,6 +724,38 @@ class PageRecord:
                 raise ContractViolation(
                     f"page {self.page_no}: image_line_span {span!r} does not lie "
                     f"inside the page's {n_lines} line(s)"
+                )
+        # D-59: the Word reader's deletion list. Only the Word reader writes it,
+        # and every page it writes is SYNTHETIC; a span on any other kind claims
+        # a deletion list the page's reader never wrote.
+        if self.deletion_line_span is not None:
+            span = self.deletion_line_span
+            if self.kind is not PageKind.SYNTHETIC:
+                raise ContractViolation(
+                    f"page {self.page_no}: deletion_line_span is set only by the "
+                    f"Word reader, on a synthetic page (kind {self.kind.value}, "
+                    f"span {span!r})"
+                )
+            if not (isinstance(span, tuple) and len(span) == 2
+                    and all(type(v) is int for v in span)):
+                raise ContractViolation(
+                    f"page {self.page_no}: deletion_line_span must be a "
+                    f"(first line, line count) tuple of ints, got {span!r}"
+                )
+            start, count = span
+            lines = self.text.split("\n")
+            if start < 0 or count < 1 or start + count > len(lines):
+                raise ContractViolation(
+                    f"page {self.page_no}: deletion_line_span {span!r} does not "
+                    f"lie inside the page's {len(lines)} line(s)"
+                )
+            stray = [start + i for i, line in enumerate(lines[start:start + count])
+                     if not line.startswith(TRACKED_DELETION_LABEL)]
+            if stray:
+                raise ContractViolation(
+                    f"page {self.page_no}: deletion_line_span {span!r} names "
+                    f"line(s) {stray} that are not deletion-list lines, so it "
+                    "points at the wrong lines"
                 )
         if self.ocr_conf is not None and not (0.0 <= self.ocr_conf <= 1.0):
             raise ContractViolation(

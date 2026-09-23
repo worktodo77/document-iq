@@ -446,13 +446,20 @@ def zone_only(doc: DocumentRecord) -> DocumentRecord:
     still fit inside the shorter text. The image lines stay on the record rather
     than being dropped so the reduced page is still honestly MIXED; they cost at
     most one line per image region.
+
+    **A Word page's deletion list is left out (D-59).** The zone skips the lines
+    :attr:`dociq.contracts.PageRecord.deletion_line_span` names, so the cut
+    holds none of them and the reduced page carries no span.
     """
     z = B.BatesZone()
     pages = []
     for p in doc.pages:
-        zone_lines = [line for _, line in z.slice_lines(p.locator_text)]
+        zone_lines = [line for _, line in z.page_lines(p)]
         if p.image_line_span is None:
-            pages.append(p.evolve(text="\n".join(zone_lines)))
+            # D-59: a Word page's deletion list is not a zone line, so the cut
+            # leaves it out, and the span that named it is cleared rather than
+            # left pointing into text the reduced page no longer holds.
+            pages.append(p.evolve(text="\n".join(zone_lines), deletion_line_span=None))
             continue
         start, count = p.image_line_span
         image_lines = p.text.split("\n")[start:start + count]

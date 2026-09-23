@@ -128,8 +128,8 @@ def test_an_embedded_image_cannot_supply_a_stamp_in_place_of_the_pages_own():
     for k in range(1, 25):
         image = "\n".join([f"chart {j} 50,00% 1234" for j in range(k - 1)]
                           + ["Embedded exhibit copy ABC-0009999"])
-        got = _zone_stamp(normalize(ex._merge_image_text(native, image)),
-                          zone, token)
+        got = _zone_stamp(zone.slice_lines(normalize(ex._merge_image_text(native, image))),
+                          token)
         assert got != "ABC-0009999", (
             f"with {k} image line(s) the page's locator became the embedded "
             "exhibit's stamp")

@@ -87,6 +87,7 @@ def make_page(
     conf_threshold: float = 0.85,
     notes: tuple[str, ...] = (),
     image_line_span: tuple[int, int] | None = None,
+    deletion_line_span: tuple[int, int] | None = None,
 ) -> PageRecord:
     """Build one validated page record.
 
@@ -105,6 +106,12 @@ def make_page(
     shifted. It is dropped only when the page's text normalizes away entirely,
     because an EMPTY page has no image lines. A span on any other non-MIXED
     kind is passed through, so the contract refuses it loudly.
+
+    ``deletion_line_span`` (D-59) marks where the Word reader's deletion list
+    (D-56) sits in ``text``. Only the Word reader passes it, and it is held to
+    the same rule: counted over text that is already normalized, or refused;
+    dropped only on an EMPTY page. On any kind but SYNTHETIC the contract
+    refuses it.
     """
     clean = normalize(text)
     extra: tuple[str, ...] = ()
@@ -130,14 +137,17 @@ def make_page(
         record_conf = None
         record_kind = kind if clean else PageKind.EMPTY
 
-    if image_line_span is not None and clean != text:
-        from ..contracts import ContractViolation
+    for name, given in (("image_line_span", image_line_span),
+                        ("deletion_line_span", deletion_line_span)):
+        if given is not None and clean != text:
+            from ..contracts import ContractViolation
 
-        raise ContractViolation(
-            f"page {page_no}: image_line_span {image_line_span!r} was counted over "
-            "text that normalization changes, so it would point at the wrong lines"
-        )
+            raise ContractViolation(
+                f"page {page_no}: {name} {given!r} was counted over text that "
+                "normalization changes, so it would point at the wrong lines"
+            )
     span = None if record_kind is PageKind.EMPTY else image_line_span
+    listed = None if record_kind is PageKind.EMPTY else deletion_line_span
     page = PageRecord(
         page_no=page_no,
         text=clean,
@@ -147,6 +157,7 @@ def make_page(
         ocr_low_conf_lines=n_low,
         notes=notes + extra,
         image_line_span=span,
+        deletion_line_span=listed,
     )
     page.validate()
     return page

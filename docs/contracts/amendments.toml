@@ -289,3 +289,15 @@ title = "a page can be both a text layer and an unread image, and the page model
 raised_by = "Alex's rulings 2026-09-10 (D-48, D-49), after the extraction fidelity sweep"
 wired_in = { "src/dociq/contracts.py" = ["PageKind", "PageRecord", "needs_ocr_review", "recognition_fingerprint", "CONTRACT_VERSION"], "src/dociq/ingest/pagemodel.py" = ["make_page"], "src/dociq/ingest/extract.py" = ["M_IMAGE_UNREAD", "_pdf_image_rects", "_ocr_pdf_regions", "_merge_image_text", "_merge_image_lines", "_extract_pdf", "ocr_yield"], "src/dociq/identify/bates.py" = ["detect_candidates", "apply_bates_reported"], "src/dociq/ingest/walker.py" = ["_page_from_jsonable"], "src/dociq/gui/view_models.py" = ["_ocr_flags"], "src/dociq/emit/log.py" = ["_document_entry"], "src/dociq/pipeline.py" = ["ocr_page_count"] }
 tests = ["tests/test_contracts.py", "tests/test_extract.py", "tests/test_bates.py", "tests/test_walker.py", "tests/test_codex_r2_findings.py"]
+
+# A-25 FRAGMENT, Word branch only (D-59). The full entry is on build/sprint-5-d51.
+# At the merge keep that branch's entry, drop this one, and union into its
+# `wired_in` and `tests` the symbols and files listed here (wired_in keys already
+# there -- contracts.py, extract.py, walker.py, tools/bates_acceptance.py -- gain
+# these names; the others are new keys). `raised_by` gains "and 2026-09-23 (D-59)".
+[amendment.A-25]
+status = "raised"
+title = "a run cannot say it chose not to read the images on its text pages"
+raised_by = "Alex's ruling 2026-09-23 (D-59), after Word review round 3; the rest of A-25 is on build/sprint-5-d51"
+wired_in = { "src/dociq/contracts.py" = ["PageRecord", "TRACKED_DELETION_LABEL"], "src/dociq/ingest/pagemodel.py" = ["make_page"], "src/dociq/ingest/extract.py" = ["_extract_docx", "_deletion_list_span"], "src/dociq/identify/bates.py" = ["BatesZone", "page_lines", "slice_lines", "detect_candidates", "apply_bates_reported"], "src/dociq/ingest/walker.py" = ["_page_from_jsonable"], "tools/bates_acceptance.py" = ["zone_only"] }
+tests = ["tests/test_bates_deletion_span.py", "tests/test_walker.py", "tests/test_word_fidelity.py"]
